@@ -301,28 +301,30 @@ func (r *destinationPublisherRegistry) Maintain(ctx context.Context) (int, error
 }
 
 type destinationRuntimeFactory struct {
-	cfg               state.ConfigurationOperating
-	database          *networking.NetworkDatabase
-	service           *networking.RouterService
-	tunnels           *networking.TunnelRuntime
-	destinations      *networking.RouterDestinationManager
-	replyKeys         *networking.GarlicReplyKeyRegistry
-	replySender       *networking.RouterBuildReplySender
-	transport         networking.TunnelSender
-	localRouter       foundation.Hash
-	staticPrivate     []byte
-	preferredPeers    []foundation.Hash
-	responders        *networking.NetworkDatabaseResponderProfiles
-	now               func() uint64
-	clockNow          func() time.Time
-	garlicReceiver    *networking.RouterGarlicReceiver
-	status            *networking.RouterDeliveryStatusMux
-	buildReplies      *destinationBuildReplyRegistry
-	requests          *destinationRequestRegistry
-	publishers        *destinationPublisherRegistry
-	publicationTokens *networking.NetworkDatabasePublicationTokenRegistry
-	metrics           *observability.Registry
-	logger            *slog.Logger
+	cfg                      state.ConfigurationOperating
+	database                 *networking.NetworkDatabase
+	service                  *networking.RouterService
+	tunnels                  *networking.TunnelRuntime
+	destinations             *networking.RouterDestinationManager
+	replyKeys                *networking.GarlicReplyKeyRegistry
+	replySender              *networking.RouterBuildReplySender
+	transport                networking.TunnelSender
+	localRouter              foundation.Hash
+	staticPrivate            []byte
+	preferredPeers           []foundation.Hash
+	reservations             *networking.TunnelBuildReservations
+	responders               *networking.NetworkDatabaseResponderProfiles
+	now                      func() uint64
+	clockNow                 func() time.Time
+	garlicReceiver           *networking.RouterGarlicReceiver
+	status                   *networking.RouterDeliveryStatusMux
+	buildReplies             *destinationBuildReplyRegistry
+	requests                 *destinationRequestRegistry
+	publishers               *destinationPublisherRegistry
+	publicationTokens        *networking.NetworkDatabasePublicationTokenRegistry
+	metrics                  *observability.Registry
+	logger                   *slog.Logger
+	requestTunnelMaintenance func(*destinationRuntime)
 }
 
 func (f *destinationRuntimeFactory) create(name string, destination *foundation.LocalDestination, policy *state.SecureStateEncryptedLeaseSetPolicy, remotePolicies []state.SecureStateRemoteELSAuthorization, requestedCrypto []uint16) (*destinationRuntime, error) {
@@ -365,7 +367,8 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 		offset := 1 + int(owner[0])%(len(preferredPeers)-1)
 		preferredPeers = append(preferredPeers[offset:], preferredPeers[:offset]...)
 	}
-	pool := networking.TunnelNewOwnedPool(owner, f.cfg.Tunnel.PoolCapacity)
+	pool := networking.TunnelNewOwnedPool(owner, f.cfg.Tunnel.ClientPoolCapacity)
+	var runtime *destinationRuntime
 	profiles := networking.TunnelNewPeerProfiles(networking.TunnelPeerProfilesConfig{})
 	build, err := networking.TunnelNewBuildManager(networking.TunnelBuildManagerConfig{
 		Runtime: f.tunnels, Pool: pool, Sender: f.transport, ReplyKeys: f.replyKeys, ReplySender: f.replySender,
@@ -377,6 +380,11 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 		},
 		LocalDelivery: func(message networking.I2NPMessage) error { return f.service.HandleI2NP(message, f.now(), false) },
 		Now:           f.now, MaxPending: f.cfg.Tunnel.BuildPendingCapacity, Profiles: profiles, Logger: f.logger, Metrics: f.metrics,
+		OnBuildEvent: func() {
+			if runtime != nil && f.requestTunnelMaintenance != nil {
+				f.requestTunnelMaintenance(runtime)
+			}
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -390,6 +398,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	inboundSource, err := networking.TunnelNewNetDBInboundBuildSource(networking.TunnelNetDBInboundBuildSourceConfig{
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: f.cfg.Tunnel.Hops,
 		PreferredPeers: preferredPeers, Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
+		Reservations: f.reservations,
 	})
 	if err != nil {
 		return nil, err
@@ -397,13 +406,14 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	outboundSource, err := networking.TunnelNewNetDBOutboundBuildSource(networking.TunnelNetDBOutboundBuildSourceConfig{
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: f.cfg.Tunnel.Hops,
 		PreferredPeers: preferredPeers, Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
+		Reservations: f.reservations,
 	})
 	if err != nil {
 		return nil, err
 	}
 	maintainer, err := networking.TunnelNewPairedPoolMaintainer(networking.TunnelPairedPoolMaintainerConfig{
 		Pool: pool, Runtime: f.tunnels, Builder: build, InboundSource: inboundSource, OutboundSource: outboundSource,
-		Now: f.now, InboundTarget: f.cfg.Tunnel.InboundTarget, OutboundTarget: f.cfg.Tunnel.OutboundTarget,
+		Now: f.now, InboundTarget: f.cfg.Tunnel.ClientInboundTarget, OutboundTarget: f.cfg.Tunnel.ClientOutboundTarget,
 		RenewBefore: uint64(f.cfg.Tunnel.RenewBefore.Milliseconds()),
 	})
 	if err != nil {
@@ -510,7 +520,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 		return nil, err
 	}
 
-	runtime := &destinationRuntime{name: name, local: destination, ratchet: ratchet, pool: pool, profiles: profiles, build: build, maintainer: maintainer, health: health, requests: requests, publisher: publisher, tunnels: f.tunnels, sender: sender, bandwidth: bandwidth, now: f.now}
+	runtime = &destinationRuntime{name: name, local: destination, ratchet: ratchet, pool: pool, profiles: profiles, build: build, maintainer: maintainer, health: health, requests: requests, publisher: publisher, tunnels: f.tunnels, sender: sender, bandwidth: bandwidth, now: f.now}
 	runtime.unregister = append(runtime.unregister,
 		f.buildReplies.register(build),
 		f.requests.register(requests),

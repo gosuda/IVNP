@@ -10,6 +10,7 @@ import (
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/observability"
 )
 
 type muxTestTransport struct {
@@ -65,6 +66,131 @@ func (m *muxTestTransport) counts() (starts, closes, waits, sends int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.starts, m.closes, m.waits, m.sends
+}
+
+type muxSessionTransport struct {
+	*muxTestTransport
+	ensureStarted chan struct{}
+	ensureRelease chan error
+	session       bool
+	drops         int
+}
+
+func newMuxSessionTransport() *muxSessionTransport {
+	return &muxSessionTransport{
+		muxTestTransport: new(muxTestTransport),
+		ensureStarted:    make(chan struct{}, 1),
+		ensureRelease:    make(chan error, 1),
+	}
+}
+
+func (m *muxSessionTransport) EnsureSession(ctx context.Context, _ foundation.Hash) error {
+	m.ensureStarted <- struct{}{}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-m.ensureRelease:
+		if err == nil {
+			m.mu.Lock()
+			m.session = true
+			m.mu.Unlock()
+		}
+		return err
+	}
+}
+
+func (m *muxSessionTransport) HasSession(foundation.Hash) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.session
+}
+
+func (m *muxSessionTransport) DropSession(foundation.Hash) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.session {
+		return false
+	}
+	m.session = false
+	m.drops++
+	return true
+}
+
+func TestTransportMuxRacesDirectSessionsAndKeepsSSU2(t *testing.T) {
+	database, peer := muxTestPeer(t, true, true)
+	ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
+	metrics := observability.NewRegistry()
+	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2, Metrics: metrics})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- mux.EnsureSession(context.Background(), peer) }()
+	<-ntcp2.ensureStarted
+	<-ssu2.ensureStarted
+	ntcp2.ensureRelease <- nil
+	ssu2.ensureRelease <- nil
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	if ntcp2.HasSession(peer) || !ssu2.HasSession(peer) || ntcp2.drops != 1 {
+		t.Fatalf("raced sessions = NTCP2 %t SSU2 %t drops %d", ntcp2.HasSession(peer), ssu2.HasSession(peer), ntcp2.drops)
+	}
+	snapshot := metrics.Snapshot().Transport
+	if snapshot.RaceAttempts != 1 || snapshot.SSU2RaceWins != 1 || snapshot.SSU2Promotions != 1 {
+		t.Fatalf("transport race metrics = %+v", snapshot)
+	}
+}
+
+func TestTransportMuxReusesExistingAuthenticatedSession(t *testing.T) {
+	database, peer := muxTestPeer(t, true, true)
+	ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
+	ntcp2.session = true
+	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = mux.EnsureSession(context.Background(), peer); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ssu2.ensureStarted:
+		t.Fatal("existing NTCP2 session triggered an SSU2 dial")
+	default:
+	}
+}
+
+func TestTransportMuxPrefersExistingSSU2AndDropsNTCP2(t *testing.T) {
+	database, peer := muxTestPeer(t, true, true)
+	ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
+	ntcp2.session, ssu2.session = true, true
+	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = mux.EnsureSession(context.Background(), peer); err != nil {
+		t.Fatal(err)
+	}
+	if ntcp2.HasSession(peer) || !ssu2.HasSession(peer) || ntcp2.drops != 1 {
+		t.Fatalf("existing sessions = NTCP2 %t SSU2 %t drops %d", ntcp2.HasSession(peer), ssu2.HasSession(peer), ntcp2.drops)
+	}
+}
+
+func TestTransportMuxExtendsDirectSSU2GraceAfterStageThree(t *testing.T) {
+	bootstrap, err := NewTransportMux(TransportMuxConfig{Database: netdb.NewDatabase(foundation.Hash{}, 8), NTCP2: new(muxTestTransport)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, err := NewTransportMux(TransportMuxConfig{
+		Database: netdb.NewDatabase(foundation.Hash{}, 8), NTCP2: new(muxTestTransport),
+		PreferSSU2: func() bool { return true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap.dialGrace() != transportBootstrapDialGrace || ready.dialGrace() != transportReadyDialGrace {
+		t.Fatalf("dial grace = bootstrap %s ready %s", bootstrap.dialGrace(), ready.dialGrace())
+	}
 }
 
 func TestTransportMuxFallsBackOnlyBeforeAmbiguousWrite(t *testing.T) {

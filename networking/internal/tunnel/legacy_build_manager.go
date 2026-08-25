@@ -81,9 +81,11 @@ func (m *BuildManager) StartVariableOutbound(ctx context.Context, build Variable
 	}
 	replyID := ids[len(ids)-1]
 	pending := &pendingVariableBuild{build: cloneVariableOutboundBuild(build), keys: keys, positions: positions, replyID: replyID, recordCount: uint8(recordCount), deadline: min(build.ExpiresAt, now+buildRequestTimeout)}
+	pending.cancelDeadline = m.scheduleBuildDeadline(now, pending.deadline)
 	m.mu.Lock()
 	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.pending[replyID] != nil || m.pendingInbound[replyID] != nil || m.pendingVariable[replyID] != nil {
 		m.mu.Unlock()
+		cancelBuildDeadline(pending.cancelDeadline)
 		clearVariableBuildKeys(keys)
 		return 0, ErrBuildPending
 	}
@@ -222,6 +224,7 @@ func (m *BuildManager) HandleVariableReply(message i2np.Message) error {
 	if pending == nil {
 		return ErrBuildPending
 	}
+	defer m.notifyBuildEvent()
 	defer clearVariableBuildKeys(pending.keys)
 	records, err := i2np.ParseBuildRecords(i2np.VariableTunnelBuildReply, message.Payload)
 	if err != nil {
@@ -336,6 +339,9 @@ func (m *BuildManager) takeVariablePending(id uint32) *pendingVariableBuild {
 	pending := m.pendingVariable[id]
 	delete(m.pendingVariable, id)
 	m.mu.Unlock()
+	if pending != nil {
+		cancelBuildDeadline(pending.cancelDeadline)
+	}
 	return pending
 }
 func (m *BuildManager) removeVariablePending(id uint32) {

@@ -27,32 +27,44 @@ func TestExplorationTargetStaysInSelectedBucket(t *testing.T) {
 	}
 }
 
-func TestExplorerFillsBoundedWindowInOneMaintenancePass(t *testing.T) {
-	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
-	addRequestTestFloodfill(database, requestTestHash(0x80))
-	sender := new(requestTestSender)
-	now := uint64(100)
-	requests, err := NewRequestManager(database, sender, requestTestRoute{gateway: requestTestHash(0x81), tunnel: 7, viaTunnel: true}, RequestManagerConfig{
-		Capacity: 8, MaxCandidates: 1, TimeoutMillis: 1000, Now: func() uint64 { return now },
-		Rand: bytes.NewReader(bytes.Repeat([]byte{1}, 64)),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	explorer, err := NewExplorer(ExplorerConfig{
-		Table: database.Routers(), Requests: requests, Now: func() uint64 { return now },
-		Rand: bytes.NewReader(bytes.Repeat([]byte{2}, explorerMaxInflight*foundation.HashLength)),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = explorer.Maintain(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if explorer.Inflight() != explorerMaxInflight {
-		t.Fatalf("inflight = %d, want %d", explorer.Inflight(), explorerMaxInflight)
-	}
-	if sent := len(sender.snapshot()); sent != explorerMaxInflight {
-		t.Fatalf("exploration lookups sent = %d, want %d", sent, explorerMaxInflight)
+func TestExplorerFillsConfiguredWindowInOneMaintenancePass(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		aggressive bool
+		want       int
+	}{
+		{name: "steady", want: explorerSteadyMaxInflight},
+		{name: "bootstrap", aggressive: true, want: explorerBootstrapMaxInflight},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+			addRequestTestFloodfill(database, requestTestHash(0x80))
+			sender := new(requestTestSender)
+			now := uint64(100)
+			requests, err := NewRequestManager(database, sender, requestTestRoute{gateway: requestTestHash(0x81), tunnel: 7, viaTunnel: true}, RequestManagerConfig{
+				Capacity: 16, MaxCandidates: 1, TimeoutMillis: 1000, Now: func() uint64 { return now },
+				Rand: bytes.NewReader(bytes.Repeat([]byte{1}, 128)),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			explorer, err := NewExplorer(ExplorerConfig{
+				Table: database.Routers(), Requests: requests, Now: func() uint64 { return now },
+				Rand:       bytes.NewReader(bytes.Repeat([]byte{2}, explorerBootstrapMaxInflight*foundation.HashLength)),
+				Aggressive: func() bool { return test.aggressive },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = explorer.Maintain(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if explorer.Inflight() != test.want {
+				t.Fatalf("inflight = %d, want %d", explorer.Inflight(), test.want)
+			}
+			if sent := len(sender.snapshot()); sent != test.want {
+				t.Fatalf("exploration lookups sent = %d, want %d", sent, test.want)
+			}
+		})
 	}
 }

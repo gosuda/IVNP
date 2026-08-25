@@ -883,6 +883,33 @@ func (m *SSU2Manager) EnsureSession(ctx context.Context, peer foundation.Hash) e
 	return err
 }
 
+func (m *SSU2Manager) HasSession(peer foundation.Hash) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	session := m.sessionsByPeer[peer]
+	m.mu.RUnlock()
+	return session != nil
+}
+
+func (m *SSU2Manager) DropSession(peer foundation.Hash) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	session := m.sessionsByPeer[peer]
+	if session != nil {
+		m.removeSessionLocked(session)
+	}
+	m.mu.Unlock()
+	if session == nil {
+		return false
+	}
+	session.ReleaseSensitive()
+	return true
+}
+
 // Send waits for a validated native SSU2 session and delivers one complete
 // I2NP message, framing oversized payloads as reliable SSU2 fragments.
 func (m *SSU2Manager) Send(ctx context.Context, peer foundation.Hash, message i2np.Message) error {
@@ -2528,7 +2555,7 @@ func (m *SSU2Manager) sendSessionConfirmed(pending *ssu2OutboundPending) {
 	installed = true
 	if m.metrics != nil {
 		m.metrics.IncTransportConnections()
-		m.metrics.SetTransportSessions(uint64(sessionCount))
+		m.metrics.SetTransportSSU2Sessions(uint64(sessionCount))
 	}
 	if m.logger != nil {
 		m.logger.Info("authenticated public transport session established", "transport", "SSU2", "peer", routerHashDiagnostic(pending.peer), "endpoint", pending.remote.String())
@@ -2707,11 +2734,17 @@ func (m *SSU2Manager) removeSession(session *ssu2TransportSession) {
 }
 
 func (m *SSU2Manager) removeSessionLocked(session *ssu2TransportSession) {
+	removed := false
 	if m.sessionsByID[session.receiveID] == session {
 		delete(m.sessionsByID, session.receiveID)
 	}
 	if m.sessionsByPeer[session.peer] == session {
 		delete(m.sessionsByPeer, session.peer)
+		removed = true
+	}
+	if removed && m.metrics != nil {
+		m.metrics.IncTransportDisconnections()
+		m.metrics.SetTransportSSU2Sessions(uint64(len(m.sessionsByPeer)))
 	}
 }
 

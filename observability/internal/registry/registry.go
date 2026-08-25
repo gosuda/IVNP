@@ -9,6 +9,20 @@ import (
 // owns exactly one Registry and passes that handle to every producer.
 type Registry struct{ state *registryState }
 
+type TunnelOwner uint8
+
+const (
+	TunnelOwnerExploratory TunnelOwner = iota
+	TunnelOwnerClient
+)
+
+type TunnelDirection uint8
+
+const (
+	TunnelDirectionInbound TunnelDirection = iota
+	TunnelDirectionOutbound
+)
+
 var zeroRegistryState registryState
 
 type registryState struct {
@@ -29,13 +43,21 @@ type registryState struct {
 
 type lifecycleMetrics struct{ starts, stops, failures, running, ingressPanics atomic.Uint64 }
 type reseedMetrics struct{ attempts, successes, failures, bytes, sources atomic.Uint64 }
-type transportMetrics struct{ connections, disconnections, handshakeFailures, receivedBytes, sentBytes, sessions atomic.Uint64 }
-type netdbMetrics struct{ lookups, lookupFailures, stores, storeFailures, routers atomic.Uint64 }
+type transportMetrics struct {
+	connections, disconnections, handshakeFailures, receivedBytes, sentBytes, sessions atomic.Uint64
+	ntcp2Sessions, ssu2Sessions                                                        atomic.Uint64
+	raceAttempts, ssu2RaceWins, ntcp2RaceWins, sessionReuses, ssu2Promotions           atomic.Uint64
+}
+type netdbMetrics struct{ lookups, lookupFailures, stores, storeFailures, routers, floodfills atomic.Uint64 }
 type tunnelMetrics struct {
-	builds, buildSuccesses, buildFailures, active atomic.Uint64
-	exploratoryInbound, exploratoryOutbound       atomic.Uint64
-	clientInbound, clientOutbound                 atomic.Uint64
-	participatingForwarded                        atomic.Uint64
+	builds, buildSuccesses, buildFailures, active             atomic.Uint64
+	exploratoryInbound, exploratoryOutbound                   atomic.Uint64
+	clientInbound, clientOutbound                             atomic.Uint64
+	participatingForwarded                                    atomic.Uint64
+	exploratoryInboundSuccesses, exploratoryOutboundSuccesses atomic.Uint64
+	clientInboundSuccesses, clientOutboundSuccesses           atomic.Uint64
+	exploratoryInboundTimeouts, exploratoryOutboundTimeouts   atomic.Uint64
+	clientInboundTimeouts, clientOutboundTimeouts             atomic.Uint64
 }
 type admissionMetrics struct{ allowed, rejected, inFlight atomic.Uint64 }
 type proxyMetrics struct{ requests, failures, active atomic.Uint64 }
@@ -82,13 +104,21 @@ type Snapshot struct {
 
 type LifecycleSnapshot struct{ Starts, Stops, Failures, Running, IngressRecoveredPanics uint64 }
 type ReseedSnapshot struct{ Attempts, Successes, Failures, Bytes, Sources uint64 }
-type TransportSnapshot struct{ Connections, Disconnections, HandshakeFailures, ReceivedBytes, SentBytes, Sessions uint64 }
-type NetDBSnapshot struct{ Lookups, LookupFailures, Stores, StoreFailures, Routers uint64 }
+type TransportSnapshot struct {
+	Connections, Disconnections, HandshakeFailures, ReceivedBytes, SentBytes, Sessions uint64
+	NTCP2Sessions, SSU2Sessions                                                        uint64
+	RaceAttempts, SSU2RaceWins, NTCP2RaceWins, SessionReuses, SSU2Promotions           uint64
+}
+type NetDBSnapshot struct{ Lookups, LookupFailures, Stores, StoreFailures, Routers, Floodfills uint64 }
 type TunnelSnapshot struct {
-	Builds, BuildSuccesses, BuildFailures, Active       uint64
-	ExploratoryInboundActive, ExploratoryOutboundActive uint64
-	ClientInboundActive, ClientOutboundActive           uint64
-	ParticipatingForwarded                              uint64
+	Builds, BuildSuccesses, BuildFailures, Active             uint64
+	ExploratoryInboundActive, ExploratoryOutboundActive       uint64
+	ClientInboundActive, ClientOutboundActive                 uint64
+	ParticipatingForwarded                                    uint64
+	ExploratoryInboundSuccesses, ExploratoryOutboundSuccesses uint64
+	ClientInboundSuccesses, ClientOutboundSuccesses           uint64
+	ExploratoryInboundTimeouts, ExploratoryOutboundTimeouts   uint64
+	ClientInboundTimeouts, ClientOutboundTimeouts             uint64
 }
 type AdmissionSnapshot struct{ Allowed, Rejected, InFlight uint64 }
 type ProxySnapshot struct{ Requests, Failures, Active uint64 }
@@ -135,11 +165,33 @@ func (r *Registry) Snapshot() Snapshot {
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	return Snapshot{
-		Lifecycle:   LifecycleSnapshot{s.lifecycle.starts.Load(), s.lifecycle.stops.Load(), s.lifecycle.failures.Load(), s.lifecycle.running.Load(), s.lifecycle.ingressPanics.Load()},
-		Reseed:      ReseedSnapshot{s.reseed.attempts.Load(), s.reseed.successes.Load(), s.reseed.failures.Load(), s.reseed.bytes.Load(), s.reseed.sources.Load()},
-		Transport:   TransportSnapshot{s.transport.connections.Load(), s.transport.disconnections.Load(), s.transport.handshakeFailures.Load(), s.transport.receivedBytes.Load(), s.transport.sentBytes.Load(), s.transport.sessions.Load()},
-		NetDB:       NetDBSnapshot{s.netdb.lookups.Load(), s.netdb.lookupFailures.Load(), s.netdb.stores.Load(), s.netdb.storeFailures.Load(), s.netdb.routers.Load()},
-		Tunnel:      TunnelSnapshot{s.tunnel.builds.Load(), s.tunnel.buildSuccesses.Load(), s.tunnel.buildFailures.Load(), s.tunnel.active.Load(), s.tunnel.exploratoryInbound.Load(), s.tunnel.exploratoryOutbound.Load(), s.tunnel.clientInbound.Load(), s.tunnel.clientOutbound.Load(), s.tunnel.participatingForwarded.Load()},
+		Lifecycle: LifecycleSnapshot{s.lifecycle.starts.Load(), s.lifecycle.stops.Load(), s.lifecycle.failures.Load(), s.lifecycle.running.Load(), s.lifecycle.ingressPanics.Load()},
+		Reseed:    ReseedSnapshot{s.reseed.attempts.Load(), s.reseed.successes.Load(), s.reseed.failures.Load(), s.reseed.bytes.Load(), s.reseed.sources.Load()},
+		Transport: TransportSnapshot{
+			Connections: s.transport.connections.Load(), Disconnections: s.transport.disconnections.Load(),
+			HandshakeFailures: s.transport.handshakeFailures.Load(), ReceivedBytes: s.transport.receivedBytes.Load(),
+			SentBytes: s.transport.sentBytes.Load(), Sessions: s.transport.sessions.Load(),
+			NTCP2Sessions: s.transport.ntcp2Sessions.Load(), SSU2Sessions: s.transport.ssu2Sessions.Load(),
+			RaceAttempts: s.transport.raceAttempts.Load(), SSU2RaceWins: s.transport.ssu2RaceWins.Load(),
+			NTCP2RaceWins: s.transport.ntcp2RaceWins.Load(), SessionReuses: s.transport.sessionReuses.Load(),
+			SSU2Promotions: s.transport.ssu2Promotions.Load(),
+		},
+		NetDB: NetDBSnapshot{
+			Lookups: s.netdb.lookups.Load(), LookupFailures: s.netdb.lookupFailures.Load(),
+			Stores: s.netdb.stores.Load(), StoreFailures: s.netdb.storeFailures.Load(),
+			Routers: s.netdb.routers.Load(), Floodfills: s.netdb.floodfills.Load(),
+		},
+		Tunnel: TunnelSnapshot{
+			Builds: s.tunnel.builds.Load(), BuildSuccesses: s.tunnel.buildSuccesses.Load(),
+			BuildFailures: s.tunnel.buildFailures.Load(), Active: s.tunnel.active.Load(),
+			ExploratoryInboundActive: s.tunnel.exploratoryInbound.Load(), ExploratoryOutboundActive: s.tunnel.exploratoryOutbound.Load(),
+			ClientInboundActive: s.tunnel.clientInbound.Load(), ClientOutboundActive: s.tunnel.clientOutbound.Load(),
+			ParticipatingForwarded:      s.tunnel.participatingForwarded.Load(),
+			ExploratoryInboundSuccesses: s.tunnel.exploratoryInboundSuccesses.Load(), ExploratoryOutboundSuccesses: s.tunnel.exploratoryOutboundSuccesses.Load(),
+			ClientInboundSuccesses: s.tunnel.clientInboundSuccesses.Load(), ClientOutboundSuccesses: s.tunnel.clientOutboundSuccesses.Load(),
+			ExploratoryInboundTimeouts: s.tunnel.exploratoryInboundTimeouts.Load(), ExploratoryOutboundTimeouts: s.tunnel.exploratoryOutboundTimeouts.Load(),
+			ClientInboundTimeouts: s.tunnel.clientInboundTimeouts.Load(), ClientOutboundTimeouts: s.tunnel.clientOutboundTimeouts.Load(),
+		},
 		Admission:   AdmissionSnapshot{s.admission.allowed.Load(), s.admission.rejected.Load(), s.admission.inFlight.Load()},
 		Proxy:       ProxySnapshot{s.proxy.requests.Load(), s.proxy.failures.Load(), s.proxy.active.Load()},
 		Control:     ControlSnapshot{s.control.requests.Load(), s.control.failures.Load(), s.control.active.Load()},
@@ -171,16 +223,31 @@ func (r *Registry) IncTransportDisconnections()        { r.metrics().transport.d
 func (r *Registry) IncTransportHandshakeFailures()     { r.metrics().transport.handshakeFailures.Add(1) }
 func (r *Registry) AddTransportReceivedBytes(v uint64) { r.metrics().transport.receivedBytes.Add(v) }
 func (r *Registry) AddTransportSentBytes(v uint64)     { r.metrics().transport.sentBytes.Add(v) }
-func (r *Registry) SetTransportSessions(v uint64)      { r.metrics().transport.sessions.Store(v) }
-func (r *Registry) IncNetDBLookups()                   { r.metrics().netdb.lookups.Add(1) }
-func (r *Registry) IncNetDBLookupFailures()            { r.metrics().netdb.lookupFailures.Add(1) }
-func (r *Registry) IncNetDBStores()                    { r.metrics().netdb.stores.Add(1) }
-func (r *Registry) IncNetDBStoreFailures()             { r.metrics().netdb.storeFailures.Add(1) }
-func (r *Registry) SetNetDBRouters(v uint64)           { r.metrics().netdb.routers.Store(v) }
-func (r *Registry) IncTunnelBuilds()                   { r.metrics().tunnel.builds.Add(1) }
-func (r *Registry) IncTunnelBuildSuccesses()           { r.metrics().tunnel.buildSuccesses.Add(1) }
-func (r *Registry) IncTunnelBuildFailures()            { r.metrics().tunnel.buildFailures.Add(1) }
-func (r *Registry) SetTunnelActive(v uint64)           { r.metrics().tunnel.active.Store(v) }
+func (r *Registry) SetTransportNTCP2Sessions(v uint64) {
+	metrics := &r.metrics().transport
+	metrics.ntcp2Sessions.Store(v)
+	metrics.sessions.Store(v + metrics.ssu2Sessions.Load())
+}
+func (r *Registry) SetTransportSSU2Sessions(v uint64) {
+	metrics := &r.metrics().transport
+	metrics.ssu2Sessions.Store(v)
+	metrics.sessions.Store(v + metrics.ntcp2Sessions.Load())
+}
+func (r *Registry) IncTransportRaceAttempts()   { r.metrics().transport.raceAttempts.Add(1) }
+func (r *Registry) IncTransportSSU2RaceWins()   { r.metrics().transport.ssu2RaceWins.Add(1) }
+func (r *Registry) IncTransportNTCP2RaceWins()  { r.metrics().transport.ntcp2RaceWins.Add(1) }
+func (r *Registry) IncTransportSessionReuses()  { r.metrics().transport.sessionReuses.Add(1) }
+func (r *Registry) IncTransportSSU2Promotions() { r.metrics().transport.ssu2Promotions.Add(1) }
+func (r *Registry) IncNetDBLookups()            { r.metrics().netdb.lookups.Add(1) }
+func (r *Registry) IncNetDBLookupFailures()     { r.metrics().netdb.lookupFailures.Add(1) }
+func (r *Registry) IncNetDBStores()             { r.metrics().netdb.stores.Add(1) }
+func (r *Registry) IncNetDBStoreFailures()      { r.metrics().netdb.storeFailures.Add(1) }
+func (r *Registry) SetNetDBRouters(v uint64)    { r.metrics().netdb.routers.Store(v) }
+func (r *Registry) SetNetDBFloodfills(v uint64) { r.metrics().netdb.floodfills.Store(v) }
+func (r *Registry) IncTunnelBuilds()            { r.metrics().tunnel.builds.Add(1) }
+func (r *Registry) IncTunnelBuildSuccesses()    { r.metrics().tunnel.buildSuccesses.Add(1) }
+func (r *Registry) IncTunnelBuildFailures()     { r.metrics().tunnel.buildFailures.Add(1) }
+func (r *Registry) SetTunnelActive(v uint64)    { r.metrics().tunnel.active.Store(v) }
 func (r *Registry) SetTunnelExploratoryInboundActive(v uint64) {
 	r.metrics().tunnel.exploratoryInbound.Store(v)
 }
@@ -193,6 +260,32 @@ func (r *Registry) SetTunnelClientOutboundActive(v uint64) {
 }
 func (r *Registry) IncTunnelParticipatingForwarded() {
 	r.metrics().tunnel.participatingForwarded.Add(1)
+}
+func (r *Registry) IncTunnelBuildSuccess(owner TunnelOwner, direction TunnelDirection) {
+	metrics := r.metrics()
+	switch {
+	case owner == TunnelOwnerClient && direction == TunnelDirectionInbound:
+		metrics.tunnel.clientInboundSuccesses.Add(1)
+	case owner == TunnelOwnerClient:
+		metrics.tunnel.clientOutboundSuccesses.Add(1)
+	case direction == TunnelDirectionInbound:
+		metrics.tunnel.exploratoryInboundSuccesses.Add(1)
+	default:
+		metrics.tunnel.exploratoryOutboundSuccesses.Add(1)
+	}
+}
+func (r *Registry) AddTunnelBuildTimeouts(owner TunnelOwner, direction TunnelDirection, count uint64) {
+	metrics := r.metrics()
+	switch {
+	case owner == TunnelOwnerClient && direction == TunnelDirectionInbound:
+		metrics.tunnel.clientInboundTimeouts.Add(count)
+	case owner == TunnelOwnerClient:
+		metrics.tunnel.clientOutboundTimeouts.Add(count)
+	case direction == TunnelDirectionInbound:
+		metrics.tunnel.exploratoryInboundTimeouts.Add(count)
+	default:
+		metrics.tunnel.exploratoryOutboundTimeouts.Add(count)
+	}
 }
 func (r *Registry) IncAdmissionAllowed()          { r.metrics().admission.allowed.Add(1) }
 func (r *Registry) IncAdmissionRejected()         { r.metrics().admission.rejected.Add(1) }

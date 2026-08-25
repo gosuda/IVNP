@@ -330,9 +330,11 @@ func daemonTestConfig(t *testing.T) state.ConfigurationOperating {
 		Network:   state.ConfigurationNetwork{ID: 2, IPv4: true},
 		Router:    state.ConfigurationRouter{Version: "0.0.0"},
 		State:     state.ConfigurationState{MaxBytes: 1 << 20, MaxDestinations: 16, MaxNameBytes: 64},
-		NetDB:     state.ConfigurationNetDB{BucketCapacity: 4},
+		NetDB:     state.ConfigurationNetDB{BucketCapacity: 4, LookupCapacity: 8},
 		Tunnel: state.ConfigurationTunnel{
-			Hops: 1, InboundTarget: 1, OutboundTarget: 1, PoolCapacity: 4, BuildPendingCapacity: 4,
+			Hops:                     1,
+			ExploratoryInboundTarget: 1, ExploratoryOutboundTarget: 1, ExploratoryPoolCapacity: 4,
+			ClientInboundTarget: 1, ClientOutboundTarget: 1, ClientPoolCapacity: 4, BuildPendingCapacity: 4,
 			Lifetime: 10 * time.Minute, RenewBefore: 10 * time.Second, MaintenanceInterval: time.Minute,
 		},
 		NTCP2: state.ConfigurationTransport{Enabled: true, Bind: state.ConfigurationEndpoint{Host: "127.0.0.1", Port: 12345}, MaxSessions: 4},
@@ -493,10 +495,17 @@ func TestTunnelCompositionUsesLiveInboundGatewayRoute(t *testing.T) {
 	if err := clientRuntime.pool.Add(networking.TunnelEntry{ID: 4, Direction: networking.TunnelInbound, Expires: now + 30_000, Owner: owner}, now); err != nil {
 		t.Fatal(err)
 	}
+	if err := d.database.AdmitRouterInfo(daemonProductionFloodfill(t, now), true, now); err != nil {
+		t.Fatal(err)
+	}
 	d.refreshObservability()
 	tunnels := d.registry.Snapshot().Tunnel
 	if tunnels.ExploratoryInboundActive != 1 || tunnels.ExploratoryOutboundActive != 1 || tunnels.ClientInboundActive != 1 || tunnels.ClientOutboundActive != 1 {
 		t.Fatalf("pool-owned active tunnel metrics = %+v", tunnels)
+	}
+	netdb := d.registry.Snapshot().NetDB
+	if netdb.Routers != 1 || netdb.Floodfills != 1 {
+		t.Fatalf("NetDB gauges = %+v", netdb)
 	}
 	gotGateway, gotTunnel, viaTunnel := (daemonReplyRoute{local: d.bundle.Router.Hash, maintainer: d.maintainer, now: func() uint64 { return now }}).DatabaseLookupReplyRoute()
 	if !viaTunnel || gotGateway != gateway || gotTunnel != 77 {

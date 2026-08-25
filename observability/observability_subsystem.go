@@ -6,14 +6,20 @@ import (
 )
 
 type (
-	HealthStatus = registry.HealthStatus
-	Registry     = registry.Registry
-	SSU2Snapshot = registry.SSU2Snapshot
+	HealthStatus    = registry.HealthStatus
+	Registry        = registry.Registry
+	SSU2Snapshot    = registry.SSU2Snapshot
+	TunnelOwner     = registry.TunnelOwner
+	TunnelDirection = registry.TunnelDirection
 )
 
 const (
-	HealthOK          = registry.HealthOK
-	HealthUnavailable = registry.HealthUnavailable
+	HealthOK                = registry.HealthOK
+	HealthUnavailable       = registry.HealthUnavailable
+	TunnelOwnerExploratory  = registry.TunnelOwnerExploratory
+	TunnelOwnerClient       = registry.TunnelOwnerClient
+	TunnelDirectionInbound  = registry.TunnelDirectionInbound
+	TunnelDirectionOutbound = registry.TunnelDirectionOutbound
 )
 
 var (

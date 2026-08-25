@@ -68,16 +68,21 @@ type Router struct {
 type NetDB struct {
 	BucketCapacity           int
 	BootstrapRouterInfoPaths []string
+	LookupCapacity           int
 }
 
-// Tunnel bounds the paired client tunnel pools. A pool must have enough
-// capacity for its live target plus one renewing generation.
+// Tunnel bounds router-owned exploratory and destination-owned client tunnel
+// pools independently. Each pool needs capacity for its live target plus one
+// renewing generation.
 type Tunnel struct {
 	Enabled                     bool
 	Hops                        int
-	InboundTarget               int
-	OutboundTarget              int
-	PoolCapacity                int
+	ExploratoryInboundTarget    int
+	ExploratoryOutboundTarget   int
+	ExploratoryPoolCapacity     int
+	ClientInboundTarget         int
+	ClientOutboundTarget        int
+	ClientPoolCapacity          int
 	BuildPendingCapacity        int
 	Lifetime                    time.Duration
 	RenewBefore                 time.Duration
@@ -177,9 +182,11 @@ type Log struct {
 }
 
 func (o Operating) String() string {
-	return fmt.Sprintf("config.Operating{DataDir:%q StateDir:%q StatePath:%q KeyPath:%q Network:%d/%t/%t Router:%s/%s NetDB:%d Tunnel:%t/%d/%d/%d NTCP2:%t SSU2:%t Reseed:%t/%d SAM:%s AddressBook:%t/%d Control:%s HTTPProxy:%s SOCKS5:%s Metrics:%s Log:%s/%s}",
+	return fmt.Sprintf("config.Operating{DataDir:%q StateDir:%q StatePath:%q KeyPath:%q Network:%d/%t/%t Router:%s/%s NetDB:%d Tunnel:%t/%d/%d/%d/%d/%d/%d NTCP2:%t SSU2:%t Reseed:%t/%d SAM:%s AddressBook:%t/%d Control:%s HTTPProxy:%s SOCKS5:%s Metrics:%s Log:%s/%s}",
 		o.DataDir, o.StateDir, o.StatePath, o.KeyPath, o.Network.ID, o.Network.IPv4, o.Network.IPv6,
-		o.Router.Family, o.Router.Version, o.NetDB.BucketCapacity, o.Tunnel.Enabled, o.Tunnel.InboundTarget, o.Tunnel.OutboundTarget, o.Tunnel.PoolCapacity,
+		o.Router.Family, o.Router.Version, o.NetDB.BucketCapacity, o.Tunnel.Enabled,
+		o.Tunnel.ExploratoryInboundTarget, o.Tunnel.ExploratoryOutboundTarget, o.Tunnel.ExploratoryPoolCapacity,
+		o.Tunnel.ClientInboundTarget, o.Tunnel.ClientOutboundTarget, o.Tunnel.ClientPoolCapacity,
 		o.NTCP2.Enabled, o.SSU2.Enabled, o.Reseed.Enabled, len(o.Reseed.Endpoints), o.SAM, o.AddressBook.Enabled, len(o.AddressBook.Subscriptions),
 		o.Control, o.HTTPProxy, o.SOCKS5, o.Metrics, o.Log.Level, o.Log.Format)
 }
@@ -372,9 +379,11 @@ func defaultOperating(base string) Operating {
 		Network:   Network{ID: 2, IPv4: true},
 		Router:    Router{IdentityType: "ed25519", Version: "2.13.0"},
 		State:     State{MaxBytes: 16 << 20, MaxDestinations: 64, MaxNameBytes: 255},
-		NetDB:     NetDB{BucketCapacity: 24},
+		NetDB:     NetDB{BucketCapacity: 24, LookupCapacity: 32},
 		Tunnel: Tunnel{
-			Enabled: true, Hops: 3, InboundTarget: 2, OutboundTarget: 2, PoolCapacity: 4,
+			Enabled: true, Hops: 3,
+			ExploratoryInboundTarget: 4, ExploratoryOutboundTarget: 4, ExploratoryPoolCapacity: 8,
+			ClientInboundTarget: 2, ClientOutboundTarget: 2, ClientPoolCapacity: 4,
 			BuildPendingCapacity: 13, Lifetime: 10 * time.Minute,
 			RenewBefore: 210 * time.Second, MaintenanceInterval: time.Minute,
 			BandwidthRateBytesPerSecond: 1 << 20, BandwidthBurstBytes: 2 << 20,
@@ -526,6 +535,13 @@ func applyNetDB(operating *Operating, values map[entryKey]string, base string) e
 		}
 		operating.NetDB.BucketCapacity = int(parsed)
 	}
+	if value, ok := valueOf(values, "netdb", "lookup_capacity"); ok {
+		parsed, err := parseUint(value, 1, 256)
+		if err != nil {
+			return invalid("netdb", "lookup_capacity")
+		}
+		operating.NetDB.LookupCapacity = int(parsed)
+	}
 	if value, ok := valueOf(values, "netdb", "bootstrap_router_info_files"); ok {
 		raw := strings.Split(value, ",")
 		if len(raw) == 0 || len(raw) > maxBootstrapRouterInfoFiles {
@@ -565,9 +581,12 @@ func applyTunnel(operating *Operating, values map[entryKey]string) error {
 		max int64
 	}{
 		{"hops", &tunnel.Hops, 1, 7},
-		{"inbound_target", &tunnel.InboundTarget, 1, 16},
-		{"outbound_target", &tunnel.OutboundTarget, 1, 16},
-		{"pool_capacity", &tunnel.PoolCapacity, 2, 64},
+		{"exploratory_inbound_target", &tunnel.ExploratoryInboundTarget, 1, 16},
+		{"exploratory_outbound_target", &tunnel.ExploratoryOutboundTarget, 1, 16},
+		{"exploratory_pool_capacity", &tunnel.ExploratoryPoolCapacity, 2, 64},
+		{"client_inbound_target", &tunnel.ClientInboundTarget, 1, 16},
+		{"client_outbound_target", &tunnel.ClientOutboundTarget, 1, 16},
+		{"client_pool_capacity", &tunnel.ClientPoolCapacity, 2, 64},
 		{"build_pending_capacity", &tunnel.BuildPendingCapacity, 1, 256},
 		{"bandwidth_rate_bytes_per_second", &tunnel.BandwidthRateBytesPerSecond, 1 << 10, 1 << 30},
 		{"bandwidth_burst_bytes", &tunnel.BandwidthBurstBytes, 1 << 10, 1 << 30},
@@ -604,8 +623,11 @@ func applyTunnel(operating *Operating, values map[entryKey]string) error {
 	if tunnel.MaintenanceInterval > tunnel.RenewBefore {
 		return invalid("tunnel", "maintenance_interval")
 	}
-	if tunnel.PoolCapacity < 2*tunnel.InboundTarget || tunnel.PoolCapacity < 2*tunnel.OutboundTarget {
-		return invalid("tunnel", "pool_capacity")
+	if tunnel.ExploratoryPoolCapacity < 2*tunnel.ExploratoryInboundTarget || tunnel.ExploratoryPoolCapacity < 2*tunnel.ExploratoryOutboundTarget {
+		return invalid("tunnel", "exploratory_pool_capacity")
+	}
+	if tunnel.ClientPoolCapacity < 2*tunnel.ClientInboundTarget || tunnel.ClientPoolCapacity < 2*tunnel.ClientOutboundTarget {
+		return invalid("tunnel", "client_pool_capacity")
 	}
 	return nil
 }
@@ -1127,8 +1149,8 @@ var operatingKeys = map[string]map[string]bool{
 	"network":     {"id": true, "ipv4": true, "ipv6": true},
 	"router":      {"identity_type": true, "family": true, "version": true},
 	"state":       {"max_bytes": true, "max_destinations": true, "max_name_bytes": true},
-	"netdb":       {"bucket_capacity": true, "bootstrap_router_info_files": true},
-	"tunnel":      {"enabled": true, "hops": true, "inbound_target": true, "outbound_target": true, "pool_capacity": true, "build_pending_capacity": true, "lifetime": true, "renew_before": true, "maintenance_interval": true, "bandwidth_rate_bytes_per_second": true, "bandwidth_burst_bytes": true},
+	"netdb":       {"bucket_capacity": true, "lookup_capacity": true, "bootstrap_router_info_files": true},
+	"tunnel":      {"enabled": true, "hops": true, "exploratory_inbound_target": true, "exploratory_outbound_target": true, "exploratory_pool_capacity": true, "client_inbound_target": true, "client_outbound_target": true, "client_pool_capacity": true, "build_pending_capacity": true, "lifetime": true, "renew_before": true, "maintenance_interval": true, "bandwidth_rate_bytes_per_second": true, "bandwidth_burst_bytes": true},
 	"ntcp2":       {"enabled": true, "bind_host": true, "bind_port": true, "advertise_host": true, "advertise_port": true, "max_sessions": true, "idle_timeout": true},
 	"ssu2":        {"enabled": true, "bind_host": true, "bind_port": true, "advertise_host": true, "advertise_port": true, "max_sessions": true, "idle_timeout": true},
 	"nat":         {"natpmp_endpoint": true, "upnp_endpoint": true},

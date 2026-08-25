@@ -12,6 +12,7 @@ import (
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/netdb"
 	"gosuda.org/ivnp/networking/internal/tunnel"
+	"gosuda.org/ivnp/observability"
 )
 
 var (
@@ -23,27 +24,46 @@ var (
 	ErrTransportUnavailable = errors.New("router: supported transport unavailable for peer")
 )
 
+const (
+	transportBootstrapDialGrace = 750 * time.Millisecond
+	transportReadyDialGrace     = 2 * time.Second
+)
+
+type preferredSessionManager interface {
+	TransportManager
+	tunnel.SessionEnsurer
+	HasSession(foundation.Hash) bool
+	DropSession(foundation.Hash) bool
+}
+
+type transportCapabilities struct {
+	ntcp2      TransportManager
+	ssu2       TransportManager
+	directSSU2 bool
+}
+
 // TransportMuxConfig composes the direct-peer NTCP2 and SSU2 managers behind
 // Router's single TransportManager dependency. Database is consulted on every
 // Send so transport selection is based only on a RouterInfo admitted by netdb.
 // Either manager may be nil, but not both.
 type TransportMuxConfig struct {
-	Database *netdb.Database
-	NTCP2    TransportManager
-	SSU2     TransportManager
+	Database   *netdb.Database
+	NTCP2      TransportManager
+	SSU2       TransportManager
+	PreferSSU2 func() bool
+	Metrics    *observability.Registry
 }
 
-// TransportMux selects NTCP2 before SSU2 when a verified peer advertises both.
-// Public bootstrap favors the connection-oriented handshake because an
-// unreachable UDP endpoint otherwise consumes the full SSU2 timeout before a
-// reachable NTCP2 endpoint is attempted. An alternate is tried only when the
-// preferred manager reports that a session could not be established or the
-// peer could not be reached. It never retries an error from an attempted
-// message write because delivery may then be ambiguous.
+// TransportMux reuses an authenticated session before opening another
+// transport. For a peer with direct NTCP2 and SSU2 addresses, it races both
+// handshakes and retains SSU2 when both succeed. Introducer-only SSU2 remains a
+// fallback because its relay setup is materially slower than a direct dial.
 type TransportMux struct {
-	database *netdb.Database
-	ntcp2    TransportManager
-	ssu2     TransportManager
+	database   *netdb.Database
+	ntcp2      TransportManager
+	ssu2       TransportManager
+	preferSSU2 func() bool
+	metrics    *observability.Registry
 
 	lifecycleMu  sync.Mutex
 	started      bool
@@ -64,9 +84,11 @@ func NewTransportMux(config TransportMuxConfig) (*TransportMux, error) {
 		return nil, ErrTransportMuxConfig
 	}
 	return &TransportMux{
-		database: config.Database,
-		ntcp2:    config.NTCP2,
-		ssu2:     config.SSU2,
+		database:   config.Database,
+		ntcp2:      config.NTCP2,
+		ssu2:       config.SSU2,
+		preferSSU2: config.PreferSSU2,
+		metrics:    config.Metrics,
 	}, nil
 }
 
@@ -183,18 +205,21 @@ func (m *TransportMux) Status() TransportStatus {
 	return status
 }
 
-// Send synchronously delegates the borrowed message to a compatible transport.
-// NTCP2 is preferred where both verified RouterInfo capabilities are present;
-// SSU2 is tried only after an establishment or reachability failure.
+// Send establishes at most one delivery path before writing the borrowed
+// message. A raced alternate is never used after a write attempt.
 func (m *TransportMux) Send(ctx context.Context, peer foundation.Hash, message i2np.Message) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-
+	if manager, handled, err := m.sessionManager(ctx, peer); handled {
+		if err != nil {
+			return err
+		}
+		return manager.Send(ctx, peer, message)
+	}
 	primary, alternate, ok := m.selectManagers(peer)
 	if !ok {
 		return ErrTransportUnavailable
@@ -211,14 +236,15 @@ func (m *TransportMux) Send(ctx context.Context, peer foundation.Hash, message i
 }
 
 // EnsureSession authenticates one selected public transport without sending an
-// I2NP message. The same pre-delivery fallback rules as Send apply.
+// I2NP message.
 func (m *TransportMux) EnsureSession(ctx context.Context, peer foundation.Hash) error {
-	if ctx ==
-		nil {
+	if ctx == nil {
 		ctx = context.Background()
 	}
-
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, handled, err := m.sessionManager(ctx, peer); handled {
 		return err
 	}
 	primary, alternate, ok := m.selectManagers(peer)
@@ -244,6 +270,111 @@ func ensureTransportSession(ctx context.Context, manager TransportManager, peer 
 		return nil
 	}
 	return ensurer.EnsureSession(ctx, peer)
+}
+
+func (m *TransportMux) sessionManager(ctx context.Context, peer foundation.Hash) (TransportManager, bool, error) {
+	capabilities, ok := m.capabilities(peer)
+	if !ok || capabilities.ntcp2 == nil || capabilities.ssu2 == nil || !capabilities.directSSU2 {
+		return nil, false, nil
+	}
+	ntcp2, ntcp2OK := capabilities.ntcp2.(preferredSessionManager)
+	ssu2, ssu2OK := capabilities.ssu2.(preferredSessionManager)
+	if !ntcp2OK || !ssu2OK {
+		return nil, false, nil
+	}
+	if ssu2.HasSession(peer) {
+		if m.metrics != nil {
+			m.metrics.IncTransportSessionReuses()
+			m.metrics.IncTransportSSU2Promotions()
+		}
+		ntcp2.DropSession(peer)
+		return ssu2, true, nil
+	}
+	if ntcp2.HasSession(peer) {
+		if m.metrics != nil {
+			m.metrics.IncTransportSessionReuses()
+		}
+		return ntcp2, true, nil
+	}
+	manager, err := m.raceDirectSessions(ctx, peer, ntcp2, ssu2)
+	return manager, true, err
+}
+
+func (m *TransportMux) raceDirectSessions(ctx context.Context, peer foundation.Hash, ntcp2, ssu2 preferredSessionManager) (TransportManager, error) {
+	type result struct {
+		manager preferredSessionManager
+		err     error
+	}
+	raceContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if m.metrics != nil {
+		m.metrics.IncTransportRaceAttempts()
+	}
+	results := make(chan result, 2)
+	go func() { results <- result{manager: ntcp2, err: ntcp2.EnsureSession(raceContext, peer)} }()
+	go func() { results <- result{manager: ssu2, err: ssu2.EnsureSession(raceContext, peer)} }()
+
+	first := <-results
+	if first.err != nil {
+		second := <-results
+		if second.err != nil {
+			return nil, errors.Join(first.err, second.err)
+		}
+		if second.manager == ssu2 {
+			ntcp2.DropSession(peer)
+			m.recordSSU2RaceWin()
+		} else if m.metrics != nil {
+			m.metrics.IncTransportNTCP2RaceWins()
+		}
+		return second.manager, nil
+	}
+	if first.manager == ssu2 {
+		cancel()
+		second := <-results
+		if second.err == nil {
+			ntcp2.DropSession(peer)
+		}
+		m.recordSSU2RaceWin()
+		return ssu2, nil
+	}
+
+	grace := m.dialGrace()
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case second := <-results:
+		if second.err == nil && second.manager == ssu2 {
+			ntcp2.DropSession(peer)
+			m.recordSSU2RaceWin()
+			return ssu2, nil
+		}
+		if m.metrics != nil {
+			m.metrics.IncTransportNTCP2RaceWins()
+		}
+		return ntcp2, nil
+	case <-timer.C:
+		cancel()
+		if m.metrics != nil {
+			m.metrics.IncTransportNTCP2RaceWins()
+		}
+		return ntcp2, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (m *TransportMux) dialGrace() time.Duration {
+	if m.preferSSU2 != nil && m.preferSSU2() {
+		return transportReadyDialGrace
+	}
+	return transportBootstrapDialGrace
+}
+
+func (m *TransportMux) recordSSU2RaceWin() {
+	if m.metrics != nil {
+		m.metrics.IncTransportSSU2RaceWins()
+		m.metrics.IncTransportSSU2Promotions()
+	}
 }
 
 func (m *TransportMux) configuredManagers() [2]TransportManager {
@@ -278,8 +409,7 @@ func (m *TransportMux) UsableRemoteRouterInfos(now time.Time) int {
 }
 
 // CanSend reports whether the current verified RouterInfo has an address usable
-// by one of this mux's configured transports. Control-plane selectors use it to
-// avoid scheduling publication and tunnel work that cannot leave the process.
+// by one of this mux's configured transports.
 func (m *TransportMux) CanSend(peer foundation.Hash) bool {
 	if m == nil {
 		return false
@@ -289,32 +419,41 @@ func (m *TransportMux) CanSend(peer foundation.Hash) bool {
 }
 
 func (m *TransportMux) selectManagers(peer foundation.Hash) (TransportManager, TransportManager, bool) {
-	ref, ok := m.database.Routers().Get(peer)
+	capabilities, ok := m.capabilities(peer)
 	if !ok {
 		return nil, nil, false
+	}
+	switch {
+	case capabilities.ssu2 != nil && capabilities.ntcp2 != nil:
+		return capabilities.ntcp2, capabilities.ssu2, true
+	case capabilities.ssu2 != nil:
+		return capabilities.ssu2, nil, true
+	case capabilities.ntcp2 != nil:
+		return capabilities.ntcp2, nil, true
+	default:
+		return nil, nil, false
+	}
+}
+
+func (m *TransportMux) capabilities(peer foundation.Hash) (transportCapabilities, bool) {
+	ref, ok := m.database.Routers().Get(peer)
+	if !ok {
+		return transportCapabilities{}, false
 	}
 	now := time.Now()
 	nowMillis := uint64(now.UnixMilli())
 	if err := netdb.ReseedRouterInfoFresh(ref.Info, nowMillis); err != nil {
-		return nil, nil, false
+		return transportCapabilities{}, false
 	}
-
-	// The table admits only verified RouterInfos. An SSU2 peer needs valid
-	// SSU2 key/version material and either a direct endpoint or a live
-	// introducer; SSU2Manager.Send selects between those paths.
-	ssu2Capable := m.ssu2 != nil && ssu2RouterInfoCapable(ref.Info, uint64(now.Unix()))
-	ntcp2Capable := m.ntcp2 != nil && ntcp2RouterInfoCapable(ref.Info, nowMillis)
-
-	switch {
-	case ssu2Capable && ntcp2Capable:
-		return m.ntcp2, m.ssu2, true
-	case ssu2Capable:
-		return m.ssu2, nil, true
-	case ntcp2Capable:
-		return m.ntcp2, nil, true
-	default:
-		return nil, nil, false
+	var capabilities transportCapabilities
+	if m.ntcp2 != nil && ntcp2RouterInfoCapable(ref.Info, nowMillis) {
+		capabilities.ntcp2 = m.ntcp2
 	}
+	if m.ssu2 != nil && ssu2RouterInfoCapable(ref.Info, uint64(now.Unix())) {
+		capabilities.ssu2 = m.ssu2
+		capabilities.directSSU2 = ssu2DirectRouterInfoCapable(ref.Info, uint64(now.Unix()))
+	}
+	return capabilities, capabilities.ntcp2 != nil || capabilities.ssu2 != nil
 }
 
 func ntcp2RouterInfoCapable(info netdb.RouterInfo, nowMillis uint64) bool {
@@ -324,13 +463,20 @@ func ntcp2RouterInfoCapable(info netdb.RouterInfo, nowMillis uint64) bool {
 	return hasCurrentTransportAddress(info, nowMillis, []byte("NTCP"), []byte("NTCP2"))
 }
 
-func ssu2RouterInfoCapable(info netdb.RouterInfo, now uint64) bool {
+func ssu2DirectRouterInfoCapable(info netdb.RouterInfo, now uint64) bool {
 	if _, err := selectSSU2Keys(info); err != nil {
 		return false
 	}
-	if _, err := selectSSU2Address(info); err == nil &&
-		hasCurrentTransportAddress(info, now*1000, []byte("SSU"), []byte("SSU2")) {
+	_, err := selectSSU2Address(info)
+	return err == nil && hasCurrentTransportAddress(info, now*1000, []byte("SSU"), []byte("SSU2"))
+}
+
+func ssu2RouterInfoCapable(info netdb.RouterInfo, now uint64) bool {
+	if ssu2DirectRouterInfoCapable(info, now) {
 		return true
+	}
+	if _, err := selectSSU2Keys(info); err != nil {
+		return false
 	}
 	return len(selectSSU2Introducers(info, now)) != 0
 }

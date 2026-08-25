@@ -38,10 +38,11 @@ var (
 )
 
 const (
-	daemonHealthProbeTimeoutMillis = uint64(time.Minute / time.Millisecond)
-	daemonNetDBLookupTimeoutMillis = uint64((30 * time.Second) / time.Millisecond)
-	daemonNetDBLookupCandidates    = 32
-	daemonNetDBExplorationInterval = 5 * time.Second
+	daemonHealthProbeTimeoutMillis       = uint64(time.Minute / time.Millisecond)
+	daemonNetDBLookupTimeoutMillis       = uint64((30 * time.Second) / time.Millisecond)
+	daemonNetDBLookupCandidates          = 32
+	daemonNetDBExplorationBootstrapDelay = time.Second
+	daemonNetDBExplorationSteadyDelay    = 5 * time.Second
 )
 
 // Listener owns both local stream and packet listener edges used by
@@ -149,27 +150,29 @@ type Status struct {
 // destinationRuntime is the complete client-side ownership boundary. Router
 // exploratory/transit components are intentionally not retained here.
 type destinationRuntime struct {
-	name              string
-	local             *foundation.LocalDestination
-	ratchet           *networking.GarlicRatchetManager
-	pool              *networking.TunnelPool
-	profiles          *networking.TunnelPeerProfiles
-	build             *networking.TunnelBuildManager
-	maintainer        *networking.TunnelPairedPoolMaintainer
-	health            *networking.TunnelHealth
-	requests          *networking.NetworkDatabaseRequestManager
-	publisher         networking.NetworkDatabaseConfirmedPublisher
-	tunnels           *networking.TunnelRuntime
-	sender            *networking.RouterStreamingTunnelSender
-	bandwidth         *networking.RouterDestinationBandwidthLimiter
-	session           *networking.RouterDestinationSession
-	unregister        []func()
-	once              sync.Once
-	maintenanceMu     sync.Mutex
-	released          atomic.Bool
-	onRelease         func(*destinationRuntime)
-	now               func() uint64
-	maintenanceQueued atomic.Bool
+	name                    string
+	local                   *foundation.LocalDestination
+	ratchet                 *networking.GarlicRatchetManager
+	pool                    *networking.TunnelPool
+	profiles                *networking.TunnelPeerProfiles
+	build                   *networking.TunnelBuildManager
+	maintainer              *networking.TunnelPairedPoolMaintainer
+	health                  *networking.TunnelHealth
+	requests                *networking.NetworkDatabaseRequestManager
+	publisher               networking.NetworkDatabaseConfirmedPublisher
+	tunnels                 *networking.TunnelRuntime
+	sender                  *networking.RouterStreamingTunnelSender
+	bandwidth               *networking.RouterDestinationBandwidthLimiter
+	session                 *networking.RouterDestinationSession
+	unregister              []func()
+	once                    sync.Once
+	maintenanceMu           sync.Mutex
+	released                atomic.Bool
+	onRelease               func(*destinationRuntime)
+	now                     func() uint64
+	maintenanceQueued       atomic.Bool
+	tunnelMaintenanceDirty  atomic.Bool
+	tunnelMaintenanceQueued atomic.Bool
 }
 
 func (r *destinationRuntime) release() {
@@ -259,6 +262,18 @@ func (r *destinationRuntime) maintain(ctx context.Context, now uint64) error {
 	return result
 }
 
+func (r *destinationRuntime) maintainTunnels(ctx context.Context) (int, error) {
+	if r == nil {
+		return 0, nil
+	}
+	r.maintenanceMu.Lock()
+	defer r.maintenanceMu.Unlock()
+	if r.released.Load() || r.maintainer == nil {
+		return 0, nil
+	}
+	return r.maintainer.Maintain(ctx)
+}
+
 // Daemon owns exactly one embedded router and its local management services.
 type Daemon struct {
 	config     state.ConfigurationOperating
@@ -304,6 +319,9 @@ type Daemon struct {
 	explorationDone       chan struct{}
 	publicationWake       chan struct{}
 	destinationWake       chan *destinationRuntime
+	destinationTunnelWake chan *destinationRuntime
+	bootstrapPoolsStarted atomic.Bool
+	tunnelWake            chan struct{}
 	netdbSaveWake         chan struct{}
 	metrics               *http.Server
 	metricsListener       net.Listener
@@ -523,7 +541,10 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 	if options.Transport != nil {
 		mux = options.Transport
 	} else {
-		mux, err = networking.RouterNewTransportMux(networking.RouterTransportMuxConfig{Database: database, NTCP2: ntcp, SSU2: ssu})
+		mux, err = networking.RouterNewTransportMux(networking.RouterTransportMuxConfig{
+			Database: database, NTCP2: ntcp, SSU2: ssu, Metrics: registry,
+			PreferSSU2: func() bool { return registry.Snapshot().Bootstrap.Stage >= 3 },
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -573,6 +594,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		tunnels               *networking.TunnelRuntime
 		pool                  *networking.TunnelPool
 		profiles              *networking.TunnelPeerProfiles
+		reservations          *networking.TunnelBuildReservations
 		replyKeys             *networking.GarlicReplyKeyRegistry
 		buildManager          *networking.TunnelBuildManager
 		maintainer            *networking.TunnelPairedPoolMaintainer
@@ -590,6 +612,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		destinationFactory    *destinationRuntimeFactory
 		publication           *networking.RouterPublicationMaintenance
 		clientRuntimes        []*destinationRuntime
+		d                     *Daemon
 	)
 	newOK := false
 	defer func() {
@@ -633,8 +656,9 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 	}
 	if cfg.Tunnel.Enabled {
 		tunnels = networking.TunnelNewRuntime(networking.TunnelRuntimeConfig{Sender: mux, Now: now})
-		pool = networking.TunnelNewPool(cfg.Tunnel.PoolCapacity)
+		pool = networking.TunnelNewPool(cfg.Tunnel.ExploratoryPoolCapacity)
 		profiles = networking.TunnelNewPeerProfiles(networking.TunnelPeerProfilesConfig{})
+		reservations = networking.TunnelNewBuildReservations()
 		responders = networking.NetworkDatabaseNewResponderProfiles(0)
 		for _, peer := range bootstrapPeers {
 			responders.Record(peer)
@@ -654,6 +678,11 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			},
 			LocalDelivery: func(message networking.I2NPMessage) error { return service.HandleI2NP(message, now(), false) },
 			Now:           now, MaxPending: cfg.Tunnel.BuildPendingCapacity, Profiles: profiles, Logger: logger, Metrics: registry,
+			OnBuildEvent: func() {
+				if d != nil {
+					d.requestExploratoryMaintenance()
+				}
+			},
 		})
 		if err != nil {
 			return nil, err
@@ -662,6 +691,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: cfg.Tunnel.Hops,
 			PreferredPeers: bootstrapPeers, Lifetime: uint64(cfg.Tunnel.Lifetime / time.Millisecond),
 			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
+			Reservations: reservations,
 		})
 		if sourceErr != nil {
 			return nil, sourceErr
@@ -670,13 +700,14 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: cfg.Tunnel.Hops,
 			PreferredPeers: bootstrapPeers, Lifetime: uint64(cfg.Tunnel.Lifetime / time.Millisecond),
 			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
+			Reservations: reservations,
 		})
 		if sourceErr != nil {
 			return nil, sourceErr
 		}
 		maintainer, err = networking.TunnelNewPairedPoolMaintainer(networking.TunnelPairedPoolMaintainerConfig{
 			Pool: pool, Runtime: tunnels, Builder: buildManager, InboundSource: inboundSource, OutboundSource: outboundSource,
-			Now: now, InboundTarget: cfg.Tunnel.InboundTarget, OutboundTarget: cfg.Tunnel.OutboundTarget,
+			Now: now, InboundTarget: cfg.Tunnel.ExploratoryInboundTarget, OutboundTarget: cfg.Tunnel.ExploratoryOutboundTarget,
 			RenewBefore: uint64(cfg.Tunnel.RenewBefore / time.Millisecond),
 		})
 		if err != nil {
@@ -692,16 +723,18 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		replyRoute := daemonReplyRoute{local: bundle.Router.Hash, maintainer: maintainer, now: now}
 		requests, err = networking.NetworkDatabaseNewRequestManager(database, muxRequestSender{
 			sender: mux, tunnels: tunnels, pairs: maintainer, now: now, replyKeys: replyKeys,
-			staticKeyLookup:     networking.TunnelNewNetDBBuildStaticKeyLookup(database.Routers()),
 			seedReplyRouterInfo: buildReplyRouterInfoSeeder(database, mux, now),
 		}, replyRoute, networking.NetworkDatabaseRequestManagerConfig{
-			Capacity: cfg.Tunnel.BuildPendingCapacity, MaxCandidates: daemonNetDBLookupCandidates, MaxWaiters: 64,
+			Capacity: cfg.NetDB.LookupCapacity, MaxCandidates: daemonNetDBLookupCandidates, MaxWaiters: 64,
 			TimeoutMillis: daemonNetDBLookupTimeoutMillis, Now: now, Metrics: registry, Responders: responders,
 		})
 		if err != nil {
 			return nil, err
 		}
-		explorer, err = networking.NetworkDatabaseNewExplorer(networking.NetworkDatabaseExplorerConfig{Table: database.Routers(), Requests: requests, Now: now})
+		explorer, err = networking.NetworkDatabaseNewExplorer(networking.NetworkDatabaseExplorerConfig{
+			Table: database.Routers(), Requests: requests, Now: now,
+			Aggressive: func() bool { return registry.Snapshot().Bootstrap.Stage < 3 },
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -722,7 +755,8 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			cfg: cfg, database: database, service: service, tunnels: tunnels, destinations: destinations,
 			replyKeys: replyKeys, replySender: replySender, transport: mux,
 			localRouter: bundle.Router.Hash, staticPrivate: bundle.Router.X25519Private[:],
-			now: now, clockNow: clock.Now, garlicReceiver: garlicReceiver, status: statusMux,
+			reservations: reservations,
+			now:          now, clockNow: clock.Now, garlicReceiver: garlicReceiver, status: statusMux,
 			buildReplies: buildReplies, requests: requestHandlers, publishers: destinationPublishers,
 			publicationTokens: publicationTokens,
 			preferredPeers:    append([]foundation.Hash(nil), bootstrapPeers...),
@@ -762,7 +796,6 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	var d *Daemon
 	runtime, err := networking.RouterNew(networking.RouterConfig{
 		NTCP2: ntcp2Endpoint(cfg.NTCP2), SSU2: transportEndpoint(cfg.SSU2, "udp"),
 		ReseedEndpoints: append([]string(nil), cfg.Reseed.Endpoints...), RequireReseed: cfg.Reseed.Required,
@@ -813,12 +846,17 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		config: cfg, store: store, stateLock: stateLock, bundle: bundle, database: database, netdbStore: netdbStore, explorer: explorer, localInfo: localInfo, router: runtime, registry: registry, logger: logger, clock: clock, listener: listener,
 		service: service, tunnels: tunnels, pool: pool, profiles: profiles, tunnelHealth: health, replyKeys: replyKeys, buildManager: buildManager, maintainer: maintainer, requests: requests, destinations: destinations, garlicSessions: garlicSessions, garlicReceiver: garlicReceiver, statusMux: statusMux, publication: publication,
 		destinationFactory: destinationFactory, buildReplies: buildReplies, requestHandlers: requestHandlers, destinationPublishers: destinationPublishers, clientRuntimes: clientRuntimes,
-		startReady:      make(chan struct{}),
-		destinationWake: make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
-		netdbSaveWake:   make(chan struct{}, 1),
+		startReady:            make(chan struct{}),
+		destinationWake:       make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
+		destinationTunnelWake: make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
+		tunnelWake:            make(chan struct{}, 1),
+		netdbSaveWake:         make(chan struct{}, 1),
 	}
 	for _, clientRuntime := range d.clientRuntimes {
 		clientRuntime.onRelease = d.removeClientRuntime
+	}
+	if destinationFactory != nil {
+		destinationFactory.requestTunnelMaintenance = d.requestDestinationTunnelMaintenance
 	}
 	if cfg.AddressBook.Enabled {
 		d.addressBook, err = client.AddressBookNewService(client.AddressBookConfig{
@@ -1077,10 +1115,11 @@ func (d *Daemon) startMaintenance() {
 	d.maintenanceDone = make(chan struct{})
 	d.publicationWake = make(chan struct{}, 1)
 	destinationWorkers := parallelism.Workers(max(1, d.config.State.MaxDestinations))
-	d.wg.Add(4 + destinationWorkers)
+	d.wg.Add(5 + destinationWorkers)
 	go d.publicationMaintenanceLoop()
 	go d.observabilityLoop()
 	go d.netdbSaveLoop()
+	go d.tunnelMaintenanceLoop()
 	if d.explorer != nil {
 		d.explorationDone = make(chan struct{})
 		d.wg.Go(d.explorationLoop)
@@ -1091,6 +1130,33 @@ func (d *Daemon) startMaintenance() {
 	go d.periodicMaintenanceLoop(interval)
 	for _, runtime := range d.clientRuntimeSnapshot() {
 		d.requestDestinationMaintenance(runtime)
+	}
+}
+
+func (d *Daemon) requestExploratoryMaintenance() {
+	if d == nil || d.maintainer == nil || d.tunnelWake == nil {
+		return
+	}
+	select {
+	case d.tunnelWake <- struct{}{}:
+	default:
+	}
+}
+
+func (d *Daemon) tunnelMaintenanceLoop() {
+	defer d.wg.Done()
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-d.tunnelWake:
+			maintenanceContext, cancel := context.WithTimeout(d.ctx, 30*time.Second)
+			_, err := d.maintainer.Maintain(maintenanceContext)
+			cancel()
+			if err != nil && d.ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				d.recordMaintenanceError(err)
+			}
+		}
 	}
 }
 
@@ -1155,10 +1221,29 @@ func (d *Daemon) netdbSaveLoop() {
 	}
 }
 
+func (d *Daemon) maintainDestinationTunnels(runtime *destinationRuntime) {
+	var result error
+	for runtime.active() {
+		runtime.tunnelMaintenanceDirty.Store(false)
+		maintenanceContext, cancel := context.WithTimeout(d.ctx, 30*time.Second)
+		_, err := runtime.maintainTunnels(maintenanceContext)
+		cancel()
+		result = errors.Join(result, err)
+		if !runtime.tunnelMaintenanceDirty.Load() {
+			break
+		}
+	}
+	runtime.tunnelMaintenanceQueued.Store(false)
+	if runtime.tunnelMaintenanceDirty.Load() {
+		d.requestDestinationTunnelMaintenance(runtime)
+	}
+	if result != nil && d.ctx.Err() == nil && !errors.Is(result, context.Canceled) && !errors.Is(result, context.DeadlineExceeded) {
+		d.recordMaintenanceError(result)
+	}
+}
+
 func (d *Daemon) explorationLoop() {
 	defer close(d.explorationDone)
-	ticker := time.NewTicker(daemonNetDBExplorationInterval)
-	defer ticker.Stop()
 	for {
 		now := uint64(d.clock.Now().UnixMilli())
 		if d.requests != nil {
@@ -1167,10 +1252,18 @@ func (d *Daemon) explorationLoop() {
 		if err := d.explorer.Maintain(d.ctx); err != nil && d.ctx.Err() == nil && !errors.Is(err, context.Canceled) {
 			d.recordMaintenanceError(err)
 		}
+		delay := daemonNetDBExplorationSteadyDelay
+		if d.registry.Snapshot().Bootstrap.Stage < 3 {
+			delay = daemonNetDBExplorationBootstrapDelay
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-d.ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }
@@ -1184,6 +1277,10 @@ func (d *Daemon) destinationMaintenanceLoop() {
 		case runtime := <-d.destinationWake:
 			if runtime != nil {
 				d.maintainDestination(runtime)
+			}
+		case runtime := <-d.destinationTunnelWake:
+			if runtime != nil {
+				d.maintainDestinationTunnels(runtime)
 			}
 		}
 	}
@@ -1232,9 +1329,7 @@ func (d *Daemon) maintainOnce(now uint64) {
 	}
 	d.router.MaintainReseed(d.ctx)
 	if d.maintainer != nil {
-		if _, err := d.maintainer.Maintain(d.ctx); err != nil && d.ctx.Err() == nil {
-			d.recordMaintenanceError(err)
-		}
+		d.requestExploratoryMaintenance()
 	}
 	for _, runtime := range d.clientRuntimeSnapshot() {
 		d.requestDestinationMaintenance(runtime)
@@ -1275,6 +1370,21 @@ func (d *Daemon) maintainTunnelHealth(now uint64) {
 	}
 }
 
+func (d *Daemon) requestDestinationTunnelMaintenance(runtime *destinationRuntime) {
+	if d == nil || runtime == nil || !runtime.active() || d.destinationTunnelWake == nil {
+		return
+	}
+	runtime.tunnelMaintenanceDirty.Store(true)
+	if !runtime.tunnelMaintenanceQueued.CompareAndSwap(destinationMaintenanceIdle, destinationMaintenanceQueued) {
+		return
+	}
+	select {
+	case d.destinationTunnelWake <- runtime:
+	default:
+		runtime.tunnelMaintenanceQueued.Store(false)
+	}
+}
+
 func (d *Daemon) expireGarlicSessions(now uint64) {
 	expireWorkers := parallelism.Workers(len(d.garlicSessions))
 	expireJobs := make(chan *networking.GarlicSessionManager)
@@ -1298,6 +1408,8 @@ func (d *Daemon) expireGarlicSessions(now uint64) {
 const (
 	destinationMaintenanceIdle   = false
 	destinationMaintenanceQueued = true
+	bootstrapPoolsIdle           = false
+	bootstrapPoolsStarted        = true
 )
 
 func (d *Daemon) requestDestinationMaintenance(runtime *destinationRuntime) {
@@ -1315,8 +1427,22 @@ func (d *Daemon) refreshObservability() {
 	if d == nil || d.registry == nil {
 		return
 	}
-	routers := uint64(d.database.Routers().Len())
+	_, routerRefs := d.database.Routers().Snapshot()
+	routers := uint64(len(routerRefs))
+	floodfills := uint64(0)
+	for _, router := range routerRefs {
+		if router.Floodfill {
+			floodfills++
+		}
+	}
 	d.registry.SetNetDBRouters(routers)
+	d.registry.SetNetDBFloodfills(floodfills)
+	if d.registry.Snapshot().Bootstrap.Stage < 3 && routers >= 50 && d.bootstrapPoolsStarted.CompareAndSwap(bootstrapPoolsIdle, bootstrapPoolsStarted) {
+		d.requestExploratoryMaintenance()
+		for _, runtime := range d.clientRuntimeSnapshot() {
+			d.requestDestinationTunnelMaintenance(runtime)
+		}
+	}
 	if d.localInfo.Reachability() == networking.RouterReachabilityReachable {
 		d.registry.SetRouterReachable(1)
 	} else {

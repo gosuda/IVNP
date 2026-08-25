@@ -37,7 +37,11 @@ func TestParseOperatingDefaults(t *testing.T) {
 			t.Fatalf("default reseed endpoint = %q", endpoint)
 		}
 	}
-	if !config.Tunnel.Enabled || config.Tunnel.Lifetime != 10*time.Minute || config.Router.Version != "2.13.0" {
+	tunnel := config.Tunnel
+	coreDefaultsRejected := !tunnel.Enabled || tunnel.Lifetime != 10*time.Minute || config.Router.Version != "2.13.0" || config.NetDB.LookupCapacity != 32
+	exploratoryDefaultsRejected := tunnel.ExploratoryInboundTarget != 4 || tunnel.ExploratoryOutboundTarget != 4 || tunnel.ExploratoryPoolCapacity != 8
+	clientDefaultsRejected := tunnel.ClientInboundTarget != 2 || tunnel.ClientOutboundTarget != 2 || tunnel.ClientPoolCapacity != 4
+	if coreDefaultsRejected || exploratoryDefaultsRejected || clientDefaultsRejected {
 		t.Fatalf("production defaults = %#v", config)
 	}
 }
@@ -318,15 +322,16 @@ func TestParseOperatingRequiresExactReseedNetworkQuery(t *testing.T) {
 }
 
 func TestParseOperatingTunnelAndNetDB(t *testing.T) {
-	text := "[router]\nversion = 1.2.3\n[netdb]\nbucket_capacity = 48\n[tunnel]\nenabled = true\nhops = 3\ninbound_target = 3\noutbound_target = 2\npool_capacity = 6\nbuild_pending_capacity = 12\nlifetime = 10m\nrenew_before = 3m\nmaintenance_interval = 45s\nbandwidth_rate_bytes_per_second = 65536\nbandwidth_burst_bytes = 131072\n"
+	text := "[router]\nversion = 1.2.3\n[netdb]\nbucket_capacity = 48\nlookup_capacity = 64\n[tunnel]\nenabled = true\nhops = 3\nexploratory_inbound_target = 3\nexploratory_outbound_target = 2\nexploratory_pool_capacity = 6\nclient_inbound_target = 2\nclient_outbound_target = 2\nclient_pool_capacity = 4\nbuild_pending_capacity = 12\nlifetime = 10m\nrenew_before = 3m\nmaintenance_interval = 45s\nbandwidth_rate_bytes_per_second = 65536\nbandwidth_burst_bytes = 131072\n"
 	operating, err := ParseOperating(text, "/etc/ivnp/ivnp.conf")
 	if err != nil {
 		t.Fatal(err)
 	}
-	parseOperatingTunnelAndNetDBRejected := operating.Router.Version != "1.2.3" || operating.NetDB.BucketCapacity != 48 || !operating.Tunnel.Enabled || operating.Tunnel.Hops != 3 || operating.Tunnel.Lifetime != 10*time.Minute || operating.Tunnel.BandwidthRateBytesPerSecond != 65_536
-	if !parseOperatingTunnelAndNetDBRejected {
-		parseOperatingTunnelAndNetDBRejected = operating.Tunnel.BandwidthBurstBytes != 131_072
-	}
+	parseOperatingTunnelAndNetDBRejected := operating.Router.Version != "1.2.3" || operating.NetDB.BucketCapacity != 48 || operating.NetDB.LookupCapacity != 64 || !operating.Tunnel.Enabled || operating.Tunnel.Hops != 3 ||
+		operating.Tunnel.ExploratoryInboundTarget != 3 || operating.Tunnel.ExploratoryOutboundTarget != 2 || operating.Tunnel.ExploratoryPoolCapacity != 6 ||
+		operating.Tunnel.ClientInboundTarget != 2 || operating.Tunnel.ClientOutboundTarget != 2 || operating.Tunnel.ClientPoolCapacity != 4 ||
+		operating.Tunnel.Lifetime != 10*time.Minute || operating.Tunnel.BandwidthRateBytesPerSecond != 65_536 ||
+		operating.Tunnel.BandwidthBurstBytes != 131_072
 	if parseOperatingTunnelAndNetDBRejected {
 		t.Fatalf("operating = %#v", operating)
 	}
@@ -335,7 +340,8 @@ func TestParseOperatingTunnelAndNetDB(t *testing.T) {
 func TestParseOperatingRejectsUnsafeTunnelBoundsAndUnknownKeys(t *testing.T) {
 	for _, text := range []string{
 		"[netdb]\nunknown = 1\n",
-		"[tunnel]\ninbound_target = 3\npool_capacity = 5\n",
+		"[tunnel]\nexploratory_inbound_target = 3\nexploratory_pool_capacity = 5\n",
+		"[tunnel]\nclient_outbound_target = 3\nclient_pool_capacity = 5\n",
 		"[tunnel]\nlifetime = 9m\n",
 		"[tunnel]\nlifetime = 11m\n",
 		"[tunnel]\nhops = 8\n",

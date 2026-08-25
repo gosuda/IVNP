@@ -5,12 +5,18 @@ import (
 	cryptorand "crypto/rand"
 	"errors"
 	"io"
+	"time"
 )
 
 const (
-	explorerMaxInflight = 4
-	explorerBackoffBase = uint64(30 * 1000)
-	explorerBackoffCap  = uint64(10 * 60 * 1000)
+	explorerSteadyMaxInflight    = 4
+	explorerBootstrapMaxInflight = 8
+	explorerSteadyMinimum        = 8
+	explorerBootstrapMinimum     = 12
+	explorerBackoffBase          = uint64(30 * 1000)
+	explorerBackoffCap           = uint64(10 * 60 * 1000)
+	explorerBootstrapBackoffBase = uint64(10 * 1000)
+	explorerBootstrapBackoffCap  = uint64(time.Minute / time.Millisecond)
 )
 
 var ErrExplorerConfig = errors.New("netdb: invalid explorer configuration")
@@ -23,10 +29,11 @@ type explorationPending struct {
 // RequestManager. It owns no goroutines: maintenance drives both launch and
 // completion processing.
 type ExplorerConfig struct {
-	Table    *Table
-	Requests *RequestManager
-	Now      func() uint64
-	Rand     io.Reader
+	Table      *Table
+	Requests   *RequestManager
+	Now        func() uint64
+	Rand       io.Reader
+	Aggressive func() bool
 }
 
 // Explorer starts enough type-3 lookups per Maintain call to fill its bounded
@@ -38,12 +45,13 @@ type Explorer struct {
 	rand     io.Reader
 	minimum  uint16
 
-	nextAt   [BucketCount]uint64
-	failures [BucketCount]uint8
-	pending  [BucketCount]explorationPending
-	cursor   int
-	inflight int
-	closed   bool
+	aggressive func() bool
+	nextAt     [BucketCount]uint64
+	failures   [BucketCount]uint8
+	pending    [BucketCount]explorationPending
+	cursor     int
+	inflight   int
+	closed     bool
 }
 
 func NewExplorer(config ExplorerConfig) (*Explorer, error) {
@@ -53,11 +61,14 @@ func NewExplorer(config ExplorerConfig) (*Explorer, error) {
 	if config.Rand == nil {
 		config.Rand = cryptorand.Reader
 	}
-	minimum := min(8, config.Table.BucketCapacity())
+	minimum := min(explorerSteadyMinimum, config.Table.BucketCapacity())
 	if minimum <= 0 {
 		return nil, ErrExplorerConfig
 	}
-	return &Explorer{table: config.Table, requests: config.Requests, now: config.Now, rand: config.Rand, minimum: uint16(minimum)}, nil
+	return &Explorer{
+		table: config.Table, requests: config.Requests, now: config.Now, rand: config.Rand,
+		minimum: uint16(minimum), aggressive: config.Aggressive,
+	}, nil
 }
 
 // Maintain drains completed lookups and fills the bounded exploration window
@@ -79,10 +90,16 @@ func (e *Explorer) Maintain(ctx context.Context) error {
 	var occupancy [BucketCount]uint16
 	e.table.BucketOccupancy(&occupancy)
 	e.drain(now, &occupancy)
-	for scanned := 0; scanned < BucketCount && e.inflight < explorerMaxInflight; scanned++ {
+	maxInflight := explorerSteadyMaxInflight
+	minimum := e.minimum
+	if e.aggressive != nil && e.aggressive() {
+		maxInflight = explorerBootstrapMaxInflight
+		minimum = uint16(min(explorerBootstrapMinimum, e.table.BucketCapacity()))
+	}
+	for scanned := 0; scanned < BucketCount && e.inflight < maxInflight; scanned++ {
 		bucket := e.cursor
 		e.cursor = (e.cursor + 1) % BucketCount
-		if occupancy[bucket] >= e.minimum || e.pending[bucket].done != nil || e.nextAt[bucket] > now {
+		if occupancy[bucket] >= minimum || e.pending[bucket].done != nil || e.nextAt[bucket] > now {
 			continue
 		}
 		target, err := explorationTarget(e.table.Local(), bucket, e.rand)
@@ -114,7 +131,7 @@ func (e *Explorer) drain(now uint64, occupancy *[BucketCount]uint16) {
 		case <-done:
 			e.pending[bucket].done = nil
 			e.inflight--
-			if occupancy[bucket] < e.minimum {
+			if occupancy[bucket] < e.currentMinimum() {
 				e.deferBucket(bucket, now)
 			} else {
 				e.failures[bucket] = 0
@@ -125,18 +142,29 @@ func (e *Explorer) drain(now uint64, occupancy *[BucketCount]uint16) {
 	}
 }
 
+func (e *Explorer) currentMinimum() uint16 {
+	if e.aggressive != nil && e.aggressive() {
+		return uint16(min(explorerBootstrapMinimum, e.table.BucketCapacity()))
+	}
+	return e.minimum
+}
+
 func (e *Explorer) deferBucket(bucket int, now uint64) {
 	if e.failures[bucket] < 7 {
 		e.failures[bucket]++
 	}
+	backoffBase, backoffCap := explorerBackoffBase, explorerBackoffCap
+	if e.aggressive != nil && e.aggressive() {
+		backoffBase, backoffCap = explorerBootstrapBackoffBase, explorerBootstrapBackoffCap
+	}
 	shift := e.failures[bucket] - 1
-	backoff := explorerBackoffBase
-	for shift > 0 && backoff < explorerBackoffCap {
+	backoff := backoffBase
+	for shift > 0 && backoff < backoffCap {
 		backoff *= 2
 		shift--
 	}
-	if backoff > explorerBackoffCap {
-		backoff = explorerBackoffCap
+	if backoff > backoffCap {
+		backoff = backoffCap
 	}
 	if ^uint64(0)-now < backoff {
 		e.nextAt[bucket] = ^uint64(0)

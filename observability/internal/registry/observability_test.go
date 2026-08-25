@@ -43,9 +43,19 @@ func TestRegistrySnapshotConcurrent(t *testing.T) {
 
 	registry.SetLifecycleRunning(1)
 	registry.SetReseedSources(2)
-	registry.SetTransportSessions(3)
+	registry.SetTransportNTCP2Sessions(2)
+	registry.SetTransportSSU2Sessions(1)
+	registry.IncTransportRaceAttempts()
+	registry.IncTransportSSU2RaceWins()
+	registry.IncTransportSessionReuses()
+	registry.IncTransportSSU2Promotions()
 	registry.SetNetDBRouters(4)
+	registry.SetNetDBFloodfills(2)
 	registry.SetTunnelActive(5)
+	registry.IncTunnelBuildSuccess(TunnelOwnerExploratory, TunnelDirectionInbound)
+	registry.IncTunnelBuildSuccess(TunnelOwnerClient, TunnelDirectionOutbound)
+	registry.AddTunnelBuildTimeouts(TunnelOwnerExploratory, TunnelDirectionOutbound, 2)
+	registry.AddTunnelBuildTimeouts(TunnelOwnerClient, TunnelDirectionInbound, 3)
 	registry.SetAdmissionInFlight(6)
 	registry.SetProxyActive(7)
 	registry.SetControlActive(8)
@@ -59,10 +69,13 @@ func TestRegistrySnapshotConcurrent(t *testing.T) {
 	if registrySnapshotConcurrentRejected {
 		t.Fatalf("counter snapshot = %+v, want every counter update preserved", snapshot)
 	}
-	registrySnapshotConcurrentRejected = snapshot.Lifecycle.Running != 1 || snapshot.Reseed.Sources != 2 || snapshot.Transport.Sessions != 3 || snapshot.NetDB.Routers != 4 || snapshot.Tunnel.Active != 5 || snapshot.Admission.InFlight != 6 || snapshot.Proxy.Active != 7
-	if !registrySnapshotConcurrentRejected {
-		registrySnapshotConcurrentRejected = snapshot.Control.Active != 8
-	}
+	registrySnapshotConcurrentRejected = snapshot.Lifecycle.Running != 1 || snapshot.Reseed.Sources != 2 ||
+		snapshot.Transport.Sessions != 3 || snapshot.Transport.NTCP2Sessions != 2 || snapshot.Transport.SSU2Sessions != 1 ||
+		snapshot.Transport.RaceAttempts != 1 || snapshot.Transport.SSU2RaceWins != 1 || snapshot.Transport.SessionReuses != 1 || snapshot.Transport.SSU2Promotions != 1 ||
+		snapshot.NetDB.Routers != 4 || snapshot.NetDB.Floodfills != 2 || snapshot.Tunnel.Active != 5 ||
+		snapshot.Tunnel.ExploratoryInboundSuccesses != 1 || snapshot.Tunnel.ClientOutboundSuccesses != 1 ||
+		snapshot.Tunnel.ExploratoryOutboundTimeouts != 2 || snapshot.Tunnel.ClientInboundTimeouts != 3 ||
+		snapshot.Admission.InFlight != 6 || snapshot.Proxy.Active != 7 || snapshot.Control.Active != 8
 	if registrySnapshotConcurrentRejected {
 		t.Fatalf("gauge snapshot = %+v, want configured values", snapshot)
 	}
@@ -106,7 +119,8 @@ func TestRegistryCopySharesConcurrentState(t *testing.T) {
 func TestPrometheusOutputIsDeterministicAndBounded(t *testing.T) {
 	registry := NewRegistry()
 	registry.IncLifecycleStarts()
-	registry.SetTransportSessions(4)
+	registry.SetTransportNTCP2Sessions(3)
+	registry.SetTransportSSU2Sessions(1)
 
 	snapshot := registry.Snapshot()
 	first := prometheusText(snapshot)
@@ -122,6 +136,10 @@ func TestPrometheusOutputIsDeterministicAndBounded(t *testing.T) {
 		"# TYPE ivnp_lifecycle_starts_total counter\n",
 		"ivnp_lifecycle_starts_total 1\n",
 		"ivnp_transport_sessions 4\n",
+		"ivnp_transport_ntcp2_sessions 3\n",
+		"ivnp_transport_ssu2_sessions 1\n",
+		"ivnp_netdb_floodfills 0\n",
+		"ivnp_tunnel_client_outbound_build_timeouts_total 0\n",
 	} {
 		if !strings.Contains(string(first), want) {
 			t.Fatalf("metrics output missing %q:\n%s", want, first)

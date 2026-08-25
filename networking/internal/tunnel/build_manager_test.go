@@ -14,6 +14,7 @@ import (
 	"gosuda.org/ivnp/foundation"
 	garlicecies "gosuda.org/ivnp/networking/internal/garlic/ecies"
 	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/observability"
 )
 
 type buildCounterReader struct{ value byte }
@@ -275,6 +276,40 @@ func TestBuildManagerClearsReplyRegistryAfterReplyErrorAndExpiry(t *testing.T) {
 	}
 }
 
+func TestBuildManagerDeadlineExpiresAndWakesOwner(t *testing.T) {
+	now := uint64(1)
+	var deadlineCallback func()
+	wake := make(chan struct{}, 1)
+	metrics := observability.NewRegistry()
+	manager, err := NewBuildManager(BuildManagerConfig{
+		Runtime: NewRuntime(RuntimeConfig{}), Sender: discardTunnelSender{}, ReplyKeys: newBuildReplyRegistry(),
+		Now: func() uint64 { return now },
+		Schedule: func(_ time.Duration, callback func()) func() {
+			deadlineCallback = callback
+			return func() {}
+		},
+		OnBuildEvent: func() { wake <- struct{}{} }, Metrics: metrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := &pendingOutboundBuild{deadline: 2}
+	pending.cancelDeadline = manager.scheduleBuildDeadline(now, pending.deadline)
+	manager.pending[1] = pending
+	now = 2
+	deadlineCallback()
+	if manager.Pending() != 0 {
+		t.Fatalf("expired pending builds = %d, want 0", manager.Pending())
+	}
+	select {
+	case <-wake:
+	default:
+		t.Fatal("build deadline did not wake owner")
+	}
+	if got := metrics.Snapshot().Tunnel.ExploratoryOutboundTimeouts; got != 1 {
+		t.Fatalf("exploratory outbound timeouts = %d, want 1", got)
+	}
+}
 func TestBuildManagerRollsBackPoolWhenRuntimeInstallFails(t *testing.T) {
 	const (
 		managerNow = uint64(100)

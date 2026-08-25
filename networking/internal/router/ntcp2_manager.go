@@ -323,6 +323,22 @@ func (m *NTCP2Manager) EnsureSession(ctx context.Context, peer foundation.Hash) 
 	return nil
 }
 
+func (m *NTCP2Manager) HasSession(peer foundation.Hash) bool {
+	return m != nil && m.session(peer) != nil
+}
+
+func (m *NTCP2Manager) DropSession(peer foundation.Hash) bool {
+	if m == nil {
+		return false
+	}
+	session := m.session(peer)
+	if session == nil {
+		return false
+	}
+	_ = session.Close()
+	return true
+}
+
 // Send delivers one standard I2NP message over an established session, dialing
 // and authenticating an NTCP2 peer from the verified netdb when necessary.
 func (m *NTCP2Manager) Send(ctx context.Context, peer foundation.Hash, message i2np.Message) error {
@@ -565,7 +581,7 @@ func (m *NTCP2Manager) install(peer foundation.Hash, session *ntcp2.Session) boo
 	m.sessions[peer] = session
 	if m.metrics != nil {
 		m.metrics.IncTransportConnections()
-		m.metrics.SetTransportSessions(uint64(len(m.sessions)))
+		m.metrics.SetTransportNTCP2Sessions(uint64(len(m.sessions)))
 	}
 	m.mu.Unlock()
 	m.wg.Add(1)
@@ -591,7 +607,7 @@ func (m *NTCP2Manager) readSession(peer foundation.Hash, session *ntcp2.Session)
 			delete(m.sessions, peer)
 			if m.metrics != nil {
 				m.metrics.IncTransportDisconnections()
-				m.metrics.SetTransportSessions(uint64(len(m.sessions)))
+				m.metrics.SetTransportNTCP2Sessions(uint64(len(m.sessions)))
 			}
 		}
 		m.mu.Unlock()

@@ -36,6 +36,7 @@ type NetDBOutboundBuildSourceConfig struct {
 	TunnelID       func() uint32
 	Target         func(nowMillis uint64) foundation.Hash
 	Eligible       func(foundation.Hash) bool
+	Reservations   *BuildReservations
 }
 
 // NetDBOutboundBuildSource selects distinct ECIES-X25519 routers that were
@@ -55,6 +56,7 @@ type NetDBOutboundBuildSource struct {
 	tunnelID         func() uint32
 	target           func(uint64) foundation.Hash
 	eligible         func(foundation.Hash) bool
+	reservations     *BuildReservations
 	sequence         atomic.Uint64
 	recoverySequence atomic.Uint64
 }
@@ -77,7 +79,7 @@ func NewNetDBOutboundBuildSource(config NetDBOutboundBuildSourceConfig) (*NetDBO
 		table: config.Table, profiles: config.Profiles, local: config.LocalRouter,
 		replyRouter: config.ReplyRouter, replyTunnelID: config.ReplyTunnelID,
 		hops: config.Hops, candidateLimit: config.CandidateLimit, lifetime: config.Lifetime,
-		circuitID: config.CircuitID, tunnelID: config.TunnelID, target: config.Target, eligible: config.Eligible,
+		circuitID: config.CircuitID, tunnelID: config.TunnelID, target: config.Target, eligible: config.Eligible, reservations: config.Reservations,
 		preferred: retainPreferred(config.Table, config.PreferredPeers),
 	}, nil
 }
@@ -105,16 +107,16 @@ func (s *NetDBOutboundBuildSource) NextOutboundForReply(ctx context.Context, now
 	}
 	target := s.selectionTarget(nowMillis)
 	candidates := s.table.ClosestInto(make([]netdb.RouterRef, s.candidateLimit), target)
-	if s.eligible != nil {
+	if s.eligible != nil || s.reservations != nil {
 		eligible := candidates[:0]
 		for _, candidate := range candidates {
-			if s.eligible(candidate.Hash) {
+			if buildCandidateAvailable(candidate.Hash, s.eligible, s.reservations) {
 				eligible = append(eligible, candidate)
 			}
 		}
 		candidates = eligible
 	}
-	hops := preferredHops(s.table, s.preferred, s.profiles, s.local, route.Gateway, s.hops, nowMillis)
+	hops := preferredHops(s.table, availablePreferred(s.preferred, s.reservations), s.profiles, s.local, route.Gateway, s.hops, nowMillis)
 	// Failure-majority profiles quarantine preferred peers without making the
 	// quarantine permanent. Probe that bounded set periodically; on intervening
 	// attempts use healthy verified routers so one broken explicit peer cannot
@@ -151,10 +153,17 @@ func (s *NetDBOutboundBuildSource) NextOutboundForReply(ctx context.Context, now
 	if expiresAt < nowMillis {
 		expiresAt = ^uint64(0)
 	}
-	return OutboundBuild{
+	build := OutboundBuild{
 		CircuitID: circuitID, Hops: hops, ReplyRouter: route.Gateway,
 		ReplyTunnelID: route.TunnelID, ExpiresAt: expiresAt,
-	}, nil
+	}
+	if s.reservations != nil {
+		build.reservation = s.reservations.Reserve(hops)
+		if build.reservation == nil {
+			return OutboundBuild{}, ErrNoEligiblePeers
+		}
+	}
+	return build, nil
 }
 
 func (s *NetDBOutboundBuildSource) selectionTarget(nowMillis uint64) foundation.Hash {
@@ -191,6 +200,7 @@ type NetDBInboundBuildSourceConfig struct {
 	TunnelID       func() uint32
 	Target         func(nowMillis uint64) foundation.Hash
 	Eligible       func(foundation.Hash) bool
+	Reservations   *BuildReservations
 }
 
 // NetDBInboundBuildSource selects distinct ECIES-X25519 routers for an
@@ -207,6 +217,7 @@ type NetDBInboundBuildSource struct {
 	tunnelID         func() uint32
 	target           func(uint64) foundation.Hash
 	eligible         func(foundation.Hash) bool
+	reservations     *BuildReservations
 	sequence         atomic.Uint64
 	recoverySequence atomic.Uint64
 }
@@ -228,7 +239,7 @@ func NewNetDBInboundBuildSource(config NetDBInboundBuildSourceConfig) (*NetDBInb
 	return &NetDBInboundBuildSource{
 		table: config.Table, profiles: config.Profiles, local: config.LocalRouter,
 		hops: config.Hops, candidateLimit: config.CandidateLimit, lifetime: config.Lifetime,
-		circuitID: config.CircuitID, tunnelID: config.TunnelID, target: config.Target, eligible: config.Eligible,
+		circuitID: config.CircuitID, tunnelID: config.TunnelID, target: config.Target, eligible: config.Eligible, reservations: config.Reservations,
 		preferred: retainPreferred(config.Table, config.PreferredPeers),
 	}, nil
 }
@@ -243,16 +254,16 @@ func (s *NetDBInboundBuildSource) NextInbound(ctx context.Context, nowMillis uin
 	}
 	target := s.selectionTarget(nowMillis)
 	candidates := s.table.ClosestInto(make([]netdb.RouterRef, s.candidateLimit), target)
-	if s.eligible != nil {
+	if s.eligible != nil || s.reservations != nil {
 		eligible := candidates[:0]
 		for _, candidate := range candidates {
-			if s.eligible(candidate.Hash) {
+			if buildCandidateAvailable(candidate.Hash, s.eligible, s.reservations) {
 				eligible = append(eligible, candidate)
 			}
 		}
 		candidates = eligible
 	}
-	hops := preferredHops(s.table, s.preferred, s.profiles, s.local, foundation.Hash{}, s.hops, nowMillis)
+	hops := preferredHops(s.table, availablePreferred(s.preferred, s.reservations), s.profiles, s.local, foundation.Hash{}, s.hops, nowMillis)
 	// Keep a full pool expiry recoverable without retrying a quarantined
 	// preferred peer on every maintenance tick.
 	if len(hops) < s.hops && s.recoverySequence.Add(1)%preferredRecoveryProbeInterval == 1 {
@@ -287,9 +298,16 @@ func (s *NetDBInboundBuildSource) NextInbound(ctx context.Context, nowMillis uin
 	if expiresAt < nowMillis {
 		expiresAt = ^uint64(0)
 	}
-	return InboundBuild{
+	build := InboundBuild{
 		CircuitID: circuitID, OutboundTunnelID: outboundTunnelID, Hops: hops, ExpiresAt: expiresAt,
-	}, nil
+	}
+	if s.reservations != nil {
+		build.reservation = s.reservations.Reserve(hops)
+		if build.reservation == nil {
+			return InboundBuild{}, ErrNoEligiblePeers
+		}
+	}
+	return build, nil
 }
 
 func (s *NetDBInboundBuildSource) selectionTarget(nowMillis uint64) foundation.Hash {
@@ -303,6 +321,26 @@ func (s *NetDBInboundBuildSource) selectionTarget(nowMillis uint64) foundation.H
 		target[16+index] = byte(nowMillis >> (56 - 8*index))
 	}
 	return target
+}
+
+func buildCandidateAvailable(peer foundation.Hash, eligible func(foundation.Hash) bool, reservations *BuildReservations) bool {
+	if eligible != nil && !eligible(peer) {
+		return false
+	}
+	return reservations == nil || reservations.Available(peer)
+}
+
+func availablePreferred(preferred []netdb.RouterRef, reservations *BuildReservations) []netdb.RouterRef {
+	if reservations == nil {
+		return preferred
+	}
+	available := make([]netdb.RouterRef, 0, len(preferred))
+	for _, candidate := range preferred {
+		if reservations.Available(candidate.Hash) {
+			available = append(available, candidate)
+		}
+	}
+	return available
 }
 
 // NewNetDBBuildStaticKeyLookup binds BuildManager validation to retained,
