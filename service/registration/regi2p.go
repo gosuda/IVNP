@@ -55,9 +55,16 @@ func normalizeDomain(domain string) (string, error) {
 		return "", ErrDomain
 	}
 	for _, character := range domain {
-		if !(character == '.' || character == '-' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9') {
+		if !validDomainCharacter(character) {
 			return "", ErrDomain
 		}
 	}
 	return domain, nil
+}
+
+func validDomainCharacter(character rune) bool {
+	return character == '.' ||
+		character == '-' ||
+		(character >= 'a' && character <= 'z') ||
+		(character >= '0' && character <= '9')
 }

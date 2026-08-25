@@ -56,7 +56,11 @@ type PublicationMaintenance struct {
 }
 
 func NewPublicationMaintenance(config PublicationMaintenanceConfig) (*PublicationMaintenance, error) {
-	if config.Now == nil || (config.RouterInfo == nil && config.NetworkRouterInfo == nil && config.LeaseSet == nil) || (config.RouterInfo != nil && config.RouterInfoRefresh == 0) {
+	newPublicationMaintenanceRejected := config.Now == nil || (config.RouterInfo == nil && config.NetworkRouterInfo == nil && config.LeaseSet == nil)
+	if !newPublicationMaintenanceRejected {
+		newPublicationMaintenanceRejected = (config.RouterInfo != nil && config.RouterInfoRefresh == 0)
+	}
+	if newPublicationMaintenanceRejected {
 		return nil, ErrPublicationMaintenanceConfig
 	}
 	return &PublicationMaintenance{
@@ -72,6 +76,7 @@ func (m *PublicationMaintenance) Maintain(ctx context.Context) (PublicationMaint
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return PublicationMaintenanceResult{}, err
 	}

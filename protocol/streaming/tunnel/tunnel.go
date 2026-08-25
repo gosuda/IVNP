@@ -1,5 +1,7 @@
 package tunnel
 
+import "cmp"
+
 import (
 	"context"
 	"crypto/ed25519"
@@ -259,9 +261,9 @@ func (n *TunnelNetwork) DialI2PFromPort(ctx context.Context, address string, loc
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
-	if localPort == 0 {
-		localPort = randomPort()
-	}
+
+	localPort = cmp.Or(localPort, randomPort())
+
 	localID, err := n.allocateID()
 	if err != nil {
 		return nil, err
@@ -387,7 +389,11 @@ func (n *TunnelNetwork) Close() error {
 }
 
 func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery, packet Packet) error {
-	if packet.ReceiveStreamID == 0 || packet.Sequence != 0 || packet.Flags&FlagNoACK == 0 || len(packet.Payload) != 0 || packet.NACKCount != 8 || len(packet.NACKs) != ivnp.HashLength {
+	handleSynchronizeRejected := packet.ReceiveStreamID == 0 || packet.Sequence != 0 || packet.Flags&FlagNoACK == 0 || len(packet.Payload) != 0 || packet.NACKCount != 8
+	if !handleSynchronizeRejected {
+		handleSynchronizeRejected = len(packet.NACKs) != ivnp.HashLength
+	}
+	if handleSynchronizeRejected {
 		return ErrTunnelPacket
 	}
 	var target ivnp.Hash
@@ -406,6 +412,7 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 	if listener == nil {
 		listener = n.listeners[0]
 	}
+
 	n.mu.RUnlock()
 	if existing != nil {
 		existing.setPeerMaxPayloadSize(peerMaxPayloadSize)
@@ -563,37 +570,55 @@ func (n *TunnelNetwork) maintain() {
 			}
 		case <-timer.C:
 			now = time.Now()
-			if index, requestDue := earliestQueuedRequest(now, queued); index >= 0 && !now.Before(requestDue) {
-				request := queued[index]
-				copy(queued[index:], queued[index+1:])
-				queued[len(queued)-1] = sendRequest{}
-				queued = queued[:len(queued)-1]
-				if err := request.ctx.Err(); err != nil {
-					request.finish(err)
-				} else {
-					request.connection.advancePace(now)
-					n.dispatchDelivery(request)
-				}
-			}
-			n.mu.RLock()
-			connections := make([]*tunnelConn, 0, len(n.byID))
-			for _, connection := range n.byID {
-				connections = append(connections, connection)
-			}
-			n.mu.RUnlock()
-			for _, connection := range connections {
-				if !now.Before(connection.retryDue(now)) {
-					for _, wire := range connection.retry(now) {
-						if len(queued) == cap(n.outbound) {
-							break
-						}
-						queued = append(queued, sendRequest{connection: connection, wire: wire, ctx: n.ctx})
-					}
-				}
-			}
+			n.dispatchEarliest(now, &queued)
+			queued = n.queueRetries(now, queued)
 		}
 	}
 }
+
+func (n *TunnelNetwork) dispatchEarliest(now time.Time, queued *[]sendRequest) {
+	index, requestDue := earliestQueuedRequest(now, *queued)
+	if index < 0 || now.Before(requestDue) {
+		return
+	}
+	request := (*queued)[index]
+	copy((*queued)[index:], (*queued)[index+1:])
+	(*queued)[len(*queued)-1] = sendRequest{}
+	*queued = (*queued)[:len(*queued)-1]
+	if err := request.ctx.Err(); err != nil {
+		request.finish(err)
+		return
+	}
+	request.connection.advancePace(now)
+	n.dispatchDelivery(request)
+}
+
+func (n *TunnelNetwork) queueRetries(now time.Time, queued []sendRequest) []sendRequest {
+	n.mu.RLock()
+	connections := make([]*tunnelConn, 0, len(n.byID))
+	for _, connection := range n.byID {
+		connections = append(connections, connection)
+	}
+	n.mu.RUnlock()
+	for _, connection := range connections {
+		queued = n.queueConnectionRetries(now, queued, connection)
+	}
+	return queued
+}
+
+func (n *TunnelNetwork) queueConnectionRetries(now time.Time, queued []sendRequest, connection *tunnelConn) []sendRequest {
+	if now.Before(connection.retryDue(now)) {
+		return queued
+	}
+	for _, wire := range connection.retry(now) {
+		if len(queued) == cap(n.outbound) {
+			break
+		}
+		queued = append(queued, sendRequest{connection: connection, wire: wire, ctx: n.ctx})
+	}
+	return queued
+}
+
 func (n *TunnelNetwork) dispatchDelivery(request sendRequest) {
 	shard := int(binary.BigEndian.Uint64(request.connection.peer[:8]) % uint64(len(n.deliveryQueues)))
 	select {
@@ -786,7 +811,11 @@ func (c *tunnelConn) retryDue(now time.Time) time.Time {
 }
 
 func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packet) error {
-	if delivery.From != c.peer || (delivery.FromPort != 0 && delivery.FromPort != c.remotePort) || (delivery.ToPort != 0 && delivery.ToPort != c.localPort) {
+	handleRejected := delivery.From != c.peer || (delivery.FromPort != 0 && delivery.FromPort != c.remotePort)
+	if !handleRejected {
+		handleRejected = (delivery.ToPort != 0 && delivery.ToPort != c.localPort)
+	}
+	if handleRejected {
 		return ErrTunnelDestination
 	}
 
@@ -797,33 +826,9 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 		c.mu.Unlock()
 		return net.ErrClosed
 	}
-	if c.remoteID == 0 {
-		if packet.Flags&FlagSynchronize == 0 || packet.Flags&FlagNoACK != 0 || packet.SendStreamID != c.localID || packet.ReceiveStreamID == 0 || packet.Sequence != 0 || packet.NACKCount != 0 || len(packet.Payload) != 0 {
-			c.mu.Unlock()
-			return ErrTunnelPacket
-		}
-		identity, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, nil, true)
-		if err != nil {
-			c.mu.Unlock()
-			return err
-		}
-		c.peerIdentity = identity
-		c.updatePeerMaxPayloadSizeLocked(peerMaxPayloadSize)
-		c.remoteID = packet.ReceiveStreamID
-		c.markEstablished()
-	} else {
-		if packet.SendStreamID != c.localID || packet.ReceiveStreamID != c.remoteID {
-			c.mu.Unlock()
-			return ErrTunnelPacket
-		}
-		if packet.Flags&(FlagSynchronize|FlagClose|FlagReset) != 0 {
-			_, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, &c.peerIdentity, packet.Flags&FlagSynchronize != 0)
-			if err != nil {
-				c.mu.Unlock()
-				return err
-			}
-			c.updatePeerMaxPayloadSizeLocked(peerMaxPayloadSize)
-		}
+	if err := c.preparePeerLocked(delivery, packet); err != nil {
+		c.mu.Unlock()
+		return err
 	}
 	if packet.Flags&FlagNoACK == 0 {
 		fastRetransmit = c.acknowledgeLocked(packet.AckThrough, packet.NACKs, time.Now())
@@ -836,40 +841,7 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 		return ErrTunnelReset
 	}
 	if packet.Sequence != 0 {
-		received := receivedPacket{
-			payload: packet.Payload,
-			close:   packet.Flags&FlagClose != 0,
-		}
-		if packet.Sequence == c.expect {
-			if !c.enqueueReceivedLocked(received) {
-				sendReset = true
-			} else {
-				c.expect++
-				for {
-					reordered, exists := c.reordered[c.expect]
-					if !exists {
-						break
-					}
-					if !c.enqueueReceivedLocked(reordered) {
-						sendReset = true
-						break
-					}
-					delete(c.reordered, c.expect)
-					c.expect++
-				}
-			}
-			sendACK = !sendReset
-		} else if sequenceAfter(packet.Sequence, c.expect) {
-			if len(c.reordered) >= MaxWindow {
-				sendReset = true
-			} else if _, exists := c.reordered[packet.Sequence]; !exists {
-				received.payload = append([]byte(nil), received.payload...)
-				c.reordered[packet.Sequence] = received
-			}
-			sendACK = !sendReset
-		} else {
-			sendACK = true
-		}
+		sendACK, sendReset = c.handleSequenceLocked(packet)
 	}
 	if c.localWriteClosed {
 		_, closePending := c.pending[c.localCloseSequence]
@@ -899,6 +871,75 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 		c.scheduleGracefulCleanup()
 	}
 	return nil
+}
+
+func (c *tunnelConn) preparePeerLocked(delivery Delivery, packet Packet) error {
+	if c.remoteID != 0 {
+		if packet.SendStreamID != c.localID || packet.ReceiveStreamID != c.remoteID {
+			return ErrTunnelPacket
+		}
+		if packet.Flags&(FlagSynchronize|FlagClose|FlagReset) == 0 {
+			return nil
+		}
+		_, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, &c.peerIdentity, packet.Flags&FlagSynchronize != 0)
+		if err != nil {
+			return err
+		}
+		c.updatePeerMaxPayloadSizeLocked(peerMaxPayloadSize)
+		return nil
+	}
+	invalidSynchronize := packet.Flags&FlagSynchronize == 0 || packet.Flags&FlagNoACK != 0 ||
+		packet.SendStreamID != c.localID || packet.ReceiveStreamID == 0 ||
+		packet.Sequence != 0 || packet.NACKCount != 0 || len(packet.Payload) != 0
+	if invalidSynchronize {
+		return ErrTunnelPacket
+	}
+	identity, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, nil, true)
+	if err != nil {
+		return err
+	}
+	c.peerIdentity = identity
+	c.updatePeerMaxPayloadSizeLocked(peerMaxPayloadSize)
+	c.remoteID = packet.ReceiveStreamID
+	c.markEstablished()
+	return nil
+}
+
+func (c *tunnelConn) handleSequenceLocked(packet Packet) (bool, bool) {
+	received := receivedPacket{payload: packet.Payload, close: packet.Flags&FlagClose != 0}
+	if packet.Sequence == c.expect {
+		sendReset := !c.enqueueExpectedLocked(received)
+		return !sendReset, sendReset
+	}
+	if !sequenceAfter(packet.Sequence, c.expect) {
+		return true, false
+	}
+	if len(c.reordered) >= MaxWindow {
+		return false, true
+	}
+	if _, exists := c.reordered[packet.Sequence]; !exists {
+		received.payload = append([]byte(nil), received.payload...)
+		c.reordered[packet.Sequence] = received
+	}
+	return true, false
+}
+
+func (c *tunnelConn) enqueueExpectedLocked(received receivedPacket) bool {
+	if !c.enqueueReceivedLocked(received) {
+		return false
+	}
+	c.expect++
+	for {
+		reordered, exists := c.reordered[c.expect]
+		if !exists {
+			return true
+		}
+		if !c.enqueueReceivedLocked(reordered) {
+			return false
+		}
+		delete(c.reordered, c.expect)
+		c.expect++
+	}
 }
 
 func (c *tunnelConn) acknowledgeLocked(through uint32, nacks []byte, now time.Time) [][]byte {
@@ -943,8 +984,11 @@ func (c *tunnelConn) acknowledgeLocked(through uint32, nacks []byte, now time.Ti
 	}
 	if !found {
 		for sequence, candidate := range c.pending {
-			if sequenceAfter(sequence, through) && candidate.retries < c.network.maxRetries &&
-				(!found || sequenceBeforeOrEqual(sequence, selected)) {
+			acknowledgeLockedSelected := sequenceAfter(sequence, through) && candidate.retries < c.network.maxRetries
+			if acknowledgeLockedSelected {
+				acknowledgeLockedSelected = (!found || sequenceBeforeOrEqual(sequence, selected))
+			}
+			if acknowledgeLockedSelected {
 				selected, pending, found = sequence, candidate, true
 			}
 		}
@@ -991,7 +1035,7 @@ func (c *tunnelConn) sendSynchronize(ctx context.Context, originator bool) error
 	} else {
 		packet = Packet{SendStreamID: c.remoteID, ReceiveStreamID: c.localID, Sequence: 0, Flags: FlagSynchronize | FlagSignatureIncluded | FlagFromIncluded | FlagMaxPacketSize}
 	}
-	wire, err := c.network.signedControl(packet, true, true)
+	wire, err := c.network.signedControl(packet, controlOptions{includeFrom: true, includeMax: true})
 	if err == nil {
 		c.synchronize = wire
 		c.syncSent = time.Now()
@@ -1285,7 +1329,7 @@ func (c *tunnelConn) abort(sendReset bool) {
 		var wire []byte
 		if c.remoteID != 0 && !c.isDoneLocked() {
 			packet := Packet{SendStreamID: c.remoteID, ReceiveStreamID: c.localID, Flags: FlagReset | FlagSignatureIncluded}
-			wire, _ = c.network.signedControl(packet, false, false)
+			wire, _ = c.network.signedControl(packet, controlOptions{})
 		}
 		c.mu.Unlock()
 		if len(wire) != 0 {
@@ -1345,7 +1389,7 @@ func (c *tunnelConn) initiateClose() error {
 		}
 		sequence := c.nextSequence
 		packet := Packet{SendStreamID: c.remoteID, ReceiveStreamID: c.localID, Sequence: sequence, AckThrough: c.expect - 1, Flags: FlagClose | FlagSignatureIncluded}
-		wire, err := c.network.signedControl(packet, false, false)
+		wire, err := c.network.signedControl(packet, controlOptions{})
 		if err == nil {
 			c.nextSequence++
 			c.localWriteClosed = true
@@ -1493,15 +1537,20 @@ type tunnelAddr struct {
 func (a tunnelAddr) Network() string { return "i2p" }
 func (a tunnelAddr) String() string  { return net.JoinHostPort(a.host, strconv.Itoa(int(a.port))) }
 
-func (n *TunnelNetwork) signedControl(packet Packet, includeFrom, includeMax bool) ([]byte, error) {
+type controlOptions struct {
+	includeFrom bool
+	includeMax  bool
+}
+
+func (n *TunnelNetwork) signedControl(packet Packet, options controlOptions) ([]byte, error) {
 	if n.sign == nil {
 		return nil, ErrTunnelIdentity
 	}
-	if includeFrom {
+	if options.includeFrom {
 		packet.Flags |= FlagFromIncluded
 		packet.Options = append(packet.Options, n.localRaw...)
 	}
-	if includeMax {
+	if options.includeMax {
 		packet.Flags |= FlagMaxPacketSize
 		packet.Options = append(packet.Options, byte(localMaxPayloadSize>>8), byte(localMaxPayloadSize&0xff))
 	}
@@ -1542,9 +1591,10 @@ func verifyControl(packet Packet, wire []byte, claimed ivnp.Hash, known *ivnp.Id
 			return ivnp.Identity{}, 0, ErrTunnelIdentity
 		}
 		offset += len(raw)
-	} else if requireFrom || known == nil {
-		return ivnp.Identity{}, 0, ErrTunnelIdentity
 	} else {
+		if requireFrom || known == nil {
+			return ivnp.Identity{}, 0, ErrTunnelIdentity
+		}
 		identity = *known
 	}
 	peerMaxPayloadSize := -1
@@ -1632,8 +1682,8 @@ func parsePeerAddress(address string) (ivnp.Hash, uint16, error) {
 
 func parseDestinationHost(host string) (ivnp.Hash, error) {
 	var hash ivnp.Hash
-	if strings.HasSuffix(strings.ToLower(host), ".b32.i2p") {
-		encoded := strings.TrimSuffix(strings.ToLower(host), ".b32.i2p")
+	if before, ok := strings.CutSuffix(strings.ToLower(host), ".b32.i2p"); ok {
+		encoded := before
 		decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(encoded))
 		if err != nil || len(decoded) != len(hash) {
 			return hash, ErrTunnelAddress

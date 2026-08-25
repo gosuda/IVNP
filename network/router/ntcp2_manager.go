@@ -169,12 +169,18 @@ func (m *NTCP2Manager) Start(parent context.Context, bindings TransportBindings)
 	if _, err := m.localHandshakePayload(bindings.LocalInfo); err != nil {
 		return err
 	}
-	if bindings.NTCP2 != nil && !hasNTCP2LocalAddress(bindings.LocalInfo.Snapshot(), ecdhPublic(m.staticPrivate[:]), m.staticIV[:]) {
+	staticPublic, err := ecdhPublic(m.staticPrivate[:])
+	if err != nil {
 		return ErrNTCP2ManagerConfig
 	}
-	if parent == nil {
+	if bindings.NTCP2 != nil && !hasNTCP2LocalAddress(bindings.LocalInfo.Snapshot(), staticPublic, m.staticIV[:]) {
+		return ErrNTCP2ManagerConfig
+	}
+	if parent ==
+		nil {
 		parent = context.Background()
 	}
+
 	if err := parent.Err(); err != nil {
 		return err
 	}
@@ -190,12 +196,10 @@ func (m *NTCP2Manager) Start(parent context.Context, bindings TransportBindings)
 	m.ctx, m.cancel = context.WithCancel(parent)
 	m.mu.Unlock()
 
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
+	m.wg.Go(func() {
 		<-m.ctx.Done()
 		_ = m.Close()
-	}()
+	})
 	if bindings.NTCP2 != nil {
 		m.wg.Add(1)
 		go m.acceptLoop()
@@ -265,6 +269,7 @@ func (m *NTCP2Manager) Status() TransportStatus {
 // EnsureSession authenticates a bidirectional NTCP2 session without emitting
 // an I2NP message.
 func (m *NTCP2Manager) EnsureSession(ctx context.Context, peer ivnp.Hash) error {
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -321,6 +326,7 @@ func (m *NTCP2Manager) EnsureSession(ctx context.Context, peer ivnp.Hash) error 
 // Send delivers one standard I2NP message over an established session, dialing
 // and authenticating an NTCP2 peer from the verified netdb when necessary.
 func (m *NTCP2Manager) Send(ctx context.Context, peer ivnp.Hash, message i2np.Message) error {
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -357,12 +363,10 @@ func (m *NTCP2Manager) acceptLoop() {
 		}
 		select {
 		case m.pending <- struct{}{}:
-			m.wg.Add(1)
-			go func() {
-				defer m.wg.Done()
+			m.wg.Go(func() {
 				defer func() { <-m.pending }()
 				m.acceptOne(conn)
-			}()
+			})
 		default:
 			_ = conn.Close()
 		}
@@ -512,7 +516,9 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer ivnp.Hash) error {
 	}
 	created, err := initiator.ReadSessionCreated(conn, peer[:])
 	if err != nil || !m.timestampValid(created.Timestamp) {
-		if err == nil {
+
+		if err ==
+			nil {
 			err = ErrNTCP2Peer
 		}
 		return err
@@ -600,66 +606,83 @@ func (m *NTCP2Manager) readSession(peer ivnp.Hash, session *ntcp2.Session) {
 		if m.metrics != nil {
 			m.metrics.AddTransportReceivedBytes(uint64(len(frame)))
 		}
-		iterator := ntcp2.NewBlockIterator(frame)
-		terminated := false
-		for {
-			block, ok, err := iterator.Next()
-			if err != nil {
-				return
-			}
-			if !ok {
-				break
-			}
-			switch block.Type {
-			case ntcp2.BlockDateTime:
-				if len(block.Data) != 4 {
-					return
-				}
-			case ntcp2.BlockI2NP:
-				message, err := decodeNTCP2I2NP(block.Data)
-				if err != nil {
-					return
-				}
-				bindings := m.currentBindings()
-				nowMillis := uint64(bindings.Clock.Now().UnixMilli())
-				var handleErr error
-				if bindings.HandleI2NPFrom != nil {
-					handleErr = bindings.HandleI2NPFrom(peer, message, nowMillis, false)
-				} else if bindings.HandleI2NP == nil {
-					handleErr = ErrNTCP2Session
-				} else {
-					handleErr = bindings.HandleI2NP(message, nowMillis, false)
-				}
-				if handleErr != nil {
-					if m.logger != nil {
-						m.logger.Debug("authenticated I2NP handler rejected NTCP2 frame",
-							"peer", routerHashDiagnostic(peer), "message_type", message.Header.Type, "message_id", message.Header.ID, "error", handleErr)
-					}
-					continue
-				}
-			case ntcp2.BlockRouterInfo:
-				if len(block.Data) < 2 || block.Data[0]&^byte(1) != 0 {
-					return
-				}
-				info, err := netdb.ParseRouterInfo(block.Data[1:])
-				if err != nil || info.Hash() != peer {
-					return
-				}
-				valid, err := info.Verify()
-				if err != nil || !valid {
-					return
-				}
-				if m.database != nil && m.database.AdmitRouterInfo(info, false, uint64(m.currentBindings().Clock.Now().UnixMilli())) != nil {
-					return
-				}
-			case ntcp2.BlockTermination:
-				terminated = true
-			}
-		}
-		if terminated {
+		if !m.handleNTCP2Frame(peer, frame) {
 			return
 		}
 	}
+}
+
+func (m *NTCP2Manager) handleNTCP2Frame(peer ivnp.Hash, frame []byte) bool {
+	iterator := ntcp2.NewBlockIterator(frame)
+	terminated := false
+	for {
+		block, ok, err := iterator.Next()
+		if err != nil {
+			return false
+		}
+		if !ok {
+			return !terminated
+		}
+		switch block.Type {
+		case ntcp2.BlockDateTime:
+			if len(block.Data) != 4 {
+				return false
+			}
+		case ntcp2.BlockI2NP:
+			if !m.handleNTCP2I2NPBlock(peer, block.Data) {
+				return false
+			}
+		case ntcp2.BlockRouterInfo:
+			if !m.handleNTCP2RouterInfoBlock(peer, block.Data) {
+				return false
+			}
+		case ntcp2.BlockTermination:
+			terminated = true
+		}
+	}
+}
+
+func (m *NTCP2Manager) handleNTCP2I2NPBlock(peer ivnp.Hash, data []byte) bool {
+	message, err := decodeNTCP2I2NP(data)
+	if err != nil {
+		return false
+	}
+	bindings := m.currentBindings()
+	nowMillis := uint64(bindings.Clock.Now().UnixMilli())
+	var handleErr error
+	switch {
+	case bindings.HandleI2NPFrom != nil:
+		handleErr = bindings.HandleI2NPFrom(peer, message, nowMillis, false)
+	case bindings.HandleI2NP == nil:
+		handleErr = ErrNTCP2Session
+	default:
+		handleErr = bindings.HandleI2NP(message, nowMillis, false)
+	}
+	if handleErr != nil && m.logger != nil {
+		m.logger.Debug("authenticated I2NP handler rejected NTCP2 frame",
+			"peer", routerHashDiagnostic(peer), "message_type", message.Header.Type, "message_id", message.Header.ID, "error", handleErr)
+	}
+	return true
+}
+
+func (m *NTCP2Manager) handleNTCP2RouterInfoBlock(peer ivnp.Hash, data []byte) bool {
+	if len(data) < 2 || data[0]&^byte(1) != 0 {
+		return false
+	}
+	info, err := netdb.ParseRouterInfo(data[1:])
+	if err != nil || info.Hash() != peer {
+		return false
+	}
+	valid, err := info.Verify()
+	if err != nil || !valid {
+		return false
+	}
+	if m.database == nil {
+		return true
+	}
+	bindings := m.currentBindings()
+	now := bindings.Clock.Now()
+	return m.database.AdmitRouterInfo(info, false, uint64(now.UnixMilli())) == nil
 }
 
 func (m *NTCP2Manager) localHandshakePayload(local LocalInfo) ([]byte, error) {
@@ -671,7 +694,11 @@ func (m *NTCP2Manager) localHandshakePayload(local LocalInfo) ([]byte, error) {
 		return nil, ErrNTCP2ManagerConfig
 	}
 	valid, err := info.Verify()
-	if err != nil || !valid || !hasNTCP2Static(info, ecdhPublic(m.staticPrivate[:])) {
+	if err != nil || !valid {
+		return nil, ErrNTCP2ManagerConfig
+	}
+	staticPublic, err := ecdhPublic(m.staticPrivate[:])
+	if err != nil || !hasNTCP2Static(info, staticPublic) {
 		return nil, ErrNTCP2ManagerConfig
 	}
 	if len(info.Bytes())+1 > ntcp2.MaxBlockData {
@@ -898,7 +925,7 @@ func ntcp2IPv4Only(listener net.Listener) bool {
 }
 
 func supportsNTCP2Version(version string) bool {
-	for _, part := range strings.Split(version, ",") {
+	for part := range strings.SplitSeq(version, ",") {
 		if part == "2" {
 			return true
 		}
@@ -906,12 +933,12 @@ func supportsNTCP2Version(version string) bool {
 	return false
 }
 
-func ecdhPublic(private []byte) []byte {
+func ecdhPublic(private []byte) ([]byte, error) {
 	key, err := ecdh.X25519().NewPrivateKey(private)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return key.PublicKey().Bytes()
+	return key.PublicKey().Bytes(), nil
 }
 
 func marshalNTCP2I2NP(message i2np.Message) ([]byte, error) {
@@ -1000,7 +1027,10 @@ func (m *NTCP2Manager) contextErr() error {
 }
 
 func (m *NTCP2Manager) timestampValid(timestamp uint32) bool {
-	now := m.currentBindings().Clock.Now().Unix()
+	bindings := m.currentBindings()
+	clock := bindings.Clock
+	current := clock.Now()
+	now := current.Unix()
 	delta := now - int64(timestamp)
 	if delta < 0 {
 		delta = -delta

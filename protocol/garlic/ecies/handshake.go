@@ -314,7 +314,11 @@ func (h *Responder) ReplyTag() ([replyTagLen]byte, error) {
 
 // CreateReply writes an NSR message for a successfully parsed bound session.
 func (h *Responder) CreateReply(dst []byte, tag [replyTagLen]byte, payload []byte) (int, error) {
-	if h == nil || h.closed || !h.parsed || !h.bound || h.aliceStatic == nil || h.aliceEphemeral == nil || h.splitReady {
+	createReplyRejected := h == nil || h.closed || !h.parsed || !h.bound || h.aliceStatic == nil || h.aliceEphemeral == nil
+	if !createReplyRejected {
+		createReplyRejected = h.splitReady
+	}
+	if createReplyRejected {
 		return 0, ErrHandshakeClosed
 	}
 	hybridLen := 0
@@ -384,7 +388,11 @@ func (h *Responder) CreateReply(dst []byte, tag [replyTagLen]byte, payload []byt
 // ParseReply authenticates an NSR produced for this bound initiator and
 // returns its plaintext payload. The returned view aliases payloadDst.
 func (h *Initiator) ParseReply(src, payloadDst []byte) ([]byte, error) {
-	if h == nil || h.closed || !h.created || !h.bound || h.splitReady || len(src) < replyTagLen+newSessionEphemeralLen+replyKeySectionLen+16 {
+	parseReplyRejected := h == nil || h.closed || !h.created || !h.bound || h.splitReady
+	if !parseReplyRejected {
+		parseReplyRejected = len(src) < replyTagLen+newSessionEphemeralLen+replyKeySectionLen+16
+	}
+	if parseReplyRejected {
 		return nil, ErrHandshake
 	}
 	tag := src[:replyTagLen]

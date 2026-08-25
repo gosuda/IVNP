@@ -52,10 +52,18 @@ func TestRegistrySnapshotConcurrent(t *testing.T) {
 
 	want := uint64(workers * iterations)
 	snapshot := registry.Snapshot()
-	if snapshot.Lifecycle.Starts != want || snapshot.Reseed.Attempts != want || snapshot.Reseed.Bytes != want*3 || snapshot.Transport.Connections != want || snapshot.Transport.ReceivedBytes != want*5 || snapshot.NetDB.Lookups != want || snapshot.Tunnel.Builds != want || snapshot.Admission.Allowed != want || snapshot.Proxy.Requests != want || snapshot.Control.Requests != want {
+	registrySnapshotConcurrentRejected := snapshot.Lifecycle.Starts != want || snapshot.Reseed.Attempts != want || snapshot.Reseed.Bytes != want*3 || snapshot.Transport.Connections != want || snapshot.Transport.ReceivedBytes != want*5 || snapshot.NetDB.Lookups != want || snapshot.Tunnel.Builds != want || snapshot.Admission.Allowed != want || snapshot.Proxy.Requests != want
+	if !registrySnapshotConcurrentRejected {
+		registrySnapshotConcurrentRejected = snapshot.Control.Requests != want
+	}
+	if registrySnapshotConcurrentRejected {
 		t.Fatalf("counter snapshot = %+v, want every counter update preserved", snapshot)
 	}
-	if snapshot.Lifecycle.Running != 1 || snapshot.Reseed.Sources != 2 || snapshot.Transport.Sessions != 3 || snapshot.NetDB.Routers != 4 || snapshot.Tunnel.Active != 5 || snapshot.Admission.InFlight != 6 || snapshot.Proxy.Active != 7 || snapshot.Control.Active != 8 {
+	registrySnapshotConcurrentRejected = snapshot.Lifecycle.Running != 1 || snapshot.Reseed.Sources != 2 || snapshot.Transport.Sessions != 3 || snapshot.NetDB.Routers != 4 || snapshot.Tunnel.Active != 5 || snapshot.Admission.InFlight != 6 || snapshot.Proxy.Active != 7
+	if !registrySnapshotConcurrentRejected {
+		registrySnapshotConcurrentRejected = snapshot.Control.Active != 8
+	}
+	if registrySnapshotConcurrentRejected {
 		t.Fatalf("gauge snapshot = %+v, want configured values", snapshot)
 	}
 

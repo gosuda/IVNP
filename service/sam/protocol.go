@@ -1,10 +1,13 @@
 package sam
 
+import "cmp"
+
 import (
 	"context"
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -350,7 +353,11 @@ func sessionPolicy(values map[string]string) (clientapi.LeaseSetPolicy, error) {
 		for _, part := range parts {
 			parsed, err := strconv.ParseUint(part, 10, 16)
 			cryptoType := uint16(parsed)
-			if err != nil || (cryptoType != 7 && cryptoType != 6 && cryptoType != 4) || seen[cryptoType] {
+			sessionPolicyRejected := err != nil || (cryptoType != 7 && cryptoType != 6 && cryptoType != 4)
+			if !sessionPolicyRejected {
+				sessionPolicyRejected = seen[cryptoType]
+			}
+			if sessionPolicyRejected {
 				return policy, ErrUnsupported
 			}
 			seen[cryptoType] = true
@@ -399,134 +406,151 @@ func sessionPolicy(values map[string]string) (clientapi.LeaseSetPolicy, error) {
 	return policy, nil
 }
 
+type sessionTransportConfig struct {
+	fromPort       uint16
+	toPort         uint16
+	listenPort     uint16
+	protocol       uint8
+	listenProtocol uint8
+	rawHeader      bool
+	udpTarget      *net.UDPAddr
+}
+
 func (s *Server) sessionTransport(connection *serverConnection, style sessionStyle, values map[string]string, child bool) (fromPort, toPort, listenPort uint16, protocol, listenProtocol uint8, rawHeader bool, udpTarget *net.UDPAddr, err error) {
 	fromRaw, fromErr := uintValue(values, "FROM_PORT", 16, 0)
 	toRaw, toErr := uintValue(values, "TO_PORT", 16, 0)
 	if fromErr != nil || toErr != nil {
-		err = ErrProtocol
-		return
+		return 0, 0, 0, 0, 0, false, nil, ErrProtocol
 	}
-	fromPort, toPort = uint16(fromRaw), uint16(toRaw)
+	config := sessionTransportConfig{fromPort: uint16(fromRaw), toPort: uint16(toRaw)}
 	switch style {
 	case styleStream:
-		protocol, listenProtocol = 6, 6
-		listenPort = toPort
-		if child {
-			listenRaw, listenErr := uintValue(values, "LISTEN_PORT", 16, uint64(fromPort))
-			if listenErr != nil || (listenRaw != 0 && listenRaw != uint64(fromPort)) {
-				err = ErrProtocol
-				return
-			}
-			listenPort = uint16(listenRaw)
-		}
-		if values["HOST"] != "" || values["HEADER"] != "" || values["PROTOCOL"] != "" || values["LISTEN_PROTOCOL"] != "" {
-			err = ErrProtocol
-			return
-		}
-		if portValue, exists := values["PORT"]; exists {
-			if s.config.UDPAddress != "" {
-				err = ErrProtocol
-				return
-			}
-			portRaw, portErr := uintValue(values, "PORT", 16, 0)
-			if portErr != nil || portValue == "" {
-				err = ErrProtocol
-				return
-			}
-			listenPort = uint16(portRaw)
-		}
+		err = s.configureStreamTransport(&config, values, child)
 	case styleDatagram, styleRaw:
-		if style == styleDatagram {
-			protocol, listenProtocol = datagram.ProtocolDatagram1, datagram.ProtocolDatagram1
-			if values["PROTOCOL"] != "" || values["HEADER"] != "" || values["LISTEN_PROTOCOL"] != "" {
-				err = ErrProtocol
-				return
-			}
-		} else {
-			protocolRaw, protocolErr := uintValue(values, "PROTOCOL", 8, uint64(datagram.ProtocolRaw))
-			if protocolErr != nil || reservedRawProtocol(uint8(protocolRaw)) {
-				err = ErrProtocol
-				return
-			}
-			protocol = uint8(protocolRaw)
-			listenProtocol = protocol
-			rawHeader, err = boolValue(values, "HEADER")
-			if err != nil {
-				return
-			}
-			if child {
-				listenProtocolRaw, listenErr := uintValue(values, "LISTEN_PROTOCOL", 8, uint64(protocol))
-				if listenErr != nil || reservedRawProtocol(uint8(listenProtocolRaw)) {
-					err = ErrProtocol
-					return
-				}
-				listenProtocol = uint8(listenProtocolRaw)
-			}
-		}
-		listenPort = fromPort
-		if child {
-			listenRaw, listenErr := uintValue(values, "LISTEN_PORT", 16, uint64(fromPort))
-			if listenErr != nil {
-				err = ErrProtocol
-				return
-			}
-			listenPort = uint16(listenRaw)
-		}
-		if portText, exists := values["PORT"]; exists {
-			portRaw, portErr := uintValue(values, "PORT", 16, 0)
-			if portErr != nil || portRaw == 0 || portText == "" {
-				err = ErrProtocol
-				return
-			}
-			if s.config.UDPAddress == "" && values["HOST"] == "" {
-				// Compatibility for an explicitly TCP-only bridge: historical
-				// ivnp used PORT as the incoming I2P route selector.
-				listenPort = uint16(portRaw)
-			} else {
-				source := connectionIP(connection.Conn)
-				host := values["HOST"]
-				if host == "" {
-					host = source.String()
-				}
-				if !source.IsValid() {
-					err = ErrProtocol
-					return
-				}
-				matched := false
-				if targetIP := net.ParseIP(host); targetIP != nil {
-					matched = targetIP.IsLoopback() && targetIP.String() == source.String()
-				} else {
-					lookupCtx, cancel := context.WithTimeout(s.ctx, s.config.HandshakeTimeout)
-					addresses, lookupErr := net.DefaultResolver.LookupNetIP(lookupCtx, "ip", host)
-					cancel()
-					if lookupErr == nil {
-						for _, address := range addresses {
-							if address.Unmap() == source {
-								matched = true
-								break
-							}
-						}
-					}
-				}
-				if !matched || !source.IsLoopback() {
-					err = ErrProtocol
-					return
-				}
-				udpTarget = &net.UDPAddr{IP: append(net.IP(nil), source.AsSlice()...), Port: int(portRaw)}
-			}
-		} else if values["HOST"] != "" {
-			err = ErrProtocol
-			return
-		}
+		err = s.configurePacketTransport(connection, &config, style, values, child)
 	case stylePrimary:
 		if child || values["PORT"] != "" || values["HOST"] != "" || values["HEADER"] != "" || values["PROTOCOL"] != "" {
 			err = ErrProtocol
-			return
 		}
 	default:
 		err = ErrProtocol
 	}
-	return
+	return config.fromPort, config.toPort, config.listenPort, config.protocol, config.listenProtocol, config.rawHeader, config.udpTarget, err
+}
+
+func (s *Server) configureStreamTransport(config *sessionTransportConfig, values map[string]string, child bool) error {
+	config.protocol, config.listenProtocol = 6, 6
+	config.listenPort = config.toPort
+	if child {
+		listenRaw, err := uintValue(values, "LISTEN_PORT", 16, uint64(config.fromPort))
+		if err != nil || (listenRaw != 0 && listenRaw != uint64(config.fromPort)) {
+			return ErrProtocol
+		}
+		config.listenPort = uint16(listenRaw)
+	}
+	if values["HOST"] != "" || values["HEADER"] != "" || values["PROTOCOL"] != "" || values["LISTEN_PROTOCOL"] != "" {
+		return ErrProtocol
+	}
+	portValue, exists := values["PORT"]
+	if !exists {
+		return nil
+	}
+	if s.config.UDPAddress != "" {
+		return ErrProtocol
+	}
+	portRaw, err := uintValue(values, "PORT", 16, 0)
+	if err != nil || portValue == "" {
+		return ErrProtocol
+	}
+	config.listenPort = uint16(portRaw)
+	return nil
+}
+
+func (s *Server) configurePacketTransport(connection *serverConnection, config *sessionTransportConfig, style sessionStyle, values map[string]string, child bool) error {
+	if style == styleDatagram {
+		config.protocol, config.listenProtocol = datagram.ProtocolDatagram1, datagram.ProtocolDatagram1
+		if values["PROTOCOL"] != "" || values["HEADER"] != "" || values["LISTEN_PROTOCOL"] != "" {
+			return ErrProtocol
+		}
+	} else {
+		protocolRaw, err := uintValue(values, "PROTOCOL", 8, uint64(datagram.ProtocolRaw))
+		if err != nil || reservedRawProtocol(uint8(protocolRaw)) {
+			return ErrProtocol
+		}
+		config.protocol = uint8(protocolRaw)
+		config.listenProtocol = config.protocol
+		config.rawHeader, err = boolValue(values, "HEADER")
+		if err != nil {
+			return err
+		}
+	}
+	config.listenPort = config.fromPort
+	if child {
+		listenRaw, err := uintValue(values, "LISTEN_PORT", 16, uint64(config.fromPort))
+		if err != nil {
+			return ErrProtocol
+		}
+		config.listenPort = uint16(listenRaw)
+		if style == styleRaw {
+			listenProtocolRaw, err := uintValue(values, "LISTEN_PROTOCOL", 8, uint64(config.protocol))
+			if err != nil || reservedRawProtocol(uint8(listenProtocolRaw)) {
+				return ErrProtocol
+			}
+			config.listenProtocol = uint8(listenProtocolRaw)
+		}
+	}
+	return s.configurePacketTarget(connection, config, values)
+}
+
+func (s *Server) configurePacketTarget(connection *serverConnection, config *sessionTransportConfig, values map[string]string) error {
+	portText, exists := values["PORT"]
+	if !exists {
+		if values["HOST"] != "" {
+			return ErrProtocol
+		}
+		return nil
+	}
+	portRaw, err := uintValue(values, "PORT", 16, 0)
+	if err != nil || portRaw == 0 || portText == "" {
+		return ErrProtocol
+	}
+	if s.config.UDPAddress == "" && values["HOST"] == "" {
+		// Compatibility for an explicitly TCP-only bridge: historical
+		// ivnp used PORT as the incoming I2P route selector.
+		config.listenPort = uint16(portRaw)
+		return nil
+	}
+	source := connectionIP(connection.Conn)
+	if !source.IsValid() {
+		return ErrProtocol
+	}
+	host := cmp.Or(values["HOST"], source.String())
+	if !s.samTargetMatchesSource(host, source) {
+		return ErrProtocol
+	}
+	config.udpTarget = &net.UDPAddr{IP: append(net.IP(nil), source.AsSlice()...), Port: int(portRaw)}
+	return nil
+}
+
+func (s *Server) samTargetMatchesSource(host string, source netip.Addr) bool {
+	if !source.IsLoopback() {
+		return false
+	}
+	if targetIP := net.ParseIP(host); targetIP != nil {
+		return targetIP.IsLoopback() && targetIP.String() == source.String()
+	}
+	lookupCtx, cancel := context.WithTimeout(s.ctx, s.config.HandshakeTimeout)
+	addresses, err := net.DefaultResolver.LookupNetIP(lookupCtx, "ip", host)
+	cancel()
+	if err != nil {
+		return false
+	}
+	for _, address := range addresses {
+		if address.Unmap() == source {
+			return true
+		}
+	}
+	return false
 }
 
 func clearLeaseSetPolicy(policy *clientapi.LeaseSetPolicy) {

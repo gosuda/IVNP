@@ -139,7 +139,11 @@ func parseOutOfSession(packet, introKey []byte, expected PacketType) (LongHeader
 		return LongHeader{}, nil, err
 	}
 	header, err := ParseLongHeader(packet[:LongHeaderLen], NetworkID)
-	if err != nil || (expected != 0 && header.Type != expected) || header.DestinationID == 0 || header.SourceID == 0 {
+	parseOutOfSessionRejected := err != nil || (expected != 0 && header.Type != expected) || header.DestinationID == 0
+	if !parseOutOfSessionRejected {
+		parseOutOfSessionRejected = header.SourceID == 0
+	}
+	if parseOutOfSessionRejected {
 		return LongHeader{}, nil, ErrHandshake
 	}
 	switch header.Type {

@@ -86,7 +86,11 @@ func NewPeerProfiles(config PeerProfilesConfig) *PeerProfiles {
 
 // Record stores one terminal authenticated build or delivery observation.
 func (p *PeerProfiles) Record(peer ivnp.Hash, observation Observation) {
-	if p == nil || peer == (ivnp.Hash{}) || (observation.Kind != BuildObservation && observation.Kind != DeliveryObservation) {
+	recordRejected := p == nil || peer == (ivnp.Hash{})
+	if !recordRejected {
+		recordRejected = (observation.Kind != BuildObservation && observation.Kind != DeliveryObservation)
+	}
+	if recordRejected {
 		return
 	}
 	p.record(peer, profileSample{kind: observation.Kind, success: observation.Success, latency: observation.LatencyMillis})
@@ -177,10 +181,7 @@ func (p *PeerProfiles) Score(peer ivnp.Hash) int64 {
 	if !ok {
 		return 0
 	}
-	latency := profile.MeanLatency
-	if latency > profileLatencyCap {
-		latency = profileLatencyCap
-	}
+	latency := min(profile.MeanLatency, profileLatencyCap)
 	return int64(profile.Successes*profileSuccessWeight-profile.Failures*profileFailurePenalty) - int64(latency)
 }
 
@@ -190,7 +191,11 @@ func (p *PeerProfiles) evictLocked() {
 	first := true
 	for peer, state := range p.peers {
 		score := scoreProfile(profileFromState(state))
-		if first || score < victimScore || (score == victimScore && hashLess(victim, peer)) {
+		evictLockedSelected := first || score < victimScore
+		if !evictLockedSelected {
+			evictLockedSelected = (score == victimScore && hashLess(victim, peer))
+		}
+		if evictLockedSelected {
 			victim, victimScore, first = peer, score, false
 		}
 	}
@@ -219,10 +224,7 @@ func profileFromState(state peerProfileState) PeerProfile {
 }
 
 func scoreProfile(profile PeerProfile) int64 {
-	latency := profile.MeanLatency
-	if latency > profileLatencyCap {
-		latency = profileLatencyCap
-	}
+	latency := min(profile.MeanLatency, profileLatencyCap)
 	return int64(profile.Successes*profileSuccessWeight-profile.Failures*profileFailurePenalty) - int64(latency)
 }
 

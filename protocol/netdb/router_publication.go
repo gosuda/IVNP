@@ -38,7 +38,11 @@ type RouterInfoPublisher struct {
 }
 
 func NewRouterInfoPublisher(config RouterInfoPublisherConfig) (*RouterInfoPublisher, error) {
-	if config.Local == nil || config.Database == nil || config.Sender == nil || config.ReplyPath == nil || config.Now == nil || config.Random == nil {
+	newRouterInfoPublisherRejected := config.Local == nil || config.Database == nil || config.Sender == nil || config.ReplyPath == nil || config.Now == nil
+	if !newRouterInfoPublisherRejected {
+		newRouterInfoPublisherRejected = config.Random == nil
+	}
+	if newRouterInfoPublisherRejected {
 		return nil, ErrRouterInfoPublisherConfig
 	}
 	return &RouterInfoPublisher{local: config.Local, confirmed: newConfirmedPublication(config.Database, config.Sender, config.ReplyPath, config.Registry, config.Now, config.Random, config.Local.Hash(), i2np.StoreRouterInfo, config.PreferredTargets, config.Logger)}, nil

@@ -520,9 +520,13 @@ func TestRatchetMetricsRecordAuthenticatedTransitions(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := metrics.Snapshot().Garlic
-	if got.NewSessionSent != 1 || got.NewSessionReceived != 2 ||
+	ratchetMetricsRecordAuthenticatedTransitionsRejected := got.NewSessionSent != 1 || got.NewSessionReceived != 2 ||
 		got.ExistingSessionSent != 2 || got.ExistingSessionReceived != 2 ||
-		got.DHStepsSent != 2 || got.DHStepsReceived != 2 {
+		got.DHStepsSent != 2
+	if !ratchetMetricsRecordAuthenticatedTransitionsRejected {
+		ratchetMetricsRecordAuthenticatedTransitionsRejected = got.DHStepsReceived != 2
+	}
+	if ratchetMetricsRecordAuthenticatedTransitionsRejected {
 		t.Fatalf("ratchet metrics = %+v", got)
 	}
 }
@@ -583,36 +587,70 @@ func BenchmarkRatchetExistingWithScratch(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-	offset := uint64(65)
+	state := ratchetBenchmarkState{
+		sender:       a,
+		receiver:     receiver,
+		senderPeer:   bPeer,
+		receiverPeer: receiverPeer,
+		payload:      payload,
+		encrypted:    &encrypted,
+		plain:        &plain,
+		received:     &received,
+		reply:        &reply,
+		now:          now,
+		offset:       65,
+	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		if offset%4000 == 0 {
-			b.StopTimer()
-			forward, err := a.EncryptExistingWithScratch(encrypted[:], plain[:], bPeer, nil, RatchetOptions{RequestDH: true}, now+offset)
-			if err == nil {
-				_, err = receiver.Receive(received[:], reply[:], forward, now+offset)
-			}
-			if err == nil {
-				reverse, reverseErr := receiver.EncryptExistingWithScratch(encrypted[:], plain[:], receiverPeer, nil, RatchetOptions{}, now+offset)
-				err = reverseErr
-				if err == nil {
-					_, err = a.Receive(received[:], reply[:], reverse, now+offset)
-				}
-			}
-			if err != nil {
-				b.Fatal(err)
-			}
-			b.StartTimer()
-		}
-		packet, err := a.EncryptExistingWithScratch(encrypted[:], plain[:], bPeer, payload, RatchetOptions{}, now+offset)
+		state.step(b)
+	}
+}
+
+type ratchetBenchmarkState struct {
+	sender       *RatchetManager
+	receiver     *RatchetManager
+	senderPeer   ivnp.Hash
+	receiverPeer ivnp.Hash
+	payload      []byte
+	encrypted    *[256]byte
+	plain        *[256]byte
+	received     *[256]byte
+	reply        *[256]byte
+	now          uint64
+	offset       uint64
+}
+
+func (state *ratchetBenchmarkState) step(b *testing.B) {
+	if state.offset%4000 == 0 {
+		b.StopTimer()
+		state.rekey(b)
+		b.StartTimer()
+	}
+	packet, err := state.sender.EncryptExistingWithScratch(state.encrypted[:], state.plain[:], state.senderPeer, state.payload, RatchetOptions{}, state.now+state.offset)
+	if err == nil {
+		_, err = state.receiver.Receive(state.received[:], state.reply[:], packet, state.now+state.offset)
+	}
+	if err != nil {
+		b.Fatal(err)
+	}
+	state.offset++
+}
+
+func (state *ratchetBenchmarkState) rekey(b *testing.B) {
+	forward, err := state.sender.EncryptExistingWithScratch(state.encrypted[:], state.plain[:], state.senderPeer, nil, RatchetOptions{RequestDH: true}, state.now+state.offset)
+	if err == nil {
+		_, err = state.receiver.Receive(state.received[:], state.reply[:], forward, state.now+state.offset)
+	}
+	if err == nil {
+		reverse, reverseErr := state.receiver.EncryptExistingWithScratch(state.encrypted[:], state.plain[:], state.receiverPeer, nil, RatchetOptions{}, state.now+state.offset)
+		err = reverseErr
 		if err == nil {
-			_, err = receiver.Receive(received[:], reply[:], packet, now+offset)
+			_, err = state.sender.Receive(state.received[:], state.reply[:], reverse, state.now+state.offset)
 		}
-		if err != nil {
-			b.Fatal(err)
-		}
-		offset++
+	}
+	if err != nil {
+		b.Fatal(err)
 	}
 }
 

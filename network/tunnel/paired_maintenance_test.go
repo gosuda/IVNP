@@ -167,7 +167,17 @@ func TestPairedMaintainerBootstrapsOnceThenUsesEstablishedCarrier(t *testing.T) 
 	if len(carrierMessages) != 2 || !haveCarrier {
 		t.Fatalf("parallel carrier sends=%#v", carrierMessages)
 	}
-	if pair, ok := maintainer.Pair(now); !ok || pair.OutboundID != 201 || pair.OutboundEndpoint != carrierHop || pair.InboundID != 701 || pair.ReplyRouter != gateway || pair.PeerCount != 1 || pair.Peers[0] != carrierHop {
+	pair, ok := maintainer.Pair(now)
+	pairMismatch := !ok
+	if !pairMismatch {
+		pairMismatch = pair.OutboundID != 201 ||
+			pair.OutboundEndpoint != carrierHop ||
+			pair.InboundID != 701 ||
+			pair.ReplyRouter != gateway ||
+			pair.PeerCount != 1 ||
+			pair.Peers[0] != carrierHop
+	}
+	if pairMismatch {
 		t.Fatalf("pair=%#v %t", pair, ok)
 	}
 	if err := maintainer.Close(); err != nil {

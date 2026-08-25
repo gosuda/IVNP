@@ -60,7 +60,11 @@ type LocalEncryptedLeaseSet struct {
 }
 
 func NewLocalEncryptedLeaseSet(destination *ivnp.LocalDestination, inner *LocalLeaseSet2, authorization EncryptedLeaseSetAuthorization, secret []byte) (*LocalEncryptedLeaseSet, error) {
-	if destination == nil || inner == nil || (len(authorization.DHClients) != 0 && len(authorization.PSKClients) != 0) {
+	newLocalEncryptedLeaseSetRejected := destination == nil || inner == nil
+	if !newLocalEncryptedLeaseSetRejected {
+		newLocalEncryptedLeaseSetRejected = (len(authorization.DHClients) != 0 && len(authorization.PSKClients) != 0)
+	}
+	if newLocalEncryptedLeaseSetRejected {
 		return nil, ErrEncryptedLeaseSet
 	}
 	clientCount := len(authorization.DHClients) + len(authorization.PSKClients)

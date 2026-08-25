@@ -381,9 +381,11 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 
 	circuitID := uint32(now()) | 1
 	receiveID := circuitID ^ 0x50607080
-	if receiveID == 0 {
+	if receiveID ==
+		0 {
 		receiveID = 1
 	}
+
 	replyID, err := buildManager.StartInbound(ctx, tunnel.InboundBuild{
 		CircuitID: circuitID,
 		Hops: []tunnel.ShortBuildHop{{
@@ -420,9 +422,11 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 
 	outboundCircuitID := circuitID ^ 0x90a0b0c0
 	outboundReceiveID := receiveID ^ 0xd0e0f001
-	if outboundCircuitID == 0 {
+	if outboundCircuitID ==
+		0 {
 		outboundCircuitID = 1
 	}
+
 	if outboundReceiveID == 0 || outboundReceiveID == receiveID {
 		outboundReceiveID++
 	}

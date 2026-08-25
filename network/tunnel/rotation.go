@@ -36,7 +36,11 @@ type RotatorConfig struct {
 }
 
 func NewRotator(config RotatorConfig) (*Rotator, error) {
-	if config.Pool == nil || config.Runtime == nil || config.Builder == nil || config.Source == nil || config.Now == nil || config.Target < 1 || config.Target > config.Pool.max || config.RenewBefore >= 10*60*1000 {
+	newRotatorRejected := config.Pool == nil || config.Runtime == nil || config.Builder == nil || config.Source == nil || config.Now == nil || config.Target < 1 || config.Target > config.Pool.max
+	if !newRotatorRejected {
+		newRotatorRejected = config.RenewBefore >= 10*60*1000
+	}
+	if newRotatorRejected {
 		return nil, ErrRotationConfig
 	}
 	return &Rotator{pool: config.Pool, runtime: config.Runtime, builder: config.Builder, source: config.Source, now: config.Now, target: config.Target, renewBefore: config.RenewBefore}, nil
@@ -47,8 +51,10 @@ func NewRotator(config RotatorConfig) (*Rotator, error) {
 // target so a slow or hostile network cannot create an unbounded build storm.
 func (r *Rotator) Maintain(ctx context.Context) (started int, err error) {
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context.
+			Background()
 	}
+
 	if err = ctx.Err(); err != nil {
 		return 0, err
 	}

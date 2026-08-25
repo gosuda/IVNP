@@ -16,7 +16,8 @@ func EncodeElligator2(dst, public []byte, random io.Reader) (bool, error) {
 	if len(dst) < 32 || len(public) != 32 {
 		return false, ErrElligator
 	}
-	if random == nil {
+	if random ==
+		nil {
 		random = rand.Reader
 	}
 
@@ -76,7 +77,10 @@ func DecodeElligator2(dst, encoded []byte) error {
 
 	d := fieldOne.add(fieldTwo.mul(r.square()))
 	v := fieldNegA.mul(d.invert())
-	t := v.square().mul(v).add(fieldA.mul(v.square())).add(v)
+	vSquared := v.square()
+	t := vSquared.mul(v)
+	t = t.add(fieldA.mul(vSquared))
+	t = t.add(v)
 	other := v.neg().sub(fieldA)
 	x := fieldSelect(v, other, fieldIsSquareNonzero(t))
 
@@ -95,11 +99,13 @@ func DecodeElligator2(dst, encoded []byte) error {
 // and its encoded public representative. The retry bound makes RNG or mapping
 // failures explicit rather than creating an unbounded handshake allocation.
 func GenerateElligator2X25519(random io.Reader) (*ecdh.PrivateKey, [32]byte, error) {
-	if random == nil {
+	if random ==
+		nil {
 		random = rand.Reader
 	}
+
 	curve := ecdh.X25519()
-	for attempt := 0; attempt < 128; attempt++ {
+	for range 128 {
 		private, err := curve.GenerateKey(random)
 		if err != nil {
 			return nil, [32]byte{}, err

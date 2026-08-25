@@ -7,11 +7,19 @@ func TestBlockIteratorFirstAndFollowOn(t *testing.T) {
 	follow := []byte{0x80 | (1 << 1) | 1, 0, 0, 0, 9, 0, 2, 4, 5}
 	it := NewBlockIterator(append(first, follow...))
 	one, ok, err := it.Next()
-	if err != nil || !ok || one.FollowOn || one.Last || one.MessageID != 9 || string(one.Data) != "\x01\x02\x03" {
+	blockIteratorFirstAndFollowOnRejected := err != nil || !ok || one.FollowOn || one.Last || one.MessageID != 9
+	if !blockIteratorFirstAndFollowOnRejected {
+		blockIteratorFirstAndFollowOnRejected = string(one.Data) != "\x01\x02\x03"
+	}
+	if blockIteratorFirstAndFollowOnRejected {
 		t.Fatalf("first=%#v ok=%t err=%v", one, ok, err)
 	}
 	two, ok, err := it.Next()
-	if err != nil || !ok || !two.FollowOn || !two.Last || two.Fragment != 1 || string(two.Data) != "\x04\x05" {
+	blockIteratorFirstAndFollowOnRejected = err != nil || !ok || !two.FollowOn || !two.Last || two.Fragment != 1
+	if !blockIteratorFirstAndFollowOnRejected {
+		blockIteratorFirstAndFollowOnRejected = string(two.Data) != "\x04\x05"
+	}
+	if blockIteratorFirstAndFollowOnRejected {
 		t.Fatalf("follow=%#v ok=%t err=%v", two, ok, err)
 	}
 }

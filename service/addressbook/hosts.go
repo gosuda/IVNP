@@ -16,10 +16,14 @@ func normalizeName(value string) (string, error) {
 	if strings.HasSuffix(name, ".i2p.alt") {
 		name = strings.TrimSuffix(name, ".alt")
 	}
-	if len(name) < len("a.i2p") || len(name) > 67 || !strings.HasSuffix(name, ".i2p") || strings.HasPrefix(name, ".") || strings.Contains(name, "..") || strings.Contains(name, ".-") || strings.Contains(name, "-.") {
+	normalizeNameRejected := len(name) < len("a.i2p") || len(name) > 67 || !strings.HasSuffix(name, ".i2p") || strings.HasPrefix(name, ".") || strings.Contains(name, "..") || strings.Contains(name, ".-")
+	if !normalizeNameRejected {
+		normalizeNameRejected = strings.Contains(name, "-.")
+	}
+	if normalizeNameRejected {
 		return "", ErrName
 	}
-	for _, label := range strings.Split(strings.TrimSuffix(name, ".i2p"), ".") {
+	for label := range strings.SplitSeq(strings.TrimSuffix(name, ".i2p"), ".") {
 		if label == "" || label[0] == '-' || label[len(label)-1] == '-' {
 			return "", ErrName
 		}
@@ -28,12 +32,18 @@ func normalizeName(value string) (string, error) {
 		}
 		for i := range len(label) {
 			c := label[i]
-			if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			if !validNameCharacter(c) {
 				return "", ErrName
 			}
 		}
 	}
 	return name, nil
+}
+
+func validNameCharacter(character byte) bool {
+	return (character >= 'a' && character <= 'z') ||
+		(character >= '0' && character <= '9') ||
+		character == '-'
 }
 
 func canonicalDestination(value string) (string, bool) {

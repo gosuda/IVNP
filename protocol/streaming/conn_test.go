@@ -80,13 +80,15 @@ func TestConnWriteQueueRespectsDeadline(t *testing.T) {
 		secondDone <- err
 	}()
 
-	deadline := time.After(time.Second)
+	deadline := time.NewTimer(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
 	for len(conn.writes) != 1 {
 		select {
-		case <-deadline:
+		case <-deadline.C:
 			t.Fatal("second write did not enter the bounded queue")
-		default:
-			time.Sleep(time.Millisecond)
+		case <-ticker.C:
 		}
 	}
 

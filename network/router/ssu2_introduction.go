@@ -230,6 +230,7 @@ func (m *SSU2Manager) forwardRelayStore(job ssu2RelayStoreJob) {
 		if err == nil {
 			err = m.sendData(job.charlie, intro)
 		}
+
 	}
 	if err != nil {
 		m.failRelayForward(job)
@@ -266,47 +267,62 @@ func (m *SSU2Manager) handleRelayIntroAttempt(bob *ssu2TransportSession, intro s
 		return
 	}
 	if known && m.relayTimestampValid(intro.Request.Timestamp) {
-		input, err := ssu2.RelayRequestSignatureInput(nil, bob.peer[:], localHash[:], intro.Request)
-		valid, verifyErr := false, err
-		if err == nil {
-			valid, verifyErr = aliceInfo.Identity.Verify(input, intro.Request.Signature)
-			clear(input)
+		response, delivered := m.processRelayIntro(bob, intro, localHash, aliceInfo)
+		if delivered {
+			return
 		}
-		if verifyErr != nil || !valid {
-			response.Code = ssu2RelayRejectSignature
-		} else if endpoint, endpointErr := m.localSSU2Endpoint(); endpointErr != nil {
-			response.Code = ssu2RelayRejectUnsupported
-		} else if aliceAddress, addressErr := selectSSU2Keys(aliceInfo); addressErr != nil {
-			response.Code = ssu2RelayRejectAliceUnknown
-		} else {
-			destinationID, sourceID := ssu2.RelayConnectionIDs(intro.Request.Nonce)
-			remote := udpAddressFromAddrPort(intro.Request.Endpoint)
-			m.mu.Lock()
-			token, tokenErr := m.newTokenLocked(remote, destinationID, sourceID)
-			m.mu.Unlock()
-			if tokenErr != nil {
-				response.Code = ssu2RelayRejectGeneralFailure
-			} else {
-				response = ssu2.RelayResponse{
-					Nonce:     intro.Request.Nonce,
-					Timestamp: uint32(m.now().Unix()),
-					Endpoint:  endpoint,
-					Token:     token,
-					HasToken:  true,
-				}
-				if !m.signRelayResponse(bob.peer, &response) {
-					return
-				}
-				block, blockErr := ssu2.MarshalRelayResponseBlock(nil, response)
-				if blockErr != nil || m.sendData(bob, block) != nil {
-					return
-				}
-				m.sendHolePunch(aliceAddress, intro.Request.Endpoint, response)
-				return
-			}
-		}
+		m.sendRelayResponse(bob, bob.peer, response)
+		return
 	}
 	m.sendRelayResponse(bob, bob.peer, response)
+}
+
+func (m *SSU2Manager) processRelayIntro(bob *ssu2TransportSession, intro ssu2.RelayIntro, localHash ivnp.Hash, aliceInfo netdb.RouterInfo) (ssu2.RelayResponse, bool) {
+	response := ssu2.RelayResponse{Code: ssu2RelayRejectSignature, Nonce: intro.Request.Nonce, Timestamp: uint32(m.now().Unix())}
+	input, err := ssu2.RelayRequestSignatureInput(nil, bob.peer[:], localHash[:], intro.Request)
+	if err != nil {
+		return response, false
+	}
+	valid, verifyErr := aliceInfo.Identity.Verify(input, intro.Request.Signature)
+	clear(input)
+	if verifyErr != nil || !valid {
+		return response, false
+	}
+	endpoint, err := m.localSSU2Endpoint()
+	if err != nil {
+		response.Code = ssu2RelayRejectUnsupported
+		return response, false
+	}
+	aliceAddress, err := selectSSU2Keys(aliceInfo)
+	if err != nil {
+		response.Code = ssu2RelayRejectAliceUnknown
+		return response, false
+	}
+	destinationID, sourceID := ssu2.RelayConnectionIDs(intro.Request.Nonce)
+	remote := udpAddressFromAddrPort(intro.Request.Endpoint)
+	m.mu.Lock()
+	token, err := m.newTokenLocked(remote, destinationID, sourceID)
+	m.mu.Unlock()
+	if err != nil {
+		response.Code = ssu2RelayRejectGeneralFailure
+		return response, false
+	}
+	response = ssu2.RelayResponse{
+		Nonce:     intro.Request.Nonce,
+		Timestamp: uint32(m.now().Unix()),
+		Endpoint:  endpoint,
+		Token:     token,
+		HasToken:  true,
+	}
+	if !m.signRelayResponse(bob.peer, &response) {
+		return response, true
+	}
+	block, err := ssu2.MarshalRelayResponseBlock(nil, response)
+	if err != nil || m.sendData(bob, block) != nil {
+		return response, true
+	}
+	m.sendHolePunch(aliceAddress, intro.Request.Endpoint, response)
+	return response, true
 }
 
 func (m *SSU2Manager) deferRelayIntro(bob *ssu2TransportSession, intro ssu2.RelayIntro, attempt uint8) bool {
@@ -702,7 +718,11 @@ func selectSSU2Introducers(info netdb.RouterInfo, now uint64) []ssu2IntroducerCa
 			}
 		}
 		for index := range peers {
-			if hasPeer[index] && hasTag[index] && (expirations[index] == 0 || uint64(expirations[index]) >= now) {
+			selectSSU2IntroducersSelected := hasPeer[index] && hasTag[index]
+			if selectSSU2IntroducersSelected {
+				selectSSU2IntroducersSelected = (expirations[index] == 0 || uint64(expirations[index]) >= now)
+			}
+			if selectSSU2IntroducersSelected {
 				candidates = append(candidates, ssu2IntroducerCandidate{peer: peers[index], relayTag: tags[index]})
 			}
 		}

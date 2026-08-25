@@ -1,5 +1,7 @@
 package netdb
 
+import "cmp"
+
 import (
 	"context"
 	"errors"
@@ -44,9 +46,11 @@ func NewPublicationTokenRegistry(now func() uint64, random func() uint32) *Publi
 	if now == nil {
 		now = func() uint64 { return 0 }
 	}
-	if random == nil {
+	if random ==
+		nil {
 		random = func() uint32 { return 1 }
 	}
+
 	return &PublicationTokenRegistry{now: now, random: random, active: make(map[uint32]publicationTokenOwner), recent: make(map[uint32]uint64)}
 }
 
@@ -70,9 +74,10 @@ func (r *PublicationTokenRegistry) allocate(owner func(uint32) publicationTokenO
 		}
 		candidate++
 		candidate &= ^(uint32(1) << 31)
-		if candidate == 0 {
-			candidate = 1
-		}
+
+		candidate = cmp.Or(candidate,
+			1)
+
 	}
 	return 0, ErrPublicationTokenExhausted
 }
@@ -143,8 +148,11 @@ type confirmedPublication struct {
 }
 
 func newConfirmedPublication(database *Database, sender LeaseSetPublishSender, route ReplyPathSource, registry *PublicationTokenRegistry, now func() uint64, random func() uint32, key ivnp.Hash, typeID i2np.StoreType, preferred []ivnp.Hash, logger *slog.Logger) *confirmedPublication {
+
 	if registry == nil {
-		registry = NewPublicationTokenRegistry(now, random)
+		registry = NewPublicationTokenRegistry(now,
+
+			random)
 	}
 	return &confirmedPublication{database: database, sender: sender, route: route, registry: registry, now: now, random: random, key: key, typeID: typeID, preferred: append([]ivnp.Hash(nil), preferred...), attempts: make(map[uint32]publicationAttempt), logger: logger}
 }
@@ -182,12 +190,18 @@ func (p *confirmedPublication) close() {
 }
 
 func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, error) {
+
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context.
+			Background()
 	}
 	now := p.now()
 	p.mu.Lock()
-	if len(p.data) == 0 || (!force && p.nextRetry != 0 && now < p.nextRetry) {
+	maintainSelected := len(p.data) == 0
+	if !maintainSelected {
+		maintainSelected = (!force && p.nextRetry != 0 && now < p.nextRetry)
+	}
+	if maintainSelected {
 		p.mu.Unlock()
 		return 0, nil
 	}
@@ -228,6 +242,7 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 				if first == nil {
 					first = err
 				}
+
 				stop = true
 				break
 			}
@@ -250,17 +265,22 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 			})
 			if err != nil {
 				if first == nil {
-					first = err
+					first =
+						err
 				}
+
 				stop = true
 				break
 			}
 			gateway, tunnelID, ok := p.replyPath()
 			if !ok {
 				p.registry.retire(token)
-				if first == nil {
+				if first ==
+					nil {
 					first = ErrInvalidReplyRoute
+
 				}
+
 				continue
 			}
 			payload, err := MarshalDatabaseStore(p.key, p.typeID, data, token, gateway, tunnelID)
@@ -269,6 +289,7 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 				if first == nil {
 					first = err
 				}
+
 				continue
 			}
 			message := i2np.Message{Header: i2np.Header{Type: i2np.DatabaseStore, ID: p.messageID(), Expiration: saturatingAdd(now, leaseSetPublicationEnvelopeLifetime)}, Payload: payload}
@@ -311,6 +332,7 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 			if first == nil {
 				first = err
 			}
+
 			if p.database != nil && p.database.metrics != nil {
 				p.database.metrics.IncPublicationSendFailures()
 			}

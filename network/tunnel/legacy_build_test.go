@@ -27,22 +27,48 @@ func TestVariableBuildKnownRequestLayouts(t *testing.T) {
 	if err := MarshalElGamalBuildRequest(legacy, request, local, bytes.NewReader(bytes.Repeat([]byte{0xa5}, 29))); err != nil {
 		t.Fatal(err)
 	}
-	if binary.BigEndian.Uint32(legacy[:4]) != 9 || !bytes.Equal(legacy[4:36], local[:]) || binary.BigEndian.Uint32(legacy[36:40]) != 10 || !bytes.Equal(legacy[40:72], next[:]) || !bytes.Equal(legacy[72:104], request.LayerKey[:]) || !bytes.Equal(legacy[104:136], request.IVKey[:]) || !bytes.Equal(legacy[136:168], request.ReplyKey[:]) || !bytes.Equal(legacy[168:184], request.ReplyIV[:]) || legacy[184] != legacyBuildEndpointFlag || binary.BigEndian.Uint32(legacy[185:189]) != request.RequestHours || binary.BigEndian.Uint32(legacy[189:193]) != 11 || !bytes.Equal(legacy[193:], bytes.Repeat([]byte{0xa5}, 29)) {
+	variableBuildKnownRequestLayoutsRejected := binary.BigEndian.Uint32(legacy[:4]) != 9 || !bytes.Equal(legacy[4:36], local[:]) || binary.BigEndian.Uint32(legacy[36:40]) != 10 || !bytes.Equal(legacy[40:72], next[:]) || !bytes.Equal(legacy[72:104], request.LayerKey[:]) || !bytes.Equal(legacy[104:136], request.IVKey[:]) || !bytes.Equal(legacy[136:168], request.ReplyKey[:]) || !bytes.Equal(legacy[168:184], request.ReplyIV[:]) || legacy[184] != legacyBuildEndpointFlag || binary.BigEndian.Uint32(legacy[185:189]) != request.RequestHours || binary.BigEndian.Uint32(legacy[189:193]) != 11
+	if !variableBuildKnownRequestLayoutsRejected {
+		variableBuildKnownRequestLayoutsRejected = !bytes.Equal(legacy[193:], bytes.Repeat([]byte{0xa5}, 29))
+	}
+	if variableBuildKnownRequestLayoutsRejected {
 		t.Fatal("legacy request layout differs")
 	}
-	if parsed, err := ParseElGamalBuildRequest(legacy); err != nil || parsed.ReceiveTunnelID != request.ReceiveTunnelID || parsed.NextTunnelID != request.NextTunnelID || parsed.NextRouter != request.NextRouter || parsed.NextMessageID != request.NextMessageID || !parsed.Endpoint {
-		t.Fatalf("ParseElGamalBuildRequest() = %#v, %v", parsed, err)
+	parsedElGamal, err := ParseElGamalBuildRequest(legacy)
+	elGamalRoundTripMismatch := err != nil
+	if !elGamalRoundTripMismatch {
+		elGamalRoundTripMismatch = parsedElGamal.ReceiveTunnelID != request.ReceiveTunnelID ||
+			parsedElGamal.NextTunnelID != request.NextTunnelID ||
+			parsedElGamal.NextRouter != request.NextRouter ||
+			parsedElGamal.NextMessageID != request.NextMessageID ||
+			!parsedElGamal.Endpoint
+	}
+	if elGamalRoundTripMismatch {
+		t.Fatalf("ParseElGamalBuildRequest() = %#v, %v", parsedElGamal, err)
 	}
 
 	long := make([]byte, LongBuildRequestPlainSize)
 	if err := MarshalLongECIESBuildRequest(long, request); err != nil {
 		t.Fatal(err)
 	}
-	if binary.BigEndian.Uint32(long[:4]) != 9 || binary.BigEndian.Uint32(long[4:8]) != 10 || !bytes.Equal(long[8:40], next[:]) || !bytes.Equal(long[40:72], request.LayerKey[:]) || !bytes.Equal(long[72:104], request.IVKey[:]) || !bytes.Equal(long[104:136], request.ReplyKey[:]) || !bytes.Equal(long[136:152], request.ReplyIV[:]) || long[152] != legacyBuildEndpointFlag || long[153] != 0 || long[154] != 0 || long[155] != 0 || binary.BigEndian.Uint32(long[156:160]) != request.RequestMinutes || binary.BigEndian.Uint32(long[160:164]) != legacyBuildLifetimeSeconds || binary.BigEndian.Uint32(long[164:168]) != 11 || !allZero(long[168:]) {
+	variableBuildKnownRequestLayoutsRejected = binary.BigEndian.Uint32(long[:4]) != 9 || binary.BigEndian.Uint32(long[4:8]) != 10 || !bytes.Equal(long[8:40], next[:]) || !bytes.Equal(long[40:72], request.LayerKey[:]) || !bytes.Equal(long[72:104], request.IVKey[:]) || !bytes.Equal(long[104:136], request.ReplyKey[:]) || !bytes.Equal(long[136:152], request.ReplyIV[:]) || long[152] != legacyBuildEndpointFlag || long[153] != 0 || long[154] != 0 || long[155] != 0 || binary.BigEndian.Uint32(long[156:160]) != request.RequestMinutes || binary.BigEndian.Uint32(long[160:164]) != legacyBuildLifetimeSeconds || binary.BigEndian.Uint32(long[164:168]) != 11
+	if !variableBuildKnownRequestLayoutsRejected {
+		variableBuildKnownRequestLayoutsRejected = !allZero(long[168:])
+	}
+	if variableBuildKnownRequestLayoutsRejected {
 		t.Fatal("long request layout differs")
 	}
-	if parsed, err := ParseLongECIESBuildRequest(long); err != nil || parsed.ReceiveTunnelID != request.ReceiveTunnelID || parsed.NextTunnelID != request.NextTunnelID || parsed.NextRouter != request.NextRouter || parsed.NextMessageID != request.NextMessageID || !parsed.Endpoint {
-		t.Fatalf("ParseLongECIESBuildRequest() = %#v, %v", parsed, err)
+	parsedLong, err := ParseLongECIESBuildRequest(long)
+	longRoundTripMismatch := err != nil
+	if !longRoundTripMismatch {
+		longRoundTripMismatch = parsedLong.ReceiveTunnelID != request.ReceiveTunnelID ||
+			parsedLong.NextTunnelID != request.NextTunnelID ||
+			parsedLong.NextRouter != request.NextRouter ||
+			parsedLong.NextMessageID != request.NextMessageID ||
+			!parsedLong.Endpoint
+	}
+	if longRoundTripMismatch {
+		t.Fatalf("ParseLongECIESBuildRequest() = %#v, %v", parsedLong, err)
 	}
 }
 

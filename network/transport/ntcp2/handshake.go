@@ -51,7 +51,11 @@ func parseSessionRequestOptions(src []byte, expectedNetwork uint8) (SessionReque
 		return SessionRequestOptions{}, ErrHandshake
 	}
 	options := SessionRequestOptions{NetworkID: src[0], Version: src[1], PaddingLength: binary.BigEndian.Uint16(src[2:4]), Message3Part2Length: binary.BigEndian.Uint16(src[4:6]), Timestamp: binary.BigEndian.Uint32(src[8:12])}
-	if options.NetworkID != expectedNetwork || options.Version != 2 || src[6] != 0 || src[7] != 0 || src[12] != 0 || src[13] != 0 || src[14] != 0 || src[15] != 0 {
+	parseSessionRequestOptionsRejected := options.NetworkID != expectedNetwork || options.Version != 2 || src[6] != 0 || src[7] != 0 || src[12] != 0 || src[13] != 0 || src[14] != 0
+	if !parseSessionRequestOptionsRejected {
+		parseSessionRequestOptionsRejected = src[15] != 0
+	}
+	if parseSessionRequestOptionsRejected {
 		return SessionRequestOptions{}, ErrNetwork
 	}
 	return options, nil
@@ -69,7 +73,11 @@ func (o SessionCreatedOptions) marshalTo(dst []byte) {
 }
 
 func parseSessionCreatedOptions(src []byte) (SessionCreatedOptions, error) {
-	if len(src) != 16 || src[0] != 0 || src[1] != 0 || src[4] != 0 || src[5] != 0 || src[6] != 0 || src[7] != 0 || src[12] != 0 || src[13] != 0 || src[14] != 0 || src[15] != 0 {
+	parseSessionCreatedOptionsRejected := len(src) != 16 || src[0] != 0 || src[1] != 0 || src[4] != 0 || src[5] != 0 || src[6] != 0 || src[7] != 0 || src[12] != 0 || src[13] != 0 || src[14] != 0
+	if !parseSessionCreatedOptionsRejected {
+		parseSessionCreatedOptionsRejected = src[15] != 0
+	}
+	if parseSessionCreatedOptionsRejected {
 		return SessionCreatedOptions{}, ErrHandshake
 	}
 	return SessionCreatedOptions{PaddingLength: binary.BigEndian.Uint16(src[2:4]), Timestamp: binary.BigEndian.Uint32(src[8:12])}, nil
@@ -132,7 +140,11 @@ func NewInitiator(remoteStatic []byte) (*Initiator, error) {
 // BuildSessionRequest writes exactly one complete SessionRequest. padding is
 // caller-generated randomness; its exact length is authenticated in options.
 func (i *Initiator) BuildSessionRequest(dst, remoteHash, remoteIV, padding []byte, options SessionRequestOptions, legacyNTCPPort bool) ([]byte, error) {
-	if i == nil || i.state == nil || i.ephemeral == nil || len(remoteHash) != 32 || len(remoteIV) != aes.BlockSize || len(padding) > MaxSessionRequestLen-SessionRequestCiphertextLen {
+	buildSessionRequestRejected := i == nil || i.state == nil || i.ephemeral == nil || len(remoteHash) != 32 || len(remoteIV) != aes.BlockSize
+	if !buildSessionRequestRejected {
+		buildSessionRequestRejected = len(padding) > MaxSessionRequestLen-SessionRequestCiphertextLen
+	}
+	if buildSessionRequestRejected {
 		return nil, ErrHandshake
 	}
 	if int(options.PaddingLength) != len(padding) {
@@ -188,7 +200,11 @@ func (r *Responder) ReleaseSensitive() {
 // returns the state for message two. staticPrivate is Bob's X25519 static
 // private key published as rs.
 func ParseSessionRequest(src, staticPrivate, remoteHash, remoteIV []byte, expectedNetwork uint8, legacyNTCPPort bool) (*Responder, SessionRequestOptions, error) {
-	if len(src) < SessionRequestCiphertextLen || len(src) > MaxSessionRequestLen || legacyNTCPPort && len(src) > LegacyNTCPMaxSessionRequestLen {
+	parseSessionRequestRejected := len(src) < SessionRequestCiphertextLen || len(src) > MaxSessionRequestLen
+	if !parseSessionRequestRejected {
+		parseSessionRequestRejected = legacyNTCPPort && len(src) > LegacyNTCPMaxSessionRequestLen
+	}
+	if parseSessionRequestRejected {
 		return nil, SessionRequestOptions{}, ErrHandshake
 	}
 	responder, options, err := parseSessionRequestHeader(src[:SessionRequestCiphertextLen], staticPrivate, remoteHash, remoteIV, expectedNetwork)
@@ -277,7 +293,11 @@ func parseSessionRequestHeader(src, staticPrivate, remoteHash, remoteIV []byte, 
 
 func finishSessionRequest(responder *Responder, padding []byte, options SessionRequestOptions, legacyNTCPPort bool) error {
 	total := SessionRequestCiphertextLen + len(padding)
-	if len(padding) != int(options.PaddingLength) || total > MaxSessionRequestLen || legacyNTCPPort && total > LegacyNTCPMaxSessionRequestLen {
+	finishSessionRequestRejected := len(padding) != int(options.PaddingLength) || total > MaxSessionRequestLen
+	if !finishSessionRequestRejected {
+		finishSessionRequestRejected = legacyNTCPPort && total > LegacyNTCPMaxSessionRequestLen
+	}
+	if finishSessionRequestRejected {
 		return ErrHandshake
 	}
 	responder.state.MixHash(padding)
@@ -286,7 +306,11 @@ func finishSessionRequest(responder *Responder, padding []byte, options SessionR
 
 // BuildSessionCreated writes Bob's complete message-two response.
 func (r *Responder) BuildSessionCreated(dst, remoteHash, padding []byte, options SessionCreatedOptions) ([]byte, error) {
-	if r == nil || r.state == nil || r.peerEphemeral == nil || len(remoteHash) != 32 || int(options.PaddingLength) != len(padding) || len(padding) > MaxSessionRequestLen-SessionRequestCiphertextLen || len(dst) < SessionRequestCiphertextLen+len(padding) {
+	buildSessionCreatedRejected := r == nil || r.state == nil || r.peerEphemeral == nil || len(remoteHash) != 32 || int(options.PaddingLength) != len(padding) || len(padding) > MaxSessionRequestLen-SessionRequestCiphertextLen
+	if !buildSessionCreatedRejected {
+		buildSessionCreatedRejected = len(dst) < SessionRequestCiphertextLen+len(padding)
+	}
+	if buildSessionCreatedRejected {
 		return nil, ErrHandshake
 	}
 	ephemeral, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -402,7 +426,11 @@ func (i *Initiator) finishSessionCreated(padding []byte, options SessionCreatedO
 // the caller-built RouterInfo/options/padding block sequence advertised by
 // Message3Part2Length in SessionRequest.
 func (i *Initiator) BuildSessionConfirmed(dst, staticPrivate, payload []byte) ([]byte, error) {
-	if i == nil || i.state == nil || i.completed || i.peerEphemeral == nil || len(payload)+16 != int(i.message3Part2Length) || len(payload)+64 > MaxSessionRequestLen || len(dst) < 64+len(payload) {
+	buildSessionConfirmedRejected := i == nil || i.state == nil || i.completed || i.peerEphemeral == nil || len(payload)+16 != int(i.message3Part2Length) || len(payload)+64 > MaxSessionRequestLen
+	if !buildSessionConfirmedRejected {
+		buildSessionConfirmedRejected = len(dst) < 64+len(payload)
+	}
+	if buildSessionConfirmedRejected {
 		return nil, ErrHandshake
 	}
 	private, err := ecdh.X25519().NewPrivateKey(staticPrivate)
@@ -430,7 +458,11 @@ func (i *Initiator) BuildSessionConfirmed(dst, staticPrivate, payload []byte) ([
 // ParseSessionConfirmed authenticates both Message3 frames and returns
 // Alice's static X25519 key and RouterInfo/options/padding payload.
 func (r *Responder) ParseSessionConfirmed(src []byte) ([]byte, []byte, error) {
-	if r == nil || r.state == nil || r.completed || r.ephemeral == nil || len(src) < 64 || len(src) > MaxSessionRequestLen || len(src)-48 != int(r.message3Part2Length) {
+	parseSessionConfirmedRejected := r == nil || r.state == nil || r.completed || r.ephemeral == nil || len(src) < 64 || len(src) > MaxSessionRequestLen
+	if !parseSessionConfirmedRejected {
+		parseSessionConfirmedRejected = len(src)-48 != int(r.message3Part2Length)
+	}
+	if parseSessionConfirmedRejected {
 		return nil, nil, ErrHandshake
 	}
 	var static [32]byte
@@ -576,7 +608,7 @@ func aesCBCEncrypt(dst, plaintext, key, iv []byte) error {
 	var previous [aes.BlockSize]byte
 	copy(previous[:], iv)
 	for offset := 0; offset < len(plaintext); offset += aes.BlockSize {
-		for i := 0; i < aes.BlockSize; i++ {
+		for i := range aes.BlockSize {
 			dst[offset+i] = plaintext[offset+i] ^ previous[i]
 		}
 		block.Encrypt(dst[offset:offset+aes.BlockSize], dst[offset:offset+aes.BlockSize])
@@ -598,7 +630,7 @@ func aesCBCDecrypt(dst, ciphertext, key, iv []byte) error {
 	for offset := 0; offset < len(ciphertext); offset += aes.BlockSize {
 		copy(current[:], ciphertext[offset:offset+aes.BlockSize])
 		block.Decrypt(dst[offset:offset+aes.BlockSize], ciphertext[offset:offset+aes.BlockSize])
-		for i := 0; i < aes.BlockSize; i++ {
+		for i := range aes.BlockSize {
 			dst[offset+i] ^= previous[i]
 		}
 		previous = current

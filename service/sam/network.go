@@ -124,13 +124,14 @@ func (n *Network) Start(ctx context.Context) error {
 	if transient {
 		destination = "TRANSIENT"
 	}
-	line := "SESSION CREATE STYLE=STREAM ID=" + n.cfg.ID + " DESTINATION=" + destination
+	var line strings.Builder
+	line.WriteString("SESSION CREATE STYLE=STREAM ID=" + n.cfg.ID + " DESTINATION=" + destination)
 	if transient {
-		line += " SIGNATURE_TYPE=" + strconv.Itoa(int(n.cfg.SignatureType))
+		line.WriteString(" SIGNATURE_TYPE=" + strconv.Itoa(int(n.cfg.SignatureType)))
 	}
-	line += " i2cp.leaseSetEncType=" + cryptoTypes(n.cfg.LeaseSetEncTypes)
+	line.WriteString(" i2cp.leaseSetEncType=" + cryptoTypes(n.cfg.LeaseSetEncTypes))
 	if n.cfg.LeaseSetType != 0 {
-		line += " i2cp.leaseSetType=" + strconv.Itoa(int(n.cfg.LeaseSetType))
+		line.WriteString(" i2cp.leaseSetType=" + strconv.Itoa(int(n.cfg.LeaseSetType)))
 	}
 	keys := make([]string, 0, len(n.cfg.SessionOptions))
 	for key := range n.cfg.SessionOptions {
@@ -138,9 +139,9 @@ func (n *Network) Start(ctx context.Context) error {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		line += " " + key + "=" + n.cfg.SessionOptions[key]
+		line.WriteString(" " + key + "=" + n.cfg.SessionOptions[key])
 	}
-	fields, err := control.commandContext(ctx, line)
+	fields, err := control.commandContext(ctx, line.String())
 	if err != nil {
 		control.Close()
 		return err
@@ -347,6 +348,7 @@ func (c *control) commandContext(ctx context.Context, line string) (map[string]s
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -631,7 +633,11 @@ func validSessionOption(key, value string) bool {
 		return false
 	}
 	for _, character := range key {
-		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '.' || character == '_' || character == '-' {
+		validSessionOptionRejected := (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '.' || character == '_'
+		if !validSessionOptionRejected {
+			validSessionOptionRejected = character == '-'
+		}
+		if validSessionOptionRejected {
 			continue
 		}
 		return false

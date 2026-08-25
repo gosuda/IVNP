@@ -606,7 +606,7 @@ func replayMix(value uint64) uint64 {
 
 func replayBucketContains(bucket []uint64, first, step uint64) bool {
 	bits := uint64(len(bucket) * 64)
-	for index := uint64(0); index < replayFilterHashes; index++ {
+	for index := range uint64(replayFilterHashes) {
 		bit := (first + index*step) % bits
 		if bucket[bit/64]&(uint64(1)<<(bit&63)) == 0 {
 			return false
@@ -617,7 +617,7 @@ func replayBucketContains(bucket []uint64, first, step uint64) bool {
 
 func replayBucketAdd(bucket []uint64, first, step uint64) {
 	bits := uint64(len(bucket) * 64)
-	for index := uint64(0); index < replayFilterHashes; index++ {
+	for index := range uint64(replayFilterHashes) {
 		bit := (first + index*step) % bits
 		bucket[bit/64] |= uint64(1) << (bit & 63)
 	}

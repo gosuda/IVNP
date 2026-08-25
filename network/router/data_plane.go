@@ -121,7 +121,11 @@ type streamingSeedCacheEntry struct {
 }
 
 func NewStreamingTunnelSender(config StreamingTunnelSenderConfig) (*StreamingTunnelSender, error) {
-	if config.Database == nil || config.Requests == nil || config.Tunnels == nil || config.Pool == nil || config.Now == nil || (config.Ratchet == nil && config.Garlic == nil) {
+	newStreamingTunnelSenderRejected := config.Database == nil || config.Requests == nil || config.Tunnels == nil || config.Pool == nil || config.Now == nil
+	if !newStreamingTunnelSenderRejected {
+		newStreamingTunnelSenderRejected = (config.Ratchet == nil && config.Garlic == nil)
+	}
+	if newStreamingTunnelSenderRejected {
 		return nil, ErrDataPlaneConfig
 	}
 	if config.NextID == nil {
@@ -188,7 +192,11 @@ func ValidateRemoteELSContexts(policies map[ivnp.Hash]RemoteELSContext) error {
 func cloneValidatedRemoteELS(policies map[ivnp.Hash]RemoteELSContext) (map[ivnp.Hash]RemoteELSContext, error) {
 	updated := make(map[ivnp.Hash]RemoteELSContext, len(policies))
 	for hash, policy := range policies {
-		if hash == (ivnp.Hash{}) || policy.Identity.Hash() != hash || len(policy.Identity.Bytes()) == 0 || len(policy.Secret) > 0xffff || (policy.Authorization.UseDH && policy.Authorization.UsePSK) {
+		cloneValidatedRemoteELSSelected := hash == (ivnp.Hash{}) || policy.Identity.Hash() != hash || len(policy.Identity.Bytes()) == 0 || len(policy.Secret) > 0xffff
+		if !cloneValidatedRemoteELSSelected {
+			cloneValidatedRemoteELSSelected = (policy.Authorization.UseDH && policy.Authorization.UsePSK)
+		}
+		if cloneValidatedRemoteELSSelected {
 			releaseRemoteELSPolicies(updated)
 			return nil, ErrDataPlaneConfig
 		}
@@ -261,6 +269,7 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streamt
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	if len(delivery.Payload) > i2np.I2PDMaxPayload-4-destinationDataHeaderLen {
 		return i2np.ErrPayloadTooLarge
 	}
@@ -347,8 +356,10 @@ func (s *StreamingTunnelSender) SendRatchetReply(ctx context.Context, target ivn
 		return ErrDataPlaneConfig
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context.
+			Background()
 	}
+
 	if s.limiter != nil {
 		if err := s.limiter.Wait(ctx, uint64(len(packet))); err != nil {
 			return err
@@ -515,9 +526,11 @@ func (s *StreamingTunnelSender) destinationCloveSetTo(set, dataPayload []byte, d
 	cloveCount++
 	length, err := garlic.CloveSetEncodedLen(cloves[:cloveCount])
 	if err != nil || len(set) < length {
-		if err == nil {
+		if err ==
+			nil {
 			err = i2np.ErrPayloadTooLarge
 		}
+
 		return nil, err
 	}
 	setID, err := s.id()
@@ -872,7 +885,11 @@ func releaseGarlicSnapshot(destinations []*garlicDestinationState) {
 }
 
 func NewGarlicReceiver(config GarlicReceiverConfig) (*GarlicReceiver, error) {
-	if config.Service == nil || config.ReplyKeys == nil || config.Now == nil || len(config.Destinations) > maxGarlicDestinations || len(config.StaticPrivate) != 0 && len(config.StaticPrivate) != 32 {
+	newGarlicReceiverRejected := config.Service == nil || config.ReplyKeys == nil || config.Now == nil || len(config.Destinations) > maxGarlicDestinations
+	if !newGarlicReceiverRejected {
+		newGarlicReceiverRejected = len(config.StaticPrivate) != 0 && len(config.StaticPrivate) != 32
+	}
+	if newGarlicReceiverRejected {
 		return nil, ErrDataPlaneConfig
 	}
 	replySlots := parallelism.CPUs()
@@ -898,7 +915,11 @@ func NewGarlicReceiver(config GarlicReceiverConfig) (*GarlicReceiver, error) {
 // It returns an idempotent removal function which waits for in-flight receive
 // work before releasing the destination's sensitive state.
 func (r *GarlicReceiver) RegisterDestination(hash ivnp.Hash, destination GarlicDestination) (func(), error) {
-	if r == nil || hash == (ivnp.Hash{}) || (destination.Sessions == nil && destination.Ratchet == nil) {
+	registerDestinationRejected := r == nil || hash == (ivnp.Hash{})
+	if !registerDestinationRejected {
+		registerDestinationRejected = (destination.Sessions == nil && destination.Ratchet == nil)
+	}
+	if registerDestinationRejected {
 		return nil, ErrDataPlaneConfig
 	}
 	r.lifecycleMu.RLock()
@@ -1031,9 +1052,14 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message i2np.Messag
 			}
 			scratch := <-r.replyScratch
 			reply, unwrapErr := ecies.OpenOneTimeReplyExistingSession(scratch[:plainLen], key.Key, key.Tag, outer.Encrypted)
-			if unwrapErr == nil {
-				unwrapErr = r.service.dispatchClove(ivnp.Hash{}, garlic.Delivery{Type: garlic.DeliveryLocal}, reply, now, false)
+			if unwrapErr ==
+				nil {
+				unwrapErr = r.service.
+					dispatchClove(ivnp.
+						Hash{}, garlic.Delivery{Type: garlic.
+						DeliveryLocal}, reply, now, false)
 			}
+
 			clear(scratch[:plainLen])
 			r.replyScratch <- scratch
 			return unwrapErr
@@ -1045,8 +1071,10 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message i2np.Messag
 			scratch := <-r.replyScratch
 			inner, openErr := ecies.OpenRouterMessage(scratch[:plainLen], r.staticPrivate[:], outer.Encrypted, now)
 			if openErr == nil {
-				openErr = r.service.handleI2NP(inner, now, false, source)
+				openErr = r.service.
+					handleI2NP(inner, now, false, source)
 			}
+
 			clear(scratch[:plainLen])
 			r.replyScratch <- scratch
 			if openErr == nil {
@@ -1092,9 +1120,11 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message i2np.Messag
 			return ErrDestinationBandwidth
 		}
 		set, parseErr := garlic.ParseCloveSet(payload)
-		if parseErr == nil {
+		if parseErr ==
+			nil {
 			parseErr = r.service.HandleGarlicCloveSet(set, now, false)
 		}
+
 		clear(scratch.plaintext[:])
 		destination.scratch <- scratch
 		return parseErr
@@ -1309,8 +1339,11 @@ func ratchetReplyTarget(cloves []garlic.Clove, observed ivnp.Hash) (ivnp.Hash, e
 			if !ok {
 				return ivnp.Hash{}, ErrGarlicPacket
 			}
-			if (key.Type == ivnp.CryptoX25519 || key.Type == ivnp.CryptoMLKEM768X25519 || key.Type == ivnp.CryptoMLKEM1024X25519) &&
-				ivnp.Sum(key.Data) == observed {
+			ratchetReplyTargetRejected := (key.Type == ivnp.CryptoX25519 || key.Type == ivnp.CryptoMLKEM768X25519 || key.Type == ivnp.CryptoMLKEM1024X25519)
+			if ratchetReplyTargetRejected {
+				ratchetReplyTargetRejected = ivnp.Sum(key.Data) == observed
+			}
+			if ratchetReplyTargetRejected {
 				return store.Key, nil
 			}
 		}

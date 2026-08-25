@@ -2,6 +2,7 @@ package netdb
 
 import (
 	"math/bits"
+	"slices"
 
 	"gosuda.org/ivnp"
 )
@@ -70,11 +71,9 @@ func (s *kBucketSet) add(local, peer ivnp.Hash, now uint64) bool {
 	}
 	index := s.bucketIndex(rangeNumber)
 	bucket := &s.buckets[index]
-	for _, member := range bucket.members {
-		if member == peer {
-			bucket.lastChanged = now
-			return false
-		}
+	if slices.Contains(bucket.members, peer) {
+		bucket.lastChanged = now
+		return false
 	}
 	if bucket.begin == bucket.end && len(bucket.members) >= s.capacity {
 		return false // Java router uses RejectTrimmer for flood resistance.
@@ -98,7 +97,11 @@ func (s *kBucketSet) split(index int, local ivnp.Hash) {
 		}
 		start, end := int(original.begin), int(original.end)
 		secondStart := 0
-		if KademliaB == 1 || (start&(kademliaBFactor-1) == 0 && (end+1)&(kademliaBFactor-1) == 0 && end > start+kademliaBFactor) {
+		splitSelected := KademliaB == 1
+		if !splitSelected {
+			splitSelected = (start&(kademliaBFactor-1) == 0 && (end+1)&(kademliaBFactor-1) == 0 && end > start+kademliaBFactor)
+		}
+		if splitSelected {
 			secondStart = end + 1 - kademliaBFactor
 		} else {
 			secondStart = start + (1+end-start)/2

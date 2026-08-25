@@ -209,7 +209,7 @@ func kdf2(key, input []byte) ([32]byte, [32]byte) {
 
 func putNonce(dst []byte, value uint64) {
 	clear(dst)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		dst[4+i] = byte(value >> (8 * i))
 	}
 }

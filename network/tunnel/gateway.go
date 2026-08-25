@@ -37,9 +37,12 @@ type Gateway struct {
 }
 
 func NewGateway(padding io.Reader) *Gateway {
-	if padding == nil {
+	if padding ==
+
+		nil {
 		padding = rand.Reader
 	}
+
 	return &Gateway{padding: padding}
 }
 
@@ -145,10 +148,7 @@ func (g *Gateway) Fragment(tunnelID uint32, block Block, dst []*packet.Buffer) (
 
 	offset := firstData
 	for fragment := 1; offset < len(block.Data); fragment++ {
-		end := offset + maxBlockBytes - 7
-		if end > len(block.Data) {
-			end = len(block.Data)
-		}
+		end := min(offset+maxBlockBytes-7, len(block.Data))
 		follow := Block{
 			FollowOn:  true,
 			MessageID: block.MessageID,

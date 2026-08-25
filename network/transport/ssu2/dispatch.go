@@ -40,8 +40,12 @@ type Dispatcher struct {
 // NewDispatcher creates workers and queue slots for packets up to packetSize.
 // Close cancels queued work and waits for any active handler to return.
 func NewDispatcher(workers, queue, packetSize int, handler PacketHandler) (*Dispatcher, error) {
-	if workers < 1 || workers > MaxDispatchWorkers || queue < 0 || queue > MaxDispatchQueue ||
-		packetSize < 1 || packetSize > MaxDatagramSize || handler == nil {
+	newDispatcherRejected := workers < 1 || workers > MaxDispatchWorkers || queue < 0 || queue > MaxDispatchQueue ||
+		packetSize < 1 || packetSize > MaxDatagramSize
+	if !newDispatcherRejected {
+		newDispatcherRejected = handler == nil
+	}
+	if newDispatcherRejected {
 		return nil, ErrInvalidBatch
 	}
 	d := &Dispatcher{
@@ -85,8 +89,10 @@ func (d *Dispatcher) Dispatch(ctx context.Context, packet Datagram) error {
 		return ErrDispatcherClosed
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context.
+			Background()
 	}
+
 	select {
 	case <-d.done:
 		return ErrDispatcherClosed

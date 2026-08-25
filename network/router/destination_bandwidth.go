@@ -97,9 +97,11 @@ func (l *DestinationBandwidthLimiter) Wait(ctx context.Context, n uint64) error 
 		l.mu.Unlock()
 		return ErrDestinationBandwidth
 	}
-	if ctx == nil {
+	if ctx ==
+		nil {
 		ctx = context.Background()
 	}
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err

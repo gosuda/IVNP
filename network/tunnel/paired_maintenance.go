@@ -67,7 +67,11 @@ type PairedPoolMaintainer struct {
 }
 
 func NewPairedPoolMaintainer(config PairedPoolMaintainerConfig) (*PairedPoolMaintainer, error) {
-	if config.Pool == nil || config.Runtime == nil || config.Builder == nil || config.Builder.pool != config.Pool || config.Builder.runtime != config.Runtime || config.InboundSource == nil || config.OutboundSource == nil || config.Now == nil || config.InboundTarget < 1 || config.OutboundTarget < 1 || config.RenewBefore >= 10*60*1000 || config.InboundTarget+config.OutboundTarget > config.Pool.max {
+	newPairedPoolMaintainerRejected := config.Pool == nil || config.Runtime == nil || config.Builder == nil || config.Builder.pool != config.Pool || config.Builder.runtime != config.Runtime || config.InboundSource == nil || config.OutboundSource == nil || config.Now == nil || config.InboundTarget < 1 || config.OutboundTarget < 1 || config.RenewBefore >= 10*60*1000
+	if !newPairedPoolMaintainerRejected {
+		newPairedPoolMaintainerRejected = config.InboundTarget+config.OutboundTarget > config.Pool.max
+	}
+	if newPairedPoolMaintainerRejected {
 		return nil, ErrPairedMaintenanceConfig
 	}
 	lifecycle, cancel := context.WithCancel(context.Background())
@@ -91,6 +95,7 @@ func (m *PairedPoolMaintainer) Maintain(ctx context.Context) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(m.ctx, cancel)
 	defer func() {

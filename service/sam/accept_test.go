@@ -101,10 +101,21 @@ func TestStreamAcceptAttachmentsAreFIFO(t *testing.T) {
 	firstAttachment, firstReader := samDial(t, server.Addr().String())
 	defer firstAttachment.Close()
 	_, _ = io.WriteString(firstAttachment, "STREAM ACCEPT ID=fifo\n")
-	time.Sleep(10 * time.Millisecond)
+	waitForSAMCondition(t, time.Second, func() bool {
+		server.mu.RLock()
+		session := server.sessions["fifo"]
+		server.mu.RUnlock()
+		return session != nil && session.acceptAdmissions.Load() >= 1
+	}, "first FIFO accept request admission")
 	secondAttachment, secondReader := samDial(t, server.Addr().String())
 	defer secondAttachment.Close()
 	_, _ = io.WriteString(secondAttachment, "STREAM ACCEPT ID=fifo\n")
+	waitForSAMCondition(t, time.Second, func() bool {
+		server.mu.RLock()
+		session := server.sessions["fifo"]
+		server.mu.RUnlock()
+		return session != nil && session.acceptAdmissions.Load() >= 2
+	}, "second FIFO accept request admission")
 
 	firstSAM, firstPeer := net.Pipe()
 	secondSAM, secondPeer := net.Pipe()
@@ -147,8 +158,19 @@ func TestStreamAcceptDeadFirstAttachmentDoesNotConsumeInbound(t *testing.T) {
 
 	first, _ := samDial(t, server.Addr().String())
 	_, _ = io.WriteString(first, "STREAM ACCEPT ID=dead-first\n")
+	waitForSAMCondition(t, time.Second, func() bool {
+		server.mu.RLock()
+		session := server.sessions["dead-first"]
+		server.mu.RUnlock()
+		return session != nil && session.acceptAdmissions.Load() >= 1
+	}, "dead accept request admission")
 	_ = first.Close()
-	time.Sleep(150 * time.Millisecond)
+	waitForSAMCondition(t, time.Second, func() bool {
+		server.mu.RLock()
+		session := server.sessions["dead-first"]
+		server.mu.RUnlock()
+		return session != nil && session.acceptCancellations.Load() >= 1
+	}, "dead accept request cancellation")
 
 	second, secondReader := samDial(t, server.Addr().String())
 	defer second.Close()
@@ -161,5 +183,23 @@ func TestStreamAcceptDeadFirstAttachmentDoesNotConsumeInbound(t *testing.T) {
 	}
 	if line := readSAMLine(t, secondReader); line != "LIVE FROM_PORT=31 TO_PORT=41" {
 		t.Fatalf("second attachment = %q", line)
+	}
+}
+
+func waitForSAMCondition(t *testing.T, timeout time.Duration, condition func() bool, name string) {
+	t.Helper()
+	deadline := time.NewTimer(timeout)
+	ticker := time.NewTicker(time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
+	for {
+		if condition() {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal(name + " did not complete")
+		case <-ticker.C:
+		}
 	}
 }

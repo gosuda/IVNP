@@ -49,11 +49,15 @@ func TestDaemonEmbeddedSAMReadinessTimeoutDestroysOwnerGraph(t *testing.T) {
 	if err != nil || line != "SESSION STATUS RESULT=I2P_ERROR MESSAGE=SESSION_NOT_READY\n" {
 		t.Fatalf("session readiness timeout = %q, %v", line, err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for len(d.clientRuntimeSnapshot()) != before && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if len(d.clientRuntimeSnapshot()) != before {
-		t.Fatal("readiness timeout left the SAM destination graph registered")
+	deadline := time.NewTimer(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
+	for len(d.clientRuntimeSnapshot()) != before {
+		select {
+		case <-deadline.C:
+			t.Fatal("readiness timeout left the SAM destination graph registered")
+		case <-ticker.C:
+		}
 	}
 }

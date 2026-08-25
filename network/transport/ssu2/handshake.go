@@ -415,7 +415,7 @@ func (i *Initiator) BuildSessionConfirmedFragments(staticPrivate, payload []byte
 	}
 	packets := make([][]byte, 0, count)
 	offset := 0
-	for index := 0; index < count; index++ {
+	for index := range count {
 		n := maxFragment
 		if index == 0 {
 			n = firstFragment

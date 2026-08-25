@@ -618,7 +618,7 @@ func applyTransport(transport *Transport, section string, values map[entryKey]st
 		}
 		transport.Enabled = parsed
 	}
-	if err := applyEndpoint(&transport.Bind, section, "bind", values, true, true); err != nil {
+	if err := applyEndpoint(&transport.Bind, section, "bind", values, endpointOptions{allowUnspecified: true, allowZeroPort: true}); err != nil {
 		return err
 	}
 	if err := applyOptionalEndpoint(&transport.Advertised, section, "advertise", values); err != nil {
@@ -654,7 +654,11 @@ func applyNAT(nat *NAT, values map[entryKey]string) error {
 	}
 	if value, ok := valueOf(values, "nat", "upnp_endpoint"); ok {
 		endpoint, err := url.Parse(value)
-		if err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.Fragment != "" || endpoint.Scheme != "http" && endpoint.Scheme != "https" {
+		applyNATRejected := err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.Fragment != ""
+		if !applyNATRejected {
+			applyNATRejected = endpoint.Scheme != "http" && endpoint.Scheme != "https"
+		}
+		if applyNATRejected {
 			return invalid("nat", "upnp_endpoint")
 		}
 		nat.UPnPEndpoint = endpoint.String()
@@ -736,11 +740,11 @@ func applyListener(listener *Listener, section string, values map[entryKey]strin
 		}
 		listener.Enabled = parsed
 	}
-	if err := applyEndpoint(&listener.Address, section, "listen", values, false, false); err != nil {
+	if err := applyEndpoint(&listener.Address, section, "listen", values, endpointOptions{}); err != nil {
 		return err
 	}
 	if section == "sam" {
-		if err := applyEndpoint(&listener.UDPAddress, section, "udp", values, false, false); err != nil {
+		if err := applyEndpoint(&listener.UDPAddress, section, "udp", values, endpointOptions{}); err != nil {
 			return err
 		}
 	}
@@ -803,7 +807,11 @@ func applyListener(listener *Listener, section string, values map[entryKey]strin
 	if err != nil {
 		return invalid(section, "listen_host")
 	}
-	if (section == "http_proxy" || section == "socks5") && (!address.IsLoopback() || listener.BearerToken != "") {
+	applyListenerRejected := (section == "http_proxy" || section == "socks5")
+	if applyListenerRejected {
+		applyListenerRejected = (!address.IsLoopback() || listener.BearerToken != "")
+	}
+	if applyListenerRejected {
 		return invalid(section, "listen")
 	}
 	if !address.IsLoopback() && listener.BearerToken == "" {
@@ -927,7 +935,12 @@ func applyLog(operating *Operating, values map[entryKey]string) error {
 	return nil
 }
 
-func applyEndpoint(endpoint *Endpoint, section, prefix string, values map[entryKey]string, allowUnspecified, allowZeroPort bool) error {
+type endpointOptions struct {
+	allowUnspecified bool
+	allowZeroPort    bool
+}
+
+func applyEndpoint(endpoint *Endpoint, section, prefix string, values map[entryKey]string, options endpointOptions) error {
 	host, hostOK := valueOf(values, section, prefix+"_host")
 	port, portOK := valueOf(values, section, prefix+"_port")
 	if hostOK != portOK {
@@ -936,7 +949,7 @@ func applyEndpoint(endpoint *Endpoint, section, prefix string, values map[entryK
 	if !hostOK {
 		return nil
 	}
-	parsed, err := parseEndpoint(host, port, allowUnspecified, allowZeroPort)
+	parsed, err := parseEndpoint(host, port, options.allowUnspecified, options.allowZeroPort)
 	if err != nil {
 		return invalid(section, prefix+"_endpoint")
 	}
@@ -1008,9 +1021,13 @@ func parseReseedEndpoints(value string) ([]string, error) {
 	for _, part := range parts {
 		endpoint := strings.TrimSpace(part)
 		parsed, err := url.Parse(endpoint)
-		if len(endpoint) == 0 || len(endpoint) > maxReseedEndpointBytes || err != nil ||
+		parseReseedEndpointsRejected := len(endpoint) == 0 || len(endpoint) > maxReseedEndpointBytes || err != nil ||
 			parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil ||
-			parsed.RawQuery != "netid=2" || parsed.ForceQuery || parsed.Fragment != "" {
+			parsed.RawQuery != "netid=2" || parsed.ForceQuery
+		if !parseReseedEndpointsRejected {
+			parseReseedEndpointsRejected = parsed.Fragment != ""
+		}
+		if parseReseedEndpointsRejected {
 			return nil, errors.New("invalid endpoint")
 		}
 		endpoints = append(endpoints, endpoint)
@@ -1074,11 +1091,18 @@ func validBearerToken(value string) bool {
 		return false
 	}
 	for _, character := range value {
-		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune("-._~+/=", character)) {
+		if !validBearerTokenCharacter(character) {
 			return false
 		}
 	}
 	return true
+}
+
+func validBearerTokenCharacter(character rune) bool {
+	return (character >= 'a' && character <= 'z') ||
+		(character >= 'A' && character <= 'Z') ||
+		(character >= '0' && character <= '9') ||
+		strings.ContainsRune("-._~+/=", character)
 }
 
 func valueOf(values map[entryKey]string, section, key string) (string, bool) {

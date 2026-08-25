@@ -73,10 +73,7 @@ func (a *ACKTracker) merge(index int) {
 func (a *ACKTracker) RangesInto(dst []ACKRange) []ACKRange {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	n := cap(dst)
-	if n > a.count {
-		n = a.count
-	}
+	n := min(cap(dst), a.count)
 	dst = dst[:n]
 	copy(dst, a.ranges[:n])
 	return dst

@@ -1,5 +1,7 @@
 package netdb
 
+import "cmp"
+
 import (
 	"context"
 	"errors"
@@ -117,7 +119,11 @@ type LeaseSetPublisher struct {
 // NewLeaseSetPublisher validates and owns the publication configuration. Its
 // key slices are copied; the signing callback remains owned by its caller.
 func NewLeaseSetPublisher(config LeaseSetPublisherConfig) (*LeaseSetPublisher, error) {
-	if ((config.Local != nil) == (config.Local2 != nil) && config.Encrypted == nil) || (config.Encrypted != nil && (config.Local != nil || config.Local2 != nil)) || config.Database == nil || config.InboundLeases == nil || config.Sender == nil || (config.Encrypted == nil && config.Sign == nil) || config.Now == nil || config.Random == nil || config.FloodfillLimit < 1 {
+	newLeaseSetPublisherRejected := ((config.Local != nil) == (config.Local2 != nil) && config.Encrypted == nil) || (config.Encrypted != nil && (config.Local != nil || config.Local2 != nil)) || config.Database == nil || config.InboundLeases == nil || config.Sender == nil || (config.Encrypted == nil && config.Sign == nil) || config.Now == nil || config.Random == nil
+	if !newLeaseSetPublisherRejected {
+		newLeaseSetPublisherRejected = config.FloodfillLimit < 1
+	}
+	if newLeaseSetPublisherRejected {
 		return nil, ErrLeaseSetPublisherConfig
 	}
 	storeType := i2np.StoreLeaseSet
@@ -177,6 +183,7 @@ func (p *LeaseSetPublisher) Maintain(ctx context.Context) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -196,6 +203,7 @@ func (p *LeaseSetPublisher) Publish(ctx context.Context) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -339,14 +347,18 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 	if p.confirmed != nil {
 		return p.confirmed.maintain(ctx, force || discoveryChanged)
 	}
-	if !force && !discoveryChanged && !changed && (p.nextPublication == 0 || now < p.nextPublication) {
+	publishRejected := !force && !discoveryChanged && !changed
+	if publishRejected {
+		publishRejected = (p.nextPublication == 0 || now < p.nextPublication)
+	}
+	if publishRejected {
 		return 0, nil
 	}
 
 	messageID := p.random()
-	if messageID == 0 {
-		messageID = 1
-	}
+
+	messageID = cmp.Or(messageID, 1)
+
 	message := i2np.Message{
 		Header: i2np.Header{Type: i2np.DatabaseStore, ID: messageID, Expiration: saturatingAdd(now, leaseSetPublicationEnvelopeLifetime)},
 	}

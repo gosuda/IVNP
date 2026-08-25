@@ -68,8 +68,12 @@ func (c Client) limits() (archive int64, infos int, total int64) {
 }
 
 func validateEndpoint(endpoint *url.URL, allowHTTP bool) error {
-	if endpoint == nil || endpoint.Hostname() == "" || endpoint.User != nil ||
-		endpoint.Fragment != "" || endpoint.RawQuery != "netid=2" || endpoint.ForceQuery {
+	validateEndpointRejected := endpoint == nil || endpoint.Hostname() == "" || endpoint.User != nil ||
+		endpoint.Fragment != "" || endpoint.RawQuery != "netid=2"
+	if !validateEndpointRejected {
+		validateEndpointRejected = endpoint.ForceQuery
+	}
+	if validateEndpointRejected {
 		return ErrInvalidURL
 	}
 	if endpoint.Scheme == "https" {
@@ -104,7 +108,9 @@ func (c Client) httpClientFor(endpoint *url.URL) *http.Client {
 	base := c.HTTPClient
 	if base == nil {
 		base = http.DefaultClient
+
 	}
+
 	client := *base
 	previous := base.CheckRedirect
 	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
@@ -226,8 +232,10 @@ func (c Client) FetchInto(ctx context.Context, endpoint string, database *netdb.
 				}
 				info, parseErr := netdb.ParseRouterInfo(data)
 				if parseErr == nil {
-					parseErr = database.AdmitReseedRouterInfo(info, seenAt)
+					parseErr = database.AdmitReseedRouterInfo(info,
+						seenAt)
 				}
+
 				pool.Release(data)
 				results[index] = parseErr == nil
 			}
@@ -250,6 +258,56 @@ func (c Client) FetchInto(ctx context.Context, endpoint string, database *netdb.
 	return accepted, nil
 }
 
+type fetchResult struct {
+	index int
+	count int
+	err   error
+}
+
+type fetchAnyState struct {
+	client    Client
+	ctx       context.Context
+	endpoints []string
+	database  *netdb.Database
+	seenAt    uint64
+	results   chan fetchResult
+	failures  []error
+	next      int
+	active    int
+	limit     int
+}
+
+func (state *fetchAnyState) launch() {
+	index := state.next
+	state.next++
+	state.active++
+	go func() {
+		count, err := state.client.FetchInto(state.ctx, state.endpoints[index], state.database, state.seenAt)
+		state.results <- fetchResult{index: index, count: count, err: err}
+	}()
+}
+
+func (state *fetchAnyState) drain() {
+	for state.active != 0 {
+		<-state.results
+		state.active--
+	}
+}
+
+func (state *fetchAnyState) launchNext(timer *time.Timer, delay time.Duration) {
+	if state.next >= len(state.endpoints) || state.active >= state.limit {
+		return
+	}
+	state.launch()
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(delay)
+}
+
 // FetchAny hedges slow reseed endpoints while bounding active requests by the
 // current CPU budget and endpoint backpressure. The first success cancels the
 // remaining HTTP work.
@@ -257,72 +315,49 @@ func (c Client) FetchAny(ctx context.Context, endpoints []string, database *netd
 	if len(endpoints) == 0 {
 		return 0, ErrNoRouterInfos
 	}
-	type result struct {
-		index int
-		count int
-		err   error
-	}
 	child, cancel := context.WithCancel(ctx)
 	defer cancel()
-	results := make(chan result, len(endpoints))
-	activeLimit := parallelism.Workers(len(endpoints))
-	next, active := 0, 0
-	launch := func() {
-		index := next
-		next++
-		active++
-		go func() {
-			count, err := c.FetchInto(child, endpoints[index], database, seenAt)
-			results <- result{index: index, count: count, err: err}
-		}()
+	state := fetchAnyState{
+		client:    c,
+		ctx:       child,
+		endpoints: endpoints,
+		database:  database,
+		seenAt:    seenAt,
+		results:   make(chan fetchResult, len(endpoints)),
+		failures:  make([]error, len(endpoints)),
+		limit:     parallelism.Workers(len(endpoints)),
 	}
-	drain := func() {
-		for active != 0 {
-			<-results
-			active--
-		}
-	}
-	launch()
-	failures := make([]error, len(endpoints))
+	state.launch()
 	hedgeDelay := time.Second
 	if c.HTTPClient != nil && c.HTTPClient.Timeout > 0 {
 		hedgeDelay = max(time.Millisecond, c.HTTPClient.Timeout/time.Duration(len(endpoints)))
 	}
 	timer := time.NewTimer(hedgeDelay)
 	defer timer.Stop()
-	for active != 0 || next < len(endpoints) {
+	for state.active != 0 || state.next < len(endpoints) {
 		select {
-		case outcome := <-results:
-			active--
+		case outcome := <-state.results:
+			state.active--
 			if outcome.err == nil {
 				cancel()
-				drain()
+				state.drain()
 				return outcome.count, nil
 			}
-			failures[outcome.index] = outcome.err
-			if next < len(endpoints) && active < activeLimit {
-				launch()
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				timer.Reset(hedgeDelay)
-			}
+			state.failures[outcome.index] = outcome.err
+			state.launchNext(timer, hedgeDelay)
 		case <-timer.C:
-			if next < len(endpoints) && active < activeLimit {
-				launch()
+			if state.next < len(endpoints) && state.active < state.limit {
+				state.launch()
 			}
 			timer.Reset(hedgeDelay)
 		case <-ctx.Done():
 			cancel()
-			drain()
+			state.drain()
 			return 0, ctx.Err()
 		}
 	}
-	compacted := failures[:0]
-	for _, failure := range failures {
+	compacted := state.failures[:0]
+	for _, failure := range state.failures {
 		if failure != nil {
 			compacted = append(compacted, failure)
 		}
@@ -344,9 +379,11 @@ func readRouterInfo(file *zip.File) ([]byte, error) {
 	read, err := io.ReadFull(reader, data[:size])
 	if err != nil || read != size {
 		pool.Release(data)
-		if err == nil {
+		if err ==
+			nil {
 			err = io.ErrUnexpectedEOF
 		}
+
 		return nil, err
 	}
 	one, err := reader.Read(data[size:])
@@ -355,6 +392,7 @@ func readRouterInfo(file *zip.File) ([]byte, error) {
 		if err == nil {
 			err = ErrArchiveTooLarge
 		}
+
 		return nil, err
 	}
 	return data[:size], nil

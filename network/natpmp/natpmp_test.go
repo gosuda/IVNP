@@ -60,7 +60,11 @@ func TestMapAndUnmapWireRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Map: %v", err)
 	}
-	if mapping.Gateway != netip.MustParseAddr("127.0.0.1") || mapping.Protocol != TCP || mapping.InternalPort != 12345 || mapping.ExternalPort != 41000 || mapping.Lifetime != 90*time.Second || mapping.Epoch != 23 {
+	mapAndUnmapWireRequestsRejected := mapping.Gateway != netip.MustParseAddr("127.0.0.1") || mapping.Protocol != TCP || mapping.InternalPort != 12345 || mapping.ExternalPort != 41000 || mapping.Lifetime != 90*time.Second
+	if !mapAndUnmapWireRequestsRejected {
+		mapAndUnmapWireRequestsRejected = mapping.Epoch != 23
+	}
+	if mapAndUnmapWireRequestsRejected {
 		t.Fatalf("Mapping = %+v", mapping)
 	}
 	if got, want := mapping.ExpiresAt.Sub(mapping.CreatedAt), 90*time.Second; got != want {

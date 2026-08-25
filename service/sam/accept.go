@@ -24,6 +24,7 @@ func (s *samSession) acceptAttachment(ctx context.Context) (net.Conn, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	reservation := s.server.config.AcceptReservationBytes
 	if !s.reserve(reservation) {
 		return nil, errQueueBudget
@@ -50,6 +51,7 @@ func (s *samSession) acceptAttachment(ctx context.Context) (net.Conn, error) {
 	request := acceptRequest{ctx: ctx, result: make(chan acceptResult)}
 	select {
 	case s.acceptRequests <- request:
+		s.acceptAdmissions.Add(1)
 	case <-s.ctx.Done():
 		return nil, net.ErrClosed
 	case <-ctx.Done():
@@ -116,6 +118,7 @@ func (s *samSession) acceptLoop(listener net.Listener, incoming <-chan acceptRes
 	}()
 	for {
 		for len(pending) != 0 && pending[0].ctx.Err() != nil {
+			s.acceptCancellations.Add(1)
 			pending = pending[1:]
 		}
 		if haveHeld && held.err != nil {
@@ -131,6 +134,7 @@ func (s *samSession) acceptLoop(listener net.Listener, incoming <-chan acceptRes
 				haveHeld = false
 				held = acceptResult{}
 			case <-request.ctx.Done():
+				s.acceptCancellations.Add(1)
 				continue
 			case <-s.ctx.Done():
 				return
@@ -150,6 +154,9 @@ func (s *samSession) acceptLoop(listener net.Listener, incoming <-chan acceptRes
 		select {
 		case request := <-s.acceptRequests:
 			pending = append(pending, request)
+		case <-pending[0].ctx.Done():
+			s.acceptCancellations.Add(1)
+			pending = pending[1:]
 		case result, ok := <-incoming:
 			if !ok {
 				s.failPendingAcceptRequests(pending, net.ErrClosed)

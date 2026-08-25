@@ -77,7 +77,11 @@ func NewHTTPProxy(config HTTPProxyConfig) (*HTTPProxy, error) {
 	if config.DialTimeout == 0 {
 		config.DialTimeout = 2 * time.Minute
 	}
-	if config.MaxConnections < 1 || config.MaxHeaderBytes < 1024 || config.MaxRequestBytes < 1 || config.ReadHeaderTimeout < 1 || config.ReadTimeout < 1 || config.WriteTimeout < 1 || config.IdleTimeout < 1 || config.DialTimeout < 1 {
+	newHTTPProxyRejected := config.MaxConnections < 1 || config.MaxHeaderBytes < 1024 || config.MaxRequestBytes < 1 || config.ReadHeaderTimeout < 1 || config.ReadTimeout < 1 || config.WriteTimeout < 1 || config.IdleTimeout < 1
+	if !newHTTPProxyRejected {
+		newHTTPProxyRejected = config.DialTimeout < 1
+	}
+	if newHTTPProxyRejected {
 		return nil, fmt.Errorf("%w: proxy bounds", ErrInvalidConfig)
 	}
 	return &HTTPProxy{config: config}, nil
@@ -247,7 +251,7 @@ func (p *HTTPProxy) forwardRequest(w http.ResponseWriter, request *http.Request,
 }
 
 func removeHopByHopHeaders(header http.Header) {
-	for _, name := range strings.Split(header.Get("Connection"), ",") {
+	for name := range strings.SplitSeq(header.Get("Connection"), ",") {
 		if name = strings.TrimSpace(name); name != "" {
 			header.Del(name)
 		}

@@ -171,6 +171,7 @@ func (l *LocalRouterInfo) Publish(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -197,9 +198,11 @@ func (l *LocalRouterInfo) Publish(ctx context.Context) error {
 // and publishes the resulting signed RouterInfo. Callers cannot mutate the
 // local address snapshot directly, avoiding competing publication owners.
 func (l *LocalRouterInfo) UpdateSSU2Introducers(ctx context.Context, leases []SSU2Introducer) error {
-	if ctx == nil {
+	if ctx ==
+		nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -209,8 +212,11 @@ func (l *LocalRouterInfo) UpdateSSU2Introducers(ctx context.Context, leases []SS
 	}
 	sort.Slice(owned, func(left, right int) bool { return owned[left].RelayTag < owned[right].RelayTag })
 	for index, lease := range owned {
-		if lease.RelayTag == 0 || !lease.Expiration.After(l.clock.Now()) ||
-			(index > 0 && lease.RelayTag == owned[index-1].RelayTag) {
+		updateSSU2IntroducersRejected := lease.RelayTag == 0 || !lease.Expiration.After(l.clock.Now())
+		if !updateSSU2IntroducersRejected {
+			updateSSU2IntroducersRejected = (index > 0 && lease.RelayTag == owned[index-1].RelayTag)
+		}
+		if updateSSU2IntroducersRejected {
 			return ErrLocalRouterInfoOptions
 		}
 	}
@@ -227,8 +233,12 @@ func (l *LocalRouterInfo) UpdateSSU2Introducers(ctx context.Context, leases []SS
 			if len(option.Key) == 3 && option.Key[:2] == "ih" && option.Key[2] >= '0' && option.Key[2] <= '2' {
 				continue
 			}
-			if len(option.Key) == 5 && (option.Key[:4] == "itag" || option.Key[:4] == "iexp") &&
-				option.Key[4] >= '0' && option.Key[4] <= '2' {
+			updateSSU2IntroducersRejected := len(option.Key) == 5 && (option.Key[:4] == "itag" || option.Key[:4] == "iexp") &&
+				option.Key[4] >= '0'
+			if updateSSU2IntroducersRejected {
+				updateSSU2IntroducersRejected = option.Key[4] <= '2'
+			}
+			if updateSSU2IntroducersRejected {
 				continue
 			}
 			options = append(options, option)

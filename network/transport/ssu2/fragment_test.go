@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ecdh"
 	"crypto/rand"
+	"slices"
 	"testing"
 )
 
@@ -55,8 +56,8 @@ func TestSSU2SessionConfirmedFragmentsReassembleOutOfOrder(t *testing.T) {
 		t.Fatalf("BuildSessionConfirmedFragments = %d packets, %v", len(packets), err)
 	}
 	reassembly := NewConfirmedReassembler(responder)
-	for index := len(packets) - 1; index >= 0; index-- {
-		static, opened, complete, err := reassembly.Add(append([]byte(nil), packets[index]...))
+	for index, packet := range slices.Backward(packets) {
+		static, opened, complete, err := reassembly.Add(append([]byte(nil), packet...))
 		if err != nil {
 			t.Fatalf("fragment %d: %v", index, err)
 		}

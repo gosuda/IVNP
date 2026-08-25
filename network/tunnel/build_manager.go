@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync"
 
@@ -231,7 +232,11 @@ type BuildManagerConfig struct {
 }
 
 func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
-	if config.Runtime == nil || config.Sender == nil || config.ReplyKeys == nil || config.Now == nil || len(config.StaticPrivate) != 0 && len(config.StaticPrivate) != 32 || len(config.LegacyPrivate) != 0 && len(config.LegacyPrivate) != cryptx.ElGamalPrivateKeySize {
+	newBuildManagerRejected := config.Runtime == nil || config.Sender == nil || config.ReplyKeys == nil || config.Now == nil || len(config.StaticPrivate) != 0 && len(config.StaticPrivate) != 32
+	if !newBuildManagerRejected {
+		newBuildManagerRejected = len(config.LegacyPrivate) != 0 && len(config.LegacyPrivate) != cryptx.ElGamalPrivateKeySize
+	}
+	if newBuildManagerRejected {
 		return nil, ErrBuildConfig
 	}
 	if config.Random == nil {
@@ -340,8 +345,10 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		return 0, ErrBuildConfig
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context.
+			Background()
 	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(m.ctx, cancel)
 	defer func() {
@@ -352,14 +359,18 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		return 0, err
 	}
 	now := m.now()
-	if build.CircuitID == 0 || len(build.Hops) < 1 || len(build.Hops) > i2np.MaxVariableBuildRecords || build.ReplyRouter == (ivnp.Hash{}) || build.ReplyTunnelID == 0 || build.Hops[len(build.Hops)-1].Router == build.ReplyRouter || build.ExpiresAt <= now {
+	startOutboundRejected := build.CircuitID == 0 || len(build.Hops) < 1 || len(build.Hops) > i2np.MaxVariableBuildRecords || build.ReplyRouter == (ivnp.Hash{}) || build.ReplyTunnelID == 0 || build.Hops[len(build.Hops)-1].Router == build.ReplyRouter
+	if !startOutboundRejected {
+		startOutboundRejected = build.ExpiresAt <= now
+	}
+	if startOutboundRejected {
 		return 0, ErrBuildConfig
 	}
 	for index, hop := range build.Hops {
 		if hop.ReceiveTunnelID == 0 || hop.Router == (ivnp.Hash{}) || hop.StaticKey == ([32]byte{}) || !validShortBuildOptions(hop.Options, false) || !m.validHopStaticKey(hop) {
 			return 0, ErrBuildConfig
 		}
-		for previous := 0; previous < index; previous++ {
+		for previous := range index {
 			if build.Hops[previous].Router == hop.Router || build.Hops[previous].ReceiveTunnelID == hop.ReceiveTunnelID {
 				return 0, ErrBuildConfig
 			}
@@ -402,7 +413,11 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 			NextMessageID:   messageIDs[index+1],
 		}
 		var plaintext [ShortBuildRequestPlainSize]byte
-		options := marshalShortBuildOptions(hop.Options)
+		options, optionsErr := marshalShortBuildOptions(hop.Options)
+		if optionsErr != nil {
+			clearBuildKeys(keys)
+			return 0, optionsErr
+		}
 		if err = marshalShortBuildRequest(plaintext[:], request, options, m.random); err != nil {
 			clearBuildKeys(keys)
 			return 0, err
@@ -493,6 +508,7 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(m.ctx, cancel)
 	defer func() {
@@ -512,7 +528,11 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 	if build.OutboundTunnelID != 0 && carrierEndpoint == (ivnp.Hash{}) {
 		return 0, ErrBuildConfig
 	}
-	if build.CircuitID == 0 || build.CircuitID == build.OutboundTunnelID || m.local == (ivnp.Hash{}) || m.localDelivery == nil || build.ExpiresAt <= now || len(build.Hops) < 1 || len(build.Hops) >= i2np.MaxVariableBuildRecords {
+	startInboundRejected := build.CircuitID == 0 || build.CircuitID == build.OutboundTunnelID || m.local == (ivnp.Hash{}) || m.localDelivery == nil || build.ExpiresAt <= now || len(build.Hops) < 1
+	if !startInboundRejected {
+		startInboundRejected = len(build.Hops) >= i2np.MaxVariableBuildRecords
+	}
+	if startInboundRejected {
 		return 0, ErrBuildConfig
 	}
 	if err := validateShortBuildHops(build.Hops); err != nil {
@@ -590,7 +610,11 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 			NextMessageID:   messageIDs[index+1],
 		}
 		var plaintext [ShortBuildRequestPlainSize]byte
-		options := marshalShortBuildOptions(hop.Options)
+		options, optionsErr := marshalShortBuildOptions(hop.Options)
+		if optionsErr != nil {
+			clearBuildKeys(keys)
+			return 0, optionsErr
+		}
 		if err = marshalShortBuildRequest(plaintext[:], request, options, m.random); err != nil {
 			clearBuildKeys(keys)
 			return 0, err
@@ -949,11 +973,18 @@ func (m *BuildManager) handleTransit(source BuildSource, message i2np.Message) e
 func (m *BuildManager) validTransitRequest(request ShortBuildRequest, keys ShortBuildKeys, now uint64, source BuildSource) bool {
 	requestTime := uint64(request.RequestMinutes) * 60_000
 	roundedNow := now - now%60_000
-	if !source.Direct || source.Router == (ivnp.Hash{}) || source.Router == m.local ||
-		!request.Gateway && !request.Endpoint && request.NextRouter == source.Router {
+	validTransitRequestRejected := !source.Direct || source.Router == (ivnp.Hash{}) || source.Router == m.local
+	if !validTransitRequestRejected {
+		validTransitRequestRejected = !request.Gateway && !request.Endpoint && request.NextRouter == source.Router
+	}
+	if validTransitRequestRejected {
 		return false
 	}
-	if request.LifetimeSeconds != shortBuildLifetime || request.ReceiveTunnelID == 0 || request.NextTunnelID == 0 || request.NextMessageID == 0 || request.NextRouter == (ivnp.Hash{}) || !request.Endpoint && request.NextRouter == m.local || request.ReceiveTunnelID == request.NextTunnelID {
+	validTransitRequestRejected = request.LifetimeSeconds != shortBuildLifetime || request.ReceiveTunnelID == 0 || request.NextTunnelID == 0 || request.NextMessageID == 0 || request.NextRouter == (ivnp.Hash{}) || !request.Endpoint && request.NextRouter == m.local
+	if !validTransitRequestRejected {
+		validTransitRequestRejected = request.ReceiveTunnelID == request.NextTunnelID
+	}
+	if validTransitRequestRejected {
 		return false
 	}
 	if requestTime > roundedNow+shortBuildFutureSkew || requestTime+shortBuildPastSkew < roundedNow {
@@ -1279,7 +1310,7 @@ func (m *BuildManager) randomPositions(hops, slots int) ([]uint8, error) {
 }
 
 func (m *BuildManager) uniqueMessageID(existing []uint32) (uint32, error) {
-	for attempts := 0; attempts < 16; attempts++ {
+	for range 16 {
 		id, err := randomUint32(m.random)
 		if err != nil {
 			return 0, err
@@ -1287,13 +1318,7 @@ func (m *BuildManager) uniqueMessageID(existing []uint32) (uint32, error) {
 		if id == 0 {
 			continue
 		}
-		unique := true
-		for _, other := range existing {
-			if id == other {
-				unique = false
-				break
-			}
-		}
+		unique := !slices.Contains(existing, id)
 		if unique {
 			return id, nil
 		}
@@ -1322,9 +1347,9 @@ func validShortBuildOptions(options ShortBuildOptions, gateway bool) bool {
 	return options.Minimum == 0 || options.Limit == 0 || options.Minimum <= options.Limit
 }
 
-func marshalShortBuildOptions(options ShortBuildOptions) []byte {
+func marshalShortBuildOptions(options ShortBuildOptions) ([]byte, error) {
 	if options == (ShortBuildOptions{}) {
-		return nil
+		return nil, nil
 	}
 	entries := make([]ivnp.MappingEntry, 0, 3)
 	if options.Limit != 0 {
@@ -1338,13 +1363,13 @@ func marshalShortBuildOptions(options ShortBuildOptions) []byte {
 	}
 	size, err := ivnp.MappingEncodedLen(entries)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	wire := make([]byte, size)
 	if _, err = ivnp.MarshalMappingTo(wire, entries); err != nil {
-		return nil
+		return nil, err
 	}
-	return wire
+	return wire, nil
 }
 
 func parseShortBuildOptions(mapping ivnp.Mapping, gateway bool) (ShortBuildOptions, bool) {
@@ -1403,7 +1428,7 @@ func validateShortBuildHops(hops []ShortBuildHop) error {
 		if hop.ReceiveTunnelID == 0 || hop.Router == (ivnp.Hash{}) || hop.StaticKey == ([32]byte{}) {
 			return ErrBuildConfig
 		}
-		for previous := 0; previous < index; previous++ {
+		for previous := range index {
 			if hops[previous].Router == hop.Router || hops[previous].ReceiveTunnelID == hop.ReceiveTunnelID {
 				return ErrBuildConfig
 			}

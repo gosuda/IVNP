@@ -361,7 +361,7 @@ func TestStreamingSignatureParsesJavaOptionOrder(t *testing.T) {
 		Flags:           FlagSynchronize | FlagNoACK | FlagDelayRequested,
 		Options:         []byte{0, 5},
 	}
-	wire, err := client.signedControl(packet, true, true)
+	wire, err := client.signedControl(packet, controlOptions{includeFrom: true, includeMax: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestTunnelNetworkRejectsTamperedSynchronize(t *testing.T) {
 		NACKs:           server.localHash[:],
 		Flags:           FlagSynchronize | FlagNoACK,
 	}
-	wire, err := client.signedControl(packet, true, true)
+	wire, err := client.signedControl(packet, controlOptions{includeFrom: true, includeMax: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -184,9 +185,7 @@ func (s *Service) fetchSubscription(parent context.Context, client *http.Client,
 
 func cloneEntries(source map[string]string) map[string]string {
 	cloned := make(map[string]string, len(source))
-	for key, value := range source {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, source)
 	return cloned
 }
 

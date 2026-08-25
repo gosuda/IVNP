@@ -24,7 +24,7 @@ func TestReceiveExistingConsumesTagAndDecrypts(t *testing.T) {
 	ciphertext := make([]byte, len(plaintext))
 	previous := iv[:16]
 	for offset := 0; offset < len(plaintext); offset += aes.BlockSize {
-		for i := 0; i < aes.BlockSize; i++ {
+		for i := range aes.BlockSize {
 			ciphertext[offset+i] = plaintext[offset+i] ^ previous[i]
 		}
 		block.Encrypt(ciphertext[offset:offset+aes.BlockSize], ciphertext[offset:offset+aes.BlockSize])

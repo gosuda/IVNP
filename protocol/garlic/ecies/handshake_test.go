@@ -164,7 +164,11 @@ func TestECIESHandshakeRejectsRemovedType5AndReleases(t *testing.T) {
 	}
 	initiator.ReleaseSensitive()
 	initiator.ReleaseSensitive()
-	if !initiator.closed || initiator.state != nil || initiator.static != nil || initiator.remoteStatic != nil || initiator.ephemeral != nil || initiator.ephemeralEnc != ([32]byte{}) {
+	eCIESHandshakeRejectsRemovedType5AndReleasesRejected := !initiator.closed || initiator.state != nil || initiator.static != nil || initiator.remoteStatic != nil || initiator.ephemeral != nil
+	if !eCIESHandshakeRejectsRemovedType5AndReleasesRejected {
+		eCIESHandshakeRejectsRemovedType5AndReleasesRejected = initiator.ephemeralEnc != ([32]byte{})
+	}
+	if eCIESHandshakeRejectsRemovedType5AndReleasesRejected {
 		t.Fatal("initiator retained handshake state after release")
 	}
 	responder, err := NewResponder(bob.Bytes(), 4)

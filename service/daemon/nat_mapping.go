@@ -1,5 +1,7 @@
 package daemon
 
+import "cmp"
+
 import (
 	"context"
 	"encoding/binary"
@@ -308,9 +310,11 @@ func (p *natMappingPublisher) attemptNATPMP(ctx context.Context, spec natMapping
 		p.mu.Unlock()
 		return mapping, nil
 	}
-	if result == nil {
+	if result ==
+		nil {
 		result = errors.New("daemon: NAT-PMP gateway did not respond")
 	}
+
 	return nil, result
 }
 
@@ -350,9 +354,9 @@ func (p *natMappingPublisher) attemptUPnP(ctx context.Context, spec natMappingSp
 	if !boundAccepts(spec.boundAddress, internalIP) {
 		return nil, errors.New("daemon: transport listener does not accept the UPnP internal address")
 	}
-	if externalPort == 0 {
-		externalPort = spec.internalPort
-	}
+
+	externalPort = cmp.Or(externalPort, spec.internalPort)
+
 	mapping := upnp.PortMapping{ExternalPort: externalPort, Protocol: spec.protocol, InternalPort: spec.internalPort, InternalClient: internalIP.String(), Enabled: true, Description: "ivnp " + strings.ToLower(spec.transport), LeaseDuration: uint32(natRequestedLifetime / time.Second)}
 	if err = p.upnp.AddPortMapping(ctx, gateway, mapping); err != nil {
 		return nil, err
@@ -457,10 +461,7 @@ func (p *natMappingPublisher) maintain(ctx context.Context, spec natMappingSpec,
 				current = nil
 				break
 			}
-			retry := remaining / 2
-			if retry > 5*time.Second {
-				retry = 5 * time.Second
-			}
+			retry := min(remaining/2, 5*time.Second)
 			if retry <= 0 || !p.wait(ctx, retry) {
 				return
 			}

@@ -1,5 +1,7 @@
 package daemon
 
+import "cmp"
+
 import (
 	"context"
 	"errors"
@@ -62,9 +64,9 @@ func (f *fakeNATPMPClient) Map(_ context.Context, request natpmp.MappingRequest)
 		return natpmp.Mapping{}, f.mapErr
 	}
 	external := f.external
-	if external == 0 {
-		external = request.ExternalPort
-	}
+
+	external = cmp.Or(external, request.ExternalPort)
+
 	return natpmp.Mapping{Gateway: f.gateway, Protocol: request.Protocol, InternalPort: request.InternalPort, ExternalPort: external, Lifetime: f.lifetime}, nil
 }
 
@@ -180,7 +182,7 @@ func TestDaemonRemainsRunningWhenInitialMappingFailsAndRetries(t *testing.T) {
 			t.Fatalf("NAT-PMP attempt %d was not observed", want)
 		}
 	}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		select {
 		case delay := <-waited:
 			if delay != 30*time.Second {

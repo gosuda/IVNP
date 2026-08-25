@@ -92,7 +92,11 @@ type VariableBuildHop struct {
 // historical local-router-hash field is required on the wire even though a
 // transit hop does not consume it.
 func MarshalElGamalBuildRequest(dst []byte, request VariableBuildRequest, local ivnp.Hash, random io.Reader) error {
-	if len(dst) < LegacyBuildRequestPlainSize || random == nil || !validVariableRequest(request) || request.Gateway && request.Endpoint {
+	marshalElGamalBuildRequestRejected := len(dst) < LegacyBuildRequestPlainSize || random == nil || !validVariableRequest(request)
+	if !marshalElGamalBuildRequestRejected {
+		marshalElGamalBuildRequestRejected = request.Gateway && request.Endpoint
+	}
+	if marshalElGamalBuildRequestRejected {
 		return ErrLegacyBuildRecord
 	}
 	clear(dst[:LegacyBuildRequestPlainSize])
@@ -116,7 +120,11 @@ func MarshalElGamalBuildRequest(dst []byte, request VariableBuildRequest, local 
 
 // MarshalLongECIESBuildRequest encodes the exact 464-byte Noise-N request.
 func MarshalLongECIESBuildRequest(dst []byte, request VariableBuildRequest) error {
-	if len(dst) < LongBuildRequestPlainSize || !validVariableRequest(request) || request.Gateway && request.Endpoint || request.LifetimeSeconds != legacyBuildLifetimeSeconds {
+	marshalLongECIESBuildRequestRejected := len(dst) < LongBuildRequestPlainSize || !validVariableRequest(request) || request.Gateway && request.Endpoint
+	if !marshalLongECIESBuildRequestRejected {
+		marshalLongECIESBuildRequestRejected = request.LifetimeSeconds != legacyBuildLifetimeSeconds
+	}
+	if marshalLongECIESBuildRequestRejected {
 		return ErrLegacyBuildRecord
 	}
 	clear(dst[:LongBuildRequestPlainSize])
@@ -176,7 +184,11 @@ func ParseLongECIESBuildRequest(plaintext []byte) (VariableBuildRequest, error) 
 	copy(request.IVKey[:], plaintext[72:104])
 	copy(request.ReplyKey[:], plaintext[104:136])
 	copy(request.ReplyIV[:], plaintext[136:152])
-	if !setVariableFlags(&request, plaintext[152]) || plaintext[153] != 0 || plaintext[154] != 0 || plaintext[155] != 0 || !validVariableRequest(request) || request.LifetimeSeconds != legacyBuildLifetimeSeconds {
+	parseLongECIESBuildRequestRejected := !setVariableFlags(&request, plaintext[152]) || plaintext[153] != 0 || plaintext[154] != 0 || plaintext[155] != 0 || !validVariableRequest(request)
+	if !parseLongECIESBuildRequestRejected {
+		parseLongECIESBuildRequestRejected = request.LifetimeSeconds != legacyBuildLifetimeSeconds
+	}
+	if parseLongECIESBuildRequestRejected {
 		return VariableBuildRequest{}, ErrLegacyBuildRecord
 	}
 	mapping, used, err := ivnp.ParseMapping(plaintext[168:])
@@ -334,7 +346,7 @@ func ProcessVariableBuildRecords(records, plaintextDst []byte, local ivnp.Hash, 
 		return VariableBuildRequest{}, keys, 0, ErrLegacyBuildRecord
 	}
 	found := -1
-	for index := 0; index < count; index++ {
+	for index := range count {
 		record := records[index*VariableBuildRecordSize : (index+1)*VariableBuildRecordSize]
 		if subtle.ConstantTimeCompare(record[:legacyBuildPeerSize], local[:legacyBuildPeerSize]) == 1 {
 			if found >= 0 {
@@ -383,7 +395,7 @@ func ProcessVariableBuildRecords(records, plaintextDst []byte, local ivnp.Hash, 
 		clear(plaintextDst[:LongBuildRequestPlainSize])
 		return VariableBuildRequest{}, keys, 0, err
 	}
-	for index := 0; index < count; index++ {
+	for index := range count {
 		if index != found {
 			other := records[index*VariableBuildRecordSize : (index+1)*VariableBuildRecordSize]
 			cbcVariableEncrypt(other, other, keys.ReplyKey, keys.ReplyIV)
@@ -444,7 +456,11 @@ func OpenVariableBuildReplies(replies []byte, keys []VariableBuildKeys, position
 }
 
 func sealVariableBuildReply(record []byte, keys VariableBuildKeys, random io.Reader, code byte) error {
-	if len(record) != VariableBuildRecordSize || random == nil || (code != 0 && code != 30) {
+	sealVariableBuildReplyRejected := len(record) != VariableBuildRecordSize || random == nil
+	if !sealVariableBuildReplyRejected {
+		sealVariableBuildReplyRejected = (code != 0 && code != 30)
+	}
+	if sealVariableBuildReplyRejected {
 		return ErrLegacyBuildRecord
 	}
 	switch keys.Kind {

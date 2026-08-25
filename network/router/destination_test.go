@@ -127,9 +127,13 @@ func TestDestinationSessionDeliversSelfMessagesLocally(t *testing.T) {
 			if receiveErr != nil {
 				t.Fatalf("protocol %d self message %d receive: %v", protocol, sequence, receiveErr)
 			}
-			if message.Delivery.From != session.Hash() || message.Delivery.To != session.Hash() ||
+			destinationSessionDeliversSelfMessagesLocallyRejected := message.Delivery.From != session.Hash() || message.Delivery.To != session.Hash() ||
 				message.Delivery.Protocol != protocol || message.Delivery.FromPort != 3333 ||
-				message.Delivery.ToPort != route.ToPort || string(message.Delivery.Payload) != string(payload) {
+				message.Delivery.ToPort != route.ToPort
+			if !destinationSessionDeliversSelfMessagesLocallyRejected {
+				destinationSessionDeliversSelfMessagesLocallyRejected = string(message.Delivery.Payload) != string(payload)
+			}
+			if destinationSessionDeliversSelfMessagesLocallyRejected {
 				t.Fatalf("protocol %d self message %d = %#v", protocol, sequence, message.Delivery)
 			}
 			message.Release()

@@ -220,23 +220,28 @@ func (s *Store) LoadOrCreate() (Bundle, error) {
 	if err := s.validConfig(); err != nil {
 		return Bundle{}, err
 	}
-	if file, err := s.openPrivateFile(s.StatePath); err == nil {
+	file, err := s.openPrivateFile(s.StatePath)
+	if err == nil {
 		file.Close()
-		if key, keyErr := s.openPrivateFile(s.MasterKeyPath); keyErr == nil {
-			key.Close()
-		} else if errors.Is(keyErr, os.ErrNotExist) {
-			return Bundle{}, ErrInvalidState
-		} else {
+		key, keyErr := s.openPrivateFile(s.MasterKeyPath)
+		if keyErr != nil {
+			if errors.Is(keyErr, os.ErrNotExist) {
+				return Bundle{}, ErrInvalidState
+			}
 			return Bundle{}, keyErr
 		}
+		key.Close()
 		return s.load()
-	} else if !errors.Is(err, os.ErrNotExist) {
+	}
+	if !errors.Is(err, os.ErrNotExist) {
 		return Bundle{}, err
 	}
-	if key, err := s.openPrivateFile(s.MasterKeyPath); err == nil {
+	key, err := s.openPrivateFile(s.MasterKeyPath)
+	if err == nil {
 		key.Close()
 		return Bundle{}, ErrInvalidState
-	} else if !errors.Is(err, os.ErrNotExist) {
+	}
+	if !errors.Is(err, os.ErrNotExist) {
 		return Bundle{}, err
 	}
 
@@ -390,11 +395,15 @@ func (s *Store) loadOrCreateMasterKey() ([]byte, error) {
 	if err == nil {
 		statErr := file.Chmod(0o600)
 		info, infoErr := file.Stat()
-		if statErr == nil {
+		if statErr ==
+
+			nil {
 			statErr = infoErr
 		}
-		if statErr == nil {
+		if statErr ==
+			nil {
 			statErr = validatePrivateFile(info)
+
 		}
 		written, writeErr := 0, statErr
 		if writeErr == nil {
@@ -403,14 +412,18 @@ func (s *Store) loadOrCreateMasterKey() ([]byte, error) {
 		if writeErr == nil && written != len(key) {
 			writeErr = io.ErrShortWrite
 		}
+
 		if writeErr == nil {
-			writeErr = file.Sync()
+			writeErr = file.
+				Sync()
 		}
 		if closeErr := file.Close(); writeErr == nil {
 			writeErr = closeErr
 		}
+
 		if writeErr == nil {
-			writeErr = fsstore.SyncDir(dir)
+			writeErr = fsstore.
+				SyncDir(dir)
 		}
 		if writeErr != nil {
 			_ = os.Remove(s.MasterKeyPath)
@@ -636,7 +649,11 @@ func (s *Store) decodeBundle(data []byte) (Bundle, error) {
 			mode := data[0]
 			count := int(binary.BigEndian.Uint16(data[1:3]))
 			data = data[3:]
-			if (mode != 1 && mode != 2) || count > s.maxDestinations() || len(data) < 32*count {
+			decodeBundleRejected := (mode != 1 && mode != 2) || count > s.maxDestinations()
+			if !decodeBundleRejected {
+				decodeBundleRejected = len(data) < 32*count
+			}
+			if decodeBundleRejected {
 				return Bundle{}, ErrInvalidState
 			}
 			clients := make([][32]byte, count)
@@ -716,7 +733,11 @@ func (s *Store) decodeBundle(data []byte) (Bundle, error) {
 			data = data[nameLen:]
 			count := int(binary.BigEndian.Uint16(data[:2]))
 			data = data[2:]
-			if !utf8.ValidString(name) || (bundle.Destinations[name].Destination == nil && bundle.DestinationPrivate[name] == nil) || count == 0 || count > s.maxDestinations() {
+			decodeBundleRejected := !utf8.ValidString(name) || (bundle.Destinations[name].Destination == nil && bundle.DestinationPrivate[name] == nil) || count == 0
+			if !decodeBundleRejected {
+				decodeBundleRejected = count > s.maxDestinations()
+			}
+			if decodeBundleRejected {
 				return Bundle{}, ErrInvalidState
 			}
 			policies := make([]RemoteELSAuthorization, count)
@@ -812,10 +833,13 @@ func (s *Store) validateBundle(bundle Bundle) error {
 	}
 	for name, policy := range bundle.EncryptedLeaseSetPolicies {
 		clientCount := len(policy.DHClients) + len(policy.PSKClients)
-		if (bundle.Destinations[name].Destination == nil && bundle.DestinationPrivate[name] == nil) ||
+		validateBundleRejected := (bundle.Destinations[name].Destination == nil && bundle.DestinationPrivate[name] == nil) ||
 			len(policy.Secret) > 0xffff || len(policy.DHClients) > 0xffff || len(policy.PSKClients) > 0xffff ||
-			(len(policy.DHClients) != 0 && len(policy.PSKClients) != 0) ||
-			1+32+2+40*clientCount+33 >= 1<<16 {
+			(len(policy.DHClients) != 0 && len(policy.PSKClients) != 0)
+		if !validateBundleRejected {
+			validateBundleRejected = 1+32+2+40*clientCount+33 >= 1<<16
+		}
+		if validateBundleRejected {
 			return ErrInvalidBundle
 		}
 	}
@@ -824,7 +848,11 @@ func (s *Store) validateBundle(bundle Bundle) error {
 	}
 	var zero [32]byte
 	for name, policies := range bundle.DestinationAddressPolicies {
-		if (bundle.Destinations[name].Destination == nil && bundle.DestinationPrivate[name] == nil) || len(policies) == 0 || len(policies) > s.maxDestinations() {
+		validateBundleRejected := (bundle.Destinations[name].Destination == nil && bundle.DestinationPrivate[name] == nil) || len(policies) == 0
+		if !validateBundleRejected {
+			validateBundleRejected = len(policies) > s.maxDestinations()
+		}
+		if validateBundleRejected {
 			return ErrInvalidBundle
 		}
 		seen := make(map[ivnp.Hash]struct{}, len(policies))
@@ -936,8 +964,12 @@ func validateRouterAddress(address ivnp.LocalRouterAddress) error {
 		return ErrInvalidBundle
 	}
 	identity, consumed, err := ivnp.ParseIdentity(address.RouterIdentity)
-	if err != nil || consumed != len(address.RouterIdentity) || !bytes.Equal(address.RouterIdentity, identity.Bytes()) ||
-		identity.Certificate().Type != ivnp.CertificateKey || identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519 || identity.CryptoKeyType() != ivnp.CryptoX25519 {
+	validateRouterAddressRejected := err != nil || consumed != len(address.RouterIdentity) || !bytes.Equal(address.RouterIdentity, identity.Bytes()) ||
+		identity.Certificate().Type != ivnp.CertificateKey || identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519
+	if !validateRouterAddressRejected {
+		validateRouterAddressRejected = identity.CryptoKeyType() != ivnp.CryptoX25519
+	}
+	if validateRouterAddressRejected {
 		return ErrInvalidBundle
 	}
 	if address.Hash != identity.Hash() || len(address.SigningPublic) != ed25519.PublicKeySize || len(address.SigningPrivate) != ed25519.PrivateKeySize {
@@ -1031,7 +1063,11 @@ func generateBundle() (Bundle, error) {
 }
 
 func (s *Store) validConfig() error {
-	if s.StatePath == "" || s.MasterKeyPath == "" || filepath.Clean(s.StatePath) == filepath.Clean(s.MasterKeyPath) || s.MaxStateBytes < 0 || s.MaxDestinations < 0 || s.MaxNameBytes < 0 {
+	validConfigRejected := s.StatePath == "" || s.MasterKeyPath == "" || filepath.Clean(s.StatePath) == filepath.Clean(s.MasterKeyPath) || s.MaxStateBytes < 0 || s.MaxDestinations < 0
+	if !validConfigRejected {
+		validConfigRejected = s.MaxNameBytes < 0
+	}
+	if validConfigRejected {
 		return ErrStoreConfig
 	}
 	if s.maxStateBytes() < headerSize+aes.BlockSize || s.maxDestinations() > 1<<16-1 || s.maxNameBytes() > 255 {

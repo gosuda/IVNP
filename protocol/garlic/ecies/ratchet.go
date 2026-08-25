@@ -176,7 +176,7 @@ func NewRatchetManager(local *ivnp.LocalDestination, config RatchetConfig) (*Rat
 		if cryptoType != 4 && cryptoType != 6 && cryptoType != 7 {
 			return nil, ErrRatchet
 		}
-		for j := 0; j < i; j++ {
+		for j := range i {
 			if cryptoTypes[j] == cryptoType {
 				return nil, ErrRatchet
 			}
@@ -338,7 +338,11 @@ func (m *RatchetManager) encryptLocked(dst, scratch []byte, peer ivnp.Hash, remo
 }
 
 func (m *RatchetManager) encryptNewLocked(dst []byte, peer ivnp.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
-	if len(remotePublic) != 32 || (cryptoType != 4 && cryptoType != 6 && cryptoType != 7) {
+	encryptNewLockedRejected := len(remotePublic) != 32
+	if !encryptNewLockedRejected {
+		encryptNewLockedRejected = (cryptoType != 4 && cryptoType != 6 && cryptoType != 7)
+	}
+	if encryptNewLockedRejected {
 		return nil, ErrRatchet
 	}
 	initiator, err := NewInitiator(m.private[:], remotePublic, cryptoType, true)
@@ -380,7 +384,11 @@ func (m *RatchetManager) EncryptUnbound(dst []byte, remotePublic []byte, cryptoT
 	if err := m.checkLocked(now); err != nil {
 		return nil, err
 	}
-	if len(remotePublic) != 32 || (cryptoType != 4 && cryptoType != 6 && cryptoType != 7) {
+	encryptUnboundRejected := len(remotePublic) != 32
+	if !encryptUnboundRejected {
+		encryptUnboundRejected = (cryptoType != 4 && cryptoType != 6 && cryptoType != 7)
+	}
+	if encryptUnboundRejected {
 		return nil, ErrRatchet
 	}
 	initiator, err := NewInitiator(m.private[:], remotePublic, cryptoType, false)
@@ -656,9 +664,12 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 		parseErr = err
 	}
 	if responder == nil {
-		if parseErr == nil {
+		if parseErr ==
+			nil {
 			parseErr = ErrRatchet
+
 		}
+
 		return RatchetResult{}, parseErr
 	}
 	defer responder.ReleaseSensitive()
@@ -788,7 +799,11 @@ func (m *RatchetManager) consumeNextKeyLocked(current *tagSet, data []byte, now 
 		return ErrRatchet
 	}
 	flags, keyID := data[0], binary.BigEndian.Uint16(data[1:3])
-	if flags&^byte(7) != 0 || keyID > 32767 || (flags&1 == 0 && len(data) != 3) || (flags&1 != 0 && len(data) != 35) {
+	consumeNextKeyLockedRejected := flags&^byte(7) != 0 || keyID > 32767 || (flags&1 == 0 && len(data) != 3)
+	if !consumeNextKeyLockedRejected {
+		consumeNextKeyLockedRejected = (flags&1 != 0 && len(data) != 35)
+	}
+	if consumeNextKeyLockedRejected {
 		return ErrRatchet
 	}
 	s := sessionForSet(current, m.sessions)
@@ -1061,13 +1076,20 @@ func (m *RatchetManager) checkLocked(now uint64) error {
 func (m *RatchetManager) expireOldTagsLocked(s *session, now uint64) {
 	var expired map[*tagSet]struct{}
 	for tag, entry := range m.inbound {
-		if entry.set.owner == s && (entry.set.expires < now || entry.set.oldUntil != 0 && entry.set.oldUntil < now) {
+		expireOldTagsLockedSelected := entry.set.owner == s
+		if expireOldTagsLockedSelected {
+			expireOldTagsLockedSelected = (entry.set.expires < now || entry.set.oldUntil != 0 && entry.set.oldUntil < now)
+		}
+		if expireOldTagsLockedSelected {
 			clear(entry.key[:])
 			delete(m.inbound, tag)
 			if entry.set != s.inbound {
-				if expired == nil {
+				if expired ==
+
+					nil {
 					expired = make(map[*tagSet]struct{})
 				}
+
 				expired[entry.set] = struct{}{}
 			}
 		}

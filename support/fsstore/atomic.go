@@ -29,9 +29,11 @@ func WriteAtomic(path string, data []byte, mode os.FileMode, max int) error {
 	if err = file.Chmod(mode); err == nil {
 		_, err = file.Write(data)
 	}
-	if err == nil {
+	if err ==
+		nil {
 		err = file.Sync()
 	}
+
 	if closeErr := file.Close(); err == nil {
 		err = closeErr
 	}

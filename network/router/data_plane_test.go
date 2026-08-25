@@ -73,18 +73,26 @@ func TestRatchetGarlicClovesMatchI2PDCompactBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cloves) != 2 || cloves[0].Delivery.Type != garlic.DeliveryLocal ||
+	ratchetGarlicClovesMatchI2PDCompactBlocksRejected := len(cloves) != 2 || cloves[0].Delivery.Type != garlic.DeliveryLocal ||
 		cloves[0].Message.Header.Type != i2np.DatabaseStore || cloves[0].Message.Header.ID != 0x01020304 ||
-		cloves[0].Message.Header.Expiration != 10_000 || !bytes.Equal(cloves[0].Message.Payload, []byte{0xaa, 0xbb, 0xcc}) {
+		cloves[0].Message.Header.Expiration != 10_000
+	if !ratchetGarlicClovesMatchI2PDCompactBlocksRejected {
+		ratchetGarlicClovesMatchI2PDCompactBlocksRejected = !bytes.Equal(cloves[0].Message.Payload, []byte{0xaa, 0xbb, 0xcc})
+	}
+	if ratchetGarlicClovesMatchI2PDCompactBlocksRejected {
 		t.Fatalf("LeaseSet clove = %#v", cloves[0])
 	}
 	var destination ivnp.Hash
 	for index := range destination {
 		destination[index] = 0x11
 	}
-	if cloves[1].Delivery.Type != garlic.DeliveryDestination || cloves[1].Delivery.To != destination ||
+	ratchetGarlicClovesMatchI2PDCompactBlocksRejected = cloves[1].Delivery.Type != garlic.DeliveryDestination || cloves[1].Delivery.To != destination ||
 		cloves[1].Message.Header.Type != i2np.Data || cloves[1].Message.Header.ID != 0x05060708 ||
-		cloves[1].Message.Header.Expiration != 11_000 || !bytes.Equal(cloves[1].Message.Payload, []byte{0xdd, 0xee}) {
+		cloves[1].Message.Header.Expiration != 11_000
+	if !ratchetGarlicClovesMatchI2PDCompactBlocksRejected {
+		ratchetGarlicClovesMatchI2PDCompactBlocksRejected = !bytes.Equal(cloves[1].Message.Payload, []byte{0xdd, 0xee})
+	}
+	if ratchetGarlicClovesMatchI2PDCompactBlocksRejected {
 		t.Fatalf("Data clove = %#v", cloves[1])
 	}
 
@@ -960,7 +968,10 @@ func TestGarlicReceiverUnregisterWaitsForInflightAndReleasesStaticKey(t *testing
 		_ = receiver.HandleGarlic(i2np.Message{Header: i2np.Header{Type: i2np.Garlic}, Payload: payload})
 		close(handleDone)
 	}()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.NewTimer(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
 	for {
 		state.inFlightMu.Lock()
 		inFlight := state.inFlight
@@ -968,13 +979,14 @@ func TestGarlicReceiverUnregisterWaitsForInflightAndReleasesStaticKey(t *testing
 		if inFlight == 1 {
 			break
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-deadline.C:
 			for _, scratch := range heldScratch {
 				state.scratch <- scratch
 			}
 			t.Fatal("garlic handler never acquired its destination snapshot")
+		case <-ticker.C:
 		}
-		time.Sleep(time.Millisecond)
 	}
 	removeDone := make(chan struct{})
 	go func() {

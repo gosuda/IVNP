@@ -48,7 +48,7 @@ func TestElligator2AuthoritativeDirectVectors(t *testing.T) {
 }
 
 func TestElligator2GeneratedKeyRoundTrip(t *testing.T) {
-	for generated := 0; generated < 32; generated++ {
+	for range 32 {
 		private, encoded, err := GenerateElligator2X25519(rand.Reader)
 		if err != nil {
 			t.Fatal(err)

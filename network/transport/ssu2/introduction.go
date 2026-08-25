@@ -138,9 +138,9 @@ func ParseRelayResponseBlock(data []byte) (RelayResponse, error) {
 	if len(data) < 13 || data[0] != 0 {
 		return RelayResponse{}, ErrIntroduction
 	}
-	response := RelayResponse{Code: data[1]}
-	response.Nonce = binary.BigEndian.Uint32(data[2:6])
-	response.Timestamp = binary.BigEndian.Uint32(data[6:10])
+	response := RelayResponse{Code: data[1],
+		Nonce:     binary.BigEndian.Uint32(data[2:6]),
+		Timestamp: binary.BigEndian.Uint32(data[6:10])}
 	if data[10] != Version {
 		return RelayResponse{}, ErrIntroduction
 	}

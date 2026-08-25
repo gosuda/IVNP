@@ -613,9 +613,12 @@ func TestSOCKS5DialCancelsWhenClientDisconnects(t *testing.T) {
 }
 
 func TestSOCKS5ResetsHandshakeDeadlineForDialFailure(t *testing.T) {
+	dialStarted := make(chan struct{})
+	releaseDial := make(chan struct{})
 	proxy, err := NewSOCKS5Proxy(SOCKS5Config{
 		Network: &testNetwork{dial: func(context.Context, string) (net.Conn, error) {
-			time.Sleep(20 * time.Millisecond)
+			close(dialStarted)
+			<-releaseDial
 			return nil, errors.New("dial failed")
 		}},
 		ListenAddress:    "127.0.0.1:0",
@@ -645,6 +648,10 @@ func TestSOCKS5ResetsHandshakeDeadlineForDialFailure(t *testing.T) {
 	request := append([]byte{5, 1, 0, 3, byte(len(testB32))}, []byte(testB32)...)
 	request = append(request, 0, 80)
 	_, _ = connection.Write(request)
+	<-dialStarted
+	timer := time.NewTimer(20 * time.Millisecond)
+	<-timer.C
+	close(releaseDial)
 	reply := make([]byte, 10)
 	if _, err := io.ReadFull(connection, reply); err != nil || reply[1] != 4 {
 		t.Fatalf("SOCKS dial reply = %v, %v", reply, err)

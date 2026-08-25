@@ -39,13 +39,7 @@ func TestUDPBatchRoundTrip(t *testing.T) {
 		t.Fatalf("WriteBatch = (%d, %v), want (3, nil)", n, err)
 	}
 
-	in, err := NewBatch(3, 32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n, err := receiver.ReadBatch(in); err != nil || n != 3 {
-		t.Fatalf("ReadBatch = (%d, %v), want (3, nil)", n, err)
-	}
+	in := readFullBatch(t, receiver, 3, 32)
 	for i, want := range []string{"first", "second", "third"} {
 		packet := in.Packets()[i]
 		if got := string(packet.Data[:packet.Len]); got != want {
@@ -61,18 +55,40 @@ func TestUDPBatchRoundTrip(t *testing.T) {
 		t.Fatalf("reply WriteBatch = (%d, %v), want (3, nil)", n, err)
 	}
 
-	replies, err := NewBatch(3, 32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n, err := sender.ReadBatch(replies); err != nil || n != 3 {
-		t.Fatalf("reply ReadBatch = (%d, %v), want (3, nil)", n, err)
-	}
+	replies := readFullBatch(t, sender, 3, 32)
 	for i, want := range []string{"reply-first", "reply-second", "reply-third"} {
 		if got := string(replies.Packets()[i].Data[:replies.Packets()[i].Len]); got != want {
 			t.Errorf("reply %d = %q, want %q", i, got, want)
 		}
 	}
+}
+
+func readFullBatch(t *testing.T, connection *UDPBatchConn, count, size int) *Batch {
+	t.Helper()
+	full, err := NewBatch(count, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filled := 0
+	for filled < count {
+		partial, batchErr := NewBatch(count-filled, size)
+		if batchErr != nil {
+			t.Fatal(batchErr)
+		}
+		n, readErr := connection.ReadBatch(partial)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		for index := range n {
+			source := partial.Packets()[index]
+			destination := &full.Packets()[filled+index]
+			destination.Len = copy(destination.Data, source.Data[:source.Len])
+			destination.Addr = source.Addr
+			destination.Zone = source.Zone
+		}
+		filled += n
+	}
+	return full
 }
 
 func TestUDPBatchWritePrefixLeavesTrailingSlotsUnsent(t *testing.T) {

@@ -46,11 +46,15 @@ func VerifySU3(container []byte, signers map[string]SU3Signer, maxContent int64)
 	versionLen := int(container[13])
 	signerLen := int(container[15])
 	contentLen := binary.BigEndian.Uint64(container[16:24])
-	if signingType != ivnp.SigningRSASHA512_4096 || signatureLen != su3RSASignatureLen ||
+	verifySU3Rejected := signingType != ivnp.SigningRSASHA512_4096 || signatureLen != su3RSASignatureLen ||
 		versionLen < su3MinimumVersion || signerLen == 0 || container[12] != 0 ||
 		container[14] != 0 || container[24] != 0 || container[25] != su3FileTypeZIP ||
 		container[26] != 0 || container[27] != su3ContentTypeReseed ||
-		!allZero(container[28:su3HeaderLen]) || contentLen == 0 || contentLen > uint64(maxContent) {
+		!allZero(container[28:su3HeaderLen]) || contentLen == 0
+	if !verifySU3Rejected {
+		verifySU3Rejected = contentLen > uint64(maxContent)
+	}
+	if verifySU3Rejected {
 		return nil, ErrSU3Malformed
 	}
 	contentStart := su3HeaderLen + versionLen + signerLen

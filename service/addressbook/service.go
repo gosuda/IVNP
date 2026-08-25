@@ -4,6 +4,7 @@ package addressbook
 import (
 	"context"
 	"errors"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -85,21 +86,39 @@ func NewService(config Config) (*Service, error) {
 		config.MaxRedirects = 3
 	}
 	s := &Service{config: config, local: make(map[string]string), remote: make(map[string]string), sources: make(map[string]map[string]string), done: make(chan struct{}), etag: make(map[string]string), modified: make(map[string]string)}
-	configured := make(map[string]struct{}, len(config.Subscriptions))
-	for _, raw := range config.Subscriptions {
+	if err := validateSubscriptions(config.Subscriptions); err != nil {
+		return nil, err
+	}
+	if err := s.loadLocalHosts(); err != nil {
+		return nil, err
+	}
+	if err := s.restoreState(); err != nil {
+		return nil, err
+	}
+	s.publish()
+	return s, nil
+}
+
+func validateSubscriptions(subscriptions []string) error {
+	configured := make(map[string]struct{}, len(subscriptions))
+	for _, raw := range subscriptions {
 		u, err := subscriptionURL(raw)
 		if err != nil || u.String() != raw {
-			return nil, ErrConfig
+			return ErrConfig
 		}
 		if _, duplicate := configured[raw]; duplicate {
-			return nil, ErrConfig
+			return ErrConfig
 		}
 		configured[raw] = struct{}{}
 	}
-	for _, path := range []string{config.PrivateHostsPath, config.UserHostsPath, config.HostsPath} {
-		entries, err := loadHostsFile(path, config.MaxFileBytes, config.MaxEntries)
+	return nil
+}
+
+func (s *Service) loadLocalHosts() error {
+	for _, path := range []string{s.config.PrivateHostsPath, s.config.UserHostsPath, s.config.HostsPath} {
+		entries, err := loadHostsFile(path, s.config.MaxFileBytes, s.config.MaxEntries)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for name, destination := range entries {
 			if _, exists := s.local[name]; !exists {
@@ -107,59 +126,62 @@ func NewService(config Config) (*Service, error) {
 			}
 		}
 	}
-	if config.StatePath != "" {
-		_, sources, etags, modified, err := loadState(config.StatePath, config.MaxFileBytes, config.MaxEntries)
-		if err == nil {
-			for _, raw := range config.Subscriptions {
-				source, present := sources[raw]
-				if !present {
-					continue
-				}
-				s.sources[raw] = cloneEntries(source)
-				if value := etags[raw]; value != "" {
-					s.etag[raw] = value
-				}
-				if value := modified[raw]; value != "" {
-					s.modified[raw] = value
-				}
-				for name, destination := range source {
-					if _, local := s.local[name]; local {
-						continue
-					}
-					if _, exists := s.remote[name]; !exists {
-						if len(s.remote) >= config.MaxEntries {
-							return nil, ErrConfig
-						}
-						s.remote[name] = destination
-					}
-				}
-			}
-			// Rewrite the cache immediately so removed sources cannot become
-			// authoritative again merely by being re-added before a verified
-			// refresh. With no subscriptions this durably discards all remote
-			// snapshots and conditional validators.
-			if err = saveState(config.StatePath, s.remote, s.sources, s.etag, s.modified, config.MaxFileBytes); err != nil {
-				return nil, err
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			// A corrupt or obsolete cache is never authoritative. Local
-			// sources remain available and verified refresh starts clean.
+	return nil
+}
+
+func (s *Service) restoreState() error {
+	if s.config.StatePath == "" {
+		return nil
+	}
+	_, sources, etags, modified, err := loadState(s.config.StatePath, s.config.MaxFileBytes, s.config.MaxEntries)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
 			s.remote = make(map[string]string)
 			s.sources = make(map[string]map[string]string)
 		}
+		return nil
 	}
-	s.publish()
-	return s, nil
+	for _, raw := range s.config.Subscriptions {
+		source, present := sources[raw]
+		if !present {
+			continue
+		}
+		if err := s.restoreSource(raw, source, etags[raw], modified[raw]); err != nil {
+			return err
+		}
+	}
+	// Rewrite the cache immediately so removed sources cannot become
+	// authoritative again merely by being re-added before a verified refresh.
+	return saveState(s.config.StatePath, s.remote, s.sources, s.etag, s.modified, s.config.MaxFileBytes)
+}
+
+func (s *Service) restoreSource(raw string, source map[string]string, etag, modified string) error {
+	s.sources[raw] = cloneEntries(source)
+	if etag != "" {
+		s.etag[raw] = etag
+	}
+	if modified != "" {
+		s.modified[raw] = modified
+	}
+	for name, destination := range source {
+		if _, local := s.local[name]; local {
+			continue
+		}
+		if _, exists := s.remote[name]; exists {
+			continue
+		}
+		if len(s.remote) >= s.config.MaxEntries {
+			return ErrConfig
+		}
+		s.remote[name] = destination
+	}
+	return nil
 }
 
 func (s *Service) publish() {
 	entries := make(map[string]string, len(s.remote)+len(s.local))
-	for name, destination := range s.remote {
-		entries[name] = destination
-	}
-	for name, destination := range s.local {
-		entries[name] = destination
-	}
+	maps.Copy(entries, s.remote)
+	maps.Copy(entries, s.local)
 	s.current.Store(&snapshot{entries: entries})
 }
 
@@ -188,7 +210,9 @@ func (s *Service) ResolveDestination(ctx context.Context, value string) (string,
 }
 
 func (s *Service) Start(parent context.Context) error {
-	if parent == nil {
+
+	if parent ==
+		nil {
 		parent = context.Background()
 	}
 	s.mu.Lock()

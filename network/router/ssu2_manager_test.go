@@ -153,8 +153,7 @@ func TestSSU2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 		_ = aliceConn.Close()
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
@@ -296,8 +295,7 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 		_ = bobConn.Close()
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
 	charlie, charlieStatic, charlieIntro := newSSU2TestLocal(t, charlieConn.LocalAddr().String())
@@ -413,13 +411,16 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 	}
 	const relayTag = 0x10203040
 	bobHash := bob.Hash()
-	time.Sleep(time.Millisecond)
+	published := alice.Snapshot().Published
+	waitForSSU2Live(t, time.Second, func() bool {
+		return uint64(time.Now().UnixMilli()) > published
+	}, "new RouterInfo publication timestamp")
 	if err = alice.ReplaceAddresses([]PublishedAddress{{
 		Transport: "SSU",
 		Cost:      3,
 		Options: []MappingOption{
 			{Key: "i", Value: ivnp.EncodeI2PBase64(aliceIntro)},
-			{Key: "s", Value: ivnp.EncodeI2PBase64(ecdhPublic(aliceStatic))},
+			{Key: "s", Value: ivnp.EncodeI2PBase64(testECDHPublic(t, aliceStatic))},
 			{Key: "v", Value: "2"},
 		},
 	}}); err != nil {
@@ -439,7 +440,7 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 			{Key: "i", Value: ivnp.EncodeI2PBase64(charlieIntro)},
 			{Key: "ih0", Value: ivnp.EncodeI2PBase64(bobHash[:])},
 			{Key: "itag0", Value: "270544960"},
-			{Key: "s", Value: ivnp.EncodeI2PBase64(ecdhPublic(charlieStatic))},
+			{Key: "s", Value: ivnp.EncodeI2PBase64(testECDHPublic(t, charlieStatic))},
 			{Key: "v", Value: "2"},
 		},
 	}}); err != nil {
@@ -852,7 +853,7 @@ func TestValidateSSU2ConfirmedPayloadInflatesGzipRouterInfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, gotIntro, err := validateSSU2ConfirmedPayload(payload, ecdhPublic(static))
+	info, gotIntro, err := validateSSU2ConfirmedPayload(payload, testECDHPublic(t, static))
 	if err != nil || info.Hash() != owner.Hash() || !bytes.Equal(gotIntro, intro) {
 
 		t.Fatalf("gzip RouterInfo = %s, %x, %v", info.Hash(), gotIntro, err)
@@ -863,7 +864,7 @@ func TestValidateSSU2ConfirmedPayloadInflatesGzipRouterInfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = validateSSU2ConfirmedPayload(payload, ecdhPublic(static)); err == nil {
+	if _, _, err = validateSSU2ConfirmedPayload(payload, testECDHPublic(t, static)); err == nil {
 		t.Fatal("oversized gzip RouterInfo was accepted")
 	}
 }

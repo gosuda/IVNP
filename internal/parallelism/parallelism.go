@@ -7,10 +7,7 @@ func Workers(work int) int {
 	if work <= 0 {
 		return 0
 	}
-	workers := CPUs()
-	if workers > work {
-		workers = work
-	}
+	workers := min(CPUs(), work)
 	return workers
 }
 

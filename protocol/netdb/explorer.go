@@ -67,9 +67,11 @@ func (e *Explorer) Maintain(ctx context.Context) error {
 	if e.closed {
 		return context.Canceled
 	}
-	if ctx == nil {
+	if ctx ==
+		nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return err
 	}

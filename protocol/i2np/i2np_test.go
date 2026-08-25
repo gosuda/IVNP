@@ -94,14 +94,16 @@ func TestDatabaseLookupMaximumAndConditionalTagBounds(t *testing.T) {
 	}
 }
 
+type databaseLookupLayoutCase struct {
+	name       string
+	flags      uint8
+	exclusions int
+	tags       int
+	tagLen     int
+}
+
 func TestDatabaseLookupReplyLayouts(t *testing.T) {
-	tests := []struct {
-		name       string
-		flags      uint8
-		exclusions int
-		tags       int
-		tagLen     int
-	}{
+	tests := []databaseLookupLayoutCase{
 		{name: "unencrypted tunnel", flags: lookupDelivery | lookupTypeMask, exclusions: 1},
 		{name: "legacy AES", flags: lookupEncrypted | 0x04, exclusions: 2, tags: 2, tagLen: 32},
 		{name: "ECIES AEAD", flags: lookupDelivery | lookupECIES | 0x08, exclusions: 1, tags: 1, tagLen: 8},
@@ -109,48 +111,52 @@ func TestDatabaseLookupReplyLayouts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			size := 65 + 2 + tt.exclusions*ivnp.HashLength
-			if tt.flags&lookupDelivery != 0 {
-				size += 4
-			}
-			if tt.tagLen != 0 {
-				size += 32 + 1 + tt.tags*tt.tagLen
-			}
-			payload := make([]byte, size)
-			payload[64] = tt.flags
-			off := 65
-			if tt.flags&lookupDelivery != 0 {
-				binary.BigEndian.PutUint32(payload[off:off+4], 1)
-				off += 4
-			}
-			binary.BigEndian.PutUint16(payload[off:off+2], uint16(tt.exclusions))
-			off += 2
-			for i := range tt.exclusions {
-				payload[off+i*ivnp.HashLength] = byte(i + 1)
-			}
-			off += tt.exclusions * ivnp.HashLength
-			if tt.tagLen != 0 {
-				payload[off] = 0xa5
-				off += 32
-				payload[off] = byte(tt.tags)
-				off++
-				payload[off] = 0x5a
-			}
-
-			lookup, err := ParseDatabaseLookup(payload)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if lookup.ExcludedCount() != tt.exclusions || lookup.ReplyTagCount() != tt.tags || int(lookup.ReplyTagLen) != tt.tagLen {
-				t.Fatalf("lookup = %d exclusions, %d tags x %d", lookup.ExcludedCount(), lookup.ReplyTagCount(), lookup.ReplyTagLen)
-			}
-			if tt.flags&lookupDelivery != 0 && lookup.ReplyTunnelID != 1 {
-				t.Fatalf("reply tunnel = %d, want 1", lookup.ReplyTunnelID)
-			}
-			if tt.tagLen != 0 && (lookup.ReplyKey[0] != 0xa5 || lookup.ReplyTags[0] != 0x5a) {
-				t.Fatalf("reply fields = %x %x", lookup.ReplyKey, lookup.ReplyTags)
-			}
+			testDatabaseLookupReplyLayout(t, tt)
 		})
+	}
+}
+
+func testDatabaseLookupReplyLayout(t *testing.T, test databaseLookupLayoutCase) {
+	t.Helper()
+	size := 65 + 2 + test.exclusions*ivnp.HashLength
+	if test.flags&lookupDelivery != 0 {
+		size += 4
+	}
+	if test.tagLen != 0 {
+		size += 32 + 1 + test.tags*test.tagLen
+	}
+	payload := make([]byte, size)
+	payload[64] = test.flags
+	off := 65
+	if test.flags&lookupDelivery != 0 {
+		binary.BigEndian.PutUint32(payload[off:off+4], 1)
+		off += 4
+	}
+	binary.BigEndian.PutUint16(payload[off:off+2], uint16(test.exclusions))
+	off += 2
+	for i := range test.exclusions {
+		payload[off+i*ivnp.HashLength] = byte(i + 1)
+	}
+	off += test.exclusions * ivnp.HashLength
+	if test.tagLen != 0 {
+		payload[off] = 0xa5
+		off += 32
+		payload[off] = byte(test.tags)
+		off++
+		payload[off] = 0x5a
+	}
+	lookup, err := ParseDatabaseLookup(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lookup.ExcludedCount() != test.exclusions || lookup.ReplyTagCount() != test.tags || int(lookup.ReplyTagLen) != test.tagLen {
+		t.Fatalf("lookup = %d exclusions, %d tags x %d", lookup.ExcludedCount(), lookup.ReplyTagCount(), lookup.ReplyTagLen)
+	}
+	if test.flags&lookupDelivery != 0 && lookup.ReplyTunnelID != 1 {
+		t.Fatalf("reply tunnel = %d, want 1", lookup.ReplyTunnelID)
+	}
+	if test.tagLen != 0 && (lookup.ReplyKey[0] != 0xa5 || lookup.ReplyTags[0] != 0x5a) {
+		t.Fatalf("reply fields = %x %x", lookup.ReplyKey, lookup.ReplyTags)
 	}
 }
 

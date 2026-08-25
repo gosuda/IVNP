@@ -112,10 +112,7 @@ func (b *Buffer) Payload() ([]byte, bool) {
 	if !b.live() {
 		return nil, false
 	}
-	start := b.start
-	if start < b.reserved {
-		start = b.reserved
-	}
+	start := max(b.start, b.reserved)
 	return b.buf[start:b.end], true
 }
 

@@ -62,27 +62,16 @@ func TestLocalPrecedenceNormalizationAndSubscriptionRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = service.Close(); _ = service.Wait() }()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+	waitForAddressbookCondition(t, 2*time.Second, func() bool {
 		value, lookupErr := service.ResolveDestination(context.Background(), "remote.i2p")
-		if lookupErr == nil && value == remoteDestination {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("remote refresh = %q, %v", value, lookupErr)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return lookupErr == nil && value == remoteDestination
+	}, "remote subscription refresh")
 	if value, err := service.ResolveDestination(context.Background(), "service.i2p"); err != nil || value != privateDestination {
 		t.Fatalf("remote overwrote local = %q, %v", value, err)
 	}
-	deadline = time.Now().Add(time.Second)
-	for requests.Load() < 2 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if requests.Load() < 2 {
-		t.Fatal("conditional refresh did not run")
-	}
+	waitForAddressbookCondition(t, time.Second, func() bool {
+		return requests.Load() >= 2
+	}, "conditional refresh")
 	if _, err = os.Stat(statePath); err != nil {
 		t.Fatalf("atomic state missing: %v", err)
 	}
@@ -96,5 +85,23 @@ func TestSubscriptionTransportPolicy(t *testing.T) {
 	}
 	if _, err := subscriptionURL("https://example.com/hosts.txt"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func waitForAddressbookCondition(t *testing.T, timeout time.Duration, condition func() bool, name string) {
+	t.Helper()
+	deadline := time.NewTimer(timeout)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
+	for {
+		if condition() {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal(name + " did not complete")
+		case <-ticker.C:
+		}
 	}
 }

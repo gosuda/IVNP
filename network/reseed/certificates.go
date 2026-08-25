@@ -54,10 +54,14 @@ func loadSU3Signers(source fs.FS, now time.Time) (map[string]SU3Signer, error) {
 			return nil, fmt.Errorf("%w: parse embedded certificate %q: %v", ErrDefaultSigners, entry.Name(), err)
 		}
 		publicKey, ok := certificate.PublicKey.(*rsa.PublicKey)
-		if !ok || publicKey.E != 65537 || publicKey.N.BitLen() != 4096 ||
+		loadSU3SignersRejected := !ok || publicKey.E != 65537 || publicKey.N.BitLen() != 4096 ||
 			certificate.Subject.CommonName == "" ||
 			certificate.KeyUsage != 0 && certificate.KeyUsage&x509.KeyUsageDigitalSignature == 0 ||
-			now.Before(certificate.NotBefore) || now.After(certificate.NotAfter) {
+			now.Before(certificate.NotBefore)
+		if !loadSU3SignersRejected {
+			loadSU3SignersRejected = now.After(certificate.NotAfter)
+		}
+		if loadSU3SignersRejected {
 			return nil, fmt.Errorf("%w: unsupported or inactive embedded certificate %q", ErrDefaultSigners, entry.Name())
 		}
 		if _, exists := signers[certificate.Subject.CommonName]; exists {

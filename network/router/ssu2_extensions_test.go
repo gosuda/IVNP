@@ -520,9 +520,11 @@ func newSSU2LiveManager(t *testing.T, database *netdb.Database, static, intro []
 
 func startSSU2LiveManager(t *testing.T, ctx context.Context, manager *SSU2Manager, conn *net.UDPConn, local *LocalRouterInfo, handle func(i2np.Message, uint64, bool) error) {
 	t.Helper()
-	if handle == nil {
+	if handle ==
+		nil {
 		handle = func(i2np.Message, uint64, bool) error { return nil }
 	}
+
 	if err := manager.Start(ctx, TransportBindings{
 		SSU2: conn, LocalInfo: local, Clock: WallClock{},
 		HandleI2NPContext: func(_ context.Context, _ ivnp.Hash, message i2np.Message, now uint64, floodfill bool) error {
@@ -643,9 +645,7 @@ func newSSU2TokenProxy(t *testing.T, alice, bob *net.UDPAddr) *ssu2TokenProxy {
 
 func (p *ssu2TokenProxy) Start(intro []byte) {
 	p.intro = append([]byte(nil), intro...)
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
+	p.wg.Go(func() {
 		packet := make([]byte, ssu2.MaxIPv4PacketLen)
 		for {
 			_ = p.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
@@ -680,7 +680,7 @@ func (p *ssu2TokenProxy) Start(intro []byte) {
 				_, _ = p.conn.WriteToUDP(wire, p.alice)
 			}
 		}
-	}()
+	})
 }
 
 func (p *ssu2TokenProxy) Counts() (requests, retries int) {

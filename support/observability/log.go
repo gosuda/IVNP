@@ -2,6 +2,8 @@
 // status endpoints for IVNP processes.
 package observability
 
+import "cmp"
+
 import (
 	"errors"
 	"io"
@@ -27,13 +29,12 @@ type LogConfig struct {
 // the four standard severity levels.
 func NewLogger(config LogConfig) (*slog.Logger, error) {
 	format := config.Format
-	if format == "" {
-		format = "text"
-	}
+
+	format = cmp.Or(format, "text")
+
 	level := config.Level
-	if level == "" {
-		level = "info"
-	}
+
+	level = cmp.Or(level, "info")
 
 	parsedLevel, err := ParseLogLevel(level)
 	if err != nil {
@@ -42,8 +43,8 @@ func NewLogger(config LogConfig) (*slog.Logger, error) {
 	output := config.Output
 	if output == nil {
 		output = os.Stderr
-	}
 
+	}
 	options := &slog.HandlerOptions{Level: parsedLevel}
 	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "text":

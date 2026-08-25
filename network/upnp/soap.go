@@ -154,16 +154,16 @@ func (c *Client) callResponse(ctx context.Context, gateway Gateway, action strin
 func marshalSOAPRequest(serviceType, action string, arguments []soapArgument) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := xml.NewEncoder(&buffer)
-	start := xml.StartElement{Name: xml.Name{Space: soapEnvelopeNamespace, Local: "Envelope"}}
-	start.Attr = []xml.Attr{{Name: xml.Name{Local: "xmlns:s"}, Value: soapEnvelopeNamespace}, {Name: xml.Name{Local: "s:encodingStyle"}, Value: "http://schemas.xmlsoap.org/soap/encoding/"}}
+	start := xml.StartElement{Name: xml.Name{Space: soapEnvelopeNamespace, Local: "Envelope"},
+		Attr: []xml.Attr{{Name: xml.Name{Local: "xmlns:s"}, Value: soapEnvelopeNamespace}, {Name: xml.Name{Local: "s:encodingStyle"}, Value: "http://schemas.xmlsoap.org/soap/encoding/"}}}
 	if err := encoder.EncodeToken(start); err != nil {
 		return nil, err
 	}
 	if err := encoder.EncodeToken(xml.StartElement{Name: xml.Name{Space: soapEnvelopeNamespace, Local: "Body"}}); err != nil {
 		return nil, err
 	}
-	actionStart := xml.StartElement{Name: xml.Name{Space: serviceType, Local: action}}
-	actionStart.Attr = []xml.Attr{{Name: xml.Name{Local: "xmlns:u"}, Value: serviceType}}
+	actionStart := xml.StartElement{Name: xml.Name{Space: serviceType, Local: action},
+		Attr: []xml.Attr{{Name: xml.Name{Local: "xmlns:u"}, Value: serviceType}}}
 	if err := encoder.EncodeToken(actionStart); err != nil {
 		return nil, err
 	}
@@ -332,7 +332,11 @@ func parseSOAPStringResponse(reader io.Reader, serviceType, action, field string
 		return "", fmt.Errorf("upnp: invalid SOAP response: %w", err)
 	}
 	valueStart, ok := token.(xml.StartElement)
-	if !ok || valueStart.Name.Local != field || valueStart.Name.Space != "" && valueStart.Name.Space != serviceType {
+	parseSOAPStringResponseRejected := !ok || valueStart.Name.Local != field
+	if !parseSOAPStringResponseRejected {
+		parseSOAPStringResponseRejected = valueStart.Name.Space != "" && valueStart.Name.Space != serviceType
+	}
+	if parseSOAPStringResponseRejected {
 		return "", fmt.Errorf("upnp: invalid SOAP response: expected %s", field)
 	}
 	value, err := readSOAPElementText(decoder, valueStart)

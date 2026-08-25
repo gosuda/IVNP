@@ -125,7 +125,11 @@ func (s *Server) parseUDPPacket(wire []byte, source net.Addr) (udpPacket, bool) 
 		return udpPacket{}, false
 	}
 	session := s.session(parts[1])
-	if session == nil || (session.style != styleDatagram && session.style != styleRaw) || !sameSourceIP(session.sourceIP, source) {
+	parseUDPPacketRejected := session == nil || (session.style != styleDatagram && session.style != styleRaw)
+	if !parseUDPPacketRejected {
+		parseUDPPacketRejected = !sameSourceIP(session.sourceIP, source)
+	}
+	if parseUDPPacketRejected {
 		return udpPacket{}, false
 	}
 	packet := udpPacket{session: session, target: parts[2], fromPort: session.fromPort, toPort: session.toPort, protocol: session.protocol}

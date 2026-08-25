@@ -1,6 +1,8 @@
 // Package daemon composes IVNP's durable state, native router runtime, and local services.
 package daemon
 
+import "cmp"
+
 import (
 	"context"
 	"crypto/ecdh"
@@ -14,6 +16,7 @@ import (
 	"net/http"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -204,8 +207,8 @@ func (r *destinationRuntime) release() {
 		if closer, ok := r.publisher.(interface{ Close() }); ok {
 			closer.Close()
 		}
-		for index := len(r.unregister) - 1; index >= 0; index-- {
-			r.unregister[index]()
+		for _, v := range slices.Backward(r.unregister) {
+			v()
 		}
 		r.unregister = nil
 		if r.sender != nil {
@@ -340,32 +343,42 @@ func New(cfg config.Operating, options Options) (*Daemon, error) {
 	if (cfg.HTTPProxy.Enabled || cfg.SOCKS5.Enabled) && !cfg.Tunnel.Enabled {
 		return nil, ErrProxyWithoutTunnels
 	}
-	if (cfg.HTTPProxy.BearerToken != "" || cfg.SOCKS5.BearerToken != "") ||
+	newRejected := (cfg.HTTPProxy.BearerToken != "" || cfg.SOCKS5.BearerToken != "") ||
 		(cfg.HTTPProxy.Enabled && !loopbackEndpoint(cfg.HTTPProxy.Address)) ||
 		(cfg.SOCKS5.Enabled && !loopbackEndpoint(cfg.SOCKS5.Address)) ||
-		(cfg.SAM.Enabled && (!loopbackEndpoint(cfg.SAM.Address) || (cfg.SAM.UDPAddress.Host != "" && !loopbackEndpoint(cfg.SAM.UDPAddress)))) ||
-		(cfg.Metrics.Enabled && !loopbackEndpoint(cfg.Metrics.Address) && cfg.Metrics.BearerToken == "") {
+		(cfg.SAM.Enabled && (!loopbackEndpoint(cfg.SAM.Address) || (cfg.SAM.UDPAddress.Host != "" && !loopbackEndpoint(cfg.SAM.UDPAddress))))
+	if !newRejected {
+		newRejected = (cfg.Metrics.Enabled && !loopbackEndpoint(cfg.Metrics.Address) && cfg.Metrics.BearerToken == "")
+	}
+	if newRejected {
 		return nil, clientapi.ErrInvalidConfig
 	}
 	clock := options.Clock
 	if clock == nil {
-		clock = router.WallClock{}
+		clock = router.
+			WallClock{}
 	}
+
 	logger := options.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	registry := observability.NewRegistry()
 	registry.SetBootstrapStage(1)
 	sockets := options.SocketRuntime
-	if sockets == nil {
+	if sockets ==
+		nil {
 		sockets = &router.NativeSocketRuntime{}
 	}
+
 	store, err := state.NewStore(cfg.StatePath, cfg.KeyPath)
 	reporter := options.PanicReporter
-	if reporter == nil {
+	if reporter ==
+		nil {
 		reporter = slogPanicReporter{logger: logger}
 	}
+
 	reporter = metricPanicReporter{metrics: registry, next: reporter}
 	if err != nil {
 		return nil, err
@@ -738,9 +751,9 @@ func New(cfg config.Operating, options Options) (*Daemon, error) {
 		tunnelTest = health
 	}
 	publicationRefresh := uint64(cfg.Tunnel.MaintenanceInterval / time.Millisecond)
-	if publicationRefresh == 0 {
-		publicationRefresh = uint64(time.Minute / time.Millisecond)
-	}
+
+	publicationRefresh = cmp.Or(publicationRefresh, uint64(time.Minute/time.Millisecond))
+
 	publication, err = router.NewPublicationMaintenance(router.PublicationMaintenanceConfig{
 		RouterInfo: localInfo, NetworkRouterInfo: routerPublisher, LeaseSet: destinationPublishers,
 		Now: now, RouterInfoRefresh: publicationRefresh,
@@ -795,6 +808,7 @@ func New(cfg config.Operating, options Options) (*Daemon, error) {
 	if listener == nil {
 		listener = nativeListener{}
 	}
+
 	d = &Daemon{
 		config: cfg, store: store, stateLock: stateLock, bundle: bundle, database: database, netdbStore: netdbStore, explorer: explorer, localInfo: localInfo, router: runtime, registry: registry, logger: logger, clock: clock, listener: listener,
 		service: service, tunnels: tunnels, pool: pool, profiles: profiles, tunnelHealth: health, replyKeys: replyKeys, buildManager: buildManager, maintainer: maintainer, requests: requests, destinations: destinations, garlicSessions: garlicSessions, garlicReceiver: garlicReceiver, statusMux: statusMux, publication: publication,
@@ -916,6 +930,7 @@ func (d *Daemon) Start(parent context.Context) error {
 	if parent == nil {
 		parent = context.Background()
 	}
+
 	d.mu.Lock()
 	if d.started {
 		d.mu.Unlock()
@@ -943,16 +958,14 @@ func (d *Daemon) Start(parent context.Context) error {
 			d.failStart(err)
 			return err
 		}
-		d.wg.Add(1)
-		go func() { defer d.wg.Done(); d.recordError(d.addressBook.Wait()) }()
+		d.wg.Go(func() { ; d.recordError(d.addressBook.Wait()) })
 	}
 	if d.samServer != nil {
 		if err := d.samServer.Start(d.ctx); err != nil {
 			d.failStart(err)
 			return err
 		}
-		d.wg.Add(1)
-		go func() { defer d.wg.Done(); d.recordError(d.samServer.Wait()) }()
+		d.wg.Go(func() { ; d.recordError(d.samServer.Wait()) })
 	}
 	if d.config.Metrics.Enabled {
 		listener, err := d.listener.Listen(d.ctx, "tcp", d.config.Metrics.Address.String())
@@ -982,13 +995,11 @@ func (d *Daemon) Start(parent context.Context) error {
 			IdleTimeout:       30 * time.Second,
 			MaxHeaderBytes:    32 << 10,
 		}
-		d.wg.Add(1)
-		go func() {
-			defer d.wg.Done()
+		d.wg.Go(func() {
 			if err := d.metrics.Serve(d.metricsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				d.recordError(err)
 			}
-		}()
+		})
 	}
 	if d.control != nil {
 		if err := d.startAllowed(); err != nil {
@@ -999,8 +1010,7 @@ func (d *Daemon) Start(parent context.Context) error {
 			d.failStart(err)
 			return err
 		}
-		d.wg.Add(1)
-		go func() { defer d.wg.Done(); d.recordError(d.control.Wait()) }()
+		d.wg.Go(func() { ; d.recordError(d.control.Wait()) })
 	}
 	if d.httpProxy != nil {
 		if err := d.startAllowed(); err != nil {
@@ -1011,8 +1021,7 @@ func (d *Daemon) Start(parent context.Context) error {
 			d.failStart(err)
 			return err
 		}
-		d.wg.Add(1)
-		go func() { defer d.wg.Done(); d.recordError(d.httpProxy.Wait()) }()
+		d.wg.Go(func() { ; d.recordError(d.httpProxy.Wait()) })
 	}
 	if d.socks5 != nil {
 		if err := d.startAllowed(); err != nil {
@@ -1023,8 +1032,7 @@ func (d *Daemon) Start(parent context.Context) error {
 			d.failStart(err)
 			return err
 		}
-		d.wg.Add(1)
-		go func() { defer d.wg.Done(); d.recordError(d.socks5.Wait()) }()
+		d.wg.Go(func() { ; d.recordError(d.socks5.Wait()) })
 	}
 	if err := d.startAllowed(); err != nil {
 		d.failStart(err)
@@ -1039,8 +1047,7 @@ func (d *Daemon) Start(parent context.Context) error {
 	case d.publicationWake <- struct{}{}:
 	default:
 	}
-	d.wg.Add(1)
-	go func() { defer d.wg.Done(); d.recordError(d.router.Wait()); _ = d.Close() }()
+	d.wg.Go(func() { ; d.recordError(d.router.Wait()); _ = d.Close() })
 	return nil
 }
 
@@ -1071,202 +1078,236 @@ func (d *Daemon) startMaintenance() {
 	d.publicationWake = make(chan struct{}, 1)
 	destinationWorkers := parallelism.Workers(max(1, d.config.State.MaxDestinations))
 	d.wg.Add(4 + destinationWorkers)
-	go func() {
-		defer d.wg.Done()
-		for {
-			select {
-			case <-d.ctx.Done():
-				return
-			case <-d.publicationWake:
-				publicationContext, cancel := context.WithTimeout(d.ctx, 30*time.Second)
-				if d.publication != nil {
-					if _, err := d.publication.Maintain(publicationContext); err != nil && d.ctx.Err() == nil {
-						if errors.Is(err, context.DeadlineExceeded) {
-							d.logger.Debug("bounded publication maintenance timed out", "error", err)
-						} else {
-							d.recordMaintenanceError(err)
-						}
-					}
-				} else if err := d.localInfo.Publish(publicationContext); err != nil && d.ctx.Err() == nil {
-					if errors.Is(err, context.DeadlineExceeded) {
-						d.logger.Debug("bounded local publication timed out", "error", err)
-					} else {
-						d.recordMaintenanceError(err)
-					}
-				}
-				cancel()
-			}
-		}
-	}()
-	go func() {
-		defer d.wg.Done()
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-d.ctx.Done():
-				return
-			case <-ticker.C:
-				d.refreshObservability()
-			}
-		}
-	}()
-	go func() {
-		defer d.wg.Done()
-		for {
-			select {
-			case <-d.ctx.Done():
-				return
-			case <-d.netdbSaveWake:
-				if d.netdbStore != nil {
-					if err := d.netdbStore.Save(); err != nil && d.ctx.Err() == nil {
-						d.recordMaintenanceError(err)
-					}
-				}
-			}
-		}
-	}()
+	go d.publicationMaintenanceLoop()
+	go d.observabilityLoop()
+	go d.netdbSaveLoop()
 	if d.explorer != nil {
 		d.explorationDone = make(chan struct{})
-		d.wg.Add(1)
-		go func() {
-			defer d.wg.Done()
-			defer close(d.explorationDone)
-			ticker := time.NewTicker(daemonNetDBExplorationInterval)
-			defer ticker.Stop()
-			for {
-				now := uint64(d.clock.Now().UnixMilli())
-				if d.requests != nil {
-					d.requests.Expire(now)
-				}
-				if err := d.explorer.Maintain(d.ctx); err != nil && d.ctx.Err() == nil && !errors.Is(err, context.Canceled) {
-					d.recordMaintenanceError(err)
-				}
-				select {
-				case <-d.ctx.Done():
-					return
-				case <-ticker.C:
-				}
-			}
-		}()
+		d.wg.Go(d.explorationLoop)
 	}
 	for range destinationWorkers {
-		go func() {
-			defer d.wg.Done()
-			for {
-				select {
-				case <-d.ctx.Done():
-					return
-				case runtime := <-d.destinationWake:
-					if runtime == nil {
-						continue
-					}
-					var maintenanceErr, publicationErr error
-					var publicationTask sync.WaitGroup
-					if runtime.publisher != nil {
-						publicationTask.Add(1)
-						go func() {
-							defer publicationTask.Done()
-							publicationContext, publicationCancel := context.WithTimeout(d.ctx, 30*time.Second)
-							_, publicationErr = runtime.publisher.Maintain(publicationContext)
-							publicationCancel()
-						}()
-					}
-					maintenanceContext, maintenanceCancel := context.WithTimeout(d.ctx, 30*time.Second)
-					maintenanceErr = runtime.maintain(maintenanceContext, uint64(d.clock.Now().UnixMilli()))
-					maintenanceCancel()
-					publicationTask.Wait()
-					err := errors.Join(maintenanceErr, publicationErr)
-					runtime.maintenanceQueued.Store(false)
-					if err != nil && d.ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-						d.recordMaintenanceError(err)
-					}
-				}
-			}
-		}()
+		go d.destinationMaintenanceLoop()
 	}
-	go func() {
-		defer d.wg.Done()
-		defer close(d.maintenanceDone)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-d.ctx.Done():
-				return
-			case <-ticker.C:
-				now := uint64(d.clock.Now().UnixMilli())
-				d.database.ExpireLeases(now)
-				if now > netdb.ReseedRouterInfoMaxAgeMillis {
-					d.database.Routers().Expire(now - netdb.ReseedRouterInfoMaxAgeMillis)
-				}
-				d.router.MaintainReseed(d.ctx)
-				if d.maintainer != nil {
-					if _, err := d.maintainer.Maintain(d.ctx); err != nil && d.ctx.Err() == nil {
-						d.recordMaintenanceError(err)
-					}
-				}
-				for _, runtime := range d.clientRuntimeSnapshot() {
-					d.requestDestinationMaintenance(runtime)
-				}
-				if d.tunnelHealth != nil {
-					if _, err := d.tunnelHealth.Expire(d.ctx); err != nil && d.ctx.Err() == nil {
-						d.recordMaintenanceError(err)
-					}
-					if d.maintainer != nil {
-						if pair, ok := d.maintainer.Pair(now); ok && pair.PeerCount != 0 {
-							if _, err := d.tunnelHealth.Probe(d.ctx, pair, ivnp.Hash{}); err != nil && !errors.Is(err, tunnel.ErrProbePending) && !errors.Is(err, tunnel.ErrProbeNotReady) && d.ctx.Err() == nil {
-								d.recordMaintenanceError(err)
-							}
-						}
-					}
-				}
-				if d.replyKeys != nil {
-					d.replyKeys.Expire(now)
-				}
-				expireWorkers := parallelism.Workers(len(d.garlicSessions))
-				expireJobs := make(chan *garlic.SessionManager)
-				var expireSessions sync.WaitGroup
-				expireSessions.Add(expireWorkers)
-				for range expireWorkers {
-					go func() {
-						defer expireSessions.Done()
-						for sessions := range expireJobs {
-							sessions.Expire(now)
-						}
-					}()
-				}
-				for _, sessions := range d.garlicSessions {
-					expireJobs <- sessions
-				}
-				close(expireJobs)
-				expireSessions.Wait()
-				select {
-				case d.publicationWake <- struct{}{}:
-				default:
-				}
-				if d.netdbStore != nil {
-					select {
-					case d.netdbSaveWake <- struct{}{}:
-					default:
-					}
-				}
-			}
-		}
-	}()
+	go d.periodicMaintenanceLoop(interval)
 	for _, runtime := range d.clientRuntimeSnapshot() {
 		d.requestDestinationMaintenance(runtime)
 	}
 }
 
+func (d *Daemon) publicationMaintenanceLoop() {
+	defer d.wg.Done()
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-d.publicationWake:
+			d.maintainPublication()
+		}
+	}
+}
+
+func (d *Daemon) maintainPublication() {
+	publicationContext, cancel := context.WithTimeout(d.ctx, 30*time.Second)
+	defer cancel()
+	var err error
+	if d.publication != nil {
+		_, err = d.publication.Maintain(publicationContext)
+	} else {
+		err = d.localInfo.Publish(publicationContext)
+	}
+	if err == nil || d.ctx.Err() != nil {
+		return
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		d.logger.Debug("bounded publication maintenance timed out", "error", err)
+		return
+	}
+	d.recordMaintenanceError(err)
+}
+
+func (d *Daemon) observabilityLoop() {
+	defer d.wg.Done()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+			d.refreshObservability()
+		}
+	}
+}
+
+func (d *Daemon) netdbSaveLoop() {
+	defer d.wg.Done()
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-d.netdbSaveWake:
+			if d.netdbStore != nil {
+				if err := d.netdbStore.Save(); err != nil && d.ctx.Err() == nil {
+					d.recordMaintenanceError(err)
+				}
+			}
+		}
+	}
+}
+
+func (d *Daemon) explorationLoop() {
+	defer close(d.explorationDone)
+	ticker := time.NewTicker(daemonNetDBExplorationInterval)
+	defer ticker.Stop()
+	for {
+		now := uint64(d.clock.Now().UnixMilli())
+		if d.requests != nil {
+			d.requests.Expire(now)
+		}
+		if err := d.explorer.Maintain(d.ctx); err != nil && d.ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+			d.recordMaintenanceError(err)
+		}
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (d *Daemon) destinationMaintenanceLoop() {
+	defer d.wg.Done()
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case runtime := <-d.destinationWake:
+			if runtime != nil {
+				d.maintainDestination(runtime)
+			}
+		}
+	}
+}
+
+func (d *Daemon) maintainDestination(runtime *destinationRuntime) {
+	var maintenanceErr, publicationErr error
+	var publicationTask sync.WaitGroup
+	if runtime.publisher != nil {
+		publicationTask.Go(func() {
+			publicationContext, publicationCancel := context.WithTimeout(d.ctx, 30*time.Second)
+			_, publicationErr = runtime.publisher.Maintain(publicationContext)
+			publicationCancel()
+		})
+	}
+	maintenanceContext, maintenanceCancel := context.WithTimeout(d.ctx, 30*time.Second)
+	maintenanceErr = runtime.maintain(maintenanceContext, uint64(d.clock.Now().UnixMilli()))
+	maintenanceCancel()
+	publicationTask.Wait()
+	err := errors.Join(maintenanceErr, publicationErr)
+	runtime.maintenanceQueued.Store(destinationMaintenanceIdle)
+	if err != nil && d.ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		d.recordMaintenanceError(err)
+	}
+}
+
+func (d *Daemon) periodicMaintenanceLoop(interval time.Duration) {
+	defer d.wg.Done()
+	defer close(d.maintenanceDone)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+			d.maintainOnce(uint64(d.clock.Now().UnixMilli()))
+		}
+	}
+}
+
+func (d *Daemon) maintainOnce(now uint64) {
+	d.database.ExpireLeases(now)
+	if now > netdb.ReseedRouterInfoMaxAgeMillis {
+		d.database.Routers().Expire(now - netdb.ReseedRouterInfoMaxAgeMillis)
+	}
+	d.router.MaintainReseed(d.ctx)
+	if d.maintainer != nil {
+		if _, err := d.maintainer.Maintain(d.ctx); err != nil && d.ctx.Err() == nil {
+			d.recordMaintenanceError(err)
+		}
+	}
+	for _, runtime := range d.clientRuntimeSnapshot() {
+		d.requestDestinationMaintenance(runtime)
+	}
+	d.maintainTunnelHealth(now)
+	if d.replyKeys != nil {
+		d.replyKeys.Expire(now)
+	}
+	d.expireGarlicSessions(now)
+	select {
+	case d.publicationWake <- struct{}{}:
+	default:
+	}
+	if d.netdbStore != nil {
+		select {
+		case d.netdbSaveWake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (d *Daemon) maintainTunnelHealth(now uint64) {
+	if d.tunnelHealth == nil {
+		return
+	}
+	if _, err := d.tunnelHealth.Expire(d.ctx); err != nil && d.ctx.Err() == nil {
+		d.recordMaintenanceError(err)
+	}
+	if d.maintainer == nil {
+		return
+	}
+	pair, ok := d.maintainer.Pair(now)
+	if !ok || pair.PeerCount == 0 {
+		return
+	}
+	if _, err := d.tunnelHealth.Probe(d.ctx, pair, ivnp.Hash{}); err != nil && !errors.Is(err, tunnel.ErrProbePending) && !errors.Is(err, tunnel.ErrProbeNotReady) && d.ctx.Err() == nil {
+		d.recordMaintenanceError(err)
+	}
+}
+
+func (d *Daemon) expireGarlicSessions(now uint64) {
+	expireWorkers := parallelism.Workers(len(d.garlicSessions))
+	expireJobs := make(chan *garlic.SessionManager)
+	var expireSessions sync.WaitGroup
+	expireSessions.Add(expireWorkers)
+	for range expireWorkers {
+		go func() {
+			defer expireSessions.Done()
+			for sessions := range expireJobs {
+				sessions.Expire(now)
+			}
+		}()
+	}
+	for _, sessions := range d.garlicSessions {
+		expireJobs <- sessions
+	}
+	close(expireJobs)
+	expireSessions.Wait()
+}
+
+const (
+	destinationMaintenanceIdle   = false
+	destinationMaintenanceQueued = true
+)
+
 func (d *Daemon) requestDestinationMaintenance(runtime *destinationRuntime) {
-	if d == nil || runtime == nil || !runtime.active() || d.destinationWake == nil || !runtime.maintenanceQueued.CompareAndSwap(false, true) {
+	if d == nil || runtime == nil || !runtime.active() || d.destinationWake == nil || !runtime.maintenanceQueued.CompareAndSwap(destinationMaintenanceIdle, destinationMaintenanceQueued) {
 		return
 	}
 	select {
 	case d.destinationWake <- runtime:
 	default:
-		runtime.maintenanceQueued.Store(false)
+		runtime.maintenanceQueued.Store(destinationMaintenanceIdle)
 	}
 }
 
@@ -1301,7 +1342,7 @@ func (d *Daemon) refreshObservability() {
 	}
 	snapshot := d.registry.Snapshot()
 	stage := snapshot.Bootstrap.Stage
-	if stage < 3 &&
+	refreshObservabilitySelected := stage < 3 &&
 		routers >= 50 &&
 		snapshot.Publication.RouterInfoSuccesses != 0 &&
 		snapshot.Publication.LeaseSet2Successes != 0 &&
@@ -1309,11 +1350,14 @@ func (d *Daemon) refreshObservability() {
 		snapshot.Tunnel.ExploratoryOutboundActive != 0 &&
 		snapshot.Tunnel.ClientInboundActive != 0 &&
 		snapshot.Tunnel.ClientOutboundActive != 0 &&
-		snapshot.SSU2.VectorIOEnabled != 0 &&
-		snapshot.SSU2.KernelDropAccounting != 0 {
+		snapshot.SSU2.VectorIOEnabled != 0
+	if refreshObservabilitySelected {
+		refreshObservabilitySelected = snapshot.SSU2.KernelDropAccounting != 0
+	}
+	if refreshObservabilitySelected {
 		stage = 3
 	}
-	if stage == 3 &&
+	refreshObservabilitySelected = stage == 3 &&
 		snapshot.Publication.RouterInfoSuccesses != 0 &&
 		snapshot.Publication.LeaseSet2Successes != 0 &&
 		snapshot.Tunnel.ExploratoryInboundActive != 0 &&
@@ -1321,8 +1365,11 @@ func (d *Daemon) refreshObservability() {
 		snapshot.Tunnel.ClientInboundActive != 0 &&
 		snapshot.Tunnel.ClientOutboundActive != 0 &&
 		snapshot.SSU2.VectorIOEnabled != 0 &&
-		snapshot.SSU2.KernelDropAccounting != 0 &&
-		snapshot.Bootstrap.RouterReachable != 0 {
+		snapshot.SSU2.KernelDropAccounting != 0
+	if refreshObservabilitySelected {
+		refreshObservabilitySelected = snapshot.Bootstrap.RouterReachable != 0
+	}
+	if refreshObservabilitySelected {
 		stage = 4
 	}
 	d.registry.SetBootstrapStage(stage)
@@ -1979,6 +2026,7 @@ func (s daemonReplySender) SendNetDBReply(ctx context.Context, gateway ivnp.Hash
 	if s.sender == nil || gateway == (ivnp.Hash{}) || s.now == nil {
 		return router.ErrDataPlaneConfig
 	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}

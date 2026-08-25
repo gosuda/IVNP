@@ -15,13 +15,17 @@ func targetAddress(host string, port uint16) (string, error) {
 	if host == "" || len(host) > maxDestinationHost || port == 0 || net.ParseIP(host) != nil {
 		return "", ErrI2PTarget
 	}
-	if strings.HasSuffix(strings.ToLower(host), ".b32.i2p") {
-		label := strings.TrimSuffix(strings.ToLower(host), ".b32.i2p")
+	if before, ok := strings.CutSuffix(strings.ToLower(host), ".b32.i2p"); ok {
+		label := before
 		if len(label) != 52 {
 			return "", ErrI2PTarget
 		}
 		for _, char := range label {
-			if (char < 'a' || char > 'z') && (char < '2' || char > '7') {
+			targetAddressRejected := (char < 'a' || char > 'z')
+			if targetAddressRejected {
+				targetAddressRejected = (char < '2' || char > '7')
+			}
+			if targetAddressRejected {
 				return "", ErrI2PTarget
 			}
 		}

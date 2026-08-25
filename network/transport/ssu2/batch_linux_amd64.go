@@ -101,6 +101,7 @@ func readBatch(c *UDPBatchConn, b *Batch) (count int, err error) {
 	if err == nil {
 		err = state.readErr
 	}
+
 	count = state.readCount
 	if err != nil || count == 0 {
 		return count, err
@@ -184,9 +185,11 @@ func writeBatchPrefix(c *UDPBatchConn, b *Batch, count int) (written int, err er
 	}
 	state.writeCount, state.writeErr, state.writeN = 0, nil, count
 	err = c.raw.Write(state.writeOp)
-	if err == nil {
+	if err ==
+		nil {
 		err = state.writeErr
 	}
+
 	return state.writeCount, err
 }
 

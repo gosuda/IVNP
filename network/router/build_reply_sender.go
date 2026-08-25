@@ -50,13 +50,17 @@ func NewBuildReplySender(config BuildReplySenderConfig) (*BuildReplySender, erro
 // directly to the IBGW as TunnelGateway messages; they do not require or use a
 // local outbound tunnel.
 func (s *BuildReplySender) SendBuildReply(ctx context.Context, gateway ivnp.Hash, gatewayTunnelID uint32, key tunnel.GarlicReplyKey, reply i2np.Message) error {
-	if s == nil || s.sender == nil || s.service == nil || s.now == nil || s.nextID == nil || gateway == (ivnp.Hash{}) || gatewayTunnelID == 0 || reply.Header.Type != i2np.OutboundTunnelBuildReply {
+	sendBuildReplyRejected := s == nil || s.sender == nil || s.service == nil || s.now == nil || s.nextID == nil || gateway == (ivnp.Hash{}) || gatewayTunnelID == 0
+	if !sendBuildReplyRejected {
+		sendBuildReplyRejected = reply.Header.Type != i2np.OutboundTunnelBuildReply
+	}
+	if sendBuildReplyRejected { // The outer envelope IDs share the router replay namespace with the reply.
+		// Never reuse the reply's ID (or each other) or a valid reply could be
+		// dropped as a replay after traversing its inbound gateway.
+
 		return ErrDataPlaneConfig
 	}
 
-	// The outer envelope IDs share the router replay namespace with the reply.
-	// Never reuse the reply's ID (or each other) or a valid reply could be
-	// dropped as a replay after traversing its inbound gateway.
 	count := 1
 	if gateway != s.local {
 		count++
@@ -108,6 +112,7 @@ func (s *BuildReplySender) SendBuildReply(ctx context.Context, gateway ivnp.Hash
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	return s.sender.Send(ctx, gateway, message)
 }
 

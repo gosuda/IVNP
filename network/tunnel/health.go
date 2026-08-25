@@ -90,7 +90,11 @@ type Health struct {
 }
 
 func NewHealth(config HealthConfig) (*Health, error) {
-	if config.Runtime == nil || config.Pool == nil || config.Maintainer == nil || config.Profiles == nil || config.Now == nil || config.Timeout == 0 {
+	newHealthRejected := config.Runtime == nil || config.Pool == nil || config.Maintainer == nil || config.Profiles == nil || config.Now == nil
+	if !newHealthRejected {
+		newHealthRejected = config.Timeout == 0
+	}
+	if newHealthRejected {
 		return nil, ErrHealthConfig
 	}
 	switch maintainer := config.Maintainer.(type) {
@@ -138,8 +142,10 @@ func (h *Health) Probe(ctx context.Context, pair CircuitPair, peer ivnp.Hash) (u
 		return 0, ErrHealthClosed
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx =
+			context.Background()
 	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(h.ctx, cancel)
 	defer func() {
@@ -149,7 +155,11 @@ func (h *Health) Probe(ctx context.Context, pair CircuitPair, peer ivnp.Hash) (u
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if pair.OutboundID == 0 || pair.InboundID == 0 || pair.ReplyRouter == (ivnp.Hash{}) || (pair.PeerCount == 0 && peer == (ivnp.Hash{})) {
+	probeRejected := pair.OutboundID == 0 || pair.InboundID == 0 || pair.ReplyRouter == (ivnp.Hash{})
+	if !probeRejected {
+		probeRejected = (pair.PeerCount == 0 && peer == (ivnp.Hash{}))
+	}
+	if probeRejected {
 		return 0, ErrHealthConfig
 	}
 	if h.requireActivity && !h.pairActive(pair) {
@@ -276,6 +286,7 @@ func (h *Health) Expire(ctx context.Context) (expired int, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(h.ctx, cancel)
 	defer func() {

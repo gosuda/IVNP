@@ -1,6 +1,8 @@
 // Package natpmp implements the NAT Port Mapping Protocol (NAT-PMP).
 package natpmp
 
+import "cmp"
+
 import (
 	"context"
 	"encoding/binary"
@@ -215,9 +217,9 @@ func (c *Client) exchange(ctx context.Context, opcode byte, request []byte, resp
 		return nil, time.Time{}, netip.Addr{}, ErrGatewayRequired
 	}
 	timeout := c.Timeout
-	if timeout == 0 {
-		timeout = DefaultTimeout
-	}
+
+	timeout = cmp.Or(timeout, DefaultTimeout)
+
 	if timeout < 0 {
 		return nil, time.Time{}, netip.Addr{}, fmt.Errorf("%w: negative timeout", ErrInvalidRequest)
 	}
@@ -226,9 +228,9 @@ func (c *Client) exchange(ctx context.Context, opcode byte, request []byte, resp
 		deadline = contextDeadline
 	}
 	port := c.Port
-	if port == 0 {
-		port = DefaultPort
-	}
+
+	port = cmp.Or(port, DefaultPort)
+
 	endpoint := net.JoinHostPort(gateway.String(), strconv.Itoa(int(port)))
 	dial := c.DialContext
 	if dial == nil {
@@ -258,12 +260,14 @@ func (c *Client) exchange(ctx context.Context, opcode byte, request []byte, resp
 		if err := conn.SetDeadline(attemptDeadline); err != nil {
 			return nil, time.Time{}, netip.Addr{}, err
 		}
-		if n, err := conn.Write(request); err != nil {
+		n, err := conn.Write(request)
+		if err != nil {
 			if contextErr := ctx.Err(); contextErr != nil {
 				return nil, time.Time{}, netip.Addr{}, contextErr
 			}
 			return nil, time.Time{}, netip.Addr{}, err
-		} else if n != len(request) {
+		}
+		if n != len(request) {
 			return nil, time.Time{}, netip.Addr{}, fmt.Errorf("%w: wrote %d of %d bytes", ErrMalformedResponse, n, len(request))
 		}
 		for {

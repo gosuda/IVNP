@@ -48,7 +48,11 @@ func TestRelayIntroductionBlocksRoundTrip(t *testing.T) {
 		t.Fatalf("Relay Request block = %#v, %t, %v", parsedBlock, ok, err)
 	}
 	parsedRequest, err := ParseRelayRequestBlock(parsedBlock.Data)
-	if err != nil || parsedRequest.Nonce != request.Nonce || parsedRequest.RelayTag != request.RelayTag || parsedRequest.Timestamp != request.Timestamp || parsedRequest.Endpoint != endpoint || !bytes.Equal(parsedRequest.Signature, request.Signature) {
+	relayIntroductionBlocksRoundTripRejected := err != nil || parsedRequest.Nonce != request.Nonce || parsedRequest.RelayTag != request.RelayTag || parsedRequest.Timestamp != request.Timestamp || parsedRequest.Endpoint != endpoint
+	if !relayIntroductionBlocksRoundTripRejected {
+		relayIntroductionBlocksRoundTripRejected = !bytes.Equal(parsedRequest.Signature, request.Signature)
+	}
+	if relayIntroductionBlocksRoundTripRejected {
 		t.Fatalf("parsed Relay Request = %#v, %v", parsedRequest, err)
 	}
 
@@ -84,7 +88,11 @@ func TestRelayIntroductionBlocksRoundTrip(t *testing.T) {
 		t.Fatalf("Relay Response block = %#v, %t, %v", parsedBlock, ok, err)
 	}
 	parsedResponse, err := ParseRelayResponseBlock(parsedBlock.Data)
-	if err != nil || parsedResponse.Nonce != response.Nonce || parsedResponse.Endpoint != response.Endpoint || parsedResponse.Token != response.Token || !parsedResponse.HasToken || !bytes.Equal(parsedResponse.Signature, response.Signature) {
+	relayIntroductionBlocksRoundTripRejected = err != nil || parsedResponse.Nonce != response.Nonce || parsedResponse.Endpoint != response.Endpoint || parsedResponse.Token != response.Token || !parsedResponse.HasToken
+	if !relayIntroductionBlocksRoundTripRejected {
+		relayIntroductionBlocksRoundTripRejected = !bytes.Equal(parsedResponse.Signature, response.Signature)
+	}
+	if relayIntroductionBlocksRoundTripRejected {
 		t.Fatalf("parsed Relay Response = %#v, %v", parsedResponse, err)
 	}
 	responseSigned, err := RelayResponseSignatureInput(nil, bob[:], RelayResponse{

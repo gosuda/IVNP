@@ -158,9 +158,12 @@ func (l *rateLimiterShard) entry(key [32]byte, nowMillis uint64) *rateEntry {
 			}
 			continue
 		}
-		if vacant == nil {
+		if vacant ==
+
+			nil {
 			vacant = entry
 		}
+
 	}
 	if vacant == nil {
 		return nil

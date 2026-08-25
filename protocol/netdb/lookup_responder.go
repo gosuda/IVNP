@@ -83,9 +83,11 @@ func NewLookupResponder(config LookupResponderConfig) (*LookupResponder, error) 
 // Start launches a CPU-scaled worker set bounded by the responder queue. It is
 // safe to enqueue before Start so daemon wiring can accept ingress immediately.
 func (r *LookupResponder) Start(parent context.Context) error {
-	if parent == nil {
+	if parent ==
+		nil {
 		parent = context.Background()
 	}
+
 	r.mu.Lock()
 	if r.closed || r.started {
 		r.mu.Unlock()

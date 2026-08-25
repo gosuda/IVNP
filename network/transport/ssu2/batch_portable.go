@@ -24,17 +24,13 @@ func readBatch(c *UDPBatchConn, b *Batch) (int, error) {
 		return 0, ErrInvalidDatagram
 	}
 	packet.Len = 0
-	n, _, flags, addr, err := c.conn.ReadMsgUDP(packet.Data, nil)
+	n, _, flags, addr, err := c.conn.ReadMsgUDPAddrPort(packet.Data, nil)
 	if err != nil {
 		return 0, err
 	}
-	peer, ok := netip.AddrFromSlice(addr.IP)
-	if !ok {
-		return 0, ErrInvalidDatagram
-	}
 	packet.Len = n
-	packet.Addr = netip.AddrPortFrom(peer.Unmap(), uint16(addr.Port))
-	packet.Zone = zoneIndex(addr.Zone)
+	packet.Addr = netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port())
+	packet.Zone = zoneIndex(addr.Addr().Zone())
 	if datagramTruncated(flags) {
 		return 1, ErrDatagramTruncated
 	}
@@ -42,7 +38,7 @@ func readBatch(c *UDPBatchConn, b *Batch) (int, error) {
 }
 
 func writeBatchPrefix(c *UDPBatchConn, b *Batch, count int) (int, error) {
-	var addresses [MaxBatch]*net.UDPAddr
+	var addresses [MaxBatch]netip.AddrPort
 	// Match sendmmsg semantics: reject a malformed prefix before emitting any
 	// datagram. This matters to callers which retry the unsent suffix.
 	for i := range b.packets[:count] {
@@ -50,7 +46,7 @@ func writeBatchPrefix(c *UDPBatchConn, b *Batch, count int) (int, error) {
 		if packet.Len < 0 || packet.Len > len(packet.Data) || packet.Len > MaxDatagramSize {
 			return 0, ErrInvalidDatagram
 		}
-		addr, ok := udpAddr(packet.Addr, packet.Zone)
+		addr, ok := udpAddrPort(packet.Addr, packet.Zone)
 		if !ok {
 			return 0, ErrInvalidDatagram
 		}
@@ -58,7 +54,7 @@ func writeBatchPrefix(c *UDPBatchConn, b *Batch, count int) (int, error) {
 	}
 	for i := range b.packets[:count] {
 		packet := &b.packets[i]
-		n, err := c.conn.WriteToUDP(packet.Data[:packet.Len], addresses[i])
+		n, err := c.conn.WriteToUDPAddrPort(packet.Data[:packet.Len], addresses[i])
 		if err != nil {
 			return i, err
 		}
@@ -69,20 +65,20 @@ func writeBatchPrefix(c *UDPBatchConn, b *Batch, count int) (int, error) {
 	return count, nil
 }
 
-func udpAddr(addrPort netip.AddrPort, zone uint32) (*net.UDPAddr, bool) {
+func udpAddrPort(addrPort netip.AddrPort, zone uint32) (netip.AddrPort, bool) {
 	addr := addrPort.Addr()
-	if !addr.IsValid() || (zone != 0 && (addr.Is4() || addr.Is4In6())) {
-		return nil, false
+	invalidZone := zone != 0 && (addr.Is4() || addr.Is4In6())
+	if !addr.IsValid() || invalidZone {
+		return netip.AddrPort{}, false
 	}
-	udpAddr := &net.UDPAddr{IP: addr.Unmap().AsSlice(), Port: int(addrPort.Port())}
 	if zone != 0 {
 		iface, err := net.InterfaceByIndex(int(zone))
 		if err != nil {
-			return nil, false
+			return netip.AddrPort{}, false
 		}
-		udpAddr.Zone = iface.Name
+		addr = addr.WithZone(iface.Name)
 	}
-	return udpAddr, true
+	return netip.AddrPortFrom(addr.Unmap(), addrPort.Port()), true
 }
 
 func zoneIndex(zone string) uint32 {

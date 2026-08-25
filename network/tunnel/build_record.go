@@ -74,12 +74,17 @@ func MarshalShortBuildRequest(dst []byte, request ShortBuildRequest, options []b
 }
 
 func marshalShortBuildRequest(dst []byte, request ShortBuildRequest, options []byte, random io.Reader) error {
-	if len(dst) < ShortBuildRequestPlainSize || request.ReceiveTunnelID == 0 || request.NextTunnelID == 0 || request.NextMessageID == 0 || request.Gateway && request.Endpoint || request.LifetimeSeconds != shortBuildLifetime || random == nil {
+	marshalShortBuildRequestRejected := len(dst) < ShortBuildRequestPlainSize || request.ReceiveTunnelID == 0 || request.NextTunnelID == 0 || request.NextMessageID == 0 || request.Gateway && request.Endpoint || request.LifetimeSeconds != shortBuildLifetime
+	if !marshalShortBuildRequestRejected {
+		marshalShortBuildRequestRejected = random == nil
+	}
+	if marshalShortBuildRequestRejected {
 		return ErrShortBuildRecord
 	}
 	if options == nil {
 		options = []byte{0, 0}
 	}
+
 	mapping, used, err := ivnp.ParseMapping(options)
 	if err != nil || used != len(options) || mapping.EncodedLen() > shortBuildMaxOptionsSize {
 		return ErrShortBuildRecord
@@ -452,7 +457,7 @@ func tunnelKDF(salt [32]byte, info string) ([32]byte, [32]byte) {
 // construction retain dozens of short-lived hash.Hash objects per hop.
 func shortBuildHMAC(key [32]byte, prefix *[32]byte, info string, counter byte) [32]byte {
 	var inner [128]byte
-	for i := 0; i < sha256.BlockSize; i++ {
+	for i := range sha256.BlockSize {
 		inner[i] = 0x36
 	}
 	for i := range key {
@@ -472,7 +477,7 @@ func shortBuildHMAC(key [32]byte, prefix *[32]byte, info string, counter byte) [
 	innerHash := sha256.Sum256(inner[:offset])
 
 	var outer [sha256.BlockSize + sha256.Size]byte
-	for i := 0; i < sha256.BlockSize; i++ {
+	for i := range sha256.BlockSize {
 		outer[i] = 0x5c
 	}
 	for i := range key {

@@ -23,8 +23,7 @@ func TestNTCP2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	alice, aliceStatic, aliceIV := newNTCP2TestLocal(t, "127.0.0.1:1")
 	bob, bobStatic, bobIV := newNTCP2TestLocal(t, listener.Addr().String())
@@ -102,7 +101,6 @@ func TestNTCP2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("native NTCP2 peer did not reject first I2NP")
 	}
-	time.Sleep(20 * time.Millisecond)
 	if current := aliceManager.session(bob.Hash()); current != session {
 		t.Fatal("message-level handler rejection closed the authenticated NTCP2 session")
 	}
@@ -302,10 +300,19 @@ func newNTCP2TestLocal(t *testing.T, endpoint string) (*LocalRouterInfo, []byte,
 	return owner, static.Bytes(), iv
 }
 
+func testECDHPublic(t *testing.T, private []byte) []byte {
+	t.Helper()
+	public, err := ecdhPublic(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return public
+}
+
 func TestNTCP2ManagerReleasesResponderOnPostConstructionFailure(t *testing.T) {
 	local, staticPrivate, staticIV := newNTCP2TestLocal(t, "127.0.0.1:1")
 	localHash := local.Hash()
-	initiator, err := ntcp2.NewInitiator(ecdhPublic(staticPrivate))
+	initiator, err := ntcp2.NewInitiator(testECDHPublic(t, staticPrivate))
 	if err != nil {
 		t.Fatal(err)
 	}

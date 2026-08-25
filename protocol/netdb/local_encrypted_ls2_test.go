@@ -204,7 +204,11 @@ func TestLocalEncryptedLeaseSetFailureCleanupAndRelease(t *testing.T) {
 			t.Fatal("ELS DH client remained after release")
 		}
 	}
-	if !encrypted.released || encrypted.destination != nil || encrypted.inner != nil || encrypted.random != nil || encrypted.secret != nil || encrypted.dhClients != nil {
+	localEncryptedLeaseSetFailureCleanupAndReleaseRejected := !encrypted.released || encrypted.destination != nil || encrypted.inner != nil || encrypted.random != nil || encrypted.secret != nil
+	if !localEncryptedLeaseSetFailureCleanupAndReleaseRejected {
+		localEncryptedLeaseSetFailureCleanupAndReleaseRejected = encrypted.dhClients != nil
+	}
+	if localEncryptedLeaseSetFailureCleanupAndReleaseRejected {
 		t.Fatal("ELS owner retained references after release")
 	}
 	if _, err = encrypted.MarshalTo(dst, now); !errors.Is(err, ErrEncryptedLeaseSet) {

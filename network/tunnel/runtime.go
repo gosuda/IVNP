@@ -147,10 +147,13 @@ func NewRuntime(cfg RuntimeConfig) *Runtime {
 	if now == nil {
 		now = func() uint64 { return uint64(time.Now().UnixMilli()) }
 	}
+
 	gateway := cfg.Gateway
-	if gateway == nil {
+	if gateway ==
+		nil {
 		gateway = NewGateway(nil)
 	}
+
 	runtime := &Runtime{gateway: gateway, now: now, metrics: cfg.Metrics}
 	var seed [4]byte
 	if _, err := rand.Read(seed[:]); err == nil {

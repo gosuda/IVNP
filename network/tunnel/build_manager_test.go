@@ -710,13 +710,11 @@ func TestBuildManagerAuthenticatesTransitBeforeReservation(t *testing.T) {
 	results := make(chan error, 2)
 	var group sync.WaitGroup
 	for range 2 {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+		group.Go(func() {
 			duplicate := message
 			duplicate.Payload = append([]byte(nil), message.Payload...)
 			results <- manager.HandleBuildFrom(ivnp.Hash{7}, duplicate)
-		}()
+		})
 	}
 	group.Wait()
 	close(results)
@@ -908,7 +906,11 @@ func TestTransitBandwidthOptionsReplyAndReceiptLifetime(t *testing.T) {
 	}
 	options := ShortBuildOptions{Minimum: 32, Requested: 48}
 	var plaintext [ShortBuildRequestPlainSize]byte
-	if err := MarshalShortBuildRequest(plaintext[:], request, marshalShortBuildOptions(options)); err != nil {
+	encodedOptions, err := marshalShortBuildOptions(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = MarshalShortBuildRequest(plaintext[:], request, encodedOptions); err != nil {
 		t.Fatal(err)
 	}
 	parsedRequest, err := ParseShortBuildRequest(plaintext[:])

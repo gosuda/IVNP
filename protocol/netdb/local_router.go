@@ -72,12 +72,15 @@ func NewLocalRouterInfo(config LocalRouterInfoConfig) (*LocalRouterInfo, error) 
 	privateProof := ed25519.Sign(signingPrivate, identity.Bytes())
 	privateMatchesPublic := ed25519.Verify(first, identity.Bytes(), privateProof)
 	clear(privateProof)
-	if identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519 ||
+	newLocalRouterInfoRejected := identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519 ||
 		len(rest) != 0 ||
 		identity.Hash() != config.Local.IdentityHash() ||
 		!bytes.Equal(first, signingPublic) ||
-		!bytes.Equal(signingPrivate.Public().(ed25519.PublicKey), signingPublic) ||
-		!privateMatchesPublic {
+		!bytes.Equal(signingPrivate.Public().(ed25519.PublicKey), signingPublic)
+	if !newLocalRouterInfoRejected {
+		newLocalRouterInfoRejected = !privateMatchesPublic
+	}
+	if newLocalRouterInfoRejected {
 		return nil, ErrLocalRouterIdentity
 	}
 	contacts, err := cloneRouterInfoContacts(config.Contacts)

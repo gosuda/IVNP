@@ -204,7 +204,11 @@ func TestTransportMuxCoalescesLifecycleErrors(t *testing.T) {
 	}
 	ssuStarts, ssuCloses, ssuWaits, _ := ssu2.counts()
 	ntcpStarts, ntcpCloses, ntcpWaits, _ := ntcp2.counts()
-	if ssuStarts != 1 || ssuCloses != 1 || ssuWaits != 1 || ntcpStarts != 1 || ntcpCloses != 1 || ntcpWaits != 1 {
+	transportMuxCoalescesLifecycleErrorsRejected := ssuStarts != 1 || ssuCloses != 1 || ssuWaits != 1 || ntcpStarts != 1 || ntcpCloses != 1
+	if !transportMuxCoalescesLifecycleErrorsRejected {
+		transportMuxCoalescesLifecycleErrorsRejected = ntcpWaits != 1
+	}
+	if transportMuxCoalescesLifecycleErrorsRejected {
 		t.Fatalf("lifecycle calls = SSU2 (%d, %d, %d), NTCP2 (%d, %d, %d); want one each", ssuStarts, ssuCloses, ssuWaits, ntcpStarts, ntcpCloses, ntcpWaits)
 	}
 }

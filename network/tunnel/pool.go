@@ -162,7 +162,11 @@ func (p *Pool) Select(direction Direction, now uint64) (Entry, bool) {
 	var best Entry
 	ok := false
 	for _, e := range p.tunnels {
-		if e.Direction == direction && e.Expires > now && (!ok || e.Expires > best.Expires) {
+		selectSelected := e.Direction == direction && e.Expires > now
+		if selectSelected {
+			selectSelected = (!ok || e.Expires > best.Expires)
+		}
+		if selectSelected {
 			best, ok = e, true
 		}
 	}

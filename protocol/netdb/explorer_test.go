@@ -18,7 +18,7 @@ func TestExplorationTargetStaysInSelectedBucket(t *testing.T) {
 		if got := distanceBucket(local, target); got != bucket {
 			t.Fatalf("bucket %d target distance = %d", bucket, got)
 		}
-		for bit := 0; bit < bucket; bit++ {
+		for bit := range bucket {
 			byteIndex, mask := bit/8, byte(1<<(7-bit%8))
 			if target[byteIndex]&mask != local[byteIndex]&mask {
 				t.Fatalf("bucket %d changed prefix bit %d", bucket, bit)

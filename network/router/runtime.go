@@ -364,7 +364,8 @@ func validateEndpoint(endpoint Endpoint) error {
 // Start opens configured sockets, publishes the current local address snapshot,
 // and starts the transport manager. A Router is single-start only.
 func (r *Router) Start(parent context.Context) error {
-	if parent == nil {
+	if parent ==
+		nil {
 		parent = context.Background()
 	}
 
@@ -541,9 +542,7 @@ func (r *Router) startReseed(ctx context.Context) <-chan struct{} {
 	r.reseedErr = nil
 	r.reseedMu.Unlock()
 
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
+	r.wg.Go(func() {
 		_, err := r.deps.Reseed.FetchAny(ctx, r.cfg.ReseedEndpoints, r.deps.Database, uint64(now.UnixMilli()))
 		if r.deps.ReseedOutcome != nil {
 			r.deps.ReseedOutcome(err)
@@ -565,7 +564,7 @@ func (r *Router) startReseed(ctx context.Context) <-chan struct{} {
 		}
 		close(done)
 		r.reseedMu.Unlock()
-	}()
+	})
 	return done
 }
 
@@ -662,8 +661,10 @@ func (r *Router) watchTransport(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+
 	if err == nil {
 		err = ErrTransportStopped
+
 	}
 	r.stop(err, true)
 }

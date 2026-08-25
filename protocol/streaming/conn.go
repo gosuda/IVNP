@@ -195,8 +195,8 @@ func (c *Conn) writeLoop() {
 			}
 			n, err := c.stream.Write(request.data)
 			activeDeadline := c.endWrite()
-			if err != nil && !activeDeadline.IsZero() && (deadlineExpired(activeDeadline) || c.isClosed()) {
-				// A deadline installed on an already-active request remains
+			deadlineFailure := err != nil && !activeDeadline.IsZero()
+			if deadlineFailure && (deadlineExpired(activeDeadline) || c.isClosed()) { // A deadline installed on an already-active request remains
 				// its outcome if Close races the underlying stream's wake-up.
 				err = timeoutError{}
 			} else if err != nil && c.isClosed() && !isTimeoutError(err) {

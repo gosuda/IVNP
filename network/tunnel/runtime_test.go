@@ -262,7 +262,7 @@ func TestRuntimeHandlesHundredsOfConcurrentCircuits(t *testing.T) {
 		go func(circuitID uint32) {
 			defer workers.Done()
 			<-start
-			for sent := 0; sent < 32; sent++ {
+			for range 32 {
 				if err := runtime.SendBlock(context.Background(), circuitID, block); err != nil {
 					errs <- err
 					return

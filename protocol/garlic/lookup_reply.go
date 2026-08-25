@@ -1,5 +1,7 @@
 package garlic
 
+import "cmp"
+
 import (
 	"encoding/binary"
 	"errors"
@@ -117,9 +119,9 @@ func (wrapper DatabaseLookupReplyWrapper) outerMessageID(inner uint32) uint32 {
 	candidate := inner ^ 0xa5a5a5a5
 	if candidate == 0 || candidate == inner {
 		candidate = inner + 1
-		if candidate == 0 {
-			candidate = 1
-		}
+
+		candidate = cmp.Or(candidate, 1)
+
 	}
 	return candidate
 }

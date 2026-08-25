@@ -49,8 +49,8 @@ func Parse(src []byte) (Packet, error) {
 		Sequence: binary.BigEndian.Uint32(src[8:12]), AckThrough: binary.BigEndian.Uint32(src[12:16]),
 		NACKCount: src[16], ResendDelay: src[off], Flags: binary.BigEndian.Uint16(src[off+1 : off+3]),
 		NACKs: src[17:off],
-	}
-	packet.Options = src[off+5 : off+5+optionsLen]
-	packet.Payload = src[off+5+optionsLen:]
+
+		Options: src[off+5 : off+5+optionsLen],
+		Payload: src[off+5+optionsLen:]}
 	return packet, nil
 }

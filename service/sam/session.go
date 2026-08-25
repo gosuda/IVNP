@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 )
 
 type sessionStyle string
@@ -36,18 +37,20 @@ type samSession struct {
 	rawHeader      bool
 	udpTarget      *net.UDPAddr
 
-	forward        bool
-	mu             sync.Mutex
-	listener       net.Listener
-	subscription   clientapi.MessageSubscription
-	children       map[string]*samSession
-	attachments    map[net.Conn]struct{}
-	queueBytes     *byteBudget
-	acceptOnce     sync.Once
-	acceptRequests chan acceptRequest
-	acceptIncoming chan acceptResult
-	once           sync.Once
-	wg             sync.WaitGroup
+	forward             bool
+	mu                  sync.Mutex
+	listener            net.Listener
+	subscription        clientapi.MessageSubscription
+	children            map[string]*samSession
+	attachments         map[net.Conn]struct{}
+	queueBytes          *byteBudget
+	acceptOnce          sync.Once
+	acceptRequests      chan acceptRequest
+	acceptIncoming      chan acceptResult
+	acceptAdmissions    atomic.Uint64
+	acceptCancellations atomic.Uint64
+	once                sync.Once
+	wg                  sync.WaitGroup
 }
 
 func newRootSession(server *Server, id string, style sessionStyle, endpoint clientapi.DestinationEndpoint, control *serverConnection, fromPort, toPort, listenPort uint16, protocol, listenProtocol uint8, rawHeader bool, udpTarget *net.UDPAddr) *samSession {
@@ -187,8 +190,7 @@ func (s *samSession) startReceiver(route clientapi.DestinationRoute, capacity in
 	}
 	s.subscription = subscription
 	s.mu.Unlock()
-	s.wg.Add(1)
-	go func() { defer s.wg.Done(); s.receiveLoop(subscription) }()
+	s.wg.Go(func() { ; s.receiveLoop(subscription) })
 	return nil
 }
 

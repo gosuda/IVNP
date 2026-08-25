@@ -34,9 +34,12 @@ func NewLocalLeaseSet2WithTypes(destination *ivnp.LocalDestination, requested []
 		return nil, ErrLocalLeaseSet2
 	}
 	identity, err := destination.Identity()
-	if err != nil || (identity.CryptoKeyType() != ivnp.CryptoX25519 && identity.CryptoKeyType() != ivnp.CryptoElGamal) ||
-		(identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519 && identity.SigningKeyType() != ivnp.SigningRedDSASHA512Ed25519) ||
-		(identity.CryptoKeyType() == ivnp.CryptoElGamal && identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519) {
+	newLocalLeaseSet2WithTypesRejected := err != nil || (identity.CryptoKeyType() != ivnp.CryptoX25519 && identity.CryptoKeyType() != ivnp.CryptoElGamal) ||
+		(identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519 && identity.SigningKeyType() != ivnp.SigningRedDSASHA512Ed25519)
+	if !newLocalLeaseSet2WithTypesRejected {
+		newLocalLeaseSet2WithTypesRejected = (identity.CryptoKeyType() == ivnp.CryptoElGamal && identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519)
+	}
+	if newLocalLeaseSet2WithTypesRejected {
 		return nil, ErrLocalLeaseSet2
 	}
 	raw := append([]byte(nil), identity.Bytes()...)

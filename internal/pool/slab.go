@@ -127,9 +127,6 @@ func classFor(n int) (int, bool) {
 	if n <= 0 || n > maxPooled {
 		return 0, false
 	}
-	exponent := bits.Len(uint(n - 1))
-	if exponent < minClass {
-		exponent = minClass
-	}
+	exponent := max(bits.Len(uint(n-1)), minClass)
 	return exponent - minClass, true
 }

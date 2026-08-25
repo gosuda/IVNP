@@ -45,12 +45,16 @@ func (s *Store) AcquireLock() (*Lock, error) {
 		err = file.Chmod(0o600)
 	}
 	info, statErr := file.Stat()
-	if statErr == nil {
+	if statErr ==
+
+		nil {
 		statErr = err
 	}
-	if statErr == nil {
+	if statErr ==
+		nil {
 		statErr = validatePrivateFile(info)
 	}
+
 	if statErr != nil {
 		file.Close()
 		return nil, statErr

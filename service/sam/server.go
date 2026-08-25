@@ -72,8 +72,11 @@ type Server struct {
 }
 
 func NewServer(config ServerConfig) (*Server, error) {
-	if config.Address == "" || config.Controller == nil || !loopbackSocketAddress(config.Address) ||
-		(config.UDPAddress != "" && !loopbackSocketAddress(config.UDPAddress)) {
+	newServerRejected := config.Address == "" || config.Controller == nil || !loopbackSocketAddress(config.Address)
+	if !newServerRejected {
+		newServerRejected = (config.UDPAddress != "" && !loopbackSocketAddress(config.UDPAddress))
+	}
+	if newServerRejected {
 		return nil, ErrProtocol
 	}
 	if config.Listen == nil {
@@ -135,6 +138,7 @@ func (s *Server) Start(parent context.Context) error {
 	if parent == nil {
 		parent = context.Background()
 	}
+
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
@@ -223,9 +227,7 @@ func (s *Server) acceptLoop() {
 			}
 			s.connections[connection] = struct{}{}
 			s.mu.Unlock()
-			s.wg.Add(1)
-			go func() {
-				defer s.wg.Done()
+			s.wg.Go(func() {
 				defer func() { <-s.sem }()
 				defer func() {
 					s.mu.Lock()
@@ -233,7 +235,7 @@ func (s *Server) acceptLoop() {
 					s.mu.Unlock()
 				}()
 				_ = s.serveConnection(connection)
-			}()
+			})
 		default:
 			_ = connection.Close()
 		}

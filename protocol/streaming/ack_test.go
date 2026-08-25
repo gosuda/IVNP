@@ -8,7 +8,7 @@ import (
 func TestAcknowledgementRetainsNACKedSequencesAndWraps(t *testing.T) {
 	state := NewState(1, 2)
 	state.Status = Open
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, ok := state.OnSend(false); !ok {
 			t.Fatal("send blocked")
 		}

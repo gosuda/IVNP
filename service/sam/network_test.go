@@ -245,21 +245,17 @@ func newFakeBridge(t *testing.T, private string) *fakeBridge {
 		t.Fatal(err)
 	}
 	bridge := &fakeBridge{listener: listener, closed: make(chan struct{}), private: private}
-	bridge.wg.Add(1)
-	go func() {
-		defer bridge.wg.Done()
+	bridge.wg.Go(func() {
 		for {
 			connection, err := listener.Accept()
 			if err != nil {
 				return
 			}
-			bridge.wg.Add(1)
-			go func() {
-				defer bridge.wg.Done()
+			bridge.wg.Go(func() {
 				bridge.handle(connection)
-			}()
+			})
 		}
-	}()
+	})
 	return bridge
 }
 

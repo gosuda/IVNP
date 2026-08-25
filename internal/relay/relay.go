@@ -34,9 +34,11 @@ func Bidirectional(left, right net.Conn, leftReader io.Reader) error {
 // copy worker. The callback converts a recovered value to the error returned by
 // this relay; it must not panic.
 func BidirectionalContained(left, right net.Conn, leftReader io.Reader, recoverPanic func(any) error) error {
-	if leftReader == nil {
+	if leftReader ==
+		nil {
 		leftReader = left
 	}
+
 	done := make(chan result, 2)
 	copyOne := func(direction uint8, destination net.Conn, source io.Reader) {
 		var copyErr error

@@ -1,6 +1,8 @@
 // Package upnp discovers Internet Gateway Devices and manages their port mappings.
 package upnp
 
+import "cmp"
+
 import (
 	"bytes"
 	"context"
@@ -61,14 +63,14 @@ func DiscoveryRequest(target string, mx int) ([]byte, error) {
 // header syntax, and non-whitespace bytes after the header terminator.
 func ParseSSDPResponse(packet []byte) (DiscoveryResponse, error) {
 	var response DiscoveryResponse
-	end := bytes.Index(packet, []byte("\r\n\r\n"))
-	if end < 0 {
+	before, after, ok := bytes.Cut(packet, []byte("\r\n\r\n"))
+	if !ok {
 		return response, fmt.Errorf("%w: missing header terminator", ErrInvalidSSDPResponse)
 	}
-	if strings.TrimSpace(string(packet[end+4:])) != "" {
+	if strings.TrimSpace(string(after)) != "" {
 		return response, fmt.Errorf("%w: body is not permitted", ErrInvalidSSDPResponse)
 	}
-	lines := strings.Split(string(packet[:end]), "\r\n")
+	lines := strings.Split(string(before), "\r\n")
 	if len(lines) < 1 || lines[0] != "HTTP/1.1 200 OK" {
 		return response, fmt.Errorf("%w: expected HTTP/1.1 200 OK", ErrInvalidSSDPResponse)
 	}
@@ -105,9 +107,9 @@ func ParseSSDPResponse(packet []byte) (DiscoveryResponse, error) {
 // Discover performs an IGD SSDP search using the client's configured address.
 func (c *Client) Discover(ctx context.Context) ([]DiscoveryResponse, error) {
 	address := c.SSDPAddress
-	if address == "" {
-		address = SSDPMulticastAddress
-	}
+
+	address = cmp.Or(address, SSDPMulticastAddress)
+
 	endpoint, err := net.ResolveUDPAddr("udp4", address)
 	if err != nil {
 		return nil, fmt.Errorf("upnp: resolve SSDP address: %w", err)
@@ -127,9 +129,9 @@ func (c *Client) DiscoverWithConn(ctx context.Context, conn net.PacketConn, dest
 		return nil, fmt.Errorf("upnp: discovery connection and destination are required")
 	}
 	mx := c.MX
-	if mx == 0 {
-		mx = 2
-	}
+
+	mx = cmp.Or(mx, 2)
+
 	request, err := DiscoveryRequest(InternetGatewayDevice, mx)
 	if err != nil {
 		return nil, err
@@ -188,11 +190,18 @@ func Discover(ctx context.Context) ([]DiscoveryResponse, error) {
 func validHeaderName(name string) bool {
 	for i := range name {
 		c := name[i]
-		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(c))) {
+		if !validHeaderCharacter(c) {
 			return false
 		}
 	}
 	return true
+}
+
+func validHeaderCharacter(character byte) bool {
+	return (character >= 'A' && character <= 'Z') ||
+		(character >= 'a' && character <= 'z') ||
+		(character >= '0' && character <= '9') ||
+		strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))
 }
 
 func parseHTTPURL(raw string) (*url.URL, error) {

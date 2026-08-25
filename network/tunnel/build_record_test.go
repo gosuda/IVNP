@@ -55,7 +55,11 @@ func TestShortBuildRequestAndReplyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.ReceiveTunnelID != request.ReceiveTunnelID || parsed.NextTunnelID != request.NextTunnelID || parsed.NextRouter != request.NextRouter || !parsed.Endpoint || parsed.Gateway || parsed.RequestMinutes != request.RequestMinutes || parsed.LifetimeSeconds != shortBuildLifetime || parsed.NextMessageID != request.NextMessageID || parsed.Options.EncodedLen() != 2 {
+	shortBuildRequestAndReplyRoundTripRejected := parsed.ReceiveTunnelID != request.ReceiveTunnelID || parsed.NextTunnelID != request.NextTunnelID || parsed.NextRouter != request.NextRouter || !parsed.Endpoint || parsed.Gateway || parsed.RequestMinutes != request.RequestMinutes || parsed.LifetimeSeconds != shortBuildLifetime || parsed.NextMessageID != request.NextMessageID
+	if !shortBuildRequestAndReplyRoundTripRejected {
+		shortBuildRequestAndReplyRoundTripRejected = parsed.Options.EncodedLen() != 2
+	}
+	if shortBuildRequestAndReplyRoundTripRejected {
 		t.Fatalf("parsed request = %#v", parsed)
 	}
 	if creatorKeys != hopKeys || !creatorKeys.HasGarlicKeys {
@@ -161,7 +165,7 @@ func TestShortBuildRecordSetThreeHopRoundTrip(t *testing.T) {
 	privateKeys := make([][]byte, hops)
 	hashes := make([][32]byte, hops)
 	requests := make([]ShortBuildRequest, hops)
-	for hop := 0; hop < hops; hop++ {
+	for hop := range hops {
 		privateKeys[hop] = bytes.Repeat([]byte{byte(0x51 + hop)}, 32)
 		private, err := ecdh.X25519().NewPrivateKey(privateKeys[hop])
 		if err != nil {
@@ -191,7 +195,7 @@ func TestShortBuildRecordSetThreeHopRoundTrip(t *testing.T) {
 	if err := PreprocessShortBuildRecords(records, keys, positions); err != nil {
 		t.Fatal(err)
 	}
-	for hop := 0; hop < hops; hop++ {
+	for hop := range hops {
 		var plaintext [ShortBuildRequestPlainSize]byte
 		request, derived, slot, err := ProcessShortBuildRecords(records, plaintext[:], hashes[hop], privateKeys[hop], true, bytes.NewReader(bytes.Repeat([]byte{byte(0x81 + hop)}, ShortBuildReplyPlainSize)))
 		if err != nil {
@@ -205,7 +209,7 @@ func TestShortBuildRecordSetThreeHopRoundTrip(t *testing.T) {
 	if err := OpenShortBuildReplies(records, keys, positions, replies); err != nil {
 		t.Fatal(err)
 	}
-	for hop := 0; hop < hops; hop++ {
+	for hop := range hops {
 		if code := replies[(hop+1)*ShortBuildReplyPlainSize-1]; code != 0 {
 			t.Fatalf("hop %d reply code = %d", hop, code)
 		}

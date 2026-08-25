@@ -29,11 +29,14 @@ func TestPacketMarshalToRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.SendStreamID != want.SendStreamID || got.ReceiveStreamID != want.ReceiveStreamID ||
+	packetMarshalToRoundTripRejected := got.SendStreamID != want.SendStreamID || got.ReceiveStreamID != want.ReceiveStreamID ||
 		got.Sequence != want.Sequence || got.AckThrough != want.AckThrough ||
 		got.NACKCount != 2 || got.ResendDelay != want.ResendDelay || got.Flags != want.Flags ||
-		string(got.NACKs) != string(want.NACKs) || string(got.Options) != string(want.Options) ||
-		string(got.Payload) != string(want.Payload) {
+		string(got.NACKs) != string(want.NACKs) || string(got.Options) != string(want.Options)
+	if !packetMarshalToRoundTripRejected {
+		packetMarshalToRoundTripRejected = string(got.Payload) != string(want.Payload)
+	}
+	if packetMarshalToRoundTripRejected {
 		t.Fatalf("Parse(MarshalTo()) = %#v; want %#v", got, want)
 	}
 }

@@ -32,7 +32,12 @@ func loadState(path string, maxBytes int64, maxEntries int) (map[string]string, 
 		return nil, nil, nil, nil, err
 	}
 	var state persistedState
-	if err = json.Unmarshal(data, &state); err != nil || (state.Version != 1 && state.Version != 2) || len(state.Entries) > maxEntries {
+	err = json.Unmarshal(data, &state)
+	invalidState := err != nil
+	if !invalidState {
+		invalidState = (state.Version != 1 && state.Version != 2) || len(state.Entries) > maxEntries
+	}
+	if invalidState {
 		return nil, nil, nil, nil, ErrConfig
 	}
 	validate := func(entries map[string]string) error {

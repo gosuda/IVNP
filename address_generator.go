@@ -244,8 +244,11 @@ func (d *LocalDestination) CryptoPublic(cryptoType CryptoKeyType) ([32]byte, err
 	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	if d.cryptoCapabilities != localDestinationCryptoCapabilities ||
-		(cryptoType != CryptoX25519 && cryptoType != CryptoMLKEM768X25519 && cryptoType != CryptoMLKEM1024X25519) {
+	cryptoPublicRejected := d.cryptoCapabilities != localDestinationCryptoCapabilities
+	if !cryptoPublicRejected {
+		cryptoPublicRejected = (cryptoType != CryptoX25519 && cryptoType != CryptoMLKEM768X25519 && cryptoType != CryptoMLKEM1024X25519)
+	}
+	if cryptoPublicRejected {
 		return [32]byte{}, ErrInvalidIdentity
 	}
 	return d.x25519Public, nil
@@ -262,8 +265,11 @@ func (d *LocalDestination) CopyCryptoPrivate(cryptoType CryptoKeyType, dst []byt
 	if d.released {
 		return cryptx.ErrSensitiveReleased
 	}
-	if d.cryptoCapabilities != localDestinationCryptoCapabilities ||
-		(cryptoType != CryptoX25519 && cryptoType != CryptoMLKEM768X25519 && cryptoType != CryptoMLKEM1024X25519) {
+	copyCryptoPrivateRejected := d.cryptoCapabilities != localDestinationCryptoCapabilities
+	if !copyCryptoPrivateRejected {
+		copyCryptoPrivateRejected = (cryptoType != CryptoX25519 && cryptoType != CryptoMLKEM768X25519 && cryptoType != CryptoMLKEM1024X25519)
+	}
+	if copyCryptoPrivateRejected {
 		return ErrInvalidIdentity
 	}
 	copy(dst, d.x25519Private[:])

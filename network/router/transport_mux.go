@@ -190,6 +190,7 @@ func (m *TransportMux) Send(ctx context.Context, peer ivnp.Hash, message i2np.Me
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -212,9 +213,11 @@ func (m *TransportMux) Send(ctx context.Context, peer ivnp.Hash, message i2np.Me
 // EnsureSession authenticates one selected public transport without sending an
 // I2NP message. The same pre-delivery fallback rules as Send apply.
 func (m *TransportMux) EnsureSession(ctx context.Context, peer ivnp.Hash) error {
-	if ctx == nil {
+	if ctx ==
+		nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -351,15 +354,18 @@ func hasCurrentTransportAddress(info netdb.RouterInfo, nowMillis uint64, first, 
 // IsRetryableTransportError reports failures that occurred before an I2NP
 // message could be delivered and are expected while selecting live peers.
 func IsRetryableTransportError(err error) bool {
-	if errors.Is(err, ErrTransportUnavailable) ||
+	isRetryableTransportErrorRejected := errors.Is(err, ErrTransportUnavailable) ||
 		errors.Is(err, ErrNTCP2Peer) || errors.Is(err, ErrNTCP2Session) ||
-		errors.Is(err, ErrSSU2Peer) || errors.Is(err, ErrSSU2Session) ||
-		errors.Is(err, ErrSSU2Introduction) {
+		errors.Is(err, ErrSSU2Peer) || errors.Is(err, ErrSSU2Session)
+	if !isRetryableTransportErrorRejected {
+		isRetryableTransportErrorRejected = errors.Is(err, ErrSSU2Introduction)
+	}
+	if isRetryableTransportErrorRejected { // A failed TCP dial cannot have written the I2NP message. Do not classify
+		// generic network errors as retryable: they may come from a session write.
+
 		return true
 	}
 
-	// A failed TCP dial cannot have written the I2NP message. Do not classify
-	// generic network errors as retryable: they may come from a session write.
 	var operation *net.OpError
 	return errors.As(err, &operation) && operation.Op == "dial"
 }

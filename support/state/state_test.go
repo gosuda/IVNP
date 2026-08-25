@@ -312,7 +312,11 @@ func testStore(t *testing.T) *Store {
 }
 
 func sameBundle(left, right Bundle) bool {
-	if !sameRouterAddress(left.Router, right.Router) || !bytes.Equal(left.NTCP2StaticPrivate, right.NTCP2StaticPrivate) || !bytes.Equal(left.NTCP2StaticIV, right.NTCP2StaticIV) || !bytes.Equal(left.SSU2StaticPrivate, right.SSU2StaticPrivate) || !bytes.Equal(left.SSU2IntroKey, right.SSU2IntroKey) || len(left.Destinations) != len(right.Destinations) {
+	sameBundleRejected := !sameRouterAddress(left.Router, right.Router) || !bytes.Equal(left.NTCP2StaticPrivate, right.NTCP2StaticPrivate) || !bytes.Equal(left.NTCP2StaticIV, right.NTCP2StaticIV) || !bytes.Equal(left.SSU2StaticPrivate, right.SSU2StaticPrivate) || !bytes.Equal(left.SSU2IntroKey, right.SSU2IntroKey)
+	if !sameBundleRejected {
+		sameBundleRejected = len(left.Destinations) != len(right.Destinations)
+	}
+	if sameBundleRejected {
 		return false
 	}
 	for name, address := range left.Destinations {

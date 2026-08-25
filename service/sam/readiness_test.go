@@ -124,8 +124,7 @@ func TestSessionStatusWaitsForReadinessAndTimesOut(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = connection.Close()
-		deadline := time.Now().Add(time.Second)
-		for {
+		waitForSAMCondition(t, time.Second, func() bool {
 			loop.mu.Lock()
 			count, allClosed := len(loop.endpoints), true
 			for _, endpoint := range loop.endpoints {
@@ -134,13 +133,7 @@ func TestSessionStatusWaitsForReadinessAndTimesOut(t *testing.T) {
 				endpoint.mu.Unlock()
 			}
 			loop.mu.Unlock()
-			if count != 0 && allClosed {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("disconnected readiness wait retained its destination")
-			}
-			time.Sleep(time.Millisecond)
-		}
+			return count != 0 && allClosed
+		}, "disconnected readiness destination cleanup")
 	})
 }

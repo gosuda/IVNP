@@ -323,7 +323,11 @@ func TestParseOperatingTunnelAndNetDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if operating.Router.Version != "1.2.3" || operating.NetDB.BucketCapacity != 48 || !operating.Tunnel.Enabled || operating.Tunnel.Hops != 3 || operating.Tunnel.Lifetime != 10*time.Minute || operating.Tunnel.BandwidthRateBytesPerSecond != 65_536 || operating.Tunnel.BandwidthBurstBytes != 131_072 {
+	parseOperatingTunnelAndNetDBRejected := operating.Router.Version != "1.2.3" || operating.NetDB.BucketCapacity != 48 || !operating.Tunnel.Enabled || operating.Tunnel.Hops != 3 || operating.Tunnel.Lifetime != 10*time.Minute || operating.Tunnel.BandwidthRateBytesPerSecond != 65_536
+	if !parseOperatingTunnelAndNetDBRejected {
+		parseOperatingTunnelAndNetDBRejected = operating.Tunnel.BandwidthBurstBytes != 131_072
+	}
+	if parseOperatingTunnelAndNetDBRejected {
 		t.Fatalf("operating = %#v", operating)
 	}
 }

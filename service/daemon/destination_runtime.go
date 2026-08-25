@@ -1,5 +1,7 @@
 package daemon
 
+import "cmp"
+
 import (
 	"context"
 	"errors"
@@ -331,7 +333,11 @@ type destinationRuntimeFactory struct {
 }
 
 func (f *destinationRuntimeFactory) create(name string, destination *ivnp.LocalDestination, policy *state.EncryptedLeaseSetPolicy, remotePolicies []state.RemoteELSAuthorization, requestedCrypto []uint16) (*destinationRuntime, error) {
-	if f == nil || destination == nil || f.database == nil || f.service == nil || f.tunnels == nil || f.destinations == nil || f.replyKeys == nil || f.replySender == nil || f.transport == nil || f.now == nil || f.clockNow == nil || f.garlicReceiver == nil || f.status == nil || f.buildReplies == nil || f.requests == nil || f.publishers == nil {
+	createSelected := f == nil || destination == nil || f.database == nil || f.service == nil || f.tunnels == nil || f.destinations == nil || f.replyKeys == nil || f.replySender == nil || f.transport == nil || f.now == nil || f.clockNow == nil || f.garlicReceiver == nil || f.status == nil || f.buildReplies == nil || f.requests == nil
+	if !createSelected {
+		createSelected = f.publishers == nil
+	}
+	if createSelected {
 		if destination != nil {
 			destination.ReleaseSensitive()
 		}
@@ -451,12 +457,11 @@ func (f *destinationRuntimeFactory) create(name string, destination *ivnp.LocalD
 	}
 	defer releaseRemoteELSContexts(remoteELS)
 	rate, burst := f.cfg.Tunnel.BandwidthRateBytesPerSecond, f.cfg.Tunnel.BandwidthBurstBytes
-	if rate == 0 {
-		rate = 1 << 20
-	}
-	if burst == 0 {
-		burst = 2 << 20
-	}
+
+	rate = cmp.Or(rate, 1<<20)
+
+	burst = cmp.Or(burst, 2<<20)
+
 	bandwidth, err := router.NewDestinationBandwidthLimiter(router.DestinationBandwidthConfig{
 		RateBytesPerSecond: uint64(rate), BurstBytes: uint64(burst), Now: f.clockNow,
 	})
@@ -556,6 +561,7 @@ func (d *Daemon) CreateDestination(ctx context.Context, name string, policy Dest
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return clientapi.Destination{}, err
 	}
@@ -650,9 +656,11 @@ func (d *Daemon) DestroyDestination(ctx context.Context, name string) error {
 	if d == nil || d.store == nil {
 		return net.ErrClosed
 	}
-	if ctx == nil {
+	if ctx ==
+		nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return err
 	}

@@ -47,7 +47,11 @@ func TestSessionCloseReleasesDirections(t *testing.T) {
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if !send.released || !receive.released || send.sip != (SipState{}) || receive.sip != (SipState{}) || send.nonceBuf != [cryptx.ChaChaNonceSize]byte{} || receive.nonceBuf != [cryptx.ChaChaNonceSize]byte{} {
+	sessionCloseReleasesDirectionsRejected := !send.released || !receive.released || send.sip != (SipState{}) || receive.sip != (SipState{}) || send.nonceBuf != [cryptx.ChaChaNonceSize]byte{}
+	if !sessionCloseReleasesDirectionsRejected {
+		sessionCloseReleasesDirectionsRejected = receive.nonceBuf != [cryptx.ChaChaNonceSize]byte{}
+	}
+	if sessionCloseReleasesDirectionsRejected {
 		t.Fatal("session close retained directional state")
 	}
 	if err := session.Write(nil); !errors.Is(err, net.ErrClosed) {

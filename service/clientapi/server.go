@@ -26,7 +26,11 @@ type server struct {
 }
 
 func (s *server) start(ctx context.Context, address string, allowRemote bool, maxConnections int, listen func(context.Context, string, string) (net.Listener, error), serve func(net.Listener)) error {
-	if ctx == nil || maxConnections < 1 || (!allowRemote && !isLocalAddress(address)) {
+	startRejected := ctx == nil || maxConnections < 1
+	if !startRejected {
+		startRejected = (!allowRemote && !isLocalAddress(address))
+	}
+	if startRejected {
 		return ErrInvalidConfig
 	}
 
@@ -35,11 +39,16 @@ func (s *server) start(ctx context.Context, address string, allowRemote bool, ma
 	if s.started || s.closed {
 		return net.ErrClosed
 	}
-	if listen == nil {
-		listen = func(ctx context.Context, network, address string) (net.Listener, error) {
-			return (&net.ListenConfig{}).Listen(ctx, network, address)
-		}
+	if listen ==
+		nil {
+		listen =
+			func(ctx context.Context, network,
+				address string) (net.
+				Listener, error) {
+				return (&net.ListenConfig{}).Listen(ctx, network, address)
+			}
 	}
+
 	listener, err := listen(ctx, "tcp", address)
 	if err != nil {
 		return err
@@ -128,11 +137,9 @@ func (s *server) serveActivity(serve func()) {
 }
 
 func (s *server) goServeActivity(serve func()) {
-	s.activities.Add(1)
-	go func() {
-		defer s.activities.Done()
+	s.activities.Go(func() {
 		serve()
-	}()
+	})
 }
 
 func (s *server) connState(_ net.Conn, state http.ConnState) {

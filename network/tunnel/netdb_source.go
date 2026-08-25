@@ -60,7 +60,11 @@ type NetDBOutboundBuildSource struct {
 }
 
 func NewNetDBOutboundBuildSource(config NetDBOutboundBuildSourceConfig) (*NetDBOutboundBuildSource, error) {
-	if config.Table == nil || config.Profiles == nil || (config.ReplyRouter == (ivnp.Hash{})) != (config.ReplyTunnelID == 0) || config.Hops < 1 || config.Hops > i2np.MaxVariableBuildRecords || config.Lifetime == 0 || config.CircuitID == nil || config.TunnelID == nil {
+	newNetDBOutboundBuildSourceRejected := config.Table == nil || config.Profiles == nil || (config.ReplyRouter == (ivnp.Hash{})) != (config.ReplyTunnelID == 0) || config.Hops < 1 || config.Hops > i2np.MaxVariableBuildRecords || config.Lifetime == 0 || config.CircuitID == nil
+	if !newNetDBOutboundBuildSourceRejected {
+		newNetDBOutboundBuildSourceRejected = config.TunnelID == nil
+	}
+	if newNetDBOutboundBuildSourceRejected {
 		return nil, ErrNetDBBuildSourceConfig
 	}
 	if config.CandidateLimit == 0 {
@@ -95,6 +99,7 @@ func (s *NetDBOutboundBuildSource) NextOutboundForReply(ctx context.Context, now
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return OutboundBuild{}, err
 	}
@@ -207,7 +212,11 @@ type NetDBInboundBuildSource struct {
 }
 
 func NewNetDBInboundBuildSource(config NetDBInboundBuildSourceConfig) (*NetDBInboundBuildSource, error) {
-	if config.Table == nil || config.Profiles == nil || config.LocalRouter == (ivnp.Hash{}) || config.Hops < 1 || config.Hops >= i2np.MaxVariableBuildRecords || config.Lifetime == 0 || config.CircuitID == nil || config.TunnelID == nil {
+	newNetDBInboundBuildSourceRejected := config.Table == nil || config.Profiles == nil || config.LocalRouter == (ivnp.Hash{}) || config.Hops < 1 || config.Hops >= i2np.MaxVariableBuildRecords || config.Lifetime == 0 || config.CircuitID == nil
+	if !newNetDBInboundBuildSourceRejected {
+		newNetDBInboundBuildSourceRejected = config.TunnelID == nil
+	}
+	if newNetDBInboundBuildSourceRejected {
 		return nil, ErrNetDBBuildSourceConfig
 	}
 	if config.CandidateLimit == 0 {
@@ -228,6 +237,7 @@ func (s *NetDBInboundBuildSource) NextInbound(ctx context.Context, nowMillis uin
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return InboundBuild{}, err
 	}
@@ -456,17 +466,13 @@ func familyConflict(selected []hopCandidate, candidate hopCandidate) bool {
 func prefixConflict(selected []hopCandidate, candidate hopCandidate) bool {
 	for _, current := range selected {
 		for _, prefix := range candidate.v4 {
-			for _, existing := range current.v4 {
-				if prefix == existing {
-					return true
-				}
+			if slices.Contains(current.v4, prefix) {
+				return true
 			}
 		}
 		for _, prefix := range candidate.v6 {
-			for _, existing := range current.v6 {
-				if prefix == existing {
-					return true
-				}
+			if slices.Contains(current.v6, prefix) {
+				return true
 			}
 		}
 	}

@@ -89,13 +89,9 @@ func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {
 	if n, _, err = receiver.ReadFromUDP(buffer); err == nil {
 		t.Fatalf("malformed UDP packet forwarded: %q", buffer[:n])
 	}
-	deadline := time.Now().Add(time.Second)
-	for metrics.Snapshot().SAM.UDPInvalid < 3 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if got := metrics.Snapshot().SAM.UDPInvalid; got < 3 {
-		t.Fatalf("SAM UDP invalid accounting = %d, want at least 3", got)
-	}
+	waitForSAMCondition(t, time.Second, func() bool {
+		return metrics.Snapshot().SAM.UDPInvalid >= 3
+	}, "SAM UDP invalid accounting")
 }
 
 func TestEmbeddedServerPrimaryRawChildUDPHeader(t *testing.T) {

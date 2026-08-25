@@ -34,15 +34,21 @@ func (c clientDestinationController) CreateDestination(ctx context.Context, spec
 	if d == nil || d.destinationFactory == nil || d.destinations == nil {
 		return nil, ErrDestinationCreation
 	}
-	if ctx == nil {
+	if ctx ==
+		nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	seenCrypto := make(map[uint16]bool, len(spec.Policy.CryptoTypes))
 	for _, cryptoType := range spec.Policy.CryptoTypes {
-		if (cryptoType != 7 && cryptoType != 6 && cryptoType != 4) || seenCrypto[cryptoType] {
+		createDestinationRejected := (cryptoType != 7 && cryptoType != 6 && cryptoType != 4)
+		if !createDestinationRejected {
+			createDestinationRejected = seenCrypto[cryptoType]
+		}
+		if createDestinationRejected {
 			return nil, errDestinationCryptoTypes
 		}
 		seenCrypto[cryptoType] = true
@@ -210,6 +216,7 @@ func (e *clientDestinationEndpoint) WaitReady(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {

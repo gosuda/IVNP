@@ -39,8 +39,8 @@ type manifest struct {
 	Endpoints           map[string]string `json:"endpoints"`
 	RequestedSeconds    int64             `json:"requested_seconds"`
 	StartedUTC          time.Time         `json:"started_utc"`
-	MeasurementStartUTC time.Time         `json:"measurement_start_utc,omitempty"`
-	MeasurementEndUTC   time.Time         `json:"measurement_end_utc,omitempty"`
+	MeasurementStartUTC time.Time         `json:"measurement_start_utc"`
+	MeasurementEndUTC   time.Time         `json:"measurement_end_utc"`
 	MeasuredSeconds     float64           `json:"measured_monotonic_seconds"`
 	RestartVerified     bool              `json:"restart_verified"`
 }

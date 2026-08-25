@@ -35,7 +35,11 @@ func TestPeerTestBlockRoundTrip(t *testing.T) {
 		t.Fatalf("PeerTest block = %#v, %t, %v", block, ok, err)
 	}
 	parsed, err := ParsePeerTestBlock(block.Data)
-	if err != nil || parsed.Message != original.Message || parsed.Code != original.Code || parsed.Nonce != original.Nonce || parsed.Timestamp != original.Timestamp || parsed.Address != original.Address || !parsed.HasHash || parsed.Hash != hash || !bytes.Equal(parsed.Signature, original.Signature) {
+	peerTestBlockRoundTripRejected := err != nil || parsed.Message != original.Message || parsed.Code != original.Code || parsed.Nonce != original.Nonce || parsed.Timestamp != original.Timestamp || parsed.Address != original.Address || !parsed.HasHash || parsed.Hash != hash
+	if !peerTestBlockRoundTripRejected {
+		peerTestBlockRoundTripRejected = !bytes.Equal(parsed.Signature, original.Signature)
+	}
+	if peerTestBlockRoundTripRejected {
 		t.Fatalf("ParsePeerTestBlock = %#v, %v", parsed, err)
 	}
 	destinationID, sourceID := PeerTestConnectionIDs(original.Nonce)

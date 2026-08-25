@@ -20,9 +20,11 @@ func (m *BuildManager) StartVariableOutbound(ctx context.Context, build Variable
 	if m.isReleased() {
 		return 0, ErrBuildConfig
 	}
-	if ctx == nil {
+	if ctx ==
+		nil {
 		ctx = context.Background()
 	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(m.ctx, cancel)
 	defer func() {
@@ -33,7 +35,11 @@ func (m *BuildManager) StartVariableOutbound(ctx context.Context, build Variable
 		return 0, err
 	}
 	now := m.now()
-	if build.CircuitID == 0 || len(build.Hops) == 0 || len(build.Hops) > legacyBuildMaxRecords || build.ReplyRouter == (ivnp.Hash{}) || build.ReplyTunnelID == 0 || build.ExpiresAt <= now || !validVariableHops(build.Hops) {
+	startVariableOutboundRejected := build.CircuitID == 0 || len(build.Hops) == 0 || len(build.Hops) > legacyBuildMaxRecords || build.ReplyRouter == (ivnp.Hash{}) || build.ReplyTunnelID == 0 || build.ExpiresAt <= now
+	if !startVariableOutboundRejected {
+		startVariableOutboundRejected = !validVariableHops(build.Hops)
+	}
+	if startVariableOutboundRejected {
 		return 0, ErrBuildConfig
 	}
 	ids := make([]uint32, len(build.Hops)+1)
@@ -304,7 +310,11 @@ func shortRequestFromVariable(request VariableBuildRequest) ShortBuildRequest {
 }
 func validVariableHops(hops []VariableBuildHop) bool {
 	for index, hop := range hops {
-		if hop.Router == (ivnp.Hash{}) || hop.ReceiveTunnelID == 0 || hop.Kind != VariableBuildElGamal && hop.Kind != VariableBuildLongECIES || hop.Kind == VariableBuildElGamal && hop.ElGamalKey == (cryptx.ElGamalPublicKey{}) || hop.Kind == VariableBuildLongECIES && hop.StaticKey == ([32]byte{}) {
+		validVariableHopsRejected := hop.Router == (ivnp.Hash{}) || hop.ReceiveTunnelID == 0 || hop.Kind != VariableBuildElGamal && hop.Kind != VariableBuildLongECIES || hop.Kind == VariableBuildElGamal && hop.ElGamalKey == (cryptx.ElGamalPublicKey{})
+		if !validVariableHopsRejected {
+			validVariableHopsRejected = hop.Kind == VariableBuildLongECIES && hop.StaticKey == ([32]byte{})
+		}
+		if validVariableHopsRejected {
 			return false
 		}
 		for previous := range index {

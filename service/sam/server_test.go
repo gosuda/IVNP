@@ -67,6 +67,7 @@ func (e *loopEndpoint) SendMessage(_ context.Context, d streamtunnel.Delivery) e
 	if sub == nil {
 		sub = target.subscriptions[clientapi.DestinationRoute{Protocol: d.Protocol}]
 	}
+
 	target.mu.Unlock()
 	if sub == nil {
 		return ErrProtocol
@@ -74,7 +75,6 @@ func (e *loopEndpoint) SendMessage(_ context.Context, d streamtunnel.Delivery) e
 	copyDelivery := d
 	copyDelivery.Payload = append([]byte(nil), d.Payload...)
 	go func() {
-		time.Sleep(20 * time.Millisecond)
 		sub.ch <- &clientapi.ReceivedMessage{Delivery: copyDelivery}
 	}()
 	return nil
@@ -174,7 +174,8 @@ func TestEmbeddedServerKeepsIdleRootSessionAlive(t *testing.T) {
 	if line := readSAMLine(t, reader); !strings.Contains(line, "RESULT=OK DESTINATION=") {
 		t.Fatalf("session create = %q", line)
 	}
-	time.Sleep(3 * 40 * time.Millisecond)
+	timer := time.NewTimer(3 * 40 * time.Millisecond)
+	<-timer.C
 	_, _ = io.WriteString(control, "PING root-still-live\n")
 	if line := readSAMLine(t, reader); line != "PONG root-still-live" {
 		t.Fatalf("idle root ping = %q", line)

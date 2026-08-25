@@ -94,10 +94,7 @@ func (c *CongestionWindow) Acknowledge(count uint16) {
 }
 
 func (c *CongestionWindow) Loss() {
-	threshold := c.cwnd / 2
-	if threshold < MinWindow {
-		threshold = MinWindow
-	}
+	threshold := max(c.cwnd/2, MinWindow)
 	c.ssthresh = threshold
 	c.cwnd = MinWindow
 	c.credit = 0

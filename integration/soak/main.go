@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -760,9 +761,13 @@ func parseOptions(args []string) (options, error) {
 	}
 
 	opts.pinnedRouters = make(map[string]string, 3)
-	for _, item := range strings.Split(pinnedRouterText, ",") {
+	for item := range strings.SplitSeq(pinnedRouterText, ",") {
 		name, hash, ok := strings.Cut(item, "=")
-		if !ok || (name != "java" && name != "i2pd-a" && name != "i2pd-b") || len(hash) != 44 {
+		parseOptionsRejected := !ok || (name != "java" && name != "i2pd-a" && name != "i2pd-b")
+		if !parseOptionsRejected {
+			parseOptionsRejected = len(hash) != 44
+		}
+		if parseOptionsRejected {
 			return opts, errors.New("--pinned-router-hashes must contain java, i2pd-a, and i2pd-b I2P hashes")
 		}
 		if _, duplicate := opts.pinnedRouters[name]; duplicate {
@@ -831,7 +836,11 @@ func validatePublicProbeEvidence(path, encodedKey, runID, routerHash, publicHost
 		signature, signatureErr = base64.RawStdEncoding.DecodeString(evidence.Signature)
 	}
 	payloadWire, marshalErr := json.Marshal(evidence.Payload)
-	if err != nil || signatureErr != nil || marshalErr != nil || len(key) != ed25519.PublicKeySize || len(signature) != ed25519.SignatureSize || !ed25519.Verify(ed25519.PublicKey(key), payloadWire, signature) {
+	validatePublicProbeEvidenceRejected := err != nil || signatureErr != nil || marshalErr != nil || len(key) != ed25519.PublicKeySize || len(signature) != ed25519.SignatureSize
+	if !validatePublicProbeEvidenceRejected {
+		validatePublicProbeEvidenceRejected = !ed25519.Verify(ed25519.PublicKey(key), payloadWire, signature)
+	}
+	if validatePublicProbeEvidenceRejected {
 		return errors.New("public reachability evidence signature is invalid")
 	}
 	payload := evidence.Payload
@@ -921,7 +930,7 @@ func runAllocationPreflight(ctx context.Context, artifacts, binaryDigest string)
 }
 
 func benchmarkAllocs(output, benchmark string) (float64, bool) {
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 3 || !strings.HasPrefix(fields[0], benchmark+"-") || fields[len(fields)-1] != "allocs/op" {
 			continue
@@ -1200,7 +1209,7 @@ func scrapeMetrics(ctx context.Context, base string) (string, map[string]uint64,
 
 func parsePrometheus(wire []byte) map[string]uint64 {
 	values := make(map[string]uint64)
-	for _, line := range strings.Split(string(wire), "\n") {
+	for line := range strings.SplitSeq(string(wire), "\n") {
 		if line == "" || line[0] == '#' || strings.Contains(line, "{") {
 			continue
 		}
@@ -1322,34 +1331,8 @@ func waitForInitialTraffic(ctx context.Context, opts options, traffic *trafficRu
 		probeCtx, cancel := context.WithTimeout(ctx, time.Duration(len(requiredDirections)+2)*probeTimeout+5*time.Second)
 		last = traffic.ProbeInitial(probeCtx)
 		cancel()
-		all := true
-		for _, result := range last {
-			fields := map[string]any{"direction": result.Direction, "sequence": result.Sequence, "bytes": result.Size, "duration_ms": result.Duration.Milliseconds()}
-			if result.Err != nil {
-				fields["error"] = result.Err.Error()
-				all = false
-			} else {
-				for _, route := range requiredDirections {
-					if result.Direction == route.name+"-eepsite" {
-						if passedSizes[result.Direction] == nil {
-							passedSizes[result.Direction] = make(map[int]bool, len(probeSizes))
-						}
-						passedSizes[result.Direction][result.Size] = true
-						break
-					}
-				}
-			}
-			_ = recorder.writeEvent(event{At: time.Now().UTC(), Type: "warmup_probe", Fields: fields})
-		}
-		warmed := true
-		for _, route := range requiredDirections {
-			direction := route.name + "-eepsite"
-			for _, size := range probeSizes {
-				if !passedSizes[direction][size] {
-					warmed = false
-				}
-			}
-		}
+		all := recordWarmupResults(last, passedSizes, recorder)
+		warmed := allProbeSizesPassed(passedSizes)
 		if all && warmed {
 			return nil
 		}
@@ -1366,6 +1349,46 @@ func waitForInitialTraffic(ctx context.Context, opts options, traffic *trafficRu
 		}
 	}
 	return errors.New("timed out waiting for initial black-box traffic: " + strings.Join(failures, "; "))
+}
+
+func recordWarmupResults(results []probeResult, passedSizes map[string]map[int]bool, recorder *artifactRecorder) bool {
+	all := true
+	for _, result := range results {
+		fields := map[string]any{"direction": result.Direction, "sequence": result.Sequence, "bytes": result.Size, "duration_ms": result.Duration.Milliseconds()}
+		if result.Err != nil {
+			fields["error"] = result.Err.Error()
+			all = false
+		} else {
+			recordPassedProbe(result, passedSizes)
+		}
+		_ = recorder.writeEvent(event{At: time.Now().UTC(), Type: "warmup_probe", Fields: fields})
+	}
+	return all
+}
+
+func recordPassedProbe(result probeResult, passedSizes map[string]map[int]bool) {
+	for _, route := range requiredDirections {
+		if result.Direction != route.name+"-eepsite" {
+			continue
+		}
+		if passedSizes[result.Direction] == nil {
+			passedSizes[result.Direction] = make(map[int]bool, len(probeSizes))
+		}
+		passedSizes[result.Direction][result.Size] = true
+		return
+	}
+}
+
+func allProbeSizesPassed(passedSizes map[string]map[int]bool) bool {
+	for _, route := range requiredDirections {
+		direction := route.name + "-eepsite"
+		for _, size := range probeSizes {
+			if !passedSizes[direction][size] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func collectSample(ctx context.Context, opts options, epoch *processEpoch, start time.Time) (soakSample, error) {
@@ -1626,7 +1649,7 @@ func medianSampleMetric(values []soakSample, extract func(soakSample) uint64) ui
 	for index, value := range values {
 		numbers[index] = extract(value)
 	}
-	sort.Slice(numbers, func(left, right int) bool { return numbers[left] < numbers[right] })
+	slices.Sort(numbers)
 	return numbers[len(numbers)/2]
 }
 

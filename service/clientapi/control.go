@@ -109,7 +109,11 @@ func NewControl(config ControlConfig) (*Control, error) {
 	if config.IdleTimeout == 0 {
 		config.IdleTimeout = 30 * time.Second
 	}
-	if config.MaxConnections < 1 || config.MaxHeaderBytes < 1024 || config.ReadHeaderTimeout < 1 || config.ReadTimeout < 1 || config.WriteTimeout < 1 || config.IdleTimeout < 1 {
+	newControlRejected := config.MaxConnections < 1 || config.MaxHeaderBytes < 1024 || config.ReadHeaderTimeout < 1 || config.ReadTimeout < 1 || config.WriteTimeout < 1
+	if !newControlRejected {
+		newControlRejected = config.IdleTimeout < 1
+	}
+	if newControlRejected {
 		return nil, ErrInvalidConfig
 	}
 	return &Control{config: config, token: sha256.Sum256([]byte(config.BearerToken))}, nil

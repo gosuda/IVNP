@@ -20,7 +20,11 @@ func TestSSU2TokenRequestAndRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	header, opened, err := ParseTokenRequest(append([]byte(nil), request...), intro)
-	if err != nil || header.DestinationID != 11 || header.SourceID != 22 || header.PacketNumber != 33 || header.Token != 0 || !bytes.Equal(opened, payload) {
+	sSU2TokenRequestAndRetryRejected := err != nil || header.DestinationID != 11 || header.SourceID != 22 || header.PacketNumber != 33 || header.Token != 0
+	if !sSU2TokenRequestAndRetryRejected {
+		sSU2TokenRequestAndRetryRejected = !bytes.Equal(opened, payload)
+	}
+	if sSU2TokenRequestAndRetryRejected {
 		t.Fatalf("TokenRequest = %#v, %x, %v", header, opened, err)
 	}
 
@@ -29,7 +33,11 @@ func TestSSU2TokenRequestAndRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	header, opened, err = ParseRetry(append([]byte(nil), retry...), intro)
-	if err != nil || header.DestinationID != 22 || header.SourceID != 11 || header.PacketNumber != 55 || header.Token != 44 || !bytes.Equal(opened, payload) {
+	sSU2TokenRequestAndRetryRejected = err != nil || header.DestinationID != 22 || header.SourceID != 11 || header.PacketNumber != 55 || header.Token != 44
+	if !sSU2TokenRequestAndRetryRejected {
+		sSU2TokenRequestAndRetryRejected = !bytes.Equal(opened, payload)
+	}
+	if sSU2TokenRequestAndRetryRejected {
 		t.Fatalf("Retry = %#v, %x, %v", header, opened, err)
 	}
 

@@ -364,9 +364,13 @@ func TestNewDoesNotOpenSocketsAndReloadsState(t *testing.T) {
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if first.bundle.Router.Hash != (ivnp.Hash{}) || len(first.bundle.Router.SigningPrivate) != 0 || first.bundle.Router.X25519Private != ([32]byte{}) ||
+	newDoesNotOpenSocketsAndReloadsStateRejected := first.bundle.Router.Hash != (ivnp.Hash{}) || len(first.bundle.Router.SigningPrivate) != 0 || first.bundle.Router.X25519Private != ([32]byte{}) ||
 		len(first.bundle.NTCP2StaticPrivate) != 0 || len(first.bundle.SSU2StaticPrivate) != 0 || first.bundle.DestinationPrivate != nil ||
-		first.bundle.EncryptedLeaseSetPolicies != nil || first.bundle.DestinationAddressPolicies != nil {
+		first.bundle.EncryptedLeaseSetPolicies != nil
+	if !newDoesNotOpenSocketsAndReloadsStateRejected {
+		newDoesNotOpenSocketsAndReloadsStateRejected = first.bundle.DestinationAddressPolicies != nil
+	}
+	if newDoesNotOpenSocketsAndReloadsStateRejected {
 		t.Fatal("closed daemon retained its in-memory sensitive state bundle")
 	}
 	second, err := New(cfg, Options{SocketRuntime: sockets})
@@ -466,7 +470,11 @@ func TestTunnelCompositionUsesLiveInboundGatewayRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	if d.service == nil || d.tunnels == nil || d.pool == nil || d.buildManager == nil || d.requests == nil || d.replyKeys == nil || d.maintainer == nil {
+	tunnelCompositionUsesLiveInboundGatewayRouteRejected := d.service == nil || d.tunnels == nil || d.pool == nil || d.buildManager == nil || d.requests == nil || d.replyKeys == nil
+	if !tunnelCompositionUsesLiveInboundGatewayRouteRejected {
+		tunnelCompositionUsesLiveInboundGatewayRouteRejected = d.maintainer == nil
+	}
+	if tunnelCompositionUsesLiveInboundGatewayRouteRejected {
 		t.Fatal("native tunnel data plane is incomplete")
 	}
 	if len(d.bundle.DestinationPrivate["default"]) == 0 || len(d.clientRuntimeSnapshot()) != 1 {
@@ -550,8 +558,12 @@ func TestMuxRequestSenderUsesEstablishedOutboundTunnel(t *testing.T) {
 		t.Fatalf("embedded lookup = %#v, %v", inner.Header, err)
 	}
 	lookup, err := i2np.ParseDatabaseLookup(inner.Payload)
-	if err != nil || lookup.From != replyGateway || lookup.ReplyTunnelID != 7 || !lookup.ReplyUsesECIES() ||
-		len(lookup.ReplyKey) != 32 || lookup.ReplyTagCount() != 1 || replyKeys.Len() != 1 {
+	muxRequestSenderUsesEstablishedOutboundTunnelRejected := err != nil || lookup.From != replyGateway || lookup.ReplyTunnelID != 7 || !lookup.ReplyUsesECIES() ||
+		len(lookup.ReplyKey) != 32 || lookup.ReplyTagCount() != 1
+	if !muxRequestSenderUsesEstablishedOutboundTunnelRejected {
+		muxRequestSenderUsesEstablishedOutboundTunnelRejected = replyKeys.Len() != 1
+	}
+	if muxRequestSenderUsesEstablishedOutboundTunnelRejected {
 		t.Fatalf("embedded lookup route = %#v, reply_keys=%d, %v", lookup, replyKeys.Len(), err)
 	}
 	var tag [8]byte
@@ -913,7 +925,7 @@ func TestDaemonNewProductionGraphPublicAndEncryptedDestinations(t *testing.T) {
 		}
 	}
 	var publicMaintainErr, encryptedMaintainErr error
-	for attempt := 0; attempt < 8; attempt++ {
+	for range 8 {
 		publicMaintainErr = publicRuntime.maintain(context.Background(), uint64(time.Now().UnixMilli()))
 		encryptedMaintainErr = encryptedRuntime.maintain(context.Background(), uint64(time.Now().UnixMilli()))
 		if publicRuntime.pool.Count(tunnel.Inbound, uint64(time.Now().UnixMilli())) > 0 &&
@@ -1020,9 +1032,13 @@ func TestDaemonNewProductionGraphPublicAndEncryptedDestinations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receivedMessage.Delivery.From != publicRuntime.local.Hash() || receivedMessage.Delivery.To != encryptedRuntime.local.Hash() ||
+	daemonNewProductionGraphPublicAndEncryptedDestinationsRejected := receivedMessage.Delivery.From != publicRuntime.local.Hash() || receivedMessage.Delivery.To != encryptedRuntime.local.Hash() ||
 		receivedMessage.Delivery.Protocol != messageRoute.Protocol || receivedMessage.Delivery.FromPort != 3333 ||
-		receivedMessage.Delivery.ToPort != messageRoute.ToPort || string(receivedMessage.Delivery.Payload) != string(messagePayload) {
+		receivedMessage.Delivery.ToPort != messageRoute.ToPort
+	if !daemonNewProductionGraphPublicAndEncryptedDestinationsRejected {
+		daemonNewProductionGraphPublicAndEncryptedDestinationsRejected = string(receivedMessage.Delivery.Payload) != string(messagePayload)
+	}
+	if daemonNewProductionGraphPublicAndEncryptedDestinationsRejected {
 		t.Fatalf("authenticated destination message = %#v", receivedMessage.Delivery)
 	}
 	receivedMessage.Release()
@@ -1047,9 +1063,13 @@ func TestDaemonNewProductionGraphPublicAndEncryptedDestinations(t *testing.T) {
 		if receiveErr != nil {
 			t.Fatalf("self message %d receive: %v", sequence, receiveErr)
 		}
-		if message.Delivery.From != publicRuntime.local.Hash() || message.Delivery.To != publicRuntime.local.Hash() ||
+		daemonNewProductionGraphPublicAndEncryptedDestinationsRejected := message.Delivery.From != publicRuntime.local.Hash() || message.Delivery.To != publicRuntime.local.Hash() ||
 			message.Delivery.Protocol != selfRoute.Protocol || message.Delivery.FromPort != 3333 ||
-			message.Delivery.ToPort != selfRoute.ToPort || string(message.Delivery.Payload) != string(payload) {
+			message.Delivery.ToPort != selfRoute.ToPort
+		if !daemonNewProductionGraphPublicAndEncryptedDestinationsRejected {
+			daemonNewProductionGraphPublicAndEncryptedDestinationsRejected = string(message.Delivery.Payload) != string(payload)
+		}
+		if daemonNewProductionGraphPublicAndEncryptedDestinationsRejected {
 			t.Fatalf("self message %d = %#v", sequence, message.Delivery)
 		}
 		message.Release()
@@ -1135,8 +1155,12 @@ func TestDaemonNewProductionGraphPublicAndEncryptedDestinations(t *testing.T) {
 		t.Fatalf("RequestManager lookups = %d", lookups)
 	}
 	publicRatchet, encryptedRatchet := publicRuntime.ratchet.Stats(), encryptedRuntime.ratchet.Stats()
-	if publicRatchet.Sessions == 0 || encryptedRatchet.Sessions == 0 || publicRatchet.ExistingSessions == 0 || encryptedRatchet.ExistingSessions == 0 ||
-		publicRatchet.InboundTags == 0 || encryptedRatchet.InboundTags == 0 {
+	daemonNewProductionGraphPublicAndEncryptedDestinationsRejected = publicRatchet.Sessions == 0 || encryptedRatchet.Sessions == 0 || publicRatchet.ExistingSessions == 0 || encryptedRatchet.ExistingSessions == 0 ||
+		publicRatchet.InboundTags == 0
+	if !daemonNewProductionGraphPublicAndEncryptedDestinationsRejected {
+		daemonNewProductionGraphPublicAndEncryptedDestinationsRejected = encryptedRatchet.InboundTags == 0
+	}
+	if daemonNewProductionGraphPublicAndEncryptedDestinationsRejected {
 		t.Fatalf("ratchet indexes public=%#v encrypted=%#v", publicRatchet, encryptedRatchet)
 	}
 	publicBandwidth, _ := publicDaemon.DestinationBandwidthSnapshot("public")
@@ -1160,226 +1184,231 @@ func TestDaemonNewProductionGraphPublicAndEncryptedDestinations(t *testing.T) {
 
 func TestDaemonProductionGraphEncryptedDHAndPSKStreaming(t *testing.T) {
 	for _, authorization := range []string{"dh", "psk"} {
-		t.Run(authorization, func(t *testing.T) {
-			now := uint64(time.Now().UnixMilli())
-			flood := daemonProductionFloodfill(t, now)
-			network := newDaemonMemoryNetwork(flood, func() uint64 { return uint64(time.Now().UnixMilli()) })
-			newDaemon := func() *Daemon {
-				cfg := daemonTestConfig(t)
-				cfg.StateDir = filepath.Dir(cfg.StatePath)
-				cfg.Tunnel.Enabled = true
-				cfg.NTCP2.Enabled = false
-				cfg.Tunnel.MaintenanceInterval = time.Hour
-				d, newErr := New(cfg, Options{Transport: network.transport()})
-				if newErr != nil {
-					t.Fatal(newErr)
-				}
-				return d
-			}
-			sourceDaemon, targetDaemon, transitDaemon := newDaemon(), newDaemon(), newDaemon()
-			t.Cleanup(func() {
-				for _, d := range []*Daemon{sourceDaemon, targetDaemon, transitDaemon} {
-					_ = d.Close()
-					_ = d.Wait()
-				}
-			})
-			for _, d := range []*Daemon{sourceDaemon, targetDaemon, transitDaemon} {
-				if destroyErr := d.DestroyDestination(context.Background(), "default"); destroyErr != nil {
-					t.Fatal(destroyErr)
-				}
-			}
-			if _, err := sourceDaemon.CreateDestination(context.Background(), "source", DestinationPolicy{Kind: DestinationPublicLS2}); err != nil {
-				t.Fatal(err)
-			}
+		t.Run(authorization, func(t *testing.T) { testDaemonProductionGraphEncryptedAuthorization(t, authorization) })
+	}
+}
+func testDaemonProductionGraphEncryptedAuthorization(t *testing.T, authorization string) {
+	now := uint64(time.Now().UnixMilli())
+	flood := daemonProductionFloodfill(t, now)
+	network := newDaemonMemoryNetwork(flood, func() uint64 { return uint64(time.Now().UnixMilli()) })
+	newDaemon := func() *Daemon {
+		cfg := daemonTestConfig(t)
+		cfg.StateDir = filepath.Dir(cfg.StatePath)
+		cfg.Tunnel.Enabled = true
+		cfg.NTCP2.Enabled = false
+		cfg.Tunnel.MaintenanceInterval = time.Hour
+		d, newErr := New(cfg, Options{Transport: network.transport()})
+		if newErr != nil {
+			t.Fatal(newErr)
+		}
+		return d
+	}
+	sourceDaemon, targetDaemon, transitDaemon := newDaemon(), newDaemon(), newDaemon()
+	t.Cleanup(func() {
+		for _, d := range []*Daemon{sourceDaemon, targetDaemon, transitDaemon} {
+			_ = d.Close()
+			_ = d.Wait()
+		}
+	})
+	for _, d := range []*Daemon{sourceDaemon, targetDaemon, transitDaemon} {
+		if destroyErr := d.DestroyDestination(context.Background(), "default"); destroyErr != nil {
+			t.Fatal(destroyErr)
+		}
+	}
+	if _, err := sourceDaemon.CreateDestination(context.Background(), "source", DestinationPolicy{Kind: DestinationPublicLS2}); err != nil {
+		t.Fatal(err)
+	}
 
-			secret := []byte("production-" + authorization)
-			targetPolicy := DestinationPolicy{Secret: secret}
-			remotePolicy := state.RemoteELSAuthorization{Secret: append([]byte(nil), secret...)}
-			switch authorization {
-			case "dh":
-				private, generateErr := ecdh.X25519().GenerateKey(cryptorand.Reader)
-				if generateErr != nil {
-					t.Fatal(generateErr)
-				}
-				var privateBytes, publicBytes [32]byte
-				copy(privateBytes[:], private.Bytes())
-				copy(publicBytes[:], private.PublicKey().Bytes())
-				targetPolicy.Kind = DestinationEncryptedDH
-				targetPolicy.DHClients = [][32]byte{publicBytes}
-				remotePolicy.Kind = state.RemoteELSAuthorizationDH
-				remotePolicy.DHPrivate, remotePolicy.DHPublic = privateBytes, publicBytes
-			case "psk":
-				var psk [32]byte
-				for index := range psk {
-					psk[index] = byte(index + 1)
-				}
-				targetPolicy.Kind = DestinationEncryptedPSK
-				targetPolicy.PSKClients = [][32]byte{psk}
-				remotePolicy.Kind, remotePolicy.PSK = state.RemoteELSAuthorizationPSK, psk
-			}
-			if _, err := targetDaemon.CreateDestination(context.Background(), "target", targetPolicy); err != nil {
+	secret := []byte("production-" + authorization)
+	targetPolicy := DestinationPolicy{Secret: secret}
+	remotePolicy := state.RemoteELSAuthorization{Secret: append([]byte(nil), secret...)}
+	switch authorization {
+	case "dh":
+		private, generateErr := ecdh.X25519().GenerateKey(cryptorand.Reader)
+		if generateErr != nil {
+			t.Fatal(generateErr)
+		}
+		var privateBytes, publicBytes [32]byte
+		copy(privateBytes[:], private.Bytes())
+		copy(publicBytes[:], private.PublicKey().Bytes())
+		targetPolicy.Kind = DestinationEncryptedDH
+		targetPolicy.DHClients = [][32]byte{publicBytes}
+		remotePolicy.Kind = state.RemoteELSAuthorizationDH
+		remotePolicy.DHPrivate, remotePolicy.DHPublic = privateBytes, publicBytes
+	case "psk":
+		var psk [32]byte
+		for index := range psk {
+			psk[index] = byte(index + 1)
+		}
+		targetPolicy.Kind = DestinationEncryptedPSK
+		targetPolicy.PSKClients = [][32]byte{psk}
+		remotePolicy.Kind, remotePolicy.PSK = state.RemoteELSAuthorizationPSK, psk
+	}
+	if _, err := targetDaemon.CreateDestination(context.Background(), "target", targetPolicy); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []*Daemon{sourceDaemon, targetDaemon, transitDaemon} {
+		if err := d.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sourceRuntime, targetRuntime := sourceDaemon.clientRuntimeSnapshot()[0], targetDaemon.clientRuntimeSnapshot()[0]
+	now = uint64(time.Now().UnixMilli())
+	sourceInfo, targetInfo, transitInfo := sourceDaemon.localInfo.Snapshot(), targetDaemon.localInfo.Snapshot(), transitDaemon.localInfo.Snapshot()
+	for _, admission := range []struct {
+		database *netdb.Database
+		infos    []netdb.RouterInfo
+	}{
+		{sourceDaemon.database, []netdb.RouterInfo{targetInfo, transitInfo}},
+		{targetDaemon.database, []netdb.RouterInfo{sourceInfo, transitInfo}},
+		{transitDaemon.database, []netdb.RouterInfo{sourceInfo, targetInfo}},
+	} {
+		for _, info := range admission.infos {
+			if err := admission.database.AdmitRouterInfo(info, false, now); err != nil {
 				t.Fatal(err)
 			}
-			for _, d := range []*Daemon{sourceDaemon, targetDaemon, transitDaemon} {
-				if err := d.Start(context.Background()); err != nil {
-					t.Fatal(err)
-				}
-			}
-			sourceRuntime, targetRuntime := sourceDaemon.clientRuntimeSnapshot()[0], targetDaemon.clientRuntimeSnapshot()[0]
-			now = uint64(time.Now().UnixMilli())
-			sourceInfo, targetInfo, transitInfo := sourceDaemon.localInfo.Snapshot(), targetDaemon.localInfo.Snapshot(), transitDaemon.localInfo.Snapshot()
-			for _, admission := range []struct {
-				database *netdb.Database
-				infos    []netdb.RouterInfo
-			}{
-				{sourceDaemon.database, []netdb.RouterInfo{targetInfo, transitInfo}},
-				{targetDaemon.database, []netdb.RouterInfo{sourceInfo, transitInfo}},
-				{transitDaemon.database, []netdb.RouterInfo{sourceInfo, targetInfo}},
-			} {
-				for _, info := range admission.infos {
-					if err := admission.database.AdmitRouterInfo(info, false, now); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-			for attempt := 0; attempt < 8; attempt++ {
-				_ = sourceRuntime.maintain(context.Background(), uint64(time.Now().UnixMilli()))
-				_ = targetRuntime.maintain(context.Background(), uint64(time.Now().UnixMilli()))
-				current := uint64(time.Now().UnixMilli())
-				if sourceRuntime.pool.Count(tunnel.Inbound, current) > 0 && sourceRuntime.pool.Count(tunnel.Outbound, current) > 0 &&
-					targetRuntime.pool.Count(tunnel.Inbound, current) > 0 && targetRuntime.pool.Count(tunnel.Outbound, current) > 0 {
-					break
-				}
-			}
-			now = uint64(time.Now().UnixMilli())
-			if sourceRuntime.pool.Count(tunnel.Inbound, now) == 0 || sourceRuntime.pool.Count(tunnel.Outbound, now) == 0 ||
-				targetRuntime.pool.Count(tunnel.Inbound, now) == 0 || targetRuntime.pool.Count(tunnel.Outbound, now) == 0 {
-				t.Fatalf("owner pools were not built: source=%#v target=%#v", sourceRuntime.pool.Snapshot(now), targetRuntime.pool.Snapshot(now))
-			}
-			if err := sourceDaemon.database.AdmitRouterInfo(flood, false, now); err != nil {
-				t.Fatal(err)
-			}
-			if err := targetDaemon.database.AdmitRouterInfo(flood, false, now); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := sourceDaemon.publication.Maintain(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := targetDaemon.publication.Maintain(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			targetIdentity, err := targetRuntime.local.Identity()
-			if err != nil {
-				t.Fatal(err)
-			}
-			remotePolicy.Identity = append([]byte(nil), targetIdentity.Bytes()...)
-			if err = sourceDaemon.UpdateDestinationAddressPolicies("source", []state.RemoteELSAuthorization{remotePolicy}); err != nil {
-				t.Fatal(err)
-			}
-			persisted := sourceDaemon.bundle.DestinationAddressPolicies["source"]
-			if len(persisted) != 1 || persisted[0].Kind != remotePolicy.Kind {
-				t.Fatal("authorized remote ELS policy was not persisted")
-			}
+		}
+	}
+	for range 8 {
+		_ = sourceRuntime.maintain(context.Background(), uint64(time.Now().UnixMilli()))
+		_ = targetRuntime.maintain(context.Background(), uint64(time.Now().UnixMilli()))
+		current := uint64(time.Now().UnixMilli())
+		if sourceRuntime.pool.Count(tunnel.Inbound, current) > 0 && sourceRuntime.pool.Count(tunnel.Outbound, current) > 0 &&
+			targetRuntime.pool.Count(tunnel.Inbound, current) > 0 && targetRuntime.pool.Count(tunnel.Outbound, current) > 0 {
+			break
+		}
+	}
+	now = uint64(time.Now().UnixMilli())
+	if sourceRuntime.pool.Count(tunnel.Inbound, now) == 0 || sourceRuntime.pool.Count(tunnel.Outbound, now) == 0 ||
+		targetRuntime.pool.Count(tunnel.Inbound, now) == 0 || targetRuntime.pool.Count(tunnel.Outbound, now) == 0 {
+		t.Fatalf("owner pools were not built: source=%#v target=%#v", sourceRuntime.pool.Snapshot(now), targetRuntime.pool.Snapshot(now))
+	}
+	if err := sourceDaemon.database.AdmitRouterInfo(flood, false, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := targetDaemon.database.AdmitRouterInfo(flood, false, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sourceDaemon.publication.Maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := targetDaemon.publication.Maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	targetIdentity, err := targetRuntime.local.Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	remotePolicy.Identity = append([]byte(nil), targetIdentity.Bytes()...)
+	if err = sourceDaemon.UpdateDestinationAddressPolicies("source", []state.RemoteELSAuthorization{remotePolicy}); err != nil {
+		t.Fatal(err)
+	}
+	persisted := sourceDaemon.bundle.DestinationAddressPolicies["source"]
+	if len(persisted) != 1 || persisted[0].Kind != remotePolicy.Kind {
+		t.Fatal("authorized remote ELS policy was not persisted")
+	}
 
-			sourceSession, sourceOK := sourceDaemon.destinations.Session(sourceRuntime.local.Hash())
-			targetSession, targetOK := targetDaemon.destinations.Session(targetRuntime.local.Hash())
-			if !sourceOK || !targetOK {
-				t.Fatal("production destination session missing")
-			}
-			messageRoute := clientapi.DestinationRoute{Protocol: 18, ToPort: 9090}
-			subscription, subscribeErr := targetSession.Subscribe(messageRoute, 1)
-			if subscribeErr != nil {
-				t.Fatal(subscribeErr)
-			}
-			defer subscription.Close()
-			messagePayload := []byte("authorized-message-" + authorization)
-			if err = sourceSession.SendMessage(context.Background(), streamtunnel.Delivery{
-				From: sourceRuntime.local.Hash(), To: targetRuntime.local.Hash(),
-				Protocol: messageRoute.Protocol, FromPort: 9091, ToPort: messageRoute.ToPort, Payload: messagePayload,
-			}); err != nil {
-				t.Fatal(err)
-			}
-			messageCtx, cancelMessage := context.WithTimeout(context.Background(), 5*time.Second)
-			received, receiveErr := subscription.Receive(messageCtx)
-			cancelMessage()
-			if receiveErr != nil {
-				t.Fatal(receiveErr)
-			}
-			if received.Delivery.From != (ivnp.Hash{}) || received.Delivery.To != targetRuntime.local.Hash() ||
-				received.Delivery.Protocol != messageRoute.Protocol || received.Delivery.FromPort != 9091 ||
-				received.Delivery.ToPort != messageRoute.ToPort || string(received.Delivery.Payload) != string(messagePayload) {
-				t.Fatalf("authorized destination message = %#v", received.Delivery)
-			}
-			received.Release()
-			listener, err := targetSession.ListenI2P(context.Background(), ":8080")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer listener.Close()
-			accepted := make(chan net.Conn, 1)
-			acceptErrors := make(chan error, 1)
-			go func() {
-				connection, acceptErr := listener.Accept()
-				if acceptErr != nil {
-					acceptErrors <- acceptErr
-					return
-				}
-				accepted <- connection
-			}()
-			streamCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			outbound, err := sourceSession.DialI2P(streamCtx, targetSession.B32()+":8080")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer outbound.Close()
-			var inbound net.Conn
-			select {
-			case inbound = <-accepted:
-			case err = <-acceptErrors:
-				t.Fatal(err)
-			case <-streamCtx.Done():
-				t.Fatal(streamCtx.Err())
-			}
-			defer inbound.Close()
-			_ = outbound.SetDeadline(time.Now().Add(5 * time.Second))
-			_ = inbound.SetDeadline(time.Now().Add(5 * time.Second))
-			for _, payload := range [][]byte{[]byte("authorized-" + authorization), []byte("existing-" + authorization)} {
-				if _, err = outbound.Write(payload); err != nil {
-					t.Fatal(err)
-				}
-				got := make([]byte, len(payload))
-				if _, err = io.ReadFull(inbound, got); err != nil || string(got) != string(payload) {
-					t.Fatalf("authorized stream payload = %q, %v", got, err)
-				}
-			}
-			reply := []byte("reply-" + authorization)
-			if _, err = inbound.Write(reply); err != nil {
-				t.Fatal(err)
-			}
-			got := make([]byte, len(reply))
-			if _, err = io.ReadFull(outbound, got); err != nil || string(got) != string(reply) {
-				t.Fatalf("authorized stream reply = %q, %v", got, err)
-			}
-			if sourceRuntime.ratchet.Stats().ExistingSessions == 0 || targetRuntime.ratchet.Stats().ExistingSessions == 0 {
-				t.Fatalf("authorized ratchet did not transition: source=%#v target=%#v", sourceRuntime.ratchet.Stats(), targetRuntime.ratchet.Stats())
-			}
-			if sourceSession.StreamingStats().CongestionWindow == 0 || targetSession.StreamingStats().CongestionWindow == 0 {
-				t.Fatalf("authorized streaming congestion missing: source=%#v target=%#v", sourceSession.StreamingStats(), targetSession.StreamingStats())
-			}
-			network.mu.RLock()
-			lookups := network.lookups
-			encryptedStores := 0
-			for _, store := range network.stores {
-				if store.Type == i2np.StoreEncryptedLeaseSet {
-					encryptedStores++
-				}
-			}
-			network.mu.RUnlock()
-			if lookups < 2 || encryptedStores == 0 {
-				t.Fatalf("authorized graph lookups=%d encrypted_stores=%d", lookups, encryptedStores)
-			}
-		})
+	sourceSession, sourceOK := sourceDaemon.destinations.Session(sourceRuntime.local.Hash())
+	targetSession, targetOK := targetDaemon.destinations.Session(targetRuntime.local.Hash())
+	if !sourceOK || !targetOK {
+		t.Fatal("production destination session missing")
+	}
+	messageRoute := clientapi.DestinationRoute{Protocol: 18, ToPort: 9090}
+	subscription, subscribeErr := targetSession.Subscribe(messageRoute, 1)
+	if subscribeErr != nil {
+		t.Fatal(subscribeErr)
+	}
+	defer subscription.Close()
+	messagePayload := []byte("authorized-message-" + authorization)
+	if err = sourceSession.SendMessage(context.Background(), streamtunnel.Delivery{
+		From: sourceRuntime.local.Hash(), To: targetRuntime.local.Hash(),
+		Protocol: messageRoute.Protocol, FromPort: 9091, ToPort: messageRoute.ToPort, Payload: messagePayload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	messageCtx, cancelMessage := context.WithTimeout(context.Background(), 5*time.Second)
+	received, receiveErr := subscription.Receive(messageCtx)
+	cancelMessage()
+	if receiveErr != nil {
+		t.Fatal(receiveErr)
+	}
+	daemonProductionGraphEncryptedDHAndPSKStreamingRejected := received.Delivery.From != (ivnp.Hash{}) || received.Delivery.To != targetRuntime.local.Hash() ||
+		received.Delivery.Protocol != messageRoute.Protocol || received.Delivery.FromPort != 9091 ||
+		received.Delivery.ToPort != messageRoute.ToPort
+	if !daemonProductionGraphEncryptedDHAndPSKStreamingRejected {
+		daemonProductionGraphEncryptedDHAndPSKStreamingRejected = string(received.Delivery.Payload) != string(messagePayload)
+	}
+	if daemonProductionGraphEncryptedDHAndPSKStreamingRejected {
+		t.Fatalf("authorized destination message = %#v", received.Delivery)
+	}
+	received.Release()
+	listener, err := targetSession.ListenI2P(context.Background(), ":8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	acceptErrors := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			acceptErrors <- acceptErr
+			return
+		}
+		accepted <- connection
+	}()
+	streamCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	outbound, err := sourceSession.DialI2P(streamCtx, targetSession.B32()+":8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outbound.Close()
+	var inbound net.Conn
+	select {
+	case inbound = <-accepted:
+	case err = <-acceptErrors:
+		t.Fatal(err)
+	case <-streamCtx.Done():
+		t.Fatal(streamCtx.Err())
+	}
+	defer inbound.Close()
+	_ = outbound.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = inbound.SetDeadline(time.Now().Add(5 * time.Second))
+	for _, payload := range [][]byte{[]byte("authorized-" + authorization), []byte("existing-" + authorization)} {
+		if _, err = outbound.Write(payload); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, len(payload))
+		if _, err = io.ReadFull(inbound, got); err != nil || string(got) != string(payload) {
+			t.Fatalf("authorized stream payload = %q, %v", got, err)
+		}
+	}
+	reply := []byte("reply-" + authorization)
+	if _, err = inbound.Write(reply); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(reply))
+	if _, err = io.ReadFull(outbound, got); err != nil || string(got) != string(reply) {
+		t.Fatalf("authorized stream reply = %q, %v", got, err)
+	}
+	if sourceRuntime.ratchet.Stats().ExistingSessions == 0 || targetRuntime.ratchet.Stats().ExistingSessions == 0 {
+		t.Fatalf("authorized ratchet did not transition: source=%#v target=%#v", sourceRuntime.ratchet.Stats(), targetRuntime.ratchet.Stats())
+	}
+	if sourceSession.StreamingStats().CongestionWindow == 0 || targetSession.StreamingStats().CongestionWindow == 0 {
+		t.Fatalf("authorized streaming congestion missing: source=%#v target=%#v", sourceSession.StreamingStats(), targetSession.StreamingStats())
+	}
+	network.mu.RLock()
+	lookups := network.lookups
+	encryptedStores := 0
+	for _, store := range network.stores {
+		if store.Type == i2np.StoreEncryptedLeaseSet {
+			encryptedStores++
+		}
+	}
+	network.mu.RUnlock()
+	if lookups < 2 || encryptedStores == 0 {
+		t.Fatalf("authorized graph lookups=%d encrypted_stores=%d", lookups, encryptedStores)
 	}
 }
 

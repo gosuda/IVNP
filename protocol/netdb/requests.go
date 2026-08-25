@@ -220,9 +220,11 @@ func (m *RequestManager) lookup(ctx context.Context, typeID LookupType, key ivnp
 	if typeID != RouterInfoLookup && typeID != LeaseSetLookup && typeID != ExplorationLookup {
 		return nil, errors.New("netdb: unknown lookup type")
 	}
-	if ctx == nil {
+	if ctx ==
+		nil {
 		ctx = context.Background()
 	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -478,28 +480,12 @@ func (m *RequestManager) Expire(nowMillis uint64) int {
 	removed := 0
 	work := make([]sendWork, 0)
 	for key, req := range m.pending {
-		if req.deadline <= nowMillis {
-			m.completeLocked(key, req, ErrRequestExpired)
+		expired, next := m.expireLocked(key, req, nowMillis)
+		if expired {
 			removed++
-			continue
 		}
-		if req.inFlight || req.responseDeadline == 0 || req.responseDeadline > nowMillis {
-			continue
-		}
-		req.responseDeadline = 0
-		next, terminal := m.prepareSendLocked(key, req)
-		if terminal != nil {
-			m.completeLocked(key, req, terminal)
-			removed++
-		} else if next != nil {
+		if next != nil {
 			work = append(work, *next)
-		} else if allCandidatesSent(req) {
-			if req.typeID == ExplorationLookup {
-				m.completeLocked(key, req, nil)
-			} else {
-				m.completeLocked(key, req, ErrRequestExpired)
-			}
-			removed++
 		}
 	}
 	m.mu.Unlock()
@@ -507,6 +493,34 @@ func (m *RequestManager) Expire(nowMillis uint64) int {
 		m.dispatch(work[i], true)
 	}
 	return removed
+}
+
+func (m *RequestManager) expireLocked(key requestKey, req *pendingRequest, nowMillis uint64) (bool, *sendWork) {
+	if req.deadline <= nowMillis {
+		m.completeLocked(key, req, ErrRequestExpired)
+		return true, nil
+	}
+	if req.inFlight || req.responseDeadline == 0 || req.responseDeadline > nowMillis {
+		return false, nil
+	}
+	req.responseDeadline = 0
+	next, terminal := m.prepareSendLocked(key, req)
+	if terminal != nil {
+		m.completeLocked(key, req, terminal)
+		return true, nil
+	}
+	if next != nil {
+		return false, next
+	}
+	if !allCandidatesSent(req) {
+		return false, nil
+	}
+	if req.typeID == ExplorationLookup {
+		m.completeLocked(key, req, nil)
+	} else {
+		m.completeLocked(key, req, ErrRequestExpired)
+	}
+	return true, nil
 }
 
 // Close rejects new lookup work, completes every waiter, and joins any

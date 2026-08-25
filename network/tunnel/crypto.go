@@ -66,7 +66,7 @@ func cbcEncrypt(block cipher.Block, dst, src, iv []byte) {
 	var prev [aes.BlockSize]byte
 	copy(prev[:], iv)
 	for off := 0; off < len(src); off += aes.BlockSize {
-		for i := 0; i < aes.BlockSize; i++ {
+		for i := range aes.BlockSize {
 			dst[off+i] = src[off+i] ^ prev[i]
 		}
 		block.Encrypt(dst[off:off+aes.BlockSize], dst[off:off+aes.BlockSize])
@@ -79,7 +79,7 @@ func cbcDecrypt(block cipher.Block, dst, src, iv []byte) {
 	for off := 0; off < len(src); off += aes.BlockSize {
 		copy(cur[:], src[off:off+aes.BlockSize])
 		block.Decrypt(dst[off:off+aes.BlockSize], src[off:off+aes.BlockSize])
-		for i := 0; i < aes.BlockSize; i++ {
+		for i := range aes.BlockSize {
 			dst[off+i] ^= prev[i]
 		}
 		prev = cur

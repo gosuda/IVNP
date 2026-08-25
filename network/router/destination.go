@@ -294,7 +294,11 @@ func (s *DestinationSession) SubscribeBounded(route clientapi.DestinationRoute, 
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
 	for existing := range s.routes {
-		if existing.Protocol == route.Protocol && (existing.ToPort == 0 || route.ToPort == 0 || existing.ToPort == route.ToPort) {
+		subscribeBoundedRejected := existing.Protocol == route.Protocol
+		if subscribeBoundedRejected {
+			subscribeBoundedRejected = (existing.ToPort == 0 || route.ToPort == 0 || existing.ToPort == route.ToPort)
+		}
+		if subscribeBoundedRejected {
 			return nil, ErrDestinationRoute
 		}
 	}
@@ -305,9 +309,11 @@ func (s *DestinationSession) SubscribeBounded(route clientapi.DestinationRoute, 
 func (s *DestinationSession) deliver(delivery streamtunnel.Delivery) error {
 	s.routeMu.RLock()
 	subscription := s.routes[clientapi.DestinationRoute{Protocol: delivery.Protocol, ToPort: delivery.ToPort}]
-	if subscription == nil {
+	if subscription ==
+		nil {
 		subscription = s.routes[clientapi.DestinationRoute{Protocol: delivery.Protocol}]
 	}
+
 	s.routeMu.RUnlock()
 	if subscription == nil {
 		return ErrDestinationRoute
@@ -423,6 +429,7 @@ func (s *destinationSubscription) Receive(ctx context.Context) (*clientapi.Recei
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	select {
 	case message := <-s.messages:
 		if message == nil {

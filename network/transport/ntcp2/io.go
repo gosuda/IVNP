@@ -79,7 +79,7 @@ func (d *Direction) ReadFrame(reader io.Reader, dst []byte) ([]byte, error) {
 	for i := range binaryNonce {
 		binaryNonce[i] = 0
 	}
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		binaryNonce[4+i] = byte(d.nonce >> (8 * i))
 	}
 	encrypted, ok = frame.Bytes()

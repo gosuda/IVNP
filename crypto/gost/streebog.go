@@ -28,12 +28,12 @@ func (b *block) addBits(bits uint32) {
 }
 func (b *block) f() {
 	var out [8]uint64
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		out[i] = t0[b[i+56]] ^ t1[b[i+48]] ^ t2[b[i+40]] ^ t3[b[i+32]] ^ t4[b[i+24]] ^ t5[b[i+16]] ^ t6[b[i+8]] ^ t7[b[i]]
 	}
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		v := out[i]
-		for j := 0; j < 8; j++ {
+		for j := range 8 {
 			b[i*8+j] = byte(v >> (8 * j))
 		}
 	}
@@ -41,7 +41,7 @@ func (b *block) f() {
 func (b block) encrypt(message block) (out block) {
 	k := b
 	out = k.xor(message)
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		out.f()
 		k = k.xor(words(roundConstants[i]))
 		k.f()
@@ -51,7 +51,7 @@ func (b block) encrypt(message block) (out block) {
 }
 func words(values [8]uint64) (out block) {
 	for i, v := range values {
-		for j := 0; j < 8; j++ {
+		for j := range 8 {
 			out[i*8+j] = byte(v >> (8 * j))
 		}
 	}

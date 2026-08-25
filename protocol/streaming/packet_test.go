@@ -19,7 +19,11 @@ func TestParseStreamingPacket(t *testing.T) {
 	copy(wire[26:28], []byte{1, 2})
 	copy(wire[28:], []byte{3, 4, 5})
 	packet, err := Parse(wire)
-	if err != nil || packet.SendStreamID != 1 || packet.ReceiveStreamID != 2 || len(packet.NACKs) != 4 || len(packet.Options) != 2 || len(packet.Payload) != 3 {
+	parseStreamingPacketRejected := err != nil || packet.SendStreamID != 1 || packet.ReceiveStreamID != 2 || len(packet.NACKs) != 4 || len(packet.Options) != 2
+	if !parseStreamingPacketRejected {
+		parseStreamingPacketRejected = len(packet.Payload) != 3
+	}
+	if parseStreamingPacketRejected {
 		t.Fatalf("Parse() = %#v, %v", packet, err)
 	}
 }

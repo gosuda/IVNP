@@ -10,7 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -243,16 +243,14 @@ func (r *trafficRunner) ProbeAll(ctx context.Context) []probeResult {
 		}()
 	}
 	for index, style := range []string{"DATAGRAM", "RAW"} {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+		group.Go(func() {
 			probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 			defer cancel()
 			started := time.Now()
 			payload := []byte(fmt.Sprintf("%s:%s:%d", r.runID, style, time.Now().UnixNano()))
 			err := r.udp.probeUDP(probeCtx, style, payload)
 			results[len(requiredDirections)+index] = probeResult{Direction: "ivnp-" + strings.ToLower(style) + "-udp-loopback", Sequence: 1, Size: len(payload), Duration: time.Since(started), Err: err}
-		}()
+		})
 	}
 	group.Wait()
 	return results
@@ -342,9 +340,7 @@ func (r *trafficRunner) runStreamLoad(ctx context.Context, duration time.Duratio
 	latencies := make([]time.Duration, 0, int(targetBytesPerSecond*uint64(seconds)/payloadSize))
 	var workers sync.WaitGroup
 	for range concurrency {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			for route := range jobs {
 				probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 				r.sequenceMu.Lock()
@@ -366,12 +362,9 @@ func (r *trafficRunner) runStreamLoad(ctx context.Context, duration time.Duratio
 				}
 				mu.Unlock()
 			}
-		}()
+		})
 	}
-	interval := time.Duration(uint64(time.Second) * payloadSize / targetBytesPerSecond)
-	if interval < 5*time.Millisecond {
-		interval = 5 * time.Millisecond
-	}
+	interval := max(time.Duration(uint64(time.Second)*payloadSize/targetBytesPerSecond), 5*time.Millisecond)
 	ticker := time.NewTicker(interval)
 	timer := time.NewTimer(duration)
 	routeIndex := 0
@@ -409,7 +402,7 @@ schedule:
 		result.Errors["scheduler queue full"] += dropped
 	}
 	result.DurationSeconds = time.Since(started).Seconds()
-	sort.Slice(latencies, func(left, right int) bool { return latencies[left] < latencies[right] })
+	slices.Sort(latencies)
 	result.P50Milliseconds = percentileLatency(latencies, 50).Milliseconds()
 	result.P95Milliseconds = percentileLatency(latencies, 95).Milliseconds()
 	result.P99Milliseconds = percentileLatency(latencies, 99).Milliseconds()
@@ -420,13 +413,7 @@ func percentileLatency(values []time.Duration, percentile int) time.Duration {
 	if len(values) == 0 {
 		return 0
 	}
-	index := (len(values)*percentile + 99) / 100
-	if index < 1 {
-		index = 1
-	}
-	if index > len(values) {
-		index = len(values)
-	}
+	index := min(max((len(values)*percentile+99)/100, 1), len(values))
 	return values[index-1]
 }
 
@@ -509,7 +496,11 @@ func (r *trafficRunner) Close() {
 func safeSAMID(value string) string {
 	var builder strings.Builder
 	for _, character := range value {
-		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-' {
+		safeSAMIDSelected := (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9')
+		if !safeSAMIDSelected {
+			safeSAMIDSelected = character == '-'
+		}
+		if safeSAMIDSelected {
 			builder.WriteRune(character)
 		}
 	}
@@ -616,8 +607,11 @@ func createSAMMessageSession(ctx context.Context, address, style, id string, udp
 	fields, err := control.command(ctx, line, nil)
 	if err != nil || fields["RESULT"] != "OK" {
 		control.Close()
-		if err == nil {
-			err = fmt.Errorf("SESSION CREATE %s result %q", style, fields["RESULT"])
+
+		if err ==
+			nil {
+			err = fmt.
+				Errorf("SESSION CREATE %s result %q", style, fields["RESULT"])
 		}
 		return nil, err
 	}
@@ -635,7 +629,11 @@ func generateSAMDestination(ctx context.Context, address string) (string, string
 	if err != nil {
 		return "", "", err
 	}
-	if (fields["RESULT"] != "" && fields["RESULT"] != "OK") || fields["PRIV"] == "" || fields["PUB"] == "" {
+	generateSAMDestinationRejected := (fields["RESULT"] != "" && fields["RESULT"] != "OK") || fields["PRIV"] == ""
+	if !generateSAMDestinationRejected {
+		generateSAMDestinationRejected = fields["PUB"] == ""
+	}
+	if generateSAMDestinationRejected {
 		return "", "", errors.New("SAM DEST GENERATE returned no key material")
 	}
 	return fields["PRIV"], fields["PUB"], nil
@@ -651,6 +649,7 @@ func openSAMControl(ctx context.Context, address string) (*samControl, error) {
 	fields, err := control.command(ctx, "HELLO VERSION MIN=3.3 MAX=3.3", nil)
 	if err != nil || fields["RESULT"] != "OK" {
 		connection.Close()
+
 		if err == nil {
 			err = errors.New("SAM 3.3 negotiation failed")
 		}
@@ -680,7 +679,7 @@ func (c *samControl) command(ctx context.Context, line string, body []byte) (map
 
 func samFields(line string) map[string]string {
 	fields := make(map[string]string)
-	for _, token := range strings.Fields(line) {
+	for token := range strings.FieldsSeq(line) {
 		key, value, ok := strings.Cut(token, "=")
 		if ok {
 			fields[strings.ToUpper(key)] = value
