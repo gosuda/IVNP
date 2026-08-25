@@ -18,17 +18,22 @@ func (n *localStreamNetwork) DialI2P(ctx context.Context, address string) (net.C
 	if l == nil {
 		return nil, ErrAddressUnavailable
 	}
+	if !l.beginDial() {
+		return nil, net.ErrClosed
+	}
+	defer l.dials.Done()
+
 	client, server := net.Pipe()
 	select {
 	case l.incoming <- server:
 		return client, nil
 	case <-ctx.Done():
-		client.Close()
-		server.Close()
+		_ = client.Close()
+		_ = server.Close()
 		return nil, ctx.Err()
 	case <-l.closed:
-		client.Close()
-		server.Close()
+		_ = client.Close()
+		_ = server.Close()
 		return nil, net.ErrClosed
 	}
 }
@@ -42,14 +47,26 @@ func (n *localStreamNetwork) ListenI2P(ctx context.Context, address string) (net
 	if address == "" {
 		return nil, ErrAddressInvalid
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if _, ok := n.listeners[address]; ok {
 		return nil, ErrAddressInUse
 	}
 	l := &localListener{network: n, address: address, incoming: make(chan net.Conn, 64), closed: make(chan struct{})}
 	n.listeners[address] = l
-	go func() { <-ctx.Done(); _ = l.Close() }()
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = l.Close()
+		case <-l.closed:
+		}
+	}()
 	return l, nil
 }
 
@@ -58,12 +75,23 @@ type localListener struct {
 	address  string
 	incoming chan net.Conn
 	closed   chan struct{}
-	once     sync.Once
+
+	mu      sync.Mutex
+	closing bool
+	dials   sync.WaitGroup
+	once    sync.Once
 }
 
 func (l *localListener) Accept() (net.Conn, error) {
 	select {
 	case c := <-l.incoming:
+		l.mu.Lock()
+		if l.closing {
+			l.mu.Unlock()
+			_ = c.Close()
+			return nil, net.ErrClosed
+		}
+		l.mu.Unlock()
 		return c, nil
 	case <-l.closed:
 		return nil, net.ErrClosed
@@ -71,14 +99,21 @@ func (l *localListener) Accept() (net.Conn, error) {
 }
 func (l *localListener) Close() error {
 	l.once.Do(func() {
-		close(l.closed)
+		l.mu.Lock()
+		l.closing = true
+		l.mu.Unlock()
+
 		l.network.mu.Lock()
-		delete(l.network.listeners, l.address)
+		if l.network.listeners[l.address] == l {
+			delete(l.network.listeners, l.address)
+		}
 		l.network.mu.Unlock()
+		close(l.closed)
+		l.dials.Wait()
 		for {
 			select {
 			case c := <-l.incoming:
-				c.Close()
+				_ = c.Close()
 			default:
 				return
 			}
@@ -86,6 +121,16 @@ func (l *localListener) Close() error {
 	})
 	return nil
 }
+func (l *localListener) beginDial() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closing {
+		return false
+	}
+	l.dials.Add(1)
+	return true
+}
+
 func (l *localListener) Addr() net.Addr { return localAddr(l.address) }
 
 type localAddr string

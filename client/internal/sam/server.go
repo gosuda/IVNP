@@ -21,6 +21,7 @@ import (
 const (
 	defaultMaxCommandBytes  = 8192
 	defaultMaxDatagramBytes = 32768
+	defaultCleanupTimeout   = 30 * time.Second
 )
 
 type ListenFunc func(context.Context, string, string) (net.Listener, error)
@@ -48,6 +49,7 @@ type ServerConfig struct {
 	HandshakeTimeout       time.Duration
 	CommandTimeout         time.Duration
 	ReadinessTimeout       time.Duration
+	CleanupTimeout         time.Duration
 	AllowLoopbackForward   bool
 }
 
@@ -69,6 +71,7 @@ type Server struct {
 	closed       bool
 	sem          chan struct{}
 	queueBytes   *byteBudget
+	cleanupErr   error
 }
 
 func NewServer(config ServerConfig) (*Server, error) {
@@ -130,6 +133,9 @@ func NewServer(config ServerConfig) (*Server, error) {
 	}
 	if config.ReadinessTimeout <= 0 {
 		config.ReadinessTimeout = 2 * time.Minute
+	}
+	if config.CleanupTimeout <= 0 {
+		config.CleanupTimeout = defaultCleanupTimeout
 	}
 	return &Server{config: config, sessions: make(map[string]*samSession), destinations: make(map[foundation.Hash]*samSession), connections: make(map[net.Conn]struct{}), done: make(chan struct{}), sem: make(chan struct{}, config.MaxConnections), queueBytes: newByteBudget(config.MaxServerQueueBytes)}, nil
 }
@@ -297,7 +303,7 @@ func (s *Server) serveConnection(raw net.Conn) (result error) {
 	_ = raw.SetReadDeadline(time.Time{})
 	defer func() {
 		if connection.root != nil {
-			connection.root.close()
+			result = errors.Join(result, connection.root.close())
 		}
 	}()
 	for {
@@ -323,7 +329,7 @@ func (s *Server) serveConnection(raw net.Conn) (result error) {
 			}
 			continue
 		}
-		stop, dispatchErr := s.dispatch(connection, cmd)
+		stop, dispatchErr := s.dispatch(s.ctx, connection, cmd)
 		if stop {
 			return dispatchErr
 		}
@@ -389,8 +395,9 @@ func (s *Server) Close() error {
 	}
 	s.mu.Lock()
 	if s.closed {
+		result := s.cleanupErr
 		s.mu.Unlock()
-		return nil
+		return result
 	}
 	s.closed = true
 	if s.cancel != nil {
@@ -407,6 +414,7 @@ func (s *Server) Close() error {
 		connections = append(connections, connection)
 	}
 	s.mu.Unlock()
+	var result error
 	if listener != nil {
 		_ = listener.Close()
 	}
@@ -417,9 +425,12 @@ func (s *Server) Close() error {
 		_ = connection.Close()
 	}
 	for _, root := range roots {
-		root.close()
+		result = errors.Join(result, root.close())
 	}
-	return nil
+	s.mu.RLock()
+	result = errors.Join(result, s.cleanupErr)
+	s.mu.RUnlock()
+	return result
 }
 func (s *Server) Wait() error {
 	if s == nil {
@@ -433,7 +444,26 @@ func (s *Server) Wait() error {
 		<-done
 		s.wg.Wait()
 	}
-	return nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cleanupErr
+}
+func (s *Server) destroyDestination(endpoint destination.DestinationEndpoint) error {
+	parent := context.Background()
+	if s.ctx != nil {
+		parent = context.WithoutCancel(s.ctx)
+	}
+	ctx, cancel := context.WithTimeout(parent, s.config.CleanupTimeout)
+	defer cancel()
+	err := s.config.Controller.DestroyDestination(ctx, endpoint)
+	if err == nil {
+		return nil
+	}
+	err = fmt.Errorf("sam: destroy destination: %w", err)
+	s.mu.Lock()
+	s.cleanupErr = errors.Join(s.cleanupErr, err)
+	s.mu.Unlock()
+	return err
 }
 
 func (s *Server) addRoot(root *samSession) error {

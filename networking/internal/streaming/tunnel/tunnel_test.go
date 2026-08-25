@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
@@ -271,39 +272,33 @@ func TestTunnelNetworkCloseRetransmitsPendingDataBeforeEOF(t *testing.T) {
 }
 
 func TestTunnelNetworkCloseCancelsBlockedRetransmission(t *testing.T) {
-	destination, err := foundation.GenerateLocalDestination()
-	if err != nil {
-		t.Fatal(err)
-	}
-	sender := &blockingTunnelSender{started: make(chan struct{})}
-	network, err := NewTunnelNetwork(TunnelNetworkConfig{Destination: destination, Sender: sender, RetransmitAfter: 10 * time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
-	}
-	connection := network.newConn(1, 2, foundation.Hash{1}, foundation.Identity{}, 1, 2, true)
-	if err := network.register(connection); err != nil {
-		_ = network.Close()
-		t.Fatal(err)
-	}
-	connection.mu.Lock()
-	connection.pending[1] = pendingPacket{wire: []byte{1}, sent: time.Now().Add(-time.Second)}
-	connection.mu.Unlock()
-	select {
-	case <-sender.started:
-	case <-time.After(time.Second):
-		_ = network.Close()
-		t.Fatal("retransmission did not enter sender")
-	}
-	closed := make(chan struct{})
-	go func() {
-		_ = network.Close()
-		close(closed)
-	}()
-	select {
-	case <-closed:
-	case <-time.After(time.Second):
-		t.Fatal("Close blocked behind canceled retransmission")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		destination, err := foundation.GenerateLocalDestination()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sender := &blockingTunnelSender{started: make(chan struct{})}
+		network, err := NewTunnelNetwork(TunnelNetworkConfig{Destination: destination, Sender: sender, RetransmitAfter: 10 * time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		connection := network.newConn(1, 2, foundation.Hash{1}, foundation.Identity{}, 1, 2, true)
+		if err := network.register(connection); err != nil {
+			_ = network.Close()
+			t.Fatal(err)
+		}
+		connection.mu.Lock()
+		connection.pending[1] = pendingPacket{wire: []byte{1}, sent: time.Now().Add(-time.Second)}
+		connection.mu.Unlock()
+		<-sender.started
+
+		closed := make(chan struct{})
+		go func() {
+			_ = network.Close()
+			close(closed)
+		}()
+		<-closed
+	})
 }
 
 func TestTunnelNetworkCloseDrainsPacingQueue(t *testing.T) {

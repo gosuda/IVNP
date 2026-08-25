@@ -109,6 +109,116 @@ func TestControlCommandHonorsContextDeadline(t *testing.T) {
 	}
 }
 
+func TestControlCommandHonorsContextCancellation(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	control := &control{Conn: client, reader: bufio.NewReader(client)}
+	firstRead := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+		if _, err := reader.ReadString('\n'); err != nil {
+			serverDone <- err
+			return
+		}
+		close(firstRead)
+		if _, err := reader.ReadString('\n'); err != nil {
+			serverDone <- err
+			return
+		}
+		_, err := io.WriteString(server, "HELLO REPLY RESULT=OK VERSION=3.3\n")
+		serverDone <- err
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := control.commandContext(ctx, "PING")
+		result <- err
+	}()
+	<-firstRead
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("command cancellation error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("command remained blocked after context cancellation")
+	}
+
+	fields, err := control.commandContext(context.Background(), "HELLO VERSION MIN=3.1 MAX=3.3")
+	if err != nil {
+		t.Fatalf("command after cancellation: %v", err)
+	}
+	if fields["RESULT"] != "OK" {
+		t.Fatalf("command after cancellation fields = %#v", fields)
+	}
+	if err = <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListenerCloseCancelsBlockedOpen(t *testing.T) {
+	bridge, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bridge.Close()
+	helloRead := make(chan struct{})
+	serverDone := make(chan struct{})
+	go func() {
+		connection, acceptErr := bridge.Accept()
+		if acceptErr != nil {
+			close(serverDone)
+			return
+		}
+		defer connection.Close()
+		reader := bufio.NewReader(connection)
+		_, _ = reader.ReadString('\n')
+		close(helloRead)
+		_, _ = reader.ReadByte()
+		close(serverDone)
+	}()
+
+	network := &Network{
+		cfg:     Config{Address: bridge.Addr().String()},
+		control: &control{},
+		local:   samAddr{host: "local.b32.i2p"},
+		done:    make(chan struct{}),
+	}
+	listener, err := network.ListenI2P(context.Background(), ":7777")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if connection != nil {
+			_ = connection.Close()
+		}
+		accepted <- acceptErr
+	}()
+	<-helloRead
+	if err = listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err = <-accepted:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Accept after Close error = %v, want net.ErrClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Accept remained blocked after listener Close")
+	}
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("listener Close did not close pending bridge connection")
+	}
+}
+
 func TestNetworkRequiresStart(t *testing.T) {
 	network, err := New(Config{})
 	if err != nil {

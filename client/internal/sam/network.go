@@ -226,18 +226,23 @@ func (n *Network) ListenI2P(ctx context.Context, address string) (net.Listener, 
 	if err = n.running(); err != nil {
 		return nil, err
 	}
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
+	if err = ctx.Err(); err != nil {
+		return nil, err
 	}
+	lifetime, cancel := context.WithCancel(ctx)
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	if n.listener != nil {
+		n.mu.Unlock()
+		cancel()
 		return nil, ErrListener
 	}
-	listener := &listener{network: n, local: samAddr{host: n.local.host, port: port}, done: make(chan struct{})}
+	listener := &listener{network: n, local: samAddr{host: n.local.host, port: port}, ctx: lifetime, cancel: cancel}
 	n.listener = listener
+	n.mu.Unlock()
+	go func() {
+		<-lifetime.Done()
+		_ = listener.Close()
+	}()
 	return listener, nil
 }
 
@@ -348,32 +353,75 @@ func (c *control) commandContext(ctx context.Context, line string) (map[string]s
 	if ctx == nil {
 		ctx = context.Background()
 	}
-
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	deadline, hasDeadline := ctx.Deadline()
-	if hasDeadline {
-		if err := c.SetDeadline(deadline); err != nil {
-			return nil, err
-		}
-		defer c.SetDeadline(time.Time{})
+	restore, err := c.interruptOnCancel(ctx)
+	if err != nil {
+		return nil, err
 	}
-	fields, err := c.command(line)
-	if err == nil {
-		return fields, nil
+	fields, commandErr := c.command(line)
+	restoreErr := restore()
+	if commandErr == nil {
+		return fields, restoreErr
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, ctxErr
+		return nil, errors.Join(ctxErr, restoreErr)
 	}
 	var networkError net.Error
-	if hasDeadline && errors.As(err, &networkError) && networkError.Timeout() && !time.Now().Before(deadline) {
+	if hasDeadline && errors.As(commandErr, &networkError) && networkError.Timeout() && !time.Now().Before(deadline) {
 		// A socket deadline can fire just before the context timer publishes
 		// Done. The socket deadline came from this context, so expose the
 		// context contract rather than the transport-specific timeout.
-		return nil, context.DeadlineExceeded
+		return nil, errors.Join(context.DeadlineExceeded, restoreErr)
 	}
-	return nil, err
+	return nil, errors.Join(commandErr, restoreErr)
+}
+
+func (c *control) readStringContext(ctx context.Context) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	restore, err := c.interruptOnCancel(ctx)
+	if err != nil {
+		return "", err
+	}
+	line, readErr := c.reader.ReadString('\n')
+	restoreErr := restore()
+	if readErr == nil {
+		return line, restoreErr
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", errors.Join(ctxErr, restoreErr)
+	}
+	return "", errors.Join(readErr, restoreErr)
+}
+
+func (c *control) interruptOnCancel(ctx context.Context) (func() error, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := c.SetDeadline(deadline); err != nil {
+			return nil, err
+		}
+	}
+	if ctx.Done() == nil {
+		return func() error { return c.SetDeadline(time.Time{}) }, nil
+	}
+	callbackDone := make(chan struct{})
+	var interruptErr error
+	stop := context.AfterFunc(ctx, func() {
+		interruptErr = c.SetDeadline(time.Now())
+		close(callbackDone)
+	})
+	return func() error {
+		if !stop() {
+			<-callbackDone
+		}
+		return errors.Join(interruptErr, c.SetDeadline(time.Time{}))
+	}, nil
 }
 
 func parseResponse(line string) (map[string]string, error) {
@@ -438,10 +486,11 @@ func statusError(kind string, fields map[string]string) error {
 type listener struct {
 	network *Network
 	local   samAddr
+	ctx     context.Context
+	cancel  context.CancelFunc
 
 	mu     sync.Mutex
 	active net.Conn
-	done   chan struct{}
 	closed bool
 }
 
@@ -451,18 +500,22 @@ func (l *listener) Accept() (net.Conn, error) {
 		l.mu.Unlock()
 		return nil, net.ErrClosed
 	}
+	ctx := l.ctx
 	l.mu.Unlock()
 	if err := l.network.running(); err != nil {
 		return nil, err
 	}
-	control, err := l.network.open(context.Background())
+	control, err := l.network.open(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, net.ErrClosed
+		}
 		return nil, err
 	}
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
-		control.Close()
+		_ = control.Close()
 		return nil, net.ErrClosed
 	}
 	l.active = control.Conn
@@ -474,22 +527,28 @@ func (l *listener) Accept() (net.Conn, error) {
 		}
 		l.mu.Unlock()
 	}()
-	fields, err := control.command("STREAM ACCEPT ID=" + l.network.cfg.ID)
+	fields, err := control.commandContext(ctx, "STREAM ACCEPT ID="+l.network.cfg.ID)
 	if err != nil || fields["RESULT"] != "OK" {
-		control.Close()
+		_ = control.Close()
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, net.ErrClosed
+			}
 			return nil, err
 		}
 		return nil, statusError("STREAM STATUS", fields)
 	}
-	peer, err := control.reader.ReadString('\n')
+	peer, err := control.readStringContext(ctx)
 	if err != nil {
-		control.Close()
+		_ = control.Close()
+		if ctx.Err() != nil {
+			return nil, net.ErrClosed
+		}
 		return nil, err
 	}
 	peer = strings.TrimSpace(peer)
 	if strings.HasPrefix(peer, "STREAM STATUS ") {
-		control.Close()
+		_ = control.Close()
 		fields, parseErr := parseResponse(peer)
 		if parseErr != nil {
 			return nil, parseErr
@@ -498,13 +557,13 @@ func (l *listener) Accept() (net.Conn, error) {
 	}
 	remote, toPort, err := parseAcceptedPeer(peer)
 	if err != nil {
-		control.Close()
+		_ = control.Close()
 		return nil, err
 	}
 	local := l.local
 	if toPort != 0 {
 		if local.port != 0 && local.port != toPort {
-			control.Close()
+			_ = control.Close()
 			return nil, ErrAddress
 		}
 		local.port = toPort
@@ -520,8 +579,14 @@ func (l *listener) Close() error {
 	}
 	l.closed = true
 	active := l.active
-	close(l.done)
+	l.cancel()
 	l.mu.Unlock()
+
+	l.network.mu.Lock()
+	if l.network.listener == l {
+		l.network.listener = nil
+	}
+	l.network.mu.Unlock()
 	if active != nil {
 		return active.Close()
 	}

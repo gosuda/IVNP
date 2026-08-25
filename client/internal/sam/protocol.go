@@ -17,7 +17,7 @@ import (
 	"gosuda.org/ivnp/networking"
 )
 
-func (s *Server) dispatch(connection *serverConnection, cmd command) (bool, error) {
+func (s *Server) dispatch(ctx context.Context, connection *serverConnection, cmd command) (bool, error) {
 	if cmd.verb == "PING" {
 		suffix := ""
 		if cmd.argument != "" {
@@ -72,13 +72,13 @@ func (s *Server) dispatch(connection *serverConnection, cmd command) (bool, erro
 		if name == "" || s.config.Resolver == nil {
 			return false, connection.writeLine("NAMING REPLY RESULT=KEY_NOT_FOUND NAME=" + quoteToken(name))
 		}
-		value, err := s.config.Resolver.ResolveDestination(context.Background(), name)
+		value, err := s.config.Resolver.ResolveDestination(ctx, name)
 		if err != nil {
 			return false, connection.writeLine("NAMING REPLY RESULT=KEY_NOT_FOUND NAME=" + quoteToken(name))
 		}
 		return false, connection.writeLine("NAMING REPLY RESULT=OK NAME=" + quoteToken(name) + " VALUE=" + value)
 	case "SESSION CREATE":
-		return false, s.createSession(connection, cmd)
+		return false, s.createSession(ctx, connection, cmd)
 	case "SESSION ADD":
 		return false, s.addSubsession(connection, cmd)
 	case "SESSION REMOVE":
@@ -96,7 +96,7 @@ func (s *Server) dispatch(connection *serverConnection, cmd command) (bool, erro
 	}
 }
 
-func (s *Server) createSession(connection *serverConnection, cmd command) error {
+func (s *Server) createSession(ctx context.Context, connection *serverConnection, cmd command) error {
 	if !onlyOptions(cmd.values, "ID", "STYLE", "DESTINATION", "PORT", "HOST", "FROM_PORT", "TO_PORT", "PROTOCOL", "HEADER", "SIGNATURE_TYPE", "I2CP.LEASESETTYPE", "I2CP.LEASESETENCTYPE", "I2CP.LEASESETAUTHTYPE", "I2CP.LEASESETSECRET", "I2CP.LEASESETCLIENT.*") {
 		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_OPTIONS")
 	}
@@ -151,7 +151,7 @@ func (s *Server) createSession(connection *serverConnection, cmd command) error 
 		return connection.writeLine("SESSION STATUS RESULT=INVALID_KEY")
 	}
 	defer clear(private)
-	endpoint, err := s.config.Controller.CreateDestination(s.ctx, destination.DestinationSpec{Local: local, Policy: policy})
+	endpoint, err := s.config.Controller.CreateDestination(ctx, destination.DestinationSpec{Local: local, Policy: policy})
 	local.ReleaseSensitive()
 	clearLeaseSetPolicy(&policy)
 	if err != nil {
@@ -162,20 +162,20 @@ func (s *Server) createSession(connection *serverConnection, cmd command) error 
 		return connection.writeLine("SESSION STATUS RESULT=" + result)
 	}
 	if ready, ok := endpoint.(destination.ReadyDestinationEndpoint); ok {
-		readyCtx, cancel := context.WithTimeout(s.ctx, s.config.ReadinessTimeout)
+		readyCtx, cancel := context.WithTimeout(ctx, s.config.ReadinessTimeout)
 		err = waitReadyConnection(readyCtx, connection, ready)
 		cancel()
 		if err != nil {
-			_ = s.config.Controller.DestroyDestination(context.Background(), endpoint)
+			cleanupErr := s.destroyDestination(endpoint)
 			if errors.Is(err, net.ErrClosed) {
-				return err
+				return errors.Join(err, cleanupErr)
 			}
-			return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=SESSION_NOT_READY")
+			return errors.Join(connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=SESSION_NOT_READY"), cleanupErr)
 		}
 	}
 	root := newRootSession(s, id, style, endpoint, connection, fromPort, toPort, listenPort, protocol, listenProtocol, rawHeader, udpTarget)
 	if err = s.addRoot(root); err != nil {
-		_ = s.config.Controller.DestroyDestination(context.Background(), endpoint)
+		cleanupErr := s.destroyDestination(endpoint)
 		result := "I2P_ERROR"
 		if err.Error() == "DUPLICATED_ID" {
 			result = "DUPLICATED_ID"
@@ -183,7 +183,7 @@ func (s *Server) createSession(connection *serverConnection, cmd command) error 
 		if err.Error() == "DUPLICATED_DEST" {
 			result = "DUPLICATED_DEST"
 		}
-		return connection.writeLine("SESSION STATUS RESULT=" + result)
+		return errors.Join(connection.writeLine("SESSION STATUS RESULT="+result), cleanupErr)
 	}
 	connection.root = root
 	if style == styleDatagram {
@@ -194,8 +194,8 @@ func (s *Server) createSession(connection *serverConnection, cmd command) error 
 	}
 	if err != nil {
 		connection.root = nil
-		root.close()
-		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=ROUTE_UNAVAILABLE")
+		cleanupErr := root.close()
+		return errors.Join(connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=ROUTE_UNAVAILABLE"), cleanupErr)
 	}
 	return connection.writeLine("SESSION STATUS RESULT=OK DESTINATION=" + string(private))
 }

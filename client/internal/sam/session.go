@@ -51,6 +51,7 @@ type samSession struct {
 	acceptAdmissions    atomic.Uint64
 	acceptCancellations atomic.Uint64
 	once                sync.Once
+	closeErr            error
 	wg                  sync.WaitGroup
 }
 
@@ -78,14 +79,14 @@ func (s *samSession) detach(connection net.Conn) {
 	s.mu.Unlock()
 }
 
-func (s *samSession) close() {
+func (s *samSession) close() error {
 	if s == nil {
-		return
+		return nil
 	}
 	r := s.root
 	if r != s {
 		s.closeChild()
-		return
+		return nil
 	}
 	r.once.Do(func() {
 		r.server.removeRoot(r)
@@ -119,8 +120,9 @@ func (s *samSession) close() {
 			_ = connection.Close()
 		}
 		r.wg.Wait()
-		_ = r.server.config.Controller.DestroyDestination(context.Background(), r.endpoint)
+		r.closeErr = r.server.destroyDestination(r.endpoint)
 	})
+	return r.closeErr
 }
 
 func (s *samSession) closeChild() {

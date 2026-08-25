@@ -3,11 +3,13 @@ package sam
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
@@ -129,6 +131,38 @@ func (r fixedResolver) ResolveDestination(context.Context, string) (string, erro
 	return string(r), nil
 }
 
+type blockingResolver struct {
+	started  chan struct{}
+	canceled chan struct{}
+}
+
+func (r *blockingResolver) ResolveDestination(ctx context.Context, _ string) (string, error) {
+	close(r.started)
+	<-ctx.Done()
+	close(r.canceled)
+	return "", ctx.Err()
+}
+
+type cleanupObservation struct {
+	initialErr  error
+	hasDeadline bool
+}
+
+type contextCleanupController struct {
+	observed chan cleanupObservation
+}
+
+func (c *contextCleanupController) CreateDestination(context.Context, destination.DestinationSpec) (destination.DestinationEndpoint, error) {
+	return nil, ErrUnsupported
+}
+
+func (c *contextCleanupController) DestroyDestination(ctx context.Context, _ destination.DestinationEndpoint) error {
+	_, hasDeadline := ctx.Deadline()
+	c.observed <- cleanupObservation{initialErr: ctx.Err(), hasDeadline: hasDeadline}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 func samDial(t *testing.T, address string) (net.Conn, *bufio.Reader) {
 	t.Helper()
 	connection, err := net.Dial("tcp", address)
@@ -154,6 +188,60 @@ func readSAMLine(t *testing.T, reader *bufio.Reader) string {
 	return strings.TrimSpace(line)
 }
 
+func TestEmbeddedServerCancelsNamingLookupOnClose(t *testing.T) {
+	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
+	resolver := &blockingResolver{started: make(chan struct{}), canceled: make(chan struct{})}
+	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, Resolver: resolver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = server.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	connection, _ := samDial(t, server.Addr().String())
+	defer connection.Close()
+	if _, err = io.WriteString(connection, "NAMING LOOKUP NAME=blocked.i2p\n"); err != nil {
+		t.Fatal(err)
+	}
+	<-resolver.started
+	if err = server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = server.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-resolver.canceled:
+	default:
+		t.Fatal("server Close did not cancel NAMING LOOKUP")
+	}
+}
+
+func TestDestroyDestinationUsesBoundedIndependentContext(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		parent, cancel := context.WithCancel(context.Background())
+		cancel()
+		controller := &contextCleanupController{observed: make(chan cleanupObservation, 1)}
+		server := &Server{
+			config: ServerConfig{Controller: controller, CleanupTimeout: time.Hour},
+			ctx:    parent,
+		}
+		err := server.destroyDestination(nil)
+		observation := <-controller.observed
+		if observation.initialErr != nil {
+			t.Fatalf("cleanup context started canceled: %v", observation.initialErr)
+		}
+		if !observation.hasDeadline {
+			t.Fatal("cleanup context has no deadline")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("destroyDestination error = %v, want context.DeadlineExceeded", err)
+		}
+		if !errors.Is(server.Wait(), context.DeadlineExceeded) {
+			t.Fatalf("Server.Wait error = %v, want context.DeadlineExceeded", server.Wait())
+		}
+	})
+}
 func TestEmbeddedServerKeepsIdleRootSessionAlive(t *testing.T) {
 	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 	server, err := NewServer(ServerConfig{
