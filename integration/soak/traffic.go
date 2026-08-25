@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"gosuda.org/ivnp/ivnp"
+	"gosuda.org/ivnp"
 )
 
 const (

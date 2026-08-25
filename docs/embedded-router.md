@@ -40,7 +40,7 @@ compatible `router.version`; IVNP does not invent one on the application's behal
 
 ## Public I2P API
 
-`gosuda.org/ivnp/ivnp` is the stable facade. `ivnp.New` constructs a complete
+`gosuda.org/ivnp` is the stable facade. `ivnp.New` constructs a complete
 embedded `ivnp.Node`; construction has no I/O, while `Start`, `Close`, and
 `Wait` retain the daemon lifecycle described above. The facade also exposes
 `ivnp.NewRouter` for callers assembling router dependencies themselves.

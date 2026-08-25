@@ -1,4 +1,4 @@
-// Command ivnp starts an embedded IVNP router daemon.
+// Command ivnpd starts an embedded IVNP router daemon.
 package main
 
 import (
@@ -10,7 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"gosuda.org/ivnp/ivnp"
+	"gosuda.org/ivnp"
 )
 
 var version = "dev"
@@ -20,7 +20,7 @@ func main() {
 }
 
 func run(args []string) int {
-	flags := flag.NewFlagSet("ivnp", flag.ContinueOnError)
+	flags := flag.NewFlagSet("ivnpd", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	configPath := flags.String("config", "ivnp.conf", "operating configuration path")
 	showVersion := flags.Bool("version", false, "print version and exit")
@@ -28,7 +28,7 @@ func run(args []string) int {
 		return 2
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "ivnp: unexpected positional arguments")
+		fmt.Fprintln(os.Stderr, "ivnpd: unexpected positional arguments")
 		return 2
 	}
 	if *showVersion {
@@ -37,7 +37,7 @@ func run(args []string) int {
 	}
 	cfg, err := ivnp.LoadOrCreateConfig(*configPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ivnp: configuration error:", err)
+		fmt.Fprintln(os.Stderr, "ivnpd: configuration error:", err)
 		return 1
 	}
 	logger := newLogger(cfg.Log)

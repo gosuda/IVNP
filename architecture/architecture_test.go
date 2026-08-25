@@ -79,7 +79,7 @@ func TestSubsystemFacadeFilesExist(t *testing.T) {
 
 func TestPublicImportsUseCanonicalPathsWithoutAliases(t *testing.T) {
 	canonical := map[string]bool{
-		modulePath + "/ivnp":                   true,
+		modulePath:                             true,
 		modulePath + "/foundation":             true,
 		modulePath + "/cryptography":           true,
 		modulePath + "/networking":             true,
@@ -109,8 +109,8 @@ func TestPublicImportsUseCanonicalPathsWithoutAliases(t *testing.T) {
 		}
 		for _, spec := range file.Imports {
 			importPath := strings.Trim(spec.Path.Value, `"`)
-			if importPath == modulePath {
-				t.Errorf("%s imports forbidden module root %q; use %q", path, importPath, modulePath+"/ivnp")
+			if importPath == modulePath+"/ivnp" {
+				t.Errorf("%s imports forbidden nested facade %q; use %q", path, importPath, modulePath)
 			}
 			if canonical[importPath] && spec.Name != nil {
 				t.Errorf("%s aliases canonical import %q as %q", path, importPath, spec.Name.Name)
@@ -143,9 +143,9 @@ func packageLayer(path string) (int, bool) {
 	}
 	relative := strings.TrimPrefix(path, modulePath+"/")
 	switch {
-	case strings.HasPrefix(relative, "command/"), strings.HasPrefix(relative, "integration/"):
+	case strings.HasPrefix(relative, "cmd/"), strings.HasPrefix(relative, "integration/"):
 		return 9, true
-	case relative == "ivnp":
+	case path == modulePath:
 		return 8, true
 	case relative == "node", strings.HasPrefix(relative, "node/"):
 		return 7, true
