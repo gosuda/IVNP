@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "skills": {
+    "api-design": {
+      "source": "gosuda/JustGoodPractices",
+      "sourceType": "github",
+      "skillPath": "skills/api-design/SKILL.md",
+      "computedHash": "bb3b61797e929f6a499be1c44517f21e8d1466e58758fcf5635fdef486376f1c"
+    },
+    "code-health": {
+      "source": "gosuda/JustGoodPractices",
+      "sourceType": "github",
+      "skillPath": "skills/code-health/SKILL.md",
+      "computedHash": "fc3e0e29ca55ae67a227bbc82793f408f1528669e23de8a1170d8addf1b1114a"
+    },
+    "code-review": {
+      "source": "gosuda/JustGoodPractices",
+      "sourceType": "github",
+      "skillPath": "skills/code-review/SKILL.md",
+      "computedHash": "0088f9d95725ca52e0f7bff4c0fbc6980bdd93c45f0d63c74ac8a237058baafd"
+    },
+    "go-practices": {
+      "source": "gosuda/JustGoodPractices",
+      "sourceType": "github",
+      "skillPath": "skills/go-practices/SKILL.md",
+      "computedHash": "290e978aec92e5291e87de4eb22d4a1cee7543f781009f5a0c33a2701fa7c253"
+    },
+    "just-good-practices": {
+      "source": "gosuda/JustGoodPractices",
+      "sourceType": "github",
+      "skillPath": "skills/just-good-practices/SKILL.md",
+      "computedHash": "c48de865fd40598597046bf0a338f13bf788c72b6f4d3a6f1251301bdc683ee3"
+    },
+    "shell-practices": {
+      "source": "gosuda/JustGoodPractices",
+      "sourceType": "github",
+      "skillPath": "skills/shell-practices/SKILL.md",
+      "computedHash": "14e49969afebd6f8614a9b993893da6467cfca93a1eff72da787879e542e7c11"
+    },
+    "testing-practices": {
+      "source": "gosuda/JustGoodPractices",
+      "sourceType": "github",
+      "skillPath": "skills/testing-practices/SKILL.md",
+      "computedHash": "b8f633ae68d95571a9ed5f52442784fa220364beff6e47ae883fb3a26f1009ab"
+    }
+  }
+}
