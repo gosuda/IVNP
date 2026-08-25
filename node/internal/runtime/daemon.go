@@ -441,14 +441,22 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 	database := networking.NetworkDatabaseNewDatabase(bundle.Router.Hash, cfg.NetDB.BucketCapacity)
 	database.SetMetrics(registry)
 	registry.SetNetDBRouters(uint64(database.Routers().Len()))
-	netdbStore, err := networking.NetworkDatabaseNewRouterInfoStore(networking.NetworkDatabaseRouterInfoStoreConfig{
-		Path: filepath.Join(cfg.StateDir, "netdb.routers"), Database: database, NetworkID: cfg.Network.ID,
-	})
-	if err != nil {
-		return nil, err
+	var netdbStore *networking.NetworkDatabaseRouterInfoStore
+	netdbStateDir := cfg.StateDir
+	if netdbStateDir == "" && cfg.StatePath != "" {
+		netdbStateDir = filepath.Dir(cfg.StatePath)
 	}
-	if _, loadErr := netdbStore.Load(uint64(clock.Now().UnixMilli())); loadErr != nil {
-		logger.Warn("ignoring invalid NetDB router snapshot", "path", netdbStore.Path(), "error", loadErr)
+	if netdbStateDir != "" {
+		store, err := networking.NetworkDatabaseNewRouterInfoStore(networking.NetworkDatabaseRouterInfoStoreConfig{
+			Path: filepath.Join(netdbStateDir, "netdb.routers"), Database: database, NetworkID: cfg.Network.ID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		netdbStore = store
+		if _, loadErr := netdbStore.Load(uint64(clock.Now().UnixMilli())); loadErr != nil {
+			logger.Warn("ignoring invalid NetDB router snapshot", "path", netdbStore.Path(), "error", loadErr)
+		}
 	}
 	var bootstrapPeers []foundation.Hash
 	if len(cfg.NetDB.BootstrapRouterInfoPaths) != 0 {
