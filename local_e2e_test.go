@@ -1,11 +1,11 @@
 package ivnp
 
+import "gosuda.org/ivnp/networking"
+
 import (
 	"bytes"
 	"context"
 	"testing"
-
-	"gosuda.org/ivnp/protocol/streaming"
 )
 
 func TestLocalZeroHopDialerListenerE2E(t *testing.T) {
@@ -22,7 +22,7 @@ func TestLocalZeroHopDialerListenerE2E(t *testing.T) {
 			serverDone <- err
 			return
 		}
-		server := streaming.NewConn(raw, streaming.NewState(2, 1))
+		server := networking.StreamingProtocolNewConn(raw, networking.StreamingProtocolNewState(2, 1))
 		defer server.Close()
 		buf := make([]byte, 4)
 		if _, err = server.Read(buf); err == nil && !bytes.Equal(buf, []byte("ping")) {
@@ -37,7 +37,7 @@ func TestLocalZeroHopDialerListenerE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := streaming.NewConn(raw, streaming.NewState(1, 2))
+	client := networking.StreamingProtocolNewConn(raw, networking.StreamingProtocolNewState(1, 2))
 	defer client.Close()
 	if _, err = client.Write([]byte("ping")); err != nil {
 		t.Fatal(err)

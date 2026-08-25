@@ -1,5 +1,7 @@
 package main
 
+import "gosuda.org/ivnp/client"
+
 import (
 	"bufio"
 	"bytes"
@@ -16,8 +18,7 @@ import (
 	"sync"
 	"time"
 
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/service/sam"
+	"gosuda.org/ivnp"
 )
 
 const (
@@ -31,7 +32,7 @@ var probeSizes = [...]int{32, 1024, 16 * 1024, 64 * 1024}
 type trafficEndpoint struct {
 	name        string
 	address     string
-	network     *sam.Network
+	network     *client.SimpleAnonymousMessagingNetwork
 	listener    net.Listener
 	eepsiteBody string
 	done        chan struct{}
@@ -151,7 +152,7 @@ func startTrafficEndpoint(ctx context.Context, runID, name, address string) (*tr
 		}
 	}
 	leaseSetEncTypes := []ivnp.CryptoKeyType{ivnp.CryptoX25519}
-	network, err := sam.New(sam.Config{
+	network, err := client.SimpleAnonymousMessagingNew(client.SimpleAnonymousMessagingConfig{
 		Address:          address,
 		ID:               safeSAMID(runID + "-stream-" + name),
 		LeaseSetType:     3,

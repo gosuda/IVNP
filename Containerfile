@@ -12,13 +12,13 @@ COPY . .
 
 FROM go-build AS soak-build
 RUN mkdir -p /out && \
-    CGO_ENABLED=0 go build -trimpath -o /out/ivnp ./cmd/ivnp && \
+    CGO_ENABLED=0 go build -trimpath -o /out/ivnpd ./cmd/ivnpd && \
     CGO_ENABLED=0 go build -trimpath -o /out/ivnp-soak ./integration/soak
 
 # Export-only image used by scripts/live-interop-soak.sh. The script copies both
 # binaries once, hashes them, and never rebuilds during a measured run.
 FROM scratch AS soak-binaries
-COPY --from=soak-build /out/ivnp /ivnp
+COPY --from=soak-build /out/ivnpd /ivnpd
 COPY --from=soak-build /out/ivnp-soak /ivnp-soak
 
 # Preserve the repository's ordinary container verification behavior as the

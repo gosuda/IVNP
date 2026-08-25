@@ -1,18 +1,18 @@
 package ivnp
 
-import streamapi "gosuda.org/ivnp/api/stream"
+import "gosuda.org/ivnp/interfaces/stream"
 
 var (
-	ErrUnsupportedNetwork    = streamapi.ErrUnsupportedNetwork
-	ErrAddressInUse          = streamapi.ErrAddressInUse
-	ErrAddressUnavailable    = streamapi.ErrAddressUnavailable
-	ErrAddressInvalid        = streamapi.ErrAddressInvalid
-	ErrStreamNetworkRequired = streamapi.ErrStreamNetworkRequired
+	ErrUnsupportedNetwork    = stream.ErrUnsupportedNetwork
+	ErrAddressInUse          = stream.ErrAddressInUse
+	ErrAddressUnavailable    = stream.ErrAddressUnavailable
+	ErrAddressInvalid        = stream.ErrAddressInvalid
+	ErrStreamNetworkRequired = stream.ErrStreamNetworkRequired
 	errStreamNetworkRequired = ErrStreamNetworkRequired
 )
 
 type (
-	StreamNetwork  = streamapi.StreamNetwork
-	Dialer         = streamapi.Dialer
-	ListenerConfig = streamapi.ListenerConfig
+	StreamNetwork  = stream.StreamNetwork
+	Dialer         = stream.Dialer
+	ListenerConfig = stream.ListenerConfig
 )

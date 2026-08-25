@@ -248,24 +248,24 @@ EOF
 phase "building pinned Java target and IVNP binaries"
 run_timed 900 docker build --file Containerfile --target java-i2p --tag "$JAVA_IMAGE" .
 run_timed 900 docker build --file Containerfile --target soak-binaries --tag "$BINARY_IMAGE" .
-BINARY_CONTAINER="$(run_timed 30 docker create "$BINARY_IMAGE" /ivnp)"
-run_timed 30 docker cp "$BINARY_CONTAINER:/ivnp" "$WORKDIR/ivnp"
+BINARY_CONTAINER="$(run_timed 30 docker create "$BINARY_IMAGE" /ivnpd)"
+run_timed 30 docker cp "$BINARY_CONTAINER:/ivnpd" "$WORKDIR/ivnpd"
 run_timed 30 docker cp "$BINARY_CONTAINER:/ivnp-soak" "$WORKDIR/ivnp-soak"
 remove_container "$BINARY_CONTAINER"; BINARY_CONTAINER=""
-chmod 700 "$WORKDIR/ivnp" "$WORKDIR/ivnp-soak"
-sha256sum "$WORKDIR/ivnp" >"$ARTIFACT_DIR/ivnp-binary.sha256"
+chmod 700 "$WORKDIR/ivnpd" "$WORKDIR/ivnp-soak"
+sha256sum "$WORKDIR/ivnpd" >"$ARTIFACT_DIR/ivnpd-binary.sha256"
 phase "exercising secure actual-binary first start and restart defaults"
 FIRST_RUN_DIR="$WORKDIR/first-run-defaults"
 mkdir -p "$FIRST_RUN_DIR"
 first_status=0
-run_timed 1 "$WORKDIR/ivnp" -config "$FIRST_RUN_DIR/ivnp.conf" >"$ARTIFACT_DIR/binary-first-start.log" 2>&1 || first_status=$?
+run_timed 1 "$WORKDIR/ivnpd" -config "$FIRST_RUN_DIR/ivnp.conf" >"$ARTIFACT_DIR/binary-first-start.log" 2>&1 || first_status=$?
 [ "$first_status" -eq 0 ] || [ "$first_status" -eq 124 ] || fail "actual binary first start failed with status $first_status"
 [ -f "$FIRST_RUN_DIR/ivnp.conf" ] || fail "actual binary did not atomically create its first-run configuration"
 [ "$(stat -c '%a' "$FIRST_RUN_DIR/ivnp.conf")" = 600 ] || fail "actual binary first-run configuration is not private"
 [ -f "$FIRST_RUN_DIR/state/router.keys" ] || fail "actual binary first start did not persist router key material"
 first_key_digest="$(sha256sum "$FIRST_RUN_DIR/state/router.keys")"
 restart_status=0
-run_timed 1 "$WORKDIR/ivnp" -config "$FIRST_RUN_DIR/ivnp.conf" >"$ARTIFACT_DIR/binary-first-restart.log" 2>&1 || restart_status=$?
+run_timed 1 "$WORKDIR/ivnpd" -config "$FIRST_RUN_DIR/ivnp.conf" >"$ARTIFACT_DIR/binary-first-restart.log" 2>&1 || restart_status=$?
 [ "$restart_status" -eq 0 ] || [ "$restart_status" -eq 124 ] || fail "actual binary first restart failed with status $restart_status"
 restart_key_digest="$(sha256sum "$FIRST_RUN_DIR/state/router.keys")"
 [ "${first_key_digest%% *}" = "${restart_key_digest%% *}" ] || fail "actual binary router identity changed across first restart"
@@ -634,7 +634,7 @@ scope=$SCOPE
 EOF
 RUNNER_ARGS=(
     --mode "$MODE" --scope "$SCOPE" --run-id "$RUN_ID" --artifacts "$ARTIFACT_DIR" --warmup-timeout "$WARMUP_TIMEOUT"
-    --ivnp-binary "$WORKDIR/ivnp" --ivnp-config "$WORKDIR/ivnp.conf" --control-token-file "$WORKDIR/control-token"
+    --ivnp-binary "$WORKDIR/ivnpd" --ivnp-config "$WORKDIR/ivnp.conf" --control-token-file "$WORKDIR/control-token"
     --java-container "$JAVA_CONTAINER" --i2pd-a-container "$I2PD_A_CONTAINER" --i2pd-b-container "$I2PD_B_CONTAINER"
     --java-image-id "$JAVA_IMAGE_ID" --i2pd-image-id "$I2PD_IMAGE_ID" --builder-image-id "$BINARY_IMAGE_ID"
     --pinned-router-hashes "java=$JAVA_HASH,i2pd-a=$I2PD_A_HASH,i2pd-b=$I2PD_B_HASH"
