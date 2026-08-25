@@ -1,0 +1,23 @@
+{
+  "upstream": {
+    "repository": "https://github.com/i2p/i2p.i2p.git",
+    "commit": "fda1ced99c3b1e8513b88c543bca3aeb668330a8"
+  },
+  "runtime": {
+    "java": "Homebrew OpenJDK 21.0.11",
+    "duration_seconds": 600,
+    "sample_period_seconds": 30,
+    "completed_utc": "2026-08-25T16:11:49Z"
+  },
+  "corpus_format": "repeated big-endian uint32 record length followed by record bytes",
+  "fixtures": [
+    {
+      "file": "delivery-encrypted-destination.corpus",
+      "records": 21,
+      "sha256": "cb00733b33ebb8e7977bb27e0057acd06a12f4c27c9054ce11ac7a7b9d759e26",
+      "generation": "DeliveryInstructions.writeBytes(byte[], int) creates destination instructions; then only the deprecated 0x80 flag is added",
+      "java_validation": "DeliveryInstructions.readBytes accepts every record, consumes 33 bytes, reports destination mode, and does not report encryption",
+      "ivnp_expected": "ParseDelivery ignores 0x80 and reads the destination immediately after the flag byte"
+    }
+  ]
+}

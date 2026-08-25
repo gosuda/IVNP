@@ -1,0 +1,23 @@
+{
+  "upstream": {
+    "repository": "https://github.com/i2p/i2p.i2p.git",
+    "commit": "fda1ced99c3b1e8513b88c543bca3aeb668330a8"
+  },
+  "runtime": {
+    "java": "Homebrew OpenJDK 21.0.11",
+    "duration_seconds": 600,
+    "sample_period_seconds": 30,
+    "completed_utc": "2026-08-25T16:11:49Z"
+  },
+  "corpus_format": "repeated big-endian uint32 record length followed by record bytes",
+  "fixtures": [
+    {
+      "file": "tunnel-gateway-unknown-222.corpus",
+      "records": 21,
+      "sha256": "a4cf3621c05d9a6c1e61a38c5a2a6863b0301183fd036fa8f9c224179941c382",
+      "generation": "UnknownI2NPMessage.readMessage/toByteArray embedded by TunnelGatewayMessage.setMessage/toByteArray/writeMessageBody",
+      "java_validation": "TunnelGatewayMessage.readMessage preserves every embedded record as UnknownI2NPMessage type 222",
+      "ivnp_expected": "ParseTunnelGateway accepts the opaque message and Runtime.HandleGateway relays its header and payload unchanged"
+    }
+  ]
+}

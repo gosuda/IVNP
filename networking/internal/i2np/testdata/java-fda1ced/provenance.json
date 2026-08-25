@@ -1,0 +1,39 @@
+{
+  "upstream": {
+    "repository": "https://github.com/i2p/i2p.i2p.git",
+    "commit": "fda1ced99c3b1e8513b88c543bca3aeb668330a8"
+  },
+  "runtime": {
+    "java": "Homebrew OpenJDK 21.0.11",
+    "duration_seconds": 600,
+    "sample_period_seconds": 30,
+    "completed_utc": "2026-08-25T16:11:49Z"
+  },
+  "corpus_format": "repeated big-endian uint32 record length followed by record bytes",
+  "fixtures": [
+    {
+      "file": "database-lookup-ecies-public-key.corpus",
+      "records": 21,
+      "sha256": "5c57e7c546c0cbe31a196bc858670597fa853de237bbbe00c4de498a379f7f58",
+      "generation": "DatabaseLookupMessage.setReplySession(PublicKey), DatabaseLookupMessage.toByteArray/writeMessageBody",
+      "java_validation": "DatabaseLookupMessage.readMessage accepts all records with an ECIES public key and no reply tag",
+      "ivnp_expected": "accept as DatabaseLookup 0x12 with exactly 32 public-key bytes"
+    },
+    {
+      "file": "transport-expiration.corpus",
+      "records": 21,
+      "sha256": "ea50c6a74105e0b7f7915c36d34786f2c1f201cc4fc3675725348569a5bd4a80",
+      "generation": "DeliveryStatusMessage.setMessageExpiration, DeliveryStatusMessage.toRawByteArrayNTCP2",
+      "java_validation": "transport header contains 1 second for 1499 ms and 2 seconds for 1500 ms",
+      "ivnp_expected": "decode to the represented second midpoint: 1500 ms and 2500 ms"
+    },
+    {
+      "file": "database-store-zero-hash.corpus",
+      "records": 21,
+      "sha256": "a17520585ff6600526c595dbd7fa459e685baf7b288e604910792e3c2e1bb5e6",
+      "generation": "LeaseSet2.sign/toByteArray, DatabaseStoreMessage.setEntry/toByteArray; then only the 32-byte database key is zeroed and the payload is reframed by UnknownI2NPMessage.toByteArray",
+      "java_validation": "DatabaseStoreMessage.readMessage rejects every record with DSM all zeros",
+      "ivnp_expected": "ParseDatabaseStore rejects with ErrMalformed"
+    }
+  ]
+}

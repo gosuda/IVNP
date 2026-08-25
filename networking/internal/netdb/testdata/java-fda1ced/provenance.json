@@ -1,0 +1,39 @@
+{
+  "upstream": {
+    "repository": "https://github.com/i2p/i2p.i2p.git",
+    "commit": "fda1ced99c3b1e8513b88c543bca3aeb668330a8"
+  },
+  "runtime": {
+    "java": "Homebrew OpenJDK 21.0.11",
+    "duration_seconds": 600,
+    "sample_period_seconds": 60,
+    "completed_utc": "2026-08-25T16:11:49Z"
+  },
+  "corpus_format": "repeated big-endian uint32 record length followed by record bytes",
+  "fixtures": [
+    {
+      "file": "database-store-ls2-over-4k.corpus",
+      "records": 11,
+      "sha256": "45c0fda7b82642b601e34439dcb3ea4e3ebf11982e25fc87657281dcb00643ac",
+      "generation": "LeaseSet2.setOptions/sign/toByteArray, DatabaseStoreMessage.setEntry/toByteArray",
+      "java_validation": "LeaseSet2.readBytes and verifySignature accept every LeaseSet2 larger than 4096 bytes",
+      "ivnp_expected": "ParseDatabaseStore and ParseLeaseSet2 accept and verify every record"
+    },
+    {
+      "file": "database-store-els2-encrypted-4096.corpus",
+      "records": 11,
+      "sha256": "2e8b17e70a7692a13802bc42bf5d513576e124e8779cd0c53129d2bee82cd52f",
+      "generation": "EncryptedLeaseSet.sign/encrypt/toByteArray with encryptedData tuned to 4096 bytes, DatabaseStoreMessage.setEntry/toByteArray",
+      "java_validation": "EncryptedLeaseSet.readBytes and verifySignature accept every record",
+      "ivnp_expected": "ParseEncryptedLeaseSet accepts 4096 encrypted bytes although the complete structure exceeds 4096 bytes"
+    },
+    {
+      "file": "database-store-els2-writer-over-4096.corpus",
+      "records": 11,
+      "sha256": "f9d193db531aedf79f1d0b5f290af7c388cfac702b6adb591cbb54796961e1ad",
+      "generation": "EncryptedLeaseSet.sign/encrypt/toByteArray with 101 PSK clients, DatabaseStoreMessage.setEntry/toByteArray",
+      "java_validation": "Java writer succeeds and EncryptedLeaseSet.readBytes rejects encryptedData larger than 4096 bytes",
+      "ivnp_expected": "DatabaseStore framing is accepted and ParseEncryptedLeaseSet rejects with ErrMalformed"
+    }
+  ]
+}
