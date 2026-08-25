@@ -4,7 +4,7 @@ package sam
 
 import (
 	"context"
-	ivnp "gosuda.org/ivnp/contracts/stream"
+	ivnp "gosuda.org/ivnp/interfaces/stream"
 	"io"
 	"net"
 	"net/http"

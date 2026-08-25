@@ -1,6 +1,6 @@
 package clientapi
 
-import destinationapi "gosuda.org/ivnp/contracts/destination"
+import destinationapi "gosuda.org/ivnp/interfaces/destination"
 
 type (
 	DestinationResolver           = destinationapi.DestinationResolver

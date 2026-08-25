@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	streamapi "gosuda.org/ivnp/contracts/stream"
+	streamapi "gosuda.org/ivnp/interfaces/stream"
 	"gosuda.org/ivnp/internal/ingress"
 	"io"
 	"net"

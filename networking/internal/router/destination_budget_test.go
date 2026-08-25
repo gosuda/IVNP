@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	clientapi "gosuda.org/ivnp/contracts/destination"
+	clientapi "gosuda.org/ivnp/interfaces/destination"
 	streamtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
 )
 

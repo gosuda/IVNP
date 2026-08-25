@@ -7,7 +7,7 @@ import client "gosuda.org/ivnp/client"
 import networking "gosuda.org/ivnp/networking"
 
 import (
-	"gosuda.org/ivnp/contracts/destination"
+	"gosuda.org/ivnp/interfaces/destination"
 
 	"gosuda.org/ivnp/node"
 )

@@ -3,8 +3,8 @@ package router
 import (
 	"context"
 	"errors"
-	clientapi "gosuda.org/ivnp/contracts/destination"
 	ivnp "gosuda.org/ivnp/foundation"
+	clientapi "gosuda.org/ivnp/interfaces/destination"
 	streamtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
 	"net"
 	"sync"

@@ -22,7 +22,7 @@ message, consumed, err := ivnp.ParseI2NP(wire)
 
 Advanced callers may import the full-name subsystem roots: `foundation`,
 `cryptography`, `networking`, `client`, `state`, `observability`, `node`, and
-`contracts`. Concrete implementations below a subsystem's `internal` directory
+`interfaces`. Concrete implementations below a subsystem's `internal` directory
 are not public import paths.
 
 ```sh

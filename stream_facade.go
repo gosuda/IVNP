@@ -1,6 +1,6 @@
 package ivnp
 
-import streamapi "gosuda.org/ivnp/contracts/stream"
+import streamapi "gosuda.org/ivnp/interfaces/stream"
 
 var (
 	ErrUnsupportedNetwork    = streamapi.ErrUnsupportedNetwork

@@ -2,8 +2,8 @@ package sam
 
 import (
 	"context"
-	clientapi "gosuda.org/ivnp/contracts/destination"
 	ivnp "gosuda.org/ivnp/foundation"
+	clientapi "gosuda.org/ivnp/interfaces/destination"
 	"io"
 	"net"
 	"sync"

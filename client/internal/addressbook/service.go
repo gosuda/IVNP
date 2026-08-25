@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	clientapi "gosuda.org/ivnp/contracts/destination"
+	clientapi "gosuda.org/ivnp/interfaces/destination"
 )
 
 var (

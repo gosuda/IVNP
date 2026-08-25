@@ -3,8 +3,8 @@ package sam
 import (
 	"context"
 	"errors"
-	clientapi "gosuda.org/ivnp/contracts/destination"
 	ivnp "gosuda.org/ivnp/foundation"
+	clientapi "gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/ingress"
 	internalrelay "gosuda.org/ivnp/internal/relay"
 	"net"

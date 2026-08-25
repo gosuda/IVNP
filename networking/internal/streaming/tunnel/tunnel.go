@@ -1,7 +1,7 @@
 package tunnel
 
-import streamapi "gosuda.org/ivnp/contracts/stream"
-import destinationapi "gosuda.org/ivnp/contracts/destination"
+import streamapi "gosuda.org/ivnp/interfaces/stream"
+import destinationapi "gosuda.org/ivnp/interfaces/destination"
 
 import "cmp"
 

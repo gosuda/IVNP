@@ -3,8 +3,8 @@ package tunnel
 import (
 	"bytes"
 	"context"
-	streamapi "gosuda.org/ivnp/contracts/stream"
 	ivnp "gosuda.org/ivnp/foundation"
+	streamapi "gosuda.org/ivnp/interfaces/stream"
 	"gosuda.org/ivnp/networking/internal/streaming"
 	"io"
 	"net"

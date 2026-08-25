@@ -3,7 +3,7 @@ package sam
 import (
 	"context"
 	"errors"
-	clientapi "gosuda.org/ivnp/contracts/destination"
+	clientapi "gosuda.org/ivnp/interfaces/destination"
 	"net"
 	"net/netip"
 	"sync"

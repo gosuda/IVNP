@@ -105,7 +105,7 @@ func packageLayer(path string) (int, bool) {
 		return 5, true
 	case strings.HasPrefix(relative, "networking/"):
 		return 4, true
-	case relative == "contracts", strings.HasPrefix(relative, "contracts/"),
+	case relative == "interfaces", strings.HasPrefix(relative, "interfaces/"),
 		relative == "state", strings.HasPrefix(relative, "state/"):
 		return 3, true
 	case relative == "foundation", strings.HasPrefix(relative, "foundation/"),

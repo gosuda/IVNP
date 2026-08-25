@@ -5,8 +5,8 @@ import networking "gosuda.org/ivnp/networking"
 import (
 	"context"
 	"errors"
-	clientapi "gosuda.org/ivnp/contracts/destination"
 	ivnp "gosuda.org/ivnp/foundation"
+	clientapi "gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/ingress"
 
 	"net"

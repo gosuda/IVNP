@@ -12,9 +12,9 @@ node                         Complete node composition and durable ownership
 client                       SAM, proxies, address book, and client services
 networking                   Router, tunnels, network database, transports
 state                        Configuration and durable encrypted state
-observability                Metrics and logging contracts
-contracts/destination        Destination-facing shared contracts
-contracts/stream             Stream dialing and listening contract
+observability                Metrics and logging interfaces
+interfaces/destination       Destination-facing shared interfaces
+interfaces/stream            Stream dialing and listening interface
 foundation                   Identities, mappings, hashes, and signatures
 cryptography                 Cryptographic primitives and key types
 internal                     Allocation, wire, relay, and recovery helpers
