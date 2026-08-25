@@ -9,7 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/network_database"
@@ -46,7 +46,7 @@ var (
 // construction; callers must republish matching `s`, `i`, and `v=2` address
 // options before starting the manager.
 type NTCP2ManagerConfig struct {
-	Database         *netdb.Database
+	Database         *networkdatabase.Database
 	StaticPrivate    []byte
 	StaticIV         []byte
 	NetworkID        uint8
@@ -72,7 +72,7 @@ type ntcp2DialAttempt struct {
 }
 
 type NTCP2Manager struct {
-	database           *netdb.Database
+	database           *networkdatabase.Database
 	staticPrivate      [32]byte
 	staticIV           [aes.BlockSize]byte
 	networkID          uint8
@@ -90,8 +90,8 @@ type NTCP2Manager struct {
 	close              sync.Once
 	wg                 sync.WaitGroup
 	pending            chan struct{}
-	sessions           map[ivnp.Hash]*ntcp2.Session
-	dialing            map[ivnp.Hash]*ntcp2DialAttempt
+	sessions           map[foundation.Hash]*ntcp2.Session
+	dialing            map[foundation.Hash]*ntcp2DialAttempt
 	replayMu           sync.Mutex
 	replay             [ntcp2ReplayEntries][32]byte
 	replaySeen         map[[32]byte]struct{}
@@ -145,8 +145,8 @@ func NewNTCP2Manager(config NTCP2ManagerConfig) (*NTCP2Manager, error) {
 		maxSessions:        config.MaxSessions,
 		done:               make(chan struct{}),
 		pending:            make(chan struct{}, config.MaxPending),
-		sessions:           make(map[ivnp.Hash]*ntcp2.Session),
-		dialing:            make(map[ivnp.Hash]*ntcp2DialAttempt),
+		sessions:           make(map[foundation.Hash]*ntcp2.Session),
+		dialing:            make(map[foundation.Hash]*ntcp2DialAttempt),
 		replaySeen:         make(map[[32]byte]struct{}, ntcp2ReplayEntries),
 		reporter:           config.PanicReporter,
 		metrics:            config.Metrics,
@@ -267,7 +267,7 @@ func (m *NTCP2Manager) Status() TransportStatus {
 
 // EnsureSession authenticates a bidirectional NTCP2 session without emitting
 // an I2NP message.
-func (m *NTCP2Manager) EnsureSession(ctx context.Context, peer ivnp.Hash) error {
+func (m *NTCP2Manager) EnsureSession(ctx context.Context, peer foundation.Hash) error {
 
 	if ctx == nil {
 		ctx = context.Background()
@@ -324,7 +324,7 @@ func (m *NTCP2Manager) EnsureSession(ctx context.Context, peer ivnp.Hash) error 
 
 // Send delivers one standard I2NP message over an established session, dialing
 // and authenticating an NTCP2 peer from the verified netdb when necessary.
-func (m *NTCP2Manager) Send(ctx context.Context, peer ivnp.Hash, message i2np.Message) error {
+func (m *NTCP2Manager) Send(ctx context.Context, peer foundation.Hash, message i2np.Message) error {
 
 	if ctx == nil {
 		ctx = context.Background()
@@ -439,7 +439,7 @@ func (m *NTCP2Manager) acceptOne(conn net.Conn) {
 	}
 }
 
-func (m *NTCP2Manager) openOutbound(ctx context.Context, peer ivnp.Hash) error {
+func (m *NTCP2Manager) openOutbound(ctx context.Context, peer foundation.Hash) error {
 	m.mu.RLock()
 	if !m.started || m.ctx == nil || m.ctx.Err() != nil {
 		m.mu.RUnlock()
@@ -454,7 +454,7 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer ivnp.Hash) error {
 	if !ok {
 		return ErrNTCP2Peer
 	}
-	if err := netdb.ReseedRouterInfoFresh(ref.Info, uint64(bindings.Clock.Now().UnixMilli())); err != nil {
+	if err := networkdatabase.ReseedRouterInfoFresh(ref.Info, uint64(bindings.Clock.Now().UnixMilli())); err != nil {
 		return fmt.Errorf("%w: %v", ErrNTCP2Peer, err)
 	}
 	remote, err := selectNTCP2AddressForNetwork(ref.Info, ntcp2IPv4Only(bindings.NTCP2))
@@ -549,7 +549,7 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer ivnp.Hash) error {
 	return nil
 }
 
-func (m *NTCP2Manager) install(peer ivnp.Hash, session *ntcp2.Session) bool {
+func (m *NTCP2Manager) install(peer foundation.Hash, session *ntcp2.Session) bool {
 	m.mu.Lock()
 	if m.ctx == nil || m.ctx.Err() != nil || len(m.sessions) >= m.maxSessions {
 		m.mu.Unlock()
@@ -572,7 +572,7 @@ func (m *NTCP2Manager) install(peer ivnp.Hash, session *ntcp2.Session) bool {
 	return true
 }
 
-func (m *NTCP2Manager) readSession(peer ivnp.Hash, session *ntcp2.Session) {
+func (m *NTCP2Manager) readSession(peer foundation.Hash, session *ntcp2.Session) {
 	defer m.wg.Done()
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -611,7 +611,7 @@ func (m *NTCP2Manager) readSession(peer ivnp.Hash, session *ntcp2.Session) {
 	}
 }
 
-func (m *NTCP2Manager) handleNTCP2Frame(peer ivnp.Hash, frame []byte) bool {
+func (m *NTCP2Manager) handleNTCP2Frame(peer foundation.Hash, frame []byte) bool {
 	iterator := ntcp2.NewBlockIterator(frame)
 	terminated := false
 	for {
@@ -641,7 +641,7 @@ func (m *NTCP2Manager) handleNTCP2Frame(peer ivnp.Hash, frame []byte) bool {
 	}
 }
 
-func (m *NTCP2Manager) handleNTCP2I2NPBlock(peer ivnp.Hash, data []byte) bool {
+func (m *NTCP2Manager) handleNTCP2I2NPBlock(peer foundation.Hash, data []byte) bool {
 	message, err := decodeNTCP2I2NP(data)
 	if err != nil {
 		return false
@@ -664,11 +664,11 @@ func (m *NTCP2Manager) handleNTCP2I2NPBlock(peer ivnp.Hash, data []byte) bool {
 	return true
 }
 
-func (m *NTCP2Manager) handleNTCP2RouterInfoBlock(peer ivnp.Hash, data []byte) bool {
+func (m *NTCP2Manager) handleNTCP2RouterInfoBlock(peer foundation.Hash, data []byte) bool {
 	if len(data) < 2 || data[0]&^byte(1) != 0 {
 		return false
 	}
-	info, err := netdb.ParseRouterInfo(data[1:])
+	info, err := networkdatabase.ParseRouterInfo(data[1:])
 	if err != nil || info.Hash() != peer {
 		return false
 	}
@@ -711,24 +711,24 @@ func (m *NTCP2Manager) localHandshakePayload(local LocalInfo) ([]byte, error) {
 	return payload, nil
 }
 
-func validateNTCP2HandshakePayload(payload, static []byte) (netdb.RouterInfo, error) {
+func validateNTCP2HandshakePayload(payload, static []byte) (networkdatabase.RouterInfo, error) {
 	iterator := ntcp2.NewBlockIterator(payload)
 	first, ok, err := iterator.Next()
 	if err != nil || !ok || first.Type != ntcp2.BlockRouterInfo || len(first.Data) < 2 || first.Data[0]&^byte(1) != 0 {
-		return netdb.RouterInfo{}, ErrNTCP2Peer
+		return networkdatabase.RouterInfo{}, ErrNTCP2Peer
 	}
-	info, err := netdb.ParseRouterInfo(first.Data[1:])
+	info, err := networkdatabase.ParseRouterInfo(first.Data[1:])
 	if err != nil {
-		return netdb.RouterInfo{}, err
+		return networkdatabase.RouterInfo{}, err
 	}
 	valid, err := info.Verify()
 	if err != nil || !valid || !hasNTCP2Static(info, static) {
-		return netdb.RouterInfo{}, ErrNTCP2Peer
+		return networkdatabase.RouterInfo{}, ErrNTCP2Peer
 	}
 	for {
 		block, ok, err := iterator.Next()
 		if err != nil {
-			return netdb.RouterInfo{}, err
+			return networkdatabase.RouterInfo{}, err
 		}
 		if !ok {
 			return info, nil
@@ -739,11 +739,11 @@ func validateNTCP2HandshakePayload(payload, static []byte) (netdb.RouterInfo, er
 		if block.Type == ntcp2.BlockPadding {
 			continue
 		}
-		return netdb.RouterInfo{}, ErrNTCP2Peer
+		return networkdatabase.RouterInfo{}, ErrNTCP2Peer
 	}
 }
 
-func (m *NTCP2Manager) admitInboundPeer(peer netdb.RouterInfo, static []byte, nowMillis uint64) bool {
+func (m *NTCP2Manager) admitInboundPeer(peer networkdatabase.RouterInfo, static []byte, nowMillis uint64) bool {
 	if !validNTCP2RouterInfoTime(peer, nowMillis) {
 		return false
 	}
@@ -761,11 +761,11 @@ func (m *NTCP2Manager) admitInboundPeer(peer netdb.RouterInfo, static []byte, no
 	return m.database.AdmitRouterInfo(peer, false, nowMillis) == nil
 }
 
-func validNTCP2RouterInfoTime(info netdb.RouterInfo, nowMillis uint64) bool {
-	return netdb.RouterInfoFresh(info, nowMillis) == nil
+func validNTCP2RouterInfoTime(info networkdatabase.RouterInfo, nowMillis uint64) bool {
+	return networkdatabase.RouterInfoFresh(info, nowMillis) == nil
 }
 
-func hasNTCP2Static(info netdb.RouterInfo, static []byte) bool {
+func hasNTCP2Static(info networkdatabase.RouterInfo, static []byte) bool {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -790,14 +790,14 @@ func hasNTCP2Static(info netdb.RouterInfo, static []byte) bool {
 				version = string(value)
 			}
 		}
-		decoded, err := ivnp.DecodeI2PBase64(key)
+		decoded, err := foundation.DecodeI2PBase64(key)
 		if err == nil && len(decoded) == 32 && bytes.Equal(decoded, static) && supportsNTCP2Version(version) {
 			return true
 		}
 	}
 }
 
-func hasNTCP2LocalAddress(info netdb.RouterInfo, static, iv []byte) bool {
+func hasNTCP2LocalAddress(info networkdatabase.RouterInfo, static, iv []byte) bool {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -836,8 +836,8 @@ func hasNTCP2LocalAddress(info netdb.RouterInfo, static, iv []byte) bool {
 				continue
 			}
 		}
-		decodedKey, keyErr := ivnp.DecodeI2PBase64(key)
-		decodedIV, ivErr := ivnp.DecodeI2PBase64(advertisedIV)
+		decodedKey, keyErr := foundation.DecodeI2PBase64(key)
+		decodedIV, ivErr := foundation.DecodeI2PBase64(advertisedIV)
 		if keyErr == nil && ivErr == nil && bytes.Equal(decodedKey, static) && bytes.Equal(decodedIV, iv) {
 			return true
 		}
@@ -851,11 +851,11 @@ type ntcp2Address struct {
 	iv     [aes.BlockSize]byte
 }
 
-func selectNTCP2Address(info netdb.RouterInfo) (ntcp2Address, error) {
+func selectNTCP2Address(info networkdatabase.RouterInfo) (ntcp2Address, error) {
 	return selectNTCP2AddressForNetwork(info, false)
 }
 
-func selectNTCP2AddressForNetwork(info netdb.RouterInfo, preferIPv4 bool) (ntcp2Address, error) {
+func selectNTCP2AddressForNetwork(info networkdatabase.RouterInfo, preferIPv4 bool) (ntcp2Address, error) {
 	var fallback ntcp2Address
 	found := false
 	addresses := info.Addresses()
@@ -897,8 +897,8 @@ func selectNTCP2AddressForNetwork(info netdb.RouterInfo, preferIPv4 bool) (ntcp2
 		if err != nil || host == "" || portNumber == 0 || !supportsNTCP2Version(version) {
 			continue
 		}
-		staticKey, staticErr := ivnp.DecodeI2PBase64([]byte(static))
-		ivBytes, ivErr := ivnp.DecodeI2PBase64([]byte(iv))
+		staticKey, staticErr := foundation.DecodeI2PBase64([]byte(static))
+		ivBytes, ivErr := foundation.DecodeI2PBase64([]byte(iv))
 		if staticErr != nil || ivErr != nil || len(staticKey) != 32 || len(ivBytes) != aes.BlockSize {
 			continue
 		}
@@ -1001,7 +1001,7 @@ func writeAll(conn net.Conn, data []byte) error {
 	return nil
 }
 
-func (m *NTCP2Manager) session(peer ivnp.Hash) *ntcp2.Session {
+func (m *NTCP2Manager) session(peer foundation.Hash) *ntcp2.Session {
 	m.mu.RLock()
 	session := m.sessions[peer]
 	m.mu.RUnlock()
@@ -1041,7 +1041,7 @@ func (m *NTCP2Manager) replayedRequest(obfuscatedEphemeral []byte) bool {
 	if len(obfuscatedEphemeral) != 32 {
 		return true
 	}
-	key := ivnp.Sum(obfuscatedEphemeral)
+	key := foundation.Sum(obfuscatedEphemeral)
 	m.replayMu.Lock()
 	defer m.replayMu.Unlock()
 	if m.replaySeen == nil {

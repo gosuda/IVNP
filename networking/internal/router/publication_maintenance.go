@@ -28,7 +28,7 @@ type LeaseSetRefresher interface {
 // tick because its publisher already owns its precise renewal deadline.
 type PublicationMaintenanceConfig struct {
 	RouterInfo        RouterInfoRefresher
-	NetworkRouterInfo netdb.ConfirmedPublisher
+	NetworkRouterInfo networkdatabase.ConfirmedPublisher
 	LeaseSet          LeaseSetRefresher
 	Now               func() uint64
 	RouterInfoRefresh uint64
@@ -46,7 +46,7 @@ type PublicationMaintenanceResult struct {
 // Each call joins its bounded publication work before returning.
 type PublicationMaintenance struct {
 	routerInfo        RouterInfoRefresher
-	networkRouterInfo netdb.ConfirmedPublisher
+	networkRouterInfo networkdatabase.ConfirmedPublisher
 	leaseSet          LeaseSetRefresher
 	now               func() uint64
 	refresh           uint64

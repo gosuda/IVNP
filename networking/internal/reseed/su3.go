@@ -7,7 +7,7 @@ import (
 	"crypto/sha512"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"math/big"
 )
 
@@ -29,7 +29,7 @@ var (
 // SU3Signer is a pinned reseed signing key. Current reseed SU3 deployments
 // use Java NONEwithRSA over the raw SHA-512 digest.
 type SU3Signer struct {
-	SigningType ivnp.SigningKeyType
+	SigningType foundation.SigningKeyType
 	PublicKey   []byte
 }
 
@@ -41,12 +41,12 @@ func VerifySU3(container []byte, signers map[string]SU3Signer, maxContent int64)
 		container[6] != 0 || container[7] != su3FileVersion {
 		return nil, ErrSU3Malformed
 	}
-	signingType := ivnp.SigningKeyType(binary.BigEndian.Uint16(container[8:10]))
+	signingType := foundation.SigningKeyType(binary.BigEndian.Uint16(container[8:10]))
 	signatureLen := int(binary.BigEndian.Uint16(container[10:12]))
 	versionLen := int(container[13])
 	signerLen := int(container[15])
 	contentLen := binary.BigEndian.Uint64(container[16:24])
-	verifySU3Rejected := signingType != ivnp.SigningRSASHA512_4096 || signatureLen != su3RSASignatureLen ||
+	verifySU3Rejected := signingType != foundation.SigningRSASHA512_4096 || signatureLen != su3RSASignatureLen ||
 		versionLen < su3MinimumVersion || signerLen == 0 || container[12] != 0 ||
 		container[14] != 0 || container[24] != 0 || container[25] != su3FileTypeZIP ||
 		container[26] != 0 || container[27] != su3ContentTypeReseed ||
@@ -85,7 +85,7 @@ func allZero(data []byte) bool {
 }
 
 func verifySU3Signature(signer SU3Signer, signed, signature []byte) bool {
-	if signer.SigningType != ivnp.SigningRSASHA512_4096 || len(signer.PublicKey) != su3RSASignatureLen || len(signature) != su3RSASignatureLen {
+	if signer.SigningType != foundation.SigningRSASHA512_4096 || len(signer.PublicKey) != su3RSASignatureLen || len(signature) != su3RSASignatureLen {
 		return false
 	}
 	modulus := new(big.Int).SetBytes(signer.PublicKey)

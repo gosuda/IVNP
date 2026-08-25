@@ -2,7 +2,7 @@ package router
 
 import (
 	"context"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/network_database"
 	"gosuda.org/ivnp/networking/internal/transport/ntcp2"
@@ -113,7 +113,7 @@ func TestSSU2ManagerDataFramingUsesReceiveAndSessionBuffers(t *testing.T) {
 	var delivered i2np.Message
 	manager := &SSU2Manager{bindings: TransportBindings{
 		Clock: fixedClock{now: time.Unix(1, 0)},
-		HandleI2NPContext: func(_ context.Context, _ ivnp.Hash, message i2np.Message, _ uint64, _ bool) error {
+		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message i2np.Message, _ uint64, _ bool) error {
 			delivered = message
 			return nil
 		},
@@ -144,8 +144,8 @@ func TestSSU2ManagerDataFramingUsesReceiveAndSessionBuffers(t *testing.T) {
 	manager.ctx = context.Background()
 	manager.conn = output
 	manager.sessionsByID = map[uint64]*ssu2TransportSession{7: session}
-	manager.sessionsByPeer = map[ivnp.Hash]*ssu2TransportSession{ivnp.Hash{}: session}
-	session.peer = ivnp.Hash{}
+	manager.sessionsByPeer = map[foundation.Hash]*ssu2TransportSession{foundation.Hash{}: session}
+	session.peer = foundation.Hash{}
 	session.remote = output.LocalAddr()
 	session.sendID = 9
 	session.send = send
@@ -171,8 +171,8 @@ func TestSSU2LiveVectorReadAuthDispatchWriteAllocations(t *testing.T) {
 	bobConn := newSSU2LoopbackConn(t)
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
-	aliceDB := netdb.NewDatabase(alice.Hash(), 16)
-	bobDB := netdb.NewDatabase(bob.Hash(), 16)
+	aliceDB := networkdatabase.NewDatabase(alice.Hash(), 16)
+	bobDB := networkdatabase.NewDatabase(bob.Hash(), 16)
 	now := uint64(time.Now().UnixMilli())
 	if err := aliceDB.AdmitRouterInfo(bob.Snapshot(), false, now); err != nil {
 		t.Fatal(err)
@@ -320,7 +320,7 @@ func BenchmarkSSU2ManagerDataSendFraming(b *testing.B) {
 		started:        true,
 		ctx:            context.Background(),
 		sessionsByID:   map[uint64]*ssu2TransportSession{7: session},
-		sessionsByPeer: map[ivnp.Hash]*ssu2TransportSession{ivnp.Hash{}: session},
+		sessionsByPeer: map[foundation.Hash]*ssu2TransportSession{foundation.Hash{}: session},
 		bindings:       TransportBindings{Clock: fixedClock{now: time.Unix(1, 0)}},
 		egressFree:     free,
 		egressQueue:    queue,
@@ -374,7 +374,7 @@ func BenchmarkSSU2ManagerDataReceiveFraming(b *testing.B) {
 	key[0] = 1
 	send, _ := ssu2.NewDataCipher(key[:], key[:], key[:])
 	receive, _ := ssu2.NewDataCipher(key[:], key[:], key[:])
-	manager := &SSU2Manager{ctx: context.Background(), bindings: TransportBindings{Clock: fixedClock{now: time.Unix(1, 0)}, HandleI2NPContext: func(context.Context, ivnp.Hash, i2np.Message, uint64, bool) error { return nil }}}
+	manager := &SSU2Manager{ctx: context.Background(), bindings: TransportBindings{Clock: fixedClock{now: time.Unix(1, 0)}, HandleI2NPContext: func(context.Context, foundation.Hash, i2np.Message, uint64, bool) error { return nil }}}
 	session := &ssu2TransportSession{receiveID: 7, receive: receive}
 	packetBuffer := make([]byte, ssu2.MaxIPv4PacketLen)
 	b.ReportAllocs()

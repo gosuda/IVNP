@@ -7,7 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
 	"gosuda.org/ivnp/networking/internal/transport/noise"
 )
@@ -21,14 +21,14 @@ var ErrHandshake = errors.New("ssu2: invalid handshake message")
 // `i` values selected from Bob's RouterInfo.
 type Initiator struct {
 	state            *noise.SymmetricState
-	introKey         [cryptx.ChaChaKeySize]byte
+	introKey         [cryptography.ChaChaKeySize]byte
 	remoteStatic     *ecdh.PublicKey
 	ephemeral        *ecdh.PrivateKey
 	peerEphemeral    *ecdh.PublicKey
 	destinationID    uint64
 	sourceID         uint64
-	requestHeaderKey [cryptx.ChaChaKeySize]byte
-	confirmHeaderKey [cryptx.ChaChaKeySize]byte
+	requestHeaderKey [cryptography.ChaChaKeySize]byte
+	confirmHeaderKey [cryptography.ChaChaKeySize]byte
 	completed        bool
 }
 
@@ -36,13 +36,13 @@ type Initiator struct {
 // be discarded after any parse failure or after SessionConfirmed is accepted.
 type Responder struct {
 	state            *noise.SymmetricState
-	introKey         [cryptx.ChaChaKeySize]byte
+	introKey         [cryptography.ChaChaKeySize]byte
 	peerEphemeral    *ecdh.PublicKey
 	ephemeral        *ecdh.PrivateKey
 	destinationID    uint64
 	sourceID         uint64
-	requestHeaderKey [cryptx.ChaChaKeySize]byte
-	confirmHeaderKey [cryptx.ChaChaKeySize]byte
+	requestHeaderKey [cryptography.ChaChaKeySize]byte
+	confirmHeaderKey [cryptography.ChaChaKeySize]byte
 	completed        bool
 }
 
@@ -83,7 +83,7 @@ func (r *Responder) ReleaseSensitive() {
 // NewInitiator prepares a one-use exchange. destinationID and sourceID are
 // Alice's random nonzero connection IDs and must be distinct.
 func NewInitiator(remoteStatic, introKey []byte, destinationID, sourceID uint64) (*Initiator, error) {
-	if len(introKey) != cryptx.ChaChaKeySize || destinationID == 0 || sourceID == 0 || SameConnectionID(destinationID, sourceID) {
+	if len(introKey) != cryptography.ChaChaKeySize || destinationID == 0 || sourceID == 0 || SameConnectionID(destinationID, sourceID) {
 		return nil, ErrHandshake
 	}
 	remote, err := ecdh.X25519().NewPublicKey(remoteStatic)
@@ -97,7 +97,7 @@ func NewInitiator(remoteStatic, introKey []byte, destinationID, sourceID uint64)
 	state := noise.Initialize(HandshakeProtocol)
 	state.MixHash(nil)
 	state.MixHash(remote.Bytes())
-	var key [cryptx.ChaChaKeySize]byte
+	var key [cryptography.ChaChaKeySize]byte
 	copy(key[:], introKey)
 	return &Initiator{state: state, introKey: key, remoteStatic: remote, ephemeral: ephemeral, destinationID: destinationID, sourceID: sourceID}, nil
 }
@@ -144,7 +144,7 @@ func (i *Initiator) BuildSessionRequest(dst, payload []byte, packetNumber uint32
 // it only removes enough header protection to validate a token before the
 // responder performs an expensive X25519 operation. packet remains unchanged.
 func PeekSessionRequest(packet, introKey []byte) (LongHeader, error) {
-	if len(packet) < LongHeaderLen+32+PacketTagLen || len(packet) > MaxIPv4PacketLen || len(introKey) != cryptx.ChaChaKeySize {
+	if len(packet) < LongHeaderLen+32+PacketTagLen || len(packet) > MaxIPv4PacketLen || len(introKey) != cryptography.ChaChaKeySize {
 		return LongHeader{}, ErrHandshake
 	}
 	var raw [LongHeaderLen]byte
@@ -170,7 +170,7 @@ func PeekSessionRequest(packet, introKey []byte) (LongHeader, error) {
 // unchanged, so it may subsequently be authenticated by a DataCipher or a
 // ConfirmedReassembler.
 func PeekDestinationID(packet, receiverIntroKey []byte) (uint64, error) {
-	if len(packet) < MinPacketLen || len(packet) > MaxIPv4PacketLen || len(receiverIntroKey) != cryptx.ChaChaKeySize {
+	if len(packet) < MinPacketLen || len(packet) > MaxIPv4PacketLen || len(receiverIntroKey) != cryptography.ChaChaKeySize {
 		return 0, ErrHandshake
 	}
 	var destination [8]byte
@@ -188,7 +188,7 @@ func PeekDestinationID(packet, receiverIntroKey []byte) (uint64, error) {
 // ParseSessionRequest removes header protection and authenticates one complete
 // SessionRequest. packet is modified in place and must be caller-owned.
 func ParseSessionRequest(packet, staticPrivate, introKey []byte) (*Responder, LongHeader, []byte, error) {
-	if len(packet) < LongHeaderLen+32+PacketTagLen || len(packet) > MaxIPv4PacketLen || len(introKey) != cryptx.ChaChaKeySize {
+	if len(packet) < LongHeaderLen+32+PacketTagLen || len(packet) > MaxIPv4PacketLen || len(introKey) != cryptography.ChaChaKeySize {
 		return nil, LongHeader{}, nil, ErrHandshake
 	}
 	if err := ProtectHeader(packet, introKey, introKey, 48); err != nil {
@@ -224,7 +224,7 @@ func ParseSessionRequest(packet, staticPrivate, introKey []byte) (*Responder, Lo
 	if err != nil || !validHandshakePayload(plain) {
 		return nil, LongHeader{}, nil, ErrHandshake
 	}
-	var key [cryptx.ChaChaKeySize]byte
+	var key [cryptography.ChaChaKeySize]byte
 	copy(key[:], introKey)
 	responder := &Responder{
 		state:            state,
@@ -613,7 +613,7 @@ func (r *Responder) DataCiphers(peerIntro []byte) (*DataCipher, *DataCipher, err
 }
 
 func deriveDataCiphers(state *noise.SymmetricState, localIntro, peerIntro []byte, initiator bool) (*DataCipher, *DataCipher, error) {
-	if state == nil || len(localIntro) != cryptx.ChaChaKeySize || len(peerIntro) != cryptx.ChaChaKeySize {
+	if state == nil || len(localIntro) != cryptography.ChaChaKeySize || len(peerIntro) != cryptography.ChaChaKeySize {
 		return nil, nil, ErrHandshake
 	}
 	chain := state.ChainingKey()
@@ -648,13 +648,13 @@ func deriveDataCiphers(state *noise.SymmetricState, localIntro, peerIntro []byte
 	return send, receive, nil
 }
 
-func deriveHeaderKey(chain [32]byte, label string) [cryptx.ChaChaKeySize]byte {
+func deriveHeaderKey(chain [32]byte, label string) [cryptography.ChaChaKeySize]byte {
 	return hkdfExpand(chain[:], nil, []byte(label))
 }
 
-func hkdfExpand(salt, input, info []byte) [cryptx.ChaChaKeySize]byte {
+func hkdfExpand(salt, input, info []byte) [cryptography.ChaChaKeySize]byte {
 	expanded := hkdfExpand64(salt, input, info)
-	var out [cryptx.ChaChaKeySize]byte
+	var out [cryptography.ChaChaKeySize]byte
 	copy(out[:], expanded[:32])
 	return out
 }

@@ -1,10 +1,10 @@
-package ecies
+package garlicecies
 
 import (
 	"crypto/ecdh"
 	"encoding/binary"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/transport/noise"
@@ -29,7 +29,7 @@ func SealRouterMessage(dst []byte, remoteStatic []byte, message i2np.Message, no
 		return nil, ErrRouterMessage
 	}
 	plainLen := 7 + 3 + routerMessageHeader + len(message.Payload)
-	if plainLen > i2np.I2PDMaxPayload || len(dst) < 32+plainLen+cryptx.ChaChaTagSize {
+	if plainLen > i2np.I2PDMaxPayload || len(dst) < 32+plainLen+cryptography.ChaChaTagSize {
 		return nil, wire.ErrShortBuffer
 	}
 	curve := ecdh.X25519()
@@ -65,7 +65,7 @@ func SealRouterMessage(dst []byte, remoteStatic []byte, message i2np.Message, no
 	binary.BigEndian.PutUint32(plain[off+2:off+6], message.Header.ID)
 	binary.BigEndian.PutUint32(plain[off+6:off+10], uint32(message.Header.Expiration/1000))
 	copy(plain[off+10:], message.Payload)
-	sealed, err := state.EncryptAndHash(dst[32:32+plainLen+cryptx.ChaChaTagSize], plain)
+	sealed, err := state.EncryptAndHash(dst[32:32+plainLen+cryptography.ChaChaTagSize], plain)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +75,7 @@ func SealRouterMessage(dst []byte, remoteStatic []byte, message i2np.Message, no
 // OpenRouterMessage authenticates one anonymous Noise-N packet and returns its
 // single LOCAL I2NP clove. dst owns the returned payload.
 func OpenRouterMessage(dst, staticPrivate, encrypted []byte, now uint64) (i2np.Message, error) {
-	if len(staticPrivate) != 32 || len(encrypted) < 32+cryptx.ChaChaTagSize+7+3+routerMessageHeader {
+	if len(staticPrivate) != 32 || len(encrypted) < 32+cryptography.ChaChaTagSize+7+3+routerMessageHeader {
 		return i2np.Message{}, ErrRouterMessage
 	}
 	curve := ecdh.X25519()
@@ -97,7 +97,7 @@ func OpenRouterMessage(dst, staticPrivate, encrypted []byte, now uint64) (i2np.M
 	if err = state.MixKey(shared); err != nil {
 		return i2np.Message{}, err
 	}
-	plainLen := len(encrypted) - 32 - cryptx.ChaChaTagSize
+	plainLen := len(encrypted) - 32 - cryptography.ChaChaTagSize
 	if len(dst) < plainLen {
 		return i2np.Message{}, wire.ErrShortBuffer
 	}

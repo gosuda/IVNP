@@ -1,10 +1,10 @@
-package daemon
+package noderuntime
 
-import state "gosuda.org/ivnp/state"
+import "gosuda.org/ivnp/state"
 
-import client "gosuda.org/ivnp/client"
+import "gosuda.org/ivnp/client"
 
-import networking "gosuda.org/ivnp/networking"
+import "gosuda.org/ivnp/networking"
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 
 	"io"
 	"net"
@@ -52,10 +52,10 @@ func (s *blockingRequestSender) Send(ctx context.Context, _ networking.NetworkDa
 
 type requestDirectCapture struct {
 	calls  int
-	target ivnp.Hash
+	target foundation.Hash
 }
 
-func (s *requestDirectCapture) Send(_ context.Context, target ivnp.Hash, _ networking.I2NPMessage) error {
+func (s *requestDirectCapture) Send(_ context.Context, target foundation.Hash, _ networking.I2NPMessage) error {
 	s.calls++
 	s.target = target
 	return nil
@@ -81,11 +81,11 @@ type requestPairCapture struct{ pair networking.TunnelCircuitPair }
 func (s requestPairCapture) Pair(uint64) (networking.TunnelCircuitPair, bool) { return s.pair, true }
 
 type requestReplyRouteCapture struct {
-	gateway ivnp.Hash
+	gateway foundation.Hash
 	tunnel  uint32
 }
 
-func (r requestReplyRouteCapture) DatabaseLookupReplyRoute() (ivnp.Hash, uint32, bool) {
+func (r requestReplyRouteCapture) DatabaseLookupReplyRoute() (foundation.Hash, uint32, bool) {
 	return r.gateway, r.tunnel, true
 }
 
@@ -120,8 +120,8 @@ func (s *defaultTransportSockets) ListenUDP(context.Context, networking.RouterEn
 
 type daemonMemoryNetwork struct {
 	mu        sync.RWMutex
-	endpoints map[ivnp.Hash]*daemonMemoryTransport
-	flood     ivnp.Hash
+	endpoints map[foundation.Hash]*daemonMemoryTransport
+	flood     foundation.Hash
 	floodDB   *networking.NetworkDatabase
 	now       func() uint64
 	stores    []networking.I2NPDatabaseStoreMessage
@@ -131,7 +131,7 @@ type daemonMemoryNetwork struct {
 
 type daemonMemoryTransport struct {
 	network  *daemonMemoryNetwork
-	local    ivnp.Hash
+	local    foundation.Hash
 	bindings networking.RouterTransportBindings
 	done     chan struct{}
 	once     sync.Once
@@ -140,7 +140,7 @@ type daemonMemoryTransport struct {
 
 func newDaemonMemoryNetwork(flood networking.NetworkDatabaseRouterInfo, now func() uint64) *daemonMemoryNetwork {
 	return &daemonMemoryNetwork{
-		endpoints: make(map[ivnp.Hash]*daemonMemoryTransport), flood: flood.Hash(),
+		endpoints: make(map[foundation.Hash]*daemonMemoryTransport), flood: flood.Hash(),
 		floodDB: networking.NetworkDatabaseNewDatabase(flood.Hash(), networking.NetworkDatabaseDefaultBucketCapacity), now: now,
 	}
 }
@@ -168,7 +168,7 @@ func (t *daemonMemoryTransport) Start(_ context.Context, bindings networking.Rou
 	return nil
 }
 
-func (t *daemonMemoryTransport) Send(ctx context.Context, target ivnp.Hash, message networking.I2NPMessage) error {
+func (t *daemonMemoryTransport) Send(ctx context.Context, target foundation.Hash, message networking.I2NPMessage) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -195,7 +195,7 @@ func (t *daemonMemoryTransport) Status() networking.RouterTransportStatus {
 	return networking.RouterTransportStatus{Running: t.running}
 }
 
-func (n *daemonMemoryNetwork) route(from, target ivnp.Hash, message networking.I2NPMessage) error {
+func (n *daemonMemoryNetwork) route(from, target foundation.Hash, message networking.I2NPMessage) error {
 	if target == n.flood {
 		return n.handleFlood(from, message)
 	}
@@ -213,7 +213,7 @@ func (n *daemonMemoryNetwork) route(from, target ivnp.Hash, message networking.I
 	return endpoint.bindings.HandleI2NPFrom(from, message, n.now(), false)
 }
 
-func (n *daemonMemoryNetwork) handleFlood(from ivnp.Hash, message networking.I2NPMessage) error {
+func (n *daemonMemoryNetwork) handleFlood(from foundation.Hash, message networking.I2NPMessage) error {
 	switch message.Header.Type {
 	case networking.I2NPDatabaseStore:
 		store, err := networking.I2NPParseDatabaseStore(message.Payload)
@@ -246,7 +246,7 @@ func (n *daemonMemoryNetwork) handleFlood(from ivnp.Hash, message networking.I2N
 		if !found {
 			return networking.NetworkDatabaseErrNoFloodfill
 		}
-		payload, err := networking.NetworkDatabaseMarshalDatabaseStore(lookup.Key, typeID, data, 0, ivnp.Hash{}, 0)
+		payload, err := networking.NetworkDatabaseMarshalDatabaseStore(lookup.Key, typeID, data, 0, foundation.Hash{}, 0)
 		if err != nil {
 			return err
 		}
@@ -257,7 +257,7 @@ func (n *daemonMemoryNetwork) handleFlood(from ivnp.Hash, message networking.I2N
 	}
 }
 
-func (n *daemonMemoryNetwork) reply(from, gateway ivnp.Hash, tunnelID uint32, message networking.I2NPMessage) error {
+func (n *daemonMemoryNetwork) reply(from, gateway foundation.Hash, tunnelID uint32, message networking.I2NPMessage) error {
 	if tunnelID == 0 {
 		return n.route(from, gateway, message)
 	}
@@ -279,14 +279,14 @@ func daemonProductionFloodfill(t *testing.T, now uint64) networking.NetworkDatab
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := make([]byte, ivnp.IdentityBaseLength+7)
+	identity := make([]byte, foundation.IdentityBaseLength+7)
 	copy(identity[352:384], public)
-	identity[384] = byte(ivnp.CertificateKey)
+	identity[384] = byte(foundation.CertificateKey)
 	identity[385], identity[386] = 0, 4
-	identity[387], identity[388] = 0, byte(ivnp.SigningEdDSASHA512Ed25519)
-	identity[389], identity[390] = 0, byte(ivnp.CryptoElGamal)
+	identity[387], identity[388] = 0, byte(foundation.SigningEdDSASHA512Ed25519)
+	identity[389], identity[390] = 0, byte(foundation.CryptoElGamal)
 	options := make([]byte, 16)
-	optionLen, err := ivnp.MarshalMappingTo(options, []ivnp.MappingEntry{{Key: []byte("caps"), Value: []byte("f")}})
+	optionLen, err := foundation.MarshalMappingTo(options, []foundation.MappingEntry{{Key: []byte("caps"), Value: []byte("f")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestNewDoesNotOpenSocketsAndReloadsState(t *testing.T) {
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
-	newDoesNotOpenSocketsAndReloadsStateRejected := first.bundle.Router.Hash != (ivnp.Hash{}) || len(first.bundle.Router.SigningPrivate) != 0 || first.bundle.Router.X25519Private != ([32]byte{}) ||
+	newDoesNotOpenSocketsAndReloadsStateRejected := first.bundle.Router.Hash != (foundation.Hash{}) || len(first.bundle.Router.SigningPrivate) != 0 || first.bundle.Router.X25519Private != ([32]byte{}) ||
 		len(first.bundle.NTCP2StaticPrivate) != 0 || len(first.bundle.SSU2StaticPrivate) != 0 || first.bundle.DestinationPrivate != nil ||
 		first.bundle.EncryptedLeaseSetPolicies != nil
 	if !newDoesNotOpenSocketsAndReloadsStateRejected {
@@ -413,11 +413,11 @@ func TestNewRejectsDestinationBoundsAndDuplicateIdentities(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		address, err := ivnp.GenerateLocalAddress()
+		address, err := foundation.GenerateLocalAddress()
 		if err != nil {
 			t.Fatal(err)
 		}
-		d.bundle.Destinations = map[string]ivnp.LocalAddress{"first": address, "second": address}
+		d.bundle.Destinations = map[string]foundation.LocalAddress{"first": address, "second": address}
 		if err := d.store.Save(d.bundle); err != nil {
 			t.Fatal(err)
 		}
@@ -437,11 +437,11 @@ func TestNewRejectsDestinationBoundsAndDuplicateIdentities(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		address, err := ivnp.GenerateLocalAddress()
+		address, err := foundation.GenerateLocalAddress()
 		if err != nil {
 			t.Fatal(err)
 		}
-		d.bundle.Destinations = make(map[string]ivnp.LocalAddress, 65)
+		d.bundle.Destinations = make(map[string]foundation.LocalAddress, 65)
 		for index := range 65 {
 			d.bundle.Destinations[string(rune(index+1))] = address
 		}
@@ -481,7 +481,7 @@ func TestTunnelCompositionUsesLiveInboundGatewayRoute(t *testing.T) {
 		t.Fatalf("default destination bandwidth snapshot = %#v, %t", snapshot, ok)
 	}
 	now := uint64(d.clock.Now().UnixMilli())
-	gateway := ivnp.Hash{9}
+	gateway := foundation.Hash{9}
 	if err := d.pool.Add(networking.TunnelEntry{ID: 1, Direction: networking.TunnelOutbound, Expires: now + 30_000}, now); err != nil {
 		t.Fatal(err)
 	}
@@ -508,8 +508,8 @@ func TestTunnelCompositionUsesLiveInboundGatewayRoute(t *testing.T) {
 }
 
 func TestMuxRequestSenderUsesEstablishedOutboundTunnel(t *testing.T) {
-	target, replyGateway := ivnp.Hash{1}, ivnp.Hash{2}
-	payload, err := networking.NetworkDatabaseBuildDatabaseLookup(ivnp.Hash{3}, networking.NetworkDatabaseLeaseSetLookup, requestReplyRouteCapture{
+	target, replyGateway := foundation.Hash{1}, foundation.Hash{2}
+	payload, err := networking.NetworkDatabaseBuildDatabaseLookup(foundation.Hash{3}, networking.NetworkDatabaseLeaseSetLookup, requestReplyRouteCapture{
 		gateway: replyGateway, tunnel: 7,
 	}, nil)
 	if err != nil {
@@ -528,7 +528,7 @@ func TestMuxRequestSenderUsesEstablishedOutboundTunnel(t *testing.T) {
 		sender: direct, tunnels: throughTunnel,
 		pairs: requestPairCapture{pair: networking.TunnelCircuitPair{OutboundID: 11}},
 		now:   func() uint64 { return 100 }, replyKeys: replyKeys,
-		staticKeyLookup: func(hash ivnp.Hash) ([32]byte, bool) {
+		staticKeyLookup: func(hash foundation.Hash) ([32]byte, bool) {
 			return staticKey, hash == target
 		},
 	}
@@ -572,20 +572,20 @@ func TestMuxRequestSenderUsesEstablishedOutboundTunnel(t *testing.T) {
 }
 
 func TestMuxLeaseSetSenderUsesOutboundTunnelAndSeedsBothRoutes(t *testing.T) {
-	target, replyGateway, outboundEndpoint := ivnp.Hash{1}, ivnp.Hash{2}, ivnp.Hash{3}
-	payload, err := networking.NetworkDatabaseMarshalDatabaseStore(ivnp.Hash{4}, networking.I2NPStoreLeaseSet2, []byte{1}, 5, replyGateway, 7)
+	target, replyGateway, outboundEndpoint := foundation.Hash{1}, foundation.Hash{2}, foundation.Hash{3}
+	payload, err := networking.NetworkDatabaseMarshalDatabaseStore(foundation.Hash{4}, networking.I2NPStoreLeaseSet2, []byte{1}, 5, replyGateway, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
 	direct := new(requestDirectCapture)
 	throughTunnel := new(requestTunnelCapture)
-	var seeded [][2]ivnp.Hash
+	var seeded [][2]foundation.Hash
 	sender := muxLeaseSetSender{
 		sender: direct, tunnels: throughTunnel,
 		pairs: requestPairCapture{pair: networking.TunnelCircuitPair{OutboundID: 11, OutboundEndpoint: outboundEndpoint}},
 		now:   func() uint64 { return 100 },
-		seedReplyRouterInfo: func(_ context.Context, endpoint, reply ivnp.Hash) error {
-			seeded = append(seeded, [2]ivnp.Hash{endpoint, reply})
+		seedReplyRouterInfo: func(_ context.Context, endpoint, reply foundation.Hash) error {
+			seeded = append(seeded, [2]foundation.Hash{endpoint, reply})
 			return nil
 		},
 	}
@@ -599,7 +599,7 @@ func TestMuxLeaseSetSenderUsesOutboundTunnelAndSeedsBothRoutes(t *testing.T) {
 	if throughTunnel.block.Delivery != networking.TunnelDeliveryRouter || throughTunnel.block.Gateway != target || !throughTunnel.block.Last {
 		t.Fatalf("tunnel block = %#v", throughTunnel.block)
 	}
-	if len(seeded) != 2 || seeded[0] != [2]ivnp.Hash{target, replyGateway} || seeded[1] != [2]ivnp.Hash{outboundEndpoint, target} {
+	if len(seeded) != 2 || seeded[0] != [2]foundation.Hash{target, replyGateway} || seeded[1] != [2]foundation.Hash{outboundEndpoint, target} {
 		t.Fatalf("RouterInfo seeds = %#v", seeded)
 	}
 	decoded, used, err := networking.I2NPParse(throughTunnel.block.Data)
@@ -730,7 +730,7 @@ func TestDestinationAddressPoliciesPersistAndWireRemoteELS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	local, err := ivnp.GenerateLocalDestination()
+	local, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -752,15 +752,15 @@ func TestDestinationAddressPoliciesPersistAndWireRemoteELS(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	none, err := ivnp.GenerateLocalDestination()
+	none, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
-	dh, err := ivnp.GenerateLocalDestination()
+	dh, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
-	psk, err := ivnp.GenerateLocalDestination()
+	psk, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -889,7 +889,7 @@ func TestDaemonNewProductionGraphPublicAndEncryptedDestinations(t *testing.T) {
 	}
 	publicRuntime := publicDaemon.clientRuntimeSnapshot()[0]
 	encryptedRuntime := encryptedDaemon.clientRuntimeSnapshot()[0]
-	if publicRuntime.local.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519 || encryptedRuntime.local.SigningKeyType() != ivnp.SigningRedDSASHA512Ed25519 {
+	if publicRuntime.local.SigningKeyType() != foundation.SigningEdDSASHA512Ed25519 || encryptedRuntime.local.SigningKeyType() != foundation.SigningRedDSASHA512Ed25519 {
 		t.Fatalf("destination signing types = %d/%d", publicRuntime.local.SigningKeyType(), encryptedRuntime.local.SigningKeyType())
 	}
 	if publicRuntime.pool == encryptedRuntime.pool || publicRuntime.pool.Owner() != publicRuntime.local.Hash() || encryptedRuntime.pool.Owner() != encryptedRuntime.local.Hash() {
@@ -1328,7 +1328,7 @@ func testDaemonProductionGraphEncryptedAuthorization(t *testing.T, authorization
 	if receiveErr != nil {
 		t.Fatal(receiveErr)
 	}
-	daemonProductionGraphEncryptedDHAndPSKStreamingRejected := received.Delivery.From != (ivnp.Hash{}) || received.Delivery.To != targetRuntime.local.Hash() ||
+	daemonProductionGraphEncryptedDHAndPSKStreamingRejected := received.Delivery.From != (foundation.Hash{}) || received.Delivery.To != targetRuntime.local.Hash() ||
 		received.Delivery.Protocol != messageRoute.Protocol || received.Delivery.FromPort != 9091 ||
 		received.Delivery.ToPort != messageRoute.ToPort
 	if !daemonProductionGraphEncryptedDHAndPSKStreamingRejected {
@@ -1420,12 +1420,12 @@ func TestCreateDestinationPersistsPublicAndEncryptedPolicies(t *testing.T) {
 	cases := []struct {
 		name   string
 		policy DestinationPolicy
-		kind   ivnp.SigningKeyType
+		kind   foundation.SigningKeyType
 	}{
-		{name: "public", policy: DestinationPolicy{Kind: DestinationPublicLS2}, kind: ivnp.SigningEdDSASHA512Ed25519},
-		{name: "encrypted-none", policy: DestinationPolicy{Kind: DestinationEncryptedNone, Secret: []byte("none")}, kind: ivnp.SigningRedDSASHA512Ed25519},
-		{name: "encrypted-dh", policy: DestinationPolicy{Kind: DestinationEncryptedDH, Secret: []byte("dh"), DHClients: [][32]byte{dhClient}}, kind: ivnp.SigningRedDSASHA512Ed25519},
-		{name: "encrypted-psk", policy: DestinationPolicy{Kind: DestinationEncryptedPSK, Secret: []byte("psk"), PSKClients: [][32]byte{pskClient}}, kind: ivnp.SigningRedDSASHA512Ed25519},
+		{name: "public", policy: DestinationPolicy{Kind: DestinationPublicLS2}, kind: foundation.SigningEdDSASHA512Ed25519},
+		{name: "encrypted-none", policy: DestinationPolicy{Kind: DestinationEncryptedNone, Secret: []byte("none")}, kind: foundation.SigningRedDSASHA512Ed25519},
+		{name: "encrypted-dh", policy: DestinationPolicy{Kind: DestinationEncryptedDH, Secret: []byte("dh"), DHClients: [][32]byte{dhClient}}, kind: foundation.SigningRedDSASHA512Ed25519},
+		{name: "encrypted-psk", policy: DestinationPolicy{Kind: DestinationEncryptedPSK, Secret: []byte("psk"), PSKClients: [][32]byte{pskClient}}, kind: foundation.SigningRedDSASHA512Ed25519},
 	}
 	for _, test := range cases {
 		retained := make([][]byte, 0, len(d.bundle.DestinationPrivate)+len(d.bundle.EncryptedLeaseSetPolicies))
@@ -1479,7 +1479,7 @@ func TestCreateDestinationPersistsPublicAndEncryptedPolicies(t *testing.T) {
 	}
 	for _, test := range cases {
 		private := reopened.bundle.DestinationPrivate[test.name]
-		imported, importErr := ivnp.ImportLocalDestination(private)
+		imported, importErr := foundation.ImportLocalDestination(private)
 		if importErr != nil {
 			t.Fatal(importErr)
 		}
@@ -1559,7 +1559,7 @@ func TestDestroyRemovesExactReleasedDestinationRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"a", "b"} {
-		local, generateErr := ivnp.GenerateLocalDestination()
+		local, generateErr := foundation.GenerateLocalDestination()
 		if generateErr != nil {
 			t.Fatal(generateErr)
 		}
@@ -1623,7 +1623,7 @@ func TestDestroyRemovesExactReleasedDestinationRuntime(t *testing.T) {
 	}
 	lookupReturned := make(chan lookupReturn, 1)
 	go func() {
-		waiter, lookupErr := requests.LookupRouterInfo(context.Background(), ivnp.Hash{99})
+		waiter, lookupErr := requests.LookupRouterInfo(context.Background(), foundation.Hash{99})
 		lookupReturned <- lookupReturn{waiter: waiter, err: lookupErr}
 	}()
 	select {
@@ -1655,7 +1655,7 @@ func TestDestroyRemovesExactReleasedDestinationRuntime(t *testing.T) {
 	if removed.requests.Pending() != 0 {
 		t.Fatalf("destroy left %d request waiters", removed.requests.Pending())
 	}
-	if _, lookupErr := removed.requests.LookupRouterInfo(context.Background(), ivnp.Hash{99}); !errors.Is(lookupErr, networking.NetworkDatabaseErrRequestManagerClosed) {
+	if _, lookupErr := removed.requests.LookupRouterInfo(context.Background(), foundation.Hash{99}); !errors.Is(lookupErr, networking.NetworkDatabaseErrRequestManagerClosed) {
 		t.Fatalf("destroyed RequestManager accepted work: %v", lookupErr)
 	}
 	if removed.build.Pending() != 0 {
@@ -1960,7 +1960,7 @@ func TestReseedOutcomesAreObservableWithoutMakingOptionalFailureFatal(t *testing
 }
 
 func TestRemoteELSContextFailureAndReleaseCleanup(t *testing.T) {
-	destination, err := ivnp.GenerateLocalDestination()
+	destination, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1977,7 +1977,7 @@ func TestRemoteELSContextFailureAndReleaseCleanup(t *testing.T) {
 		t.Fatalf("remoteELSContexts partial failure = %#v, %v", contexts, err)
 	}
 	secret := []byte("retained")
-	contexts := map[ivnp.Hash]networking.RouterRemoteELSContext{
+	contexts := map[foundation.Hash]networking.RouterRemoteELSContext{
 		identity.Hash(): {Identity: identity, Secret: secret, Authorization: networking.NetworkDatabaseELSClientAuthorization{UsePSK: true, PSK: [32]byte{1}}},
 	}
 	releaseRemoteELSContexts(contexts)

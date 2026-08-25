@@ -1,8 +1,8 @@
-package state
+package securestore
 
 import (
 	"bytes"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"testing"
 )
 
@@ -12,7 +12,7 @@ func TestEncryptedLeaseSetPolicyPersistsForLegacyEd25519Destination(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	address, err := ivnp.GenerateLocalAddress()
+	address, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestBundleReleaseSensitiveWipesAllPrivateMaterial(t *testing.T) {
 	var client, dhPrivate, dhPublic, psk [32]byte
 	client[0], dhPrivate[0], dhPublic[0], psk[0] = 4, 5, 6, 7
 	bundle := Bundle{
-		Router:                    ivnp.LocalRouterAddress{SigningPrivate: routerPrivate, X25519Private: [32]byte{8}},
+		Router:                    foundation.LocalRouterAddress{SigningPrivate: routerPrivate, X25519Private: [32]byte{8}},
 		NTCP2StaticPrivate:        bytes.Repeat([]byte{9}, 32),
 		SSU2StaticPrivate:         bytes.Repeat([]byte{10}, 32),
 		DestinationPrivate:        map[string][]byte{"local": destinationPrivate},
@@ -67,7 +67,7 @@ func TestBundleReleaseSensitiveWipesAllPrivateMaterial(t *testing.T) {
 			}
 		}
 	}
-	if bundle.Router.Hash != (ivnp.Hash{}) || bundle.DestinationPrivate != nil || bundle.EncryptedLeaseSetPolicies != nil || bundle.DestinationAddressPolicies != nil {
+	if bundle.Router.Hash != (foundation.Hash{}) || bundle.DestinationPrivate != nil || bundle.EncryptedLeaseSetPolicies != nil || bundle.DestinationAddressPolicies != nil {
 		t.Fatal("bundle release retained sensitive ownership graph")
 	}
 }

@@ -13,7 +13,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/networking/internal/i2np"
@@ -86,7 +86,7 @@ type PeerTestResult struct {
 // SSU2ManagerConfig contains the private static X25519 key and public SSU2
 // introduction key advertised in the local RouterInfo's SSU/SSU2 address.
 type SSU2ManagerConfig struct {
-	Database         *netdb.Database
+	Database         *networkdatabase.Database
 	StaticPrivate    []byte
 	IntroKey         []byte
 	NetworkID        uint8
@@ -116,7 +116,7 @@ type SSU2ManagerConfig struct {
 // Confirmed reassembly, RouterInfo/static-key binding validation, and delivery
 // of complete SSU2 I2NP blocks to Router's transport callback.
 type SSU2Manager struct {
-	database             *netdb.Database
+	database             *networkdatabase.Database
 	staticPrivate        []byte
 	introKey             []byte
 	tokenSecret          [sha256.Size]byte
@@ -155,15 +155,15 @@ type SSU2Manager struct {
 	logger         *slog.Logger
 	kernelDrops    atomic.Uint64
 
-	sessionsByPeer      map[ivnp.Hash]*ssu2TransportSession
+	sessionsByPeer      map[foundation.Hash]*ssu2TransportSession
 	sessionsByID        map[uint64]*ssu2TransportSession
-	outbound            map[ivnp.Hash]*ssu2OutboundPending
+	outbound            map[foundation.Hash]*ssu2OutboundPending
 	outboundAddr        map[netip.AddrPort]*ssu2OutboundPending
 	inbound             map[uint64]*ssu2InboundPending
-	introducers         map[uint32]ivnp.Hash
-	relayGrants         map[ivnp.Hash]ssu2RelayTagLease
-	advertisedRelays    map[ivnp.Hash]ssu2RelayTagLease
-	relayTagPending     map[ivnp.Hash]time.Time
+	introducers         map[uint32]foundation.Hash
+	relayGrants         map[foundation.Hash]ssu2RelayTagLease
+	advertisedRelays    map[foundation.Hash]ssu2RelayTagLease
+	relayTagPending     map[foundation.Hash]time.Time
 	relayPublish        chan struct{}
 	relayRevision       uint64
 	publishedRevision   uint64
@@ -176,7 +176,7 @@ type SSU2Manager struct {
 	deferredRelayIntros map[uint32]ssu2DeferredRelayIntro
 	relayStoreJobs      chan ssu2RelayStoreJob
 	routerInfoStoresMu  sync.RWMutex
-	routerInfoStores    map[ivnp.Hash]ssu2RouterInfoStoreSnapshot
+	routerInfoStores    map[foundation.Hash]ssu2RouterInfoStoreSnapshot
 	reporter            ingress.Reporter
 }
 
@@ -224,7 +224,7 @@ type ssu2ReceiveJob struct {
 }
 
 type ssu2DispatchItem struct {
-	peer    ivnp.Hash
+	peer    foundation.Hash
 	message i2np.Message
 }
 
@@ -289,7 +289,7 @@ func (m *SSU2Manager) clearIOBuffers() {
 }
 
 type ssu2TransportSession struct {
-	peer       ivnp.Hash
+	peer       foundation.Hash
 	sendID     uint64
 	receiveID  uint64
 	remoteMu   sync.RWMutex
@@ -460,7 +460,7 @@ type ssu2FragmentAssembly struct {
 	updated   time.Time
 }
 type ssu2OutboundPending struct {
-	peer          ivnp.Hash
+	peer          foundation.Hash
 	remote        *net.UDPAddr
 	address       ssu2PeerAddress
 	initiator     *ssu2.Initiator
@@ -488,8 +488,8 @@ type ssu2InboundPending struct {
 }
 
 type ssu2RelayRequest struct {
-	target     ivnp.Hash
-	introducer ivnp.Hash
+	target     foundation.Hash
+	introducer foundation.Hash
 	address    ssu2PeerAddress
 	endpoint   netip.AddrPort
 	ready      chan struct{}
@@ -507,14 +507,14 @@ type ssu2RelayForward struct {
 }
 
 type ssu2RelayTagLease struct {
-	peer     ivnp.Hash
+	peer     foundation.Hash
 	tag      uint32
 	expires  time.Time
 	renewing bool
 }
 
 type ssu2NewTokenLease struct {
-	peer        ivnp.Hash
+	peer        foundation.Hash
 	endpoint    string
 	destination uint64
 	token       uint64
@@ -524,16 +524,16 @@ type ssu2NewTokenLease struct {
 // ssu2PeerTestState records only authenticated observations. It is bounded by
 type ssu2PeerTestState struct {
 	nonce            uint32
-	bob              ivnp.Hash
-	alice            ivnp.Hash
-	charlie          ivnp.Hash
+	bob              foundation.Hash
+	alice            foundation.Hash
+	charlie          foundation.Hash
 	message6Received bool
 	endpoint         netip.AddrPort
 	expires          time.Time
 	message4         *ssu2.PeerTestBlock
 	message5         *ssu2.PeerTestBlock
 	message7         *ssu2.PeerTestBlock
-	message5Peer     ivnp.Hash
+	message5Peer     foundation.Hash
 	message5Source   netip.AddrPort
 	message7Source   netip.AddrPort
 	message6Sent     bool
@@ -562,8 +562,8 @@ type ssu2RelayStoreJob struct {
 	request   ssu2.RelayRequest
 	alice     *ssu2TransportSession
 	charlie   *ssu2TransportSession
-	aliceInfo netdb.RouterInfo
-	localHash ivnp.Hash
+	aliceInfo networkdatabase.RouterInfo
+	localHash foundation.Hash
 }
 
 // ssu2RouterInfoStoreSnapshot holds immutable RouterInfo-store bytes shared
@@ -571,7 +571,7 @@ type ssu2RelayStoreJob struct {
 type ssu2RouterInfoStoreSnapshot struct {
 	raw        []byte
 	compressed []byte
-	hash       ivnp.Hash
+	hash       foundation.Hash
 }
 
 type ssu2PeerAddress struct {
@@ -637,22 +637,22 @@ func NewSSU2Manager(config SSU2ManagerConfig) (*SSU2Manager, error) {
 		metrics:              config.Metrics,
 		logger:               config.Logger,
 		done:                 make(chan struct{}),
-		sessionsByPeer:       make(map[ivnp.Hash]*ssu2TransportSession),
+		sessionsByPeer:       make(map[foundation.Hash]*ssu2TransportSession),
 		sessionsByID:         make(map[uint64]*ssu2TransportSession),
-		outbound:             make(map[ivnp.Hash]*ssu2OutboundPending),
+		outbound:             make(map[foundation.Hash]*ssu2OutboundPending),
 		outboundAddr:         make(map[netip.AddrPort]*ssu2OutboundPending),
 		inbound:              make(map[uint64]*ssu2InboundPending),
-		introducers:          make(map[uint32]ivnp.Hash),
-		relayGrants:          make(map[ivnp.Hash]ssu2RelayTagLease),
-		advertisedRelays:     make(map[ivnp.Hash]ssu2RelayTagLease),
-		relayTagPending:      make(map[ivnp.Hash]time.Time),
+		introducers:          make(map[uint32]foundation.Hash),
+		relayGrants:          make(map[foundation.Hash]ssu2RelayTagLease),
+		advertisedRelays:     make(map[foundation.Hash]ssu2RelayTagLease),
+		relayTagPending:      make(map[foundation.Hash]time.Time),
 		newTokens:            make(map[string]ssu2NewTokenLease),
 		peerTests:            make(map[uint32]*ssu2PeerTestState),
 		symmetricEvidence:    make(map[string]ssu2PeerTestEvidence),
 		relayRequests:        make(map[uint32]*ssu2RelayRequest),
 		relayForwards:        make(map[uint32]ssu2RelayForward),
 		deferredRelayIntros:  make(map[uint32]ssu2DeferredRelayIntro),
-		routerInfoStores:     make(map[ivnp.Hash]ssu2RouterInfoStoreSnapshot),
+		routerInfoStores:     make(map[foundation.Hash]ssu2RouterInfoStoreSnapshot),
 	}, nil
 }
 
@@ -862,7 +862,7 @@ func (m *SSU2Manager) Status() TransportStatus {
 
 // EnsureSession authenticates a bidirectional SSU2 session without emitting an
 // I2NP message.
-func (m *SSU2Manager) EnsureSession(ctx context.Context, peer ivnp.Hash) error {
+func (m *SSU2Manager) EnsureSession(ctx context.Context, peer foundation.Hash) error {
 	if ctx ==
 		nil {
 		ctx = context.Background()
@@ -885,7 +885,7 @@ func (m *SSU2Manager) EnsureSession(ctx context.Context, peer ivnp.Hash) error {
 
 // Send waits for a validated native SSU2 session and delivers one complete
 // I2NP message, framing oversized payloads as reliable SSU2 fragments.
-func (m *SSU2Manager) Send(ctx context.Context, peer ivnp.Hash, message i2np.Message) error {
+func (m *SSU2Manager) Send(ctx context.Context, peer foundation.Hash, message i2np.Message) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -932,7 +932,7 @@ func (m *SSU2Manager) Send(ctx context.Context, peer ivnp.Hash, message i2np.Mes
 // SendPeerTest sends an authenticated out-of-session phase-5, -6, or -7 Peer
 // Test packet to a verified SSU2 RouterInfo. Signature generation remains with
 // the caller because its signing key is outside transport ownership.
-func (m *SSU2Manager) SendPeerTest(ctx context.Context, peer ivnp.Hash, test ssu2.PeerTestBlock) error {
+func (m *SSU2Manager) SendPeerTest(ctx context.Context, peer foundation.Hash, test ssu2.PeerTestBlock) error {
 
 	if ctx == nil {
 		ctx = context.Background()
@@ -989,7 +989,7 @@ func (m *SSU2Manager) SendPeerTest(ctx context.Context, peer ivnp.Hash, test ssu
 
 // maybeStartPeerTest activates peer testing for newly established outbound
 // sessions while retaining one bounded in-flight test per Bob.
-func (m *SSU2Manager) maybeStartPeerTest(bob ivnp.Hash) {
+func (m *SSU2Manager) maybeStartPeerTest(bob foundation.Hash) {
 	m.mu.RLock()
 	running := m.runningLocked()
 	for _, state := range m.peerTests {
@@ -1007,7 +1007,7 @@ func (m *SSU2Manager) maybeStartPeerTest(bob ivnp.Hash) {
 
 // StartPeerTest begins the Alice side of the SSU2 Peer Test process over an
 // existing authenticated session with Bob.
-func (m *SSU2Manager) StartPeerTest(ctx context.Context, bob ivnp.Hash) error {
+func (m *SSU2Manager) StartPeerTest(ctx context.Context, bob foundation.Hash) error {
 
 	if ctx == nil {
 		ctx = context.
@@ -1065,7 +1065,7 @@ func (m *SSU2Manager) StartPeerTest(ctx context.Context, bob ivnp.Hash) error {
 
 // RegisterIntroducer registers this manager as Bob for relayTag. The selected
 // Charlie must have a live native SSU2 session when a Relay Request arrives.
-func (m *SSU2Manager) RegisterIntroducer(relayTag uint32, charlie ivnp.Hash) error {
+func (m *SSU2Manager) RegisterIntroducer(relayTag uint32, charlie foundation.Hash) error {
 	if relayTag == 0 {
 		return ErrSSU2Introduction
 	}
@@ -1145,7 +1145,7 @@ func (m *SSU2Manager) handleRelayTag(session *ssu2TransportSession, tag ssu2.Rel
 }
 
 // RequestRelayTag negotiates a renewable relay lease on a live SSU2 session.
-func (m *SSU2Manager) RequestRelayTag(ctx context.Context, peer ivnp.Hash) error {
+func (m *SSU2Manager) RequestRelayTag(ctx context.Context, peer foundation.Hash) error {
 	if ctx ==
 		nil {
 		ctx = context.Background()
@@ -1295,7 +1295,7 @@ func (m *SSU2Manager) relayPublicationLoop() {
 func (m *SSU2Manager) maintainIntroducers() {
 	now := m.now()
 	type candidate struct {
-		peer    ivnp.Hash
+		peer    foundation.Hash
 		session *ssu2TransportSession
 	}
 	var candidates []candidate
@@ -1359,7 +1359,7 @@ func (m *SSU2Manager) maintainIntroducers() {
 // with introducer. endpoint is Alice's reachable UDP endpoint advertised in
 // the signed Relay Request. relayTag is the tag target delegated to introducer
 // in target's RouterInfo.
-func (m *SSU2Manager) Introduce(ctx context.Context, introducer, target ivnp.Hash, relayTag uint32, endpoint netip.AddrPort) error {
+func (m *SSU2Manager) Introduce(ctx context.Context, introducer, target foundation.Hash, relayTag uint32, endpoint netip.AddrPort) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1448,7 +1448,7 @@ func (m *SSU2Manager) Introduce(ctx context.Context, introducer, target ivnp.Has
 		return ErrSSU2Session
 	}
 }
-func (m *SSU2Manager) establish(ctx context.Context, peer ivnp.Hash) (*ssu2TransportSession, error) {
+func (m *SSU2Manager) establish(ctx context.Context, peer foundation.Hash) (*ssu2TransportSession, error) {
 	var stale *ssu2TransportSession
 	m.mu.Lock()
 	if !m.runningLocked() {
@@ -1513,7 +1513,7 @@ func (m *SSU2Manager) establish(ctx context.Context, peer ivnp.Hash) (*ssu2Trans
 	}
 }
 
-func (m *SSU2Manager) newOutboundLocked(peer ivnp.Hash) (*ssu2OutboundPending, error) {
+func (m *SSU2Manager) newOutboundLocked(peer foundation.Hash) (*ssu2OutboundPending, error) {
 	if m.database == nil {
 		return nil, ErrSSU2Session
 	}
@@ -1521,7 +1521,7 @@ func (m *SSU2Manager) newOutboundLocked(peer ivnp.Hash) (*ssu2OutboundPending, e
 	if !ok {
 		return nil, ErrSSU2Peer
 	}
-	if err := netdb.ReseedRouterInfoFresh(ref.Info, uint64(m.nowLocked().UnixMilli())); err != nil {
+	if err := networkdatabase.ReseedRouterInfoFresh(ref.Info, uint64(m.nowLocked().UnixMilli())); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSSU2Peer, err)
 	}
 	address, err := selectSSU2Address(ref.Info)
@@ -1549,7 +1549,7 @@ func (m *SSU2Manager) newOutboundLocked(peer ivnp.Hash) (*ssu2OutboundPending, e
 	return m.newOutboundToLocked(peer, address, remote, destinationID, sourceID)
 }
 
-func (m *SSU2Manager) newIntroducedOutboundLocked(peer ivnp.Hash, address ssu2PeerAddress, endpoint netip.AddrPort, destinationID, sourceID uint64) (*ssu2OutboundPending, error) {
+func (m *SSU2Manager) newIntroducedOutboundLocked(peer foundation.Hash, address ssu2PeerAddress, endpoint netip.AddrPort, destinationID, sourceID uint64) (*ssu2OutboundPending, error) {
 	if !validSSU2Endpoint(endpoint) {
 		return nil, ErrSSU2Introduction
 	}
@@ -1557,7 +1557,7 @@ func (m *SSU2Manager) newIntroducedOutboundLocked(peer ivnp.Hash, address ssu2Pe
 	return m.newOutboundToLocked(peer, address, remote, destinationID, sourceID)
 }
 
-func (m *SSU2Manager) newOutboundToLocked(peer ivnp.Hash, address ssu2PeerAddress, remote *net.UDPAddr, destinationID, sourceID uint64) (*ssu2OutboundPending, error) {
+func (m *SSU2Manager) newOutboundToLocked(peer foundation.Hash, address ssu2PeerAddress, remote *net.UDPAddr, destinationID, sourceID uint64) (*ssu2OutboundPending, error) {
 	if len(m.outbound)+len(m.inbound) >= m.maxPending || m.outbound[peer] != nil || remote == nil || remote.Port <= 0 {
 		return nil, ErrSSU2Session
 	}
@@ -1967,7 +1967,7 @@ func (m *SSU2Manager) handleSessionPeerTest(session *ssu2TransportSession, test 
 func (m *SSU2Manager) handlePeerTestOne(alice *ssu2TransportSession, test ssu2.PeerTestBlock) {
 	bindings := m.currentBindings()
 	if bindings.LocalInfo == nil || !peerTestEndpointMatches(alice.remoteAddr(), test.Address) ||
-		!m.verifyPeerTest(alice.peer, bindings.LocalInfo.Hash(), ivnp.Hash{}, test) {
+		!m.verifyPeerTest(alice.peer, bindings.LocalInfo.Hash(), foundation.Hash{}, test) {
 		m.sendPeerTestReject(alice, test, 5)
 		return
 	}
@@ -1998,7 +1998,7 @@ func (m *SSU2Manager) handlePeerTestOne(alice *ssu2TransportSession, test ssu2.P
 }
 
 func (m *SSU2Manager) handlePeerTestTwo(bob *ssu2TransportSession, test ssu2.PeerTestBlock) {
-	if !test.HasHash || !m.verifyPeerTest(test.Hash, bob.peer, ivnp.Hash{}, test) {
+	if !test.HasHash || !m.verifyPeerTest(test.Hash, bob.peer, foundation.Hash{}, test) {
 		return
 	}
 	bindings := m.currentBindings()
@@ -2083,7 +2083,7 @@ func (m *SSU2Manager) handlePeerTestFour(bob *ssu2TransportSession, test ssu2.Pe
 		if state.message5 != nil && state.message5Peer != test.Hash {
 			state.message5 = nil
 			state.message5Source = netip.AddrPort{}
-			state.message5Peer = ivnp.Hash{}
+			state.message5Peer = foundation.Hash{}
 		}
 	}
 	result, done := m.peerTestResultLocked(state, false)
@@ -2107,7 +2107,7 @@ func (m *SSU2Manager) handleOutOfSessionPeerTest(test ssu2.PeerTestBlock, remote
 		return false
 	}
 	local := m.bindings.LocalInfo.Hash()
-	var expected ivnp.Hash
+	var expected foundation.Hash
 	switch test.Message {
 	case 5:
 		if state.alice != local {
@@ -2116,13 +2116,13 @@ func (m *SSU2Manager) handleOutOfSessionPeerTest(test ssu2.PeerTestBlock, remote
 		}
 		expected = state.charlie
 	case 7:
-		if state.alice != local || state.charlie == (ivnp.Hash{}) {
+		if state.alice != local || state.charlie == (foundation.Hash{}) {
 			m.mu.RUnlock()
 			return false
 		}
 		expected = state.charlie
 	case 6:
-		if state.charlie != local || state.alice == (ivnp.Hash{}) {
+		if state.charlie != local || state.alice == (foundation.Hash{}) {
 			m.mu.RUnlock()
 			return false
 		}
@@ -2132,7 +2132,7 @@ func (m *SSU2Manager) handleOutOfSessionPeerTest(test ssu2.PeerTestBlock, remote
 		return false
 	}
 	m.mu.RUnlock()
-	if expected == (ivnp.Hash{}) {
+	if expected == (foundation.Hash{}) {
 		var found bool
 		expected, found = m.peerTestPeerAtEndpoint(source)
 		if !found {
@@ -2151,7 +2151,7 @@ func (m *SSU2Manager) handleOutOfSessionPeerTest(test ssu2.PeerTestBlock, remote
 	}
 	switch test.Message {
 	case 5:
-		if state.message5 != nil || (state.charlie != (ivnp.Hash{}) && state.charlie != expected) {
+		if state.message5 != nil || (state.charlie != (foundation.Hash{}) && state.charlie != expected) {
 			m.mu.Unlock()
 			return false
 		}
@@ -2209,7 +2209,7 @@ func (m *SSU2Manager) sendPeerTestReject(alice *ssu2TransportSession, request ss
 	}
 }
 
-func (m *SSU2Manager) verifyPeerTest(peer, bob, alice ivnp.Hash, test ssu2.PeerTestBlock) bool {
+func (m *SSU2Manager) verifyPeerTest(peer, bob, alice foundation.Hash, test ssu2.PeerTestBlock) bool {
 	info, known := m.routerInfo(peer)
 	if !known {
 		return false
@@ -2223,12 +2223,12 @@ func (m *SSU2Manager) verifyPeerTest(peer, bob, alice ivnp.Hash, test ssu2.PeerT
 	return verifyErr == nil && valid
 }
 
-func (m *SSU2Manager) peerTestEndpointApproved(peer ivnp.Hash, source netip.AddrPort) bool {
+func (m *SSU2Manager) peerTestEndpointApproved(peer foundation.Hash, source netip.AddrPort) bool {
 	info, ok := m.routerInfo(peer)
 	return ok && peerTestInfoEndpointApproved(info, source)
 }
 
-func peerTestInfoEndpointApproved(info netdb.RouterInfo, source netip.AddrPort) bool {
+func peerTestInfoEndpointApproved(info networkdatabase.RouterInfo, source netip.AddrPort) bool {
 	if !source.IsValid() {
 		return false
 	}
@@ -2244,19 +2244,19 @@ func peerTestInfoEndpointApproved(info netdb.RouterInfo, source netip.AddrPort) 
 	return expected == netip.AddrPortFrom(source.Addr().Unmap(), source.Port())
 }
 
-func (m *SSU2Manager) peerTestPeerAtEndpoint(source netip.AddrPort) (ivnp.Hash, bool) {
+func (m *SSU2Manager) peerTestPeerAtEndpoint(source netip.AddrPort) (foundation.Hash, bool) {
 	if m.database == nil || !source.IsValid() {
-		return ivnp.Hash{}, false
+		return foundation.Hash{}, false
 	}
 	_, peers := m.database.Routers().Snapshot()
-	var matched ivnp.Hash
+	var matched foundation.Hash
 	found := false
 	for _, peer := range peers {
 		if !peerTestInfoEndpointApproved(peer.Info, source) {
 			continue
 		}
 		if found && matched != peer.Hash {
-			return ivnp.Hash{}, false
+			return foundation.Hash{}, false
 		}
 		matched, found = peer.Hash, true
 	}
@@ -3164,7 +3164,7 @@ func (m *SSU2Manager) localConfirmedPayload() ([]byte, error) {
 	return ssu2.MarshalBlock(nil, ssu2.BlockRouterInfo, data)
 }
 
-func (m *SSU2Manager) admitSSU2Peer(peer netdb.RouterInfo, static []byte, now time.Time) bool {
+func (m *SSU2Manager) admitSSU2Peer(peer networkdatabase.RouterInfo, static []byte, now time.Time) bool {
 	if !validSSU2RouterInfoTime(peer, uint64(now.UnixMilli())) || m.database == nil {
 		return false
 	}
@@ -3180,7 +3180,7 @@ func (m *SSU2Manager) newTokenLocked(remote net.Addr, destinationID, sourceID ui
 	return m.retryToken(remote, destinationID, sourceID, m.tokenBucket(m.nowLocked()))
 }
 
-func newTokenCacheKey(peer ivnp.Hash, remote net.Addr, destination uint64) string {
+func newTokenCacheKey(peer foundation.Hash, remote net.Addr, destination uint64) string {
 	if remote == nil || destination == 0 {
 		return ""
 	}
@@ -3213,7 +3213,7 @@ func (m *SSU2Manager) consumeNewTokenLocked(token uint64, remote net.Addr) bool 
 
 func (m *SSU2Manager) expireExtensions(now time.Time) {
 	type renewal struct {
-		peer    ivnp.Hash
+		peer    foundation.Hash
 		session *ssu2TransportSession
 	}
 	var renew []renewal
@@ -3348,7 +3348,7 @@ func (m *SSU2Manager) storeNewToken(session *ssu2TransportSession, token ssu2.Ne
 	m.mu.Unlock()
 }
 
-func (m *SSU2Manager) cachedNewTokenLocked(peer ivnp.Hash, remote net.Addr, destination uint64) uint64 {
+func (m *SSU2Manager) cachedNewTokenLocked(peer foundation.Hash, remote net.Addr, destination uint64) uint64 {
 	key := newTokenCacheKey(peer, remote, destination)
 	lease, ok := m.newTokens[key]
 	if !ok || lease.destination != destination || !lease.expires.After(m.nowLocked()) {
@@ -3360,7 +3360,7 @@ func (m *SSU2Manager) cachedNewTokenLocked(peer ivnp.Hash, remote net.Addr, dest
 	return lease.token
 }
 
-func (m *SSU2Manager) cachedNewTokenDestinationLocked(peer ivnp.Hash, remote net.Addr) uint64 {
+func (m *SSU2Manager) cachedNewTokenDestinationLocked(peer foundation.Hash, remote net.Addr) uint64 {
 	for _, lease := range m.newTokens {
 		if lease.peer == peer && lease.endpoint == remote.String() && lease.destination != 0 && lease.expires.After(m.nowLocked()) {
 			return lease.destination
@@ -3481,7 +3481,7 @@ func (e ssu2HandshakeError) Error() string {
 
 func (e ssu2HandshakeError) Unwrap() error { return ErrSSU2Session }
 
-func (m *SSU2Manager) recordOutboundFailure(peer ivnp.Hash, err error) {
+func (m *SSU2Manager) recordOutboundFailure(peer foundation.Hash, err error) {
 	if m.metrics != nil {
 		m.metrics.IncTransportHandshakeFailures()
 	}
@@ -3536,7 +3536,7 @@ func (m *SSU2Manager) removeInboundHeld(destinationID uint64, pending *ssu2Inbou
 // dispatchI2NP remains the narrow single-message entry point used by direct
 // callers; the live receive path always calls dispatchI2NPBatch once per UDP
 // packet.
-func (m *SSU2Manager) dispatchI2NP(peer ivnp.Hash, message i2np.Message) error {
+func (m *SSU2Manager) dispatchI2NP(peer foundation.Hash, message i2np.Message) error {
 	batch, err := m.appendDispatchI2NP(nil, peer, message)
 	if err != nil {
 		return err
@@ -3596,7 +3596,7 @@ func (m *SSU2Manager) releaseDispatchBatch(batch *ssu2DispatchBatch) {
 	}
 }
 
-func (m *SSU2Manager) appendDispatchI2NP(batch *ssu2DispatchBatch, peer ivnp.Hash, message i2np.Message) (*ssu2DispatchBatch, error) {
+func (m *SSU2Manager) appendDispatchI2NP(batch *ssu2DispatchBatch, peer foundation.Hash, message i2np.Message) (*ssu2DispatchBatch, error) {
 	if batch == nil {
 		var err error
 		batch, err = m.borrowDispatchBatch()
@@ -3686,12 +3686,12 @@ func failQueuedDispatches(queue chan *ssu2DispatchBatch) {
 	}
 }
 
-func (m *SSU2Manager) deliverI2NPRecovered(peer ivnp.Hash, message i2np.Message) (err error) {
+func (m *SSU2Manager) deliverI2NPRecovered(peer foundation.Hash, message i2np.Message) (err error) {
 	defer ingress.Recover(&err, m.reporter, ingress.BoundarySSU2Packet, nil)
 	return m.deliverI2NP(peer, message)
 }
 
-func (m *SSU2Manager) deliverI2NP(peer ivnp.Hash, message i2np.Message) error {
+func (m *SSU2Manager) deliverI2NP(peer foundation.Hash, message i2np.Message) error {
 	bindings := m.currentBindings()
 	if bindings.HandleI2NPContext == nil {
 		return ErrSSU2ManagerConfig
@@ -4304,7 +4304,7 @@ func (s *ssu2TransportSession) expireFragments(now time.Time) {
 	}
 }
 
-func validateSSU2ConfirmedPayload(payload, static []byte) (netdb.RouterInfo, []byte, error) {
+func validateSSU2ConfirmedPayload(payload, static []byte) (networkdatabase.RouterInfo, []byte, error) {
 	iterator := ssu2.NewBlockIterator(payload)
 	first, ok, err := iterator.Next()
 	validateSSU2ConfirmedPayloadRejected := err != nil || !ok || first.Type != ssu2.BlockRouterInfo || len(first.Data) < 2 || first.Data[0]&^byte(3) != 0
@@ -4312,34 +4312,34 @@ func validateSSU2ConfirmedPayload(payload, static []byte) (netdb.RouterInfo, []b
 		validateSSU2ConfirmedPayloadRejected = first.Data[1] != 1
 	}
 	if validateSSU2ConfirmedPayloadRejected {
-		return netdb.RouterInfo{}, nil, ErrSSU2Peer
+		return networkdatabase.RouterInfo{}, nil, ErrSSU2Peer
 	}
 	raw := first.Data[2:]
 	if first.Data[0]&2 != 0 {
 		raw, err = inflateSSU2RouterInfo(raw)
 		if err != nil {
-			return netdb.RouterInfo{}, nil, ErrSSU2Peer
+			return networkdatabase.RouterInfo{}, nil, ErrSSU2Peer
 		}
 	}
-	info, err := netdb.ParseRouterInfo(raw)
+	info, err := networkdatabase.ParseRouterInfo(raw)
 	if err != nil {
-		return netdb.RouterInfo{}, nil, ErrSSU2Peer
+		return networkdatabase.RouterInfo{}, nil, ErrSSU2Peer
 	}
 	valid, err := info.Verify()
 	intro, found := ssu2IntroForStatic(info, static)
 	if err != nil || !valid || !found {
-		return netdb.RouterInfo{}, nil, ErrSSU2Peer
+		return networkdatabase.RouterInfo{}, nil, ErrSSU2Peer
 	}
 	for {
 		block, ok, err := iterator.Next()
 		if err != nil {
-			return netdb.RouterInfo{}, nil, ErrSSU2Peer
+			return networkdatabase.RouterInfo{}, nil, ErrSSU2Peer
 		}
 		if !ok {
 			return info, intro, nil
 		}
 		if block.Type != ssu2.BlockOptions && block.Type != ssu2.BlockPadding && block.Type != ssu2.BlockI2NP {
-			return netdb.RouterInfo{}, nil, ErrSSU2Peer
+			return networkdatabase.RouterInfo{}, nil, ErrSSU2Peer
 		}
 	}
 }
@@ -4351,31 +4351,31 @@ func inflateSSU2RouterInfo(compressed []byte) ([]byte, error) {
 	}
 	reader.Multistream(false)
 	defer reader.Close()
-	raw, err := io.ReadAll(io.LimitReader(reader, int64(netdb.MaxRouterInfoBytes+1)))
+	raw, err := io.ReadAll(io.LimitReader(reader, int64(networkdatabase.MaxRouterInfoBytes+1)))
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) > netdb.MaxRouterInfoBytes {
-		return nil, netdb.ErrRouterInfoTooLarge
+	if len(raw) > networkdatabase.MaxRouterInfoBytes {
+		return nil, networkdatabase.ErrRouterInfoTooLarge
 	}
 	return raw, nil
 }
 
-func validSSU2RouterInfoTime(info netdb.RouterInfo, nowMillis uint64) bool {
-	return netdb.RouterInfoFresh(info, nowMillis) == nil
+func validSSU2RouterInfoTime(info networkdatabase.RouterInfo, nowMillis uint64) bool {
+	return networkdatabase.RouterInfoFresh(info, nowMillis) == nil
 }
 
-func hasSSU2Keys(info netdb.RouterInfo, static, intro []byte) bool {
+func hasSSU2Keys(info networkdatabase.RouterInfo, static, intro []byte) bool {
 	candidate, ok := ssu2IntroForStatic(info, static)
 	return ok && bytes.Equal(candidate, intro)
 }
 
-func hasSSU2Static(info netdb.RouterInfo, static []byte) bool {
+func hasSSU2Static(info networkdatabase.RouterInfo, static []byte) bool {
 	_, ok := ssu2IntroForStatic(info, static)
 	return ok
 }
 
-func ssu2IntroForStatic(info netdb.RouterInfo, static []byte) ([]byte, bool) {
+func ssu2IntroForStatic(info networkdatabase.RouterInfo, static []byte) ([]byte, bool) {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -4401,8 +4401,8 @@ func ssu2IntroForStatic(info netdb.RouterInfo, static []byte) ([]byte, bool) {
 				version = append(version[:0], value...)
 			}
 		}
-		decodedStatic, staticErr := ivnp.DecodeI2PBase64(advertisedStatic)
-		decodedIntro, introErr := ivnp.DecodeI2PBase64(intro)
+		decodedStatic, staticErr := foundation.DecodeI2PBase64(advertisedStatic)
+		decodedIntro, introErr := foundation.DecodeI2PBase64(intro)
 		ssu2IntroForStaticRejected := staticErr == nil && introErr == nil && len(decodedStatic) == 32 && len(decodedIntro) == 32 && supportsSSU2Version(string(version))
 		if ssu2IntroForStaticRejected {
 			ssu2IntroForStaticRejected = bytes.Equal(decodedStatic, static)
@@ -4413,7 +4413,7 @@ func ssu2IntroForStatic(info netdb.RouterInfo, static []byte) ([]byte, bool) {
 	}
 }
 
-func selectSSU2Address(info netdb.RouterInfo) (ssu2PeerAddress, error) {
+func selectSSU2Address(info networkdatabase.RouterInfo) (ssu2PeerAddress, error) {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -4450,8 +4450,8 @@ func selectSSU2Address(info netdb.RouterInfo) (ssu2PeerAddress, error) {
 		if err != nil || host == "" || portNumber == 0 || !supportsSSU2Version(version) || net.ParseIP(host) == nil {
 			continue
 		}
-		staticKey, staticErr := ivnp.DecodeI2PBase64([]byte(static))
-		introKey, introErr := ivnp.DecodeI2PBase64([]byte(intro))
+		staticKey, staticErr := foundation.DecodeI2PBase64([]byte(static))
+		introKey, introErr := foundation.DecodeI2PBase64([]byte(intro))
 		if staticErr != nil || introErr != nil || len(staticKey) != 32 || len(introKey) != 32 {
 			continue
 		}

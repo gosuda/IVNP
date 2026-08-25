@@ -1,10 +1,10 @@
-package netdb
+package networkdatabase
 
 import (
 	"bytes"
 	"compress/gzip"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/observability"
@@ -43,14 +43,14 @@ type leaseEntry struct {
 type Database struct {
 	routers   *Table
 	leasesMu  sync.RWMutex
-	leases    map[ivnp.Hash]leaseEntry
+	leases    map[foundation.Hash]leaseEntry
 	maxLeases int
 	gzipPool  sync.Pool
 	metrics   *observability.Registry
 }
 
-func NewDatabase(local ivnp.Hash, bucketCapacity int) *Database {
-	return &Database{routers: NewTable(local, bucketCapacity), leases: make(map[ivnp.Hash]leaseEntry), maxLeases: 4096}
+func NewDatabase(local foundation.Hash, bucketCapacity int) *Database {
+	return &Database{routers: NewTable(local, bucketCapacity), leases: make(map[foundation.Hash]leaseEntry), maxLeases: 4096}
 }
 
 // SetMetrics installs the daemon-owned metric registry before the database is
@@ -63,7 +63,7 @@ func (d *Database) SetMetrics(metrics *observability.Registry) {
 
 // RoutingKey applies the I2P daily DHT transform SHA256(hash || YYYYMMDD).
 // The date is UTC, matching i2pd CreateRoutingKey.
-func RoutingKey(key ivnp.Hash, nowMillis uint64) ivnp.Hash {
+func RoutingKey(key foundation.Hash, nowMillis uint64) foundation.Hash {
 	date := time.UnixMilli(int64(nowMillis)).UTC()
 	year, month, day := date.Date()
 	var input [40]byte
@@ -76,16 +76,16 @@ func RoutingKey(key ivnp.Hash, nowMillis uint64) ivnp.Hash {
 	input[37] = byte('0' + int(month)%10)
 	input[38] = byte('0' + day/10)
 	input[39] = byte('0' + day%10)
-	return ivnp.Sum(input[:])
+	return foundation.Sum(input[:])
 }
 
 // FloodTargetsAt writes the floodfills closest to key's daily routing key.
-func (d *Database) FloodTargetsAt(dst []RouterRef, key ivnp.Hash, nowMillis uint64) []RouterRef {
+func (d *Database) FloodTargetsAt(dst []RouterRef, key foundation.Hash, nowMillis uint64) []RouterRef {
 	return d.routers.ClosestFloodfillsInto(dst, RoutingKey(key, nowMillis))
 }
 
 // FloodTargets writes the current UTC day's closest floodfill peers.
-func (d *Database) FloodTargets(dst []RouterRef, key ivnp.Hash) []RouterRef {
+func (d *Database) FloodTargets(dst []RouterRef, key foundation.Hash) []RouterRef {
 	return d.FloodTargetsAt(dst, key, uint64(time.Now().UnixMilli()))
 }
 
@@ -323,7 +323,7 @@ func (d *Database) storeEncryptedLeaseSet(store i2np.DatabaseStoreMessage, seenA
 }
 
 // LeaseSet returns the newest legacy LeaseSet for key, when one is stored.
-func (d *Database) LeaseSet(key ivnp.Hash) (LeaseSet, bool) {
+func (d *Database) LeaseSet(key foundation.Hash) (LeaseSet, bool) {
 	d.leasesMu.RLock()
 	entry, ok := d.leases[key]
 	d.leasesMu.RUnlock()
@@ -331,7 +331,7 @@ func (d *Database) LeaseSet(key ivnp.Hash) (LeaseSet, bool) {
 }
 
 // LeaseSet2 returns the newest LS2 for key, when one is stored.
-func (d *Database) LeaseSet2(key ivnp.Hash) (LeaseSet2, bool) {
+func (d *Database) LeaseSet2(key foundation.Hash) (LeaseSet2, bool) {
 	d.leasesMu.RLock()
 	entry, ok := d.leases[key]
 	d.leasesMu.RUnlock()
@@ -339,7 +339,7 @@ func (d *Database) LeaseSet2(key ivnp.Hash) (LeaseSet2, bool) {
 }
 
 // MetaLeaseSet returns the newest meta LeaseSet for key, when one is stored.
-func (d *Database) MetaLeaseSet(key ivnp.Hash) (MetaLeaseSet, bool) {
+func (d *Database) MetaLeaseSet(key foundation.Hash) (MetaLeaseSet, bool) {
 	d.leasesMu.RLock()
 	entry, ok := d.leases[key]
 	d.leasesMu.RUnlock()
@@ -347,16 +347,16 @@ func (d *Database) MetaLeaseSet(key ivnp.Hash) (MetaLeaseSet, bool) {
 }
 
 // EncryptedLeaseSet returns the newest encrypted LeaseSet for key.
-func (d *Database) EncryptedLeaseSet(key ivnp.Hash) (EncryptedLeaseSet, bool) {
+func (d *Database) EncryptedLeaseSet(key foundation.Hash) (EncryptedLeaseSet, bool) {
 	d.leasesMu.RLock()
 	entry, ok := d.leases[key]
 	d.leasesMu.RUnlock()
 	return entry.encrypted, ok && entry.typeID == i2np.StoreEncryptedLeaseSet
 }
 
-func (d *Database) storeLeaseEntry(key ivnp.Hash, entry leaseEntry) {
+func (d *Database) storeLeaseEntry(key foundation.Hash, entry leaseEntry) {
 	if len(d.leases) == d.maxLeases {
-		var oldestKey ivnp.Hash
+		var oldestKey foundation.Hash
 		var oldest uint64 = ^uint64(0)
 		for candidate, existing := range d.leases {
 			if existing.expires < oldest {

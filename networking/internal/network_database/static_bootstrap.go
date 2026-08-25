@@ -1,21 +1,21 @@
-package netdb
+package networkdatabase
 
-import state "gosuda.org/ivnp/state"
+import "gosuda.org/ivnp/state"
 
 import (
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 )
 
 // LoadStaticRouterInfos loads exact signed RouterInfo files into database. Every
 // configured file is required to parse, verify, and satisfy the live transport
 // freshness window; callers should invoke it after durable NetDB restoration
 // and before starting network reseed.
-func LoadStaticRouterInfos(paths []string, database *Database, nowMillis uint64) ([]ivnp.Hash, error) {
+func LoadStaticRouterInfos(paths []string, database *Database, nowMillis uint64) ([]foundation.Hash, error) {
 	if database == nil {
 		return nil, fmt.Errorf("netdb: static bootstrap database is nil")
 	}
-	hashes := make([]ivnp.Hash, 0, len(paths))
+	hashes := make([]foundation.Hash, 0, len(paths))
 	for _, path := range paths {
 		file, _, err := state.FilesystemStoreOpenRegular(path)
 		if err != nil {

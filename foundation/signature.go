@@ -11,7 +11,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"errors"
-	gost "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/pool"
 	"math/big"
 	"sync"
@@ -58,9 +58,9 @@ func VerifySignature(kind SigningKeyType, first, rest, message, signature []byte
 		// reference implementation inherits EdDSA verification unchanged.
 		return ed25519.Verify(ed25519.PublicKey(first), message, signature), nil
 	case SigningGOSTR3410_256:
-		return gost.Verify256(first, message, signature[:32], signature[32:]), nil
+		return cryptography.Verify256(first, message, signature[:32], signature[32:]), nil
 	case SigningGOSTR3410_512:
-		return gost.Verify512(first, message, signature[:64], signature[64:]), nil
+		return cryptography.Verify512(first, message, signature[:64], signature[64:]), nil
 	default:
 		return false, ErrUnsupportedSignature
 	}

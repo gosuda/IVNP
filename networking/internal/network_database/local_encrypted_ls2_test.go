@@ -1,4 +1,4 @@
-package netdb
+package networkdatabase
 
 import (
 	"bytes"
@@ -6,7 +6,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"testing"
 	"time"
@@ -31,9 +31,9 @@ func (r *elsFailReader) Read(dst []byte) (int, error) {
 	}
 	return n, nil
 }
-func encryptedTestSet(t *testing.T, auth EncryptedLeaseSetAuthorization) (*ivnp.LocalDestination, ivnp.Identity, *LocalEncryptedLeaseSet, uint64) {
+func encryptedTestSet(t *testing.T, auth EncryptedLeaseSetAuthorization) (*foundation.LocalDestination, foundation.Identity, *LocalEncryptedLeaseSet, uint64) {
 	t.Helper()
-	destination, err := ivnp.GenerateEncryptedLocalDestination()
+	destination, err := foundation.GenerateEncryptedLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func encryptedTestSet(t *testing.T, auth EncryptedLeaseSetAuthorization) (*ivnp.
 		t.Fatal(err)
 	}
 	now := uint64(1_750_000_000_000)
-	if err = local.ReplaceInboundLeases([]Lease{{Gateway: ivnp.Hash{1}, TunnelID: 7, EndDate: now + 3_600_000}}); err != nil {
+	if err = local.ReplaceInboundLeases([]Lease{{Gateway: foundation.Hash{1}, TunnelID: 7, EndDate: now + 3_600_000}}); err != nil {
 		t.Fatal(err)
 	}
 	encrypted, err := NewLocalEncryptedLeaseSet(destination, local, auth, nil)
@@ -69,7 +69,7 @@ func TestEncryptedLeaseSetRoundTripAndTampering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if set.SigningType != ivnp.SigningRedDSASHA512Ed25519 || set.Flags != 0 {
+	if set.SigningType != foundation.SigningRedDSASHA512Ed25519 || set.Flags != 0 {
 		t.Fatalf("outer header = %#v", set)
 	}
 	if ok, err := set.Verify(); err != nil || !ok {
@@ -91,7 +91,7 @@ func TestEncryptedLeaseSetRoundTripAndTampering(t *testing.T) {
 	if _, err = DecryptEncryptedLeaseSet(bad, identity, nil, ELSClientAuthorization{}, now+1_000); err == nil {
 		t.Fatal("tampered ELS2 decrypted")
 	}
-	wrong, err := ivnp.GenerateEncryptedLocalDestination()
+	wrong, err := foundation.GenerateEncryptedLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestLocalEncryptedLeaseSetFailureCleanupAndRelease(t *testing.T) {
 	clients := encrypted.dhClients
 	encrypted.random = rand.Reader
 	short := bytes.Repeat([]byte{0xa5}, 63)
-	if _, err = encrypted.MarshalTo(short, now); !errors.Is(err, ivnp.ErrDestinationSmall) {
+	if _, err = encrypted.MarshalTo(short, now); !errors.Is(err, foundation.ErrDestinationSmall) {
 		t.Fatalf("MarshalTo short outer destination = %v", err)
 	}
 	for _, value := range short {
@@ -221,7 +221,7 @@ func TestLeaseSetPublisherCloseReleasesSensitiveOwners(t *testing.T) {
 	encrypted.secret = append(encrypted.secret, []byte("publisher-secret")...)
 	secret := encrypted.secret
 	publisher, err := NewLeaseSetPublisher(LeaseSetPublisherConfig{
-		Encrypted: encrypted, Database: NewDatabase(ivnp.Hash{}, DefaultBucketCapacity),
+		Encrypted: encrypted, Database: NewDatabase(foundation.Hash{}, DefaultBucketCapacity),
 		InboundLeases: InboundLeaseSourceFunc(func(uint64) []Lease { return nil }),
 		Sender:        LeaseSetPublishSenderFunc(func(context.Context, RouterRef, i2np.Message) error { return nil }),
 		Now:           func() uint64 { return now }, Random: func() uint32 { return 1 }, FloodfillLimit: 1,
@@ -249,12 +249,12 @@ func TestLeaseSetPublisherCloseReleasesSensitiveOwners(t *testing.T) {
 func TestEncryptedLeaseSetPublisherUsesConfirmedStoreType(t *testing.T) {
 	destination, _, encrypted, now := encryptedTestSet(t, EncryptedLeaseSetAuthorization{})
 	defer destination.ReleaseSensitive()
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	publisher, err := NewLeaseSetPublisher(LeaseSetPublisherConfig{
 		Encrypted: encrypted,
 		Database:  database,
 		InboundLeases: InboundLeaseSourceFunc(func(uint64) []Lease {
-			return []Lease{{Gateway: ivnp.Hash{1}, TunnelID: 7, EndDate: now + 3_600_000}}
+			return []Lease{{Gateway: foundation.Hash{1}, TunnelID: 7, EndDate: now + 3_600_000}}
 		}),
 		Sender:         LeaseSetPublishSenderFunc(func(_ context.Context, _ RouterRef, _ i2np.Message) error { return nil }),
 		Now:            func() uint64 { return now },
@@ -271,7 +271,7 @@ func TestEncryptedLeaseSetPublisherUsesConfirmedStoreType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored, ok := database.EncryptedLeaseSet(hash); !ok || stored.SigningType != ivnp.SigningRedDSASHA512Ed25519 {
+	if stored, ok := database.EncryptedLeaseSet(hash); !ok || stored.SigningType != foundation.SigningRedDSASHA512Ed25519 {
 		t.Fatal("encrypted publication was not stored under blinded key")
 	}
 }

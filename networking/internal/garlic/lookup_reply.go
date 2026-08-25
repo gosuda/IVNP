@@ -5,7 +5,6 @@ import "cmp"
 import (
 	"encoding/binary"
 	"errors"
-
 	"gosuda.org/ivnp/networking/internal/garlic/ecies"
 	"gosuda.org/ivnp/networking/internal/i2np"
 )
@@ -63,7 +62,7 @@ func (wrapper DatabaseLookupReplyWrapper) WrapDatabaseLookupReply(lookup i2np.Da
 		defer clear(key[:])
 		capacity := 8 + 3 + 10 + len(reply.Payload) + 16
 		encrypted = make([]byte, capacity)
-		sealed, err := ecies.SealOneTimeReplyExistingSession(encrypted, key, tag, reply, nil)
+		sealed, err := garlicecies.SealOneTimeReplyExistingSession(encrypted, key, tag, reply, nil)
 		if err != nil {
 			clear(encrypted)
 			return i2np.Message{}, err

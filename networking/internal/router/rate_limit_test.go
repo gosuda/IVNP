@@ -2,7 +2,7 @@ package router
 
 import (
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"net"
 	"runtime"
@@ -106,7 +106,7 @@ func TestRateLimiterDistributesIPv4SourcesAcrossCapacity(t *testing.T) {
 
 func TestServiceRateLimitsInvalidI2NPByPeer(t *testing.T) {
 	service := NewService(nil)
-	var attacker, peer ivnp.Hash
+	var attacker, peer foundation.Hash
 	attacker[0] = 1
 	peer[0] = 2
 	message := i2np.Message{

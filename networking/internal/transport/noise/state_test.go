@@ -3,7 +3,7 @@ package noise
 import (
 	"bytes"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"math"
 	"testing"
 )
@@ -71,10 +71,10 @@ func TestSymmetricStateReleaseZeroizesAndRejectsUse(t *testing.T) {
 	if cipher == nil {
 		t.Fatal("released Noise child cipher was lost")
 	}
-	if _, err := cipher.SealTo(make([]byte, cryptx.ChaChaTagSize), make([]byte, cryptx.ChaChaNonceSize), nil, nil); !errors.Is(err, cryptx.ErrSensitiveReleased) {
+	if _, err := cipher.SealTo(make([]byte, cryptography.ChaChaTagSize), make([]byte, cryptography.ChaChaNonceSize), nil, nil); !errors.Is(err, cryptography.ErrSensitiveReleased) {
 		t.Fatalf("released Noise child cipher remained usable: %v", err)
 	}
-	if _, err := state.EncryptAndHash(make([]byte, 16), nil); !errors.Is(err, cryptx.ErrSensitiveReleased) {
+	if _, err := state.EncryptAndHash(make([]byte, 16), nil); !errors.Is(err, cryptography.ErrSensitiveReleased) {
 		t.Fatalf("EncryptAndHash after release = %v", err)
 	}
 }

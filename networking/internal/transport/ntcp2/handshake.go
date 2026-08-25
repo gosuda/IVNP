@@ -8,7 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
 	"gosuda.org/ivnp/networking/internal/transport/noise"
 	"io"
@@ -543,7 +543,7 @@ func (r *Responder) clearHandshake() {
 
 func newDataSession(conn net.Conn, state *noise.SymmetricState, initiator bool) (*Session, error) {
 	if state == nil {
-		return nil, cryptx.ErrSensitiveReleased
+		return nil, cryptography.ErrSensitiveReleased
 	}
 	chainingKey, handshakeHash := state.ChainingKey(), state.Hash()
 	temp := hmac256(chainingKey[:], nil, nil, nil)

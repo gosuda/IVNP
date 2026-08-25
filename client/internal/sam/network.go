@@ -12,7 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"net"
 	"sort"
 	"strconv"
@@ -38,11 +38,11 @@ type Config struct {
 	Address          string
 	ID               string
 	Destination      string
-	LeaseSetEncTypes []ivnp.CryptoKeyType
+	LeaseSetEncTypes []foundation.CryptoKeyType
 	// LeaseSetType is the I2CP LeaseSet type requested from the router. Zero
 	// leaves the router default unchanged; 3 requests LeaseSet2.
 	LeaseSetType  uint8
-	SignatureType ivnp.SigningKeyType
+	SignatureType foundation.SigningKeyType
 	// SessionOptions carries validated I2CP tunnel options to the external
 	// router. It is intended for standard options such as explicitPeers and
 	// inbound/outbound length; values containing SAM token separators fail New.
@@ -82,13 +82,13 @@ func New(cfg Config) (*Network, error) {
 		return nil, ErrAddress
 	}
 	if cfg.SignatureType == 0 {
-		cfg.SignatureType = ivnp.SigningEdDSASHA512Ed25519
+		cfg.SignatureType = foundation.SigningEdDSASHA512Ed25519
 	}
 	if len(cfg.LeaseSetEncTypes) == 0 {
-		cfg.LeaseSetEncTypes = []ivnp.CryptoKeyType{ivnp.CryptoX25519}
+		cfg.LeaseSetEncTypes = []foundation.CryptoKeyType{foundation.CryptoX25519}
 	}
 	for _, cryptoType := range cfg.LeaseSetEncTypes {
-		if cryptoType != ivnp.CryptoX25519 && cryptoType != ivnp.CryptoMLKEM768X25519 && cryptoType != ivnp.CryptoMLKEM1024X25519 {
+		if cryptoType != foundation.CryptoX25519 && cryptoType != foundation.CryptoMLKEM768X25519 && cryptoType != foundation.CryptoMLKEM1024X25519 {
 			return nil, ErrAddress
 		}
 	}
@@ -619,7 +619,7 @@ func parseListenAddress(address string) (string, int, error) {
 	return host, int(value), nil
 }
 
-func cryptoTypes(types []ivnp.CryptoKeyType) string {
+func cryptoTypes(types []foundation.CryptoKeyType) string {
 	values := make([]string, len(types))
 	for index, cryptoType := range types {
 		values[index] = strconv.Itoa(int(cryptoType))
@@ -651,7 +651,7 @@ func publicAddress(privateDestination string) (string, samAddr, error) {
 	if err != nil {
 		return "", samAddr{}, err
 	}
-	identity, used, err := ivnp.ParseIdentity(decoded[:n])
+	identity, used, err := foundation.ParseIdentity(decoded[:n])
 	if err != nil || used == 0 {
 		return "", samAddr{}, ErrProtocol
 	}

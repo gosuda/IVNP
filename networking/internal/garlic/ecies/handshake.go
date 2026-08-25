@@ -1,10 +1,10 @@
-package ecies
+package garlicecies
 
 import (
 	"bytes"
 	"crypto/ecdh"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
 	"gosuda.org/ivnp/networking/internal/transport/noise"
 	"io"
@@ -37,8 +37,8 @@ type Initiator struct {
 	created      bool
 	closed       bool
 	splitRoot    [32]byte
-	splitSend    *cryptx.ChaCha20Poly1305
-	splitReceive *cryptx.ChaCha20Poly1305
+	splitSend    *cryptography.ChaCha20Poly1305
+	splitReceive *cryptography.ChaCha20Poly1305
 	splitReady   bool
 }
 
@@ -54,8 +54,8 @@ type Responder struct {
 	parsed         bool
 	closed         bool
 	splitRoot      [32]byte
-	splitSend      *cryptx.ChaCha20Poly1305
-	splitReceive   *cryptx.ChaCha20Poly1305
+	splitSend      *cryptography.ChaCha20Poly1305
+	splitReceive   *cryptography.ChaCha20Poly1305
 	splitReady     bool
 }
 
@@ -139,7 +139,7 @@ func newInitiator(staticPrivate, remoteStatic []byte, cryptoType uint16, bound b
 	// Java's IKelg2+hs2 engine mixes the raw responder static key here. The
 	// hs2 name does not change this pre-message input in Java I2P.
 	state.MixHash(remote.Bytes())
-	ephemeral, encoded, err := cryptx.GenerateElligator2X25519(random)
+	ephemeral, encoded, err := cryptography.GenerateElligator2X25519(random)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +242,7 @@ func (h *Responder) ParseNewSession(src, payloadDst []byte) ([]byte, error) {
 	}
 	curve := ecdh.X25519()
 	var decoded [32]byte
-	if err := cryptx.DecodeElligator2(decoded[:], src[:newSessionEphemeralLen]); err != nil {
+	if err := cryptography.DecodeElligator2(decoded[:], src[:newSessionEphemeralLen]); err != nil {
 		h.ReleaseSensitive()
 		return nil, err
 	}
@@ -330,7 +330,7 @@ func (h *Responder) CreateReply(dst []byte, tag [replyTagLen]byte, payload []byt
 	}
 	copy(dst[:replyTagLen], tag[:])
 	h.state.MixHash(tag[:])
-	ephemeral, encoded, err := cryptx.GenerateElligator2X25519(nil)
+	ephemeral, encoded, err := cryptography.GenerateElligator2X25519(nil)
 	if err != nil {
 		h.ReleaseSensitive()
 		return 0, err
@@ -376,8 +376,8 @@ func (h *Responder) CreateReply(dst []byte, tag [replyTagLen]byte, payload []byt
 		return 0, err
 	}
 	defer clear(attachKey[:])
-	var nonce [cryptx.ChaChaNonceSize]byte
-	if _, err = cryptx.SealChaCha20Poly1305To(dst[off:total], attachKey[:], nonce[:], payload, hash[:]); err != nil {
+	var nonce [cryptography.ChaChaNonceSize]byte
+	if _, err = cryptography.SealChaCha20Poly1305To(dst[off:total], attachKey[:], nonce[:], payload, hash[:]); err != nil {
 		h.ReleaseSensitive()
 		return 0, err
 	}
@@ -397,7 +397,7 @@ func (h *Initiator) ParseReply(src, payloadDst []byte) ([]byte, error) {
 	tag := src[:replyTagLen]
 	h.state.MixHash(tag)
 	var decoded [32]byte
-	if err := cryptx.DecodeElligator2(decoded[:], src[replyTagLen:replyTagLen+newSessionEphemeralLen]); err != nil {
+	if err := cryptography.DecodeElligator2(decoded[:], src[replyTagLen:replyTagLen+newSessionEphemeralLen]); err != nil {
 		h.ReleaseSensitive()
 		return nil, err
 	}
@@ -453,8 +453,8 @@ func (h *Initiator) ParseReply(src, payloadDst []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer clear(attachKey[:])
-	var nonce [cryptx.ChaChaNonceSize]byte
-	payload, err := cryptx.OpenChaCha20Poly1305To(payloadDst, attachKey[:], nonce[:], src[off:], hash[:])
+	var nonce [cryptography.ChaChaNonceSize]byte
+	payload, err := cryptography.OpenChaCha20Poly1305To(payloadDst, attachKey[:], nonce[:], src[off:], hash[:])
 	if err != nil {
 		h.ReleaseSensitive()
 		return nil, handshakeError(err)
@@ -464,14 +464,14 @@ func (h *Initiator) ParseReply(src, payloadDst []byte) ([]byte, error) {
 
 // Split consumes a completed initiator handshake and returns the directional
 // data-phase ciphers in send, receive order.
-func (h *Initiator) Split() (send, receive *cryptx.ChaCha20Poly1305, err error) {
+func (h *Initiator) Split() (send, receive *cryptography.ChaCha20Poly1305, err error) {
 	_, send, receive, err = h.SplitWithRoot()
 	return send, receive, err
 }
 
 // SplitWithRoot additionally returns the post-handshake chaining key required
 // as the root key for both initial ratchet tag sets.
-func (h *Initiator) SplitWithRoot() (root [32]byte, send, receive *cryptx.ChaCha20Poly1305, err error) {
+func (h *Initiator) SplitWithRoot() (root [32]byte, send, receive *cryptography.ChaCha20Poly1305, err error) {
 	if h == nil || h.closed || !h.splitReady || h.splitSend == nil || h.splitReceive == nil {
 		return root, nil, nil, ErrHandshakeClosed
 	}
@@ -486,14 +486,14 @@ func (h *Initiator) SplitWithRoot() (root [32]byte, send, receive *cryptx.ChaCha
 
 // Split consumes a successfully parsed responder handshake and returns its
 // directional data-phase ciphers in send, receive order.
-func (h *Responder) Split() (send, receive *cryptx.ChaCha20Poly1305, err error) {
+func (h *Responder) Split() (send, receive *cryptography.ChaCha20Poly1305, err error) {
 	_, send, receive, err = h.SplitWithRoot()
 	return send, receive, err
 }
 
 // SplitWithRoot returns the same post-handshake chaining key as the initiator.
 // Noise Split is initiator ordered, so responder cipher ownership is reversed.
-func (h *Responder) SplitWithRoot() (root [32]byte, send, receive *cryptx.ChaCha20Poly1305, err error) {
+func (h *Responder) SplitWithRoot() (root [32]byte, send, receive *cryptography.ChaCha20Poly1305, err error) {
 	if h == nil || h.closed || !h.splitReady || h.splitSend == nil || h.splitReceive == nil {
 		return root, nil, nil, ErrHandshakeClosed
 	}
@@ -505,7 +505,7 @@ func (h *Responder) SplitWithRoot() (root [32]byte, send, receive *cryptx.ChaCha
 	return root, send, receive, nil
 }
 
-func deriveAttachPayloadKey(cipher *cryptx.ChaCha20Poly1305) ([32]byte, error) {
+func deriveAttachPayloadKey(cipher *cryptography.ChaCha20Poly1305) ([32]byte, error) {
 	var key [32]byte
 	if cipher == nil {
 		return key, ErrHandshake
@@ -565,7 +565,7 @@ func protocolName(cryptoType uint16) (string, error) {
 	if cryptoType == 4 {
 		return "Noise_IKelg2+hs2_25519_ChaChaPoly_SHA256", nil
 	}
-	params, known := cryptx.Parameters(cryptoType)
+	params, known := cryptography.Parameters(cryptoType)
 	if !known {
 		return "", ErrHandshake
 	}

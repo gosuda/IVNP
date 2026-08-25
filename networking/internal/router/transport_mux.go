@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/network_database"
 	"gosuda.org/ivnp/networking/internal/tunnel"
@@ -27,7 +27,7 @@ var (
 // Send so transport selection is based only on a RouterInfo admitted by netdb.
 // Either manager may be nil, but not both.
 type TransportMuxConfig struct {
-	Database *netdb.Database
+	Database *networkdatabase.Database
 	NTCP2    TransportManager
 	SSU2     TransportManager
 }
@@ -40,7 +40,7 @@ type TransportMuxConfig struct {
 // peer could not be reached. It never retries an error from an attempted
 // message write because delivery may then be ambiguous.
 type TransportMux struct {
-	database *netdb.Database
+	database *networkdatabase.Database
 	ntcp2    TransportManager
 	ssu2     TransportManager
 
@@ -185,7 +185,7 @@ func (m *TransportMux) Status() TransportStatus {
 // Send synchronously delegates the borrowed message to a compatible transport.
 // NTCP2 is preferred where both verified RouterInfo capabilities are present;
 // SSU2 is tried only after an establishment or reachability failure.
-func (m *TransportMux) Send(ctx context.Context, peer ivnp.Hash, message i2np.Message) error {
+func (m *TransportMux) Send(ctx context.Context, peer foundation.Hash, message i2np.Message) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -211,7 +211,7 @@ func (m *TransportMux) Send(ctx context.Context, peer ivnp.Hash, message i2np.Me
 
 // EnsureSession authenticates one selected public transport without sending an
 // I2NP message. The same pre-delivery fallback rules as Send apply.
-func (m *TransportMux) EnsureSession(ctx context.Context, peer ivnp.Hash) error {
+func (m *TransportMux) EnsureSession(ctx context.Context, peer foundation.Hash) error {
 	if ctx ==
 		nil {
 		ctx = context.Background()
@@ -237,7 +237,7 @@ func (m *TransportMux) EnsureSession(ctx context.Context, peer ivnp.Hash) error 
 	return nil
 }
 
-func ensureTransportSession(ctx context.Context, manager TransportManager, peer ivnp.Hash) error {
+func ensureTransportSession(ctx context.Context, manager TransportManager, peer foundation.Hash) error {
 	ensurer, ok := manager.(tunnel.SessionEnsurer)
 	if !ok {
 		return nil
@@ -262,7 +262,7 @@ func (m *TransportMux) UsableRemoteRouterInfos(now time.Time) int {
 	_, peers := m.database.Routers().Snapshot()
 	count := 0
 	for _, peer := range peers {
-		if netdb.ReseedRouterInfoFresh(peer.Info, nowMillis) != nil {
+		if networkdatabase.ReseedRouterInfoFresh(peer.Info, nowMillis) != nil {
 			continue
 		}
 		if m.ntcp2 != nil && ntcp2RouterInfoCapable(peer.Info, nowMillis) {
@@ -279,7 +279,7 @@ func (m *TransportMux) UsableRemoteRouterInfos(now time.Time) int {
 // CanSend reports whether the current verified RouterInfo has an address usable
 // by one of this mux's configured transports. Control-plane selectors use it to
 // avoid scheduling publication and tunnel work that cannot leave the process.
-func (m *TransportMux) CanSend(peer ivnp.Hash) bool {
+func (m *TransportMux) CanSend(peer foundation.Hash) bool {
 	if m == nil {
 		return false
 	}
@@ -287,14 +287,14 @@ func (m *TransportMux) CanSend(peer ivnp.Hash) bool {
 	return ok
 }
 
-func (m *TransportMux) selectManagers(peer ivnp.Hash) (TransportManager, TransportManager, bool) {
+func (m *TransportMux) selectManagers(peer foundation.Hash) (TransportManager, TransportManager, bool) {
 	ref, ok := m.database.Routers().Get(peer)
 	if !ok {
 		return nil, nil, false
 	}
 	now := time.Now()
 	nowMillis := uint64(now.UnixMilli())
-	if err := netdb.ReseedRouterInfoFresh(ref.Info, nowMillis); err != nil {
+	if err := networkdatabase.ReseedRouterInfoFresh(ref.Info, nowMillis); err != nil {
 		return nil, nil, false
 	}
 
@@ -316,14 +316,14 @@ func (m *TransportMux) selectManagers(peer ivnp.Hash) (TransportManager, Transpo
 	}
 }
 
-func ntcp2RouterInfoCapable(info netdb.RouterInfo, nowMillis uint64) bool {
+func ntcp2RouterInfoCapable(info networkdatabase.RouterInfo, nowMillis uint64) bool {
 	if _, err := selectNTCP2Address(info); err != nil {
 		return false
 	}
 	return hasCurrentTransportAddress(info, nowMillis, []byte("NTCP"), []byte("NTCP2"))
 }
 
-func ssu2RouterInfoCapable(info netdb.RouterInfo, now uint64) bool {
+func ssu2RouterInfoCapable(info networkdatabase.RouterInfo, now uint64) bool {
 	if _, err := selectSSU2Keys(info); err != nil {
 		return false
 	}
@@ -334,7 +334,7 @@ func ssu2RouterInfoCapable(info netdb.RouterInfo, now uint64) bool {
 	return len(selectSSU2Introducers(info, now)) != 0
 }
 
-func hasCurrentTransportAddress(info netdb.RouterInfo, nowMillis uint64, first, second []byte) bool {
+func hasCurrentTransportAddress(info networkdatabase.RouterInfo, nowMillis uint64, first, second []byte) bool {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -369,6 +369,6 @@ func IsRetryableTransportError(err error) bool {
 	return errors.As(err, &operation) && operation.Op == "dial"
 }
 
-func routerHashDiagnostic(hash ivnp.Hash) string {
-	return ivnp.EncodeI2PBase64(hash[:])
+func routerHashDiagnostic(hash foundation.Hash) string {
+	return foundation.EncodeI2PBase64(hash[:])
 }

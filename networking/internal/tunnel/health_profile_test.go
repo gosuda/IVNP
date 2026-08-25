@@ -3,7 +3,7 @@ package tunnel
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"testing"
 	"time"
@@ -11,7 +11,7 @@ import (
 
 func TestPeerProfilesBoundHistoryAndScoreDeterministically(t *testing.T) {
 	profiles := NewPeerProfiles(PeerProfilesConfig{MaxPeers: 2, Window: 2})
-	var peer ivnp.Hash
+	var peer foundation.Hash
 	peer[0] = 1
 	profiles.RecordSuccess(peer, 30)
 	profiles.RecordFailure(peer)
@@ -32,7 +32,7 @@ func TestPeerProfilesBoundHistoryAndScoreDeterministically(t *testing.T) {
 
 func TestPeerProfilesPreserveAuthenticatedBuildCompatibilityAcrossAmbiguousDeliveryLoss(t *testing.T) {
 	profiles := NewPeerProfiles(PeerProfilesConfig{Window: 8})
-	peer := ivnp.Hash{1}
+	peer := foundation.Hash{1}
 	profiles.Record(peer, Observation{Kind: BuildObservation, Success: true})
 	for range 4 {
 		profiles.Record(peer, Observation{Kind: DeliveryObservation})
@@ -55,7 +55,7 @@ func TestHealthProbeCorrelatesStatusAndExpiresFailures(t *testing.T) {
 	sender := new(captureTunnelSender)
 	runtime := NewRuntime(RuntimeConfig{Sender: sender, Now: func() uint64 { return now }})
 	pool := NewPool(2)
-	if err := runtime.RegisterOutbound(OutboundCircuit{ID: 1, FirstHop: ivnp.Hash{9}, NextTunnelID: 2, ExpiresAt: now + 1_000}); err != nil {
+	if err := runtime.RegisterOutbound(OutboundCircuit{ID: 1, FirstHop: foundation.Hash{9}, NextTunnelID: 2, ExpiresAt: now + 1_000}); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.Add(Entry{ID: 1, Direction: Outbound, Expires: now + 1_000}, now); err != nil {
@@ -77,8 +77,8 @@ func TestHealthProbeCorrelatesStatusAndExpiresFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer := ivnp.Hash{7}
-	pair := CircuitPair{OutboundID: 1, InboundID: 3, ReplyRouter: ivnp.Hash{8}}
+	peer := foundation.Hash{7}
+	pair := CircuitPair{OutboundID: 1, InboundID: 3, ReplyRouter: foundation.Hash{8}}
 	id, err := health.Probe(context.Background(), pair, peer)
 	if err != nil || id == 0 || health.Pending() != 1 {
 		t.Fatalf("Probe() = %d, %v; pending=%d", id, err, health.Pending())
@@ -103,7 +103,7 @@ func TestHealthProbeCorrelatesStatusAndExpiresFailures(t *testing.T) {
 	if _, ok := pool.Get(1, now); !ok || source.calls != 1 {
 		t.Fatalf("failed replacement retained tunnel=%t replacement calls=%d", ok, source.calls)
 	}
-	if owner, ok := runtime.CircuitOwner(1); !ok || owner != (ivnp.Hash{}) {
+	if owner, ok := runtime.CircuitOwner(1); !ok || owner != (foundation.Hash{}) {
 		t.Fatalf("failed replacement removed runtime circuit: owner=%x present=%t", owner, ok)
 	}
 	if profile, ok := profiles.Snapshot(peer); !ok || profile.Failures != 1 {
@@ -127,9 +127,9 @@ func TestHealthExpiryPreservesCircuitWithBidirectionalTraffic(t *testing.T) {
 	now := uint64(1_000)
 	sender := new(captureTunnelSender)
 	runtime := NewRuntime(RuntimeConfig{Sender: sender, Now: func() uint64 { return now }})
-	owner := ivnp.Hash{1}
+	owner := foundation.Hash{1}
 	pool := NewOwnedPool(owner, 2)
-	if err := runtime.RegisterOutbound(OutboundCircuit{ID: 1, Owner: owner, FirstHop: ivnp.Hash{9}, NextTunnelID: 3, ExpiresAt: now + 1_000}); err != nil {
+	if err := runtime.RegisterOutbound(OutboundCircuit{ID: 1, Owner: owner, FirstHop: foundation.Hash{9}, NextTunnelID: 3, ExpiresAt: now + 1_000}); err != nil {
 		t.Fatal(err)
 	}
 	delivered := 0
@@ -165,8 +165,8 @@ func TestHealthExpiryPreservesCircuitWithBidirectionalTraffic(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = health.Close() })
 
-	pair := CircuitPair{OutboundID: 1, InboundID: 700, InboundLocalID: 3, ReplyRouter: ivnp.Hash{8}}
-	if _, err = health.Probe(context.Background(), pair, ivnp.Hash{7}); !errors.Is(err, ErrProbeNotReady) {
+	pair := CircuitPair{OutboundID: 1, InboundID: 700, InboundLocalID: 3, ReplyRouter: foundation.Hash{8}}
+	if _, err = health.Probe(context.Background(), pair, foundation.Hash{7}); !errors.Is(err, ErrProbeNotReady) {
 		t.Fatalf("Probe before traffic = %v, want %v", err, ErrProbeNotReady)
 	}
 	sendTraffic := func(messageID uint32) {
@@ -183,7 +183,7 @@ func TestHealthExpiryPreservesCircuitWithBidirectionalTraffic(t *testing.T) {
 		}
 	}
 	sendTraffic(98)
-	if _, err = health.Probe(context.Background(), pair, ivnp.Hash{7}); err != nil {
+	if _, err = health.Probe(context.Background(), pair, foundation.Hash{7}); err != nil {
 		t.Fatal(err)
 	}
 	if sent := sender.take(); len(sent) != 1 {
@@ -214,7 +214,7 @@ func TestHealthCloseCancelsAndJoinsActiveProbe(t *testing.T) {
 	sender := &cancelingBuildSender{entered: make(chan struct{})}
 	runtime := NewRuntime(RuntimeConfig{Sender: sender, Now: func() uint64 { return now }})
 	pool := NewPool(2)
-	if err := runtime.RegisterOutbound(OutboundCircuit{ID: 1, FirstHop: ivnp.Hash{9}, NextTunnelID: 2, ExpiresAt: now + 1_000}); err != nil {
+	if err := runtime.RegisterOutbound(OutboundCircuit{ID: 1, FirstHop: foundation.Hash{9}, NextTunnelID: 2, ExpiresAt: now + 1_000}); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.Add(Entry{ID: 1, Direction: Outbound, Expires: now + 1_000}, now); err != nil {
@@ -240,7 +240,7 @@ func TestHealthCloseCancelsAndJoinsActiveProbe(t *testing.T) {
 	}
 	probed := make(chan error, 1)
 	go func() {
-		_, probeErr := health.Probe(context.Background(), CircuitPair{OutboundID: 1, InboundID: 3, ReplyRouter: ivnp.Hash{8}}, ivnp.Hash{7})
+		_, probeErr := health.Probe(context.Background(), CircuitPair{OutboundID: 1, InboundID: 3, ReplyRouter: foundation.Hash{8}}, foundation.Hash{7})
 		probed <- probeErr
 	}()
 	select {
@@ -274,9 +274,9 @@ func TestDestinationHealthStateAndRotationAreIndependent(t *testing.T) {
 		health   *Health
 		source   *rotationSource
 	}
-	newOwner := func(owner ivnp.Hash, circuitID uint32) healthOwner {
+	newOwner := func(owner foundation.Hash, circuitID uint32) healthOwner {
 		pool := NewOwnedPool(owner, 2)
-		if err := runtime.RegisterOutbound(OutboundCircuit{ID: circuitID, Owner: owner, FirstHop: ivnp.Hash{9}, NextTunnelID: circuitID + 10, ExpiresAt: now + 1_000}); err != nil {
+		if err := runtime.RegisterOutbound(OutboundCircuit{ID: circuitID, Owner: owner, FirstHop: foundation.Hash{9}, NextTunnelID: circuitID + 10, ExpiresAt: now + 1_000}); err != nil {
 			t.Fatal(err)
 		}
 		if err := pool.Add(Entry{ID: circuitID, Owner: owner, Direction: Outbound, Expires: now + 1_000}, now); err != nil {
@@ -300,14 +300,14 @@ func TestDestinationHealthStateAndRotationAreIndependent(t *testing.T) {
 		}
 		return healthOwner{pool: pool, profiles: profiles, health: health, source: source}
 	}
-	first := newOwner(ivnp.Hash{1}, 1)
-	second := newOwner(ivnp.Hash{2}, 2)
-	firstPeer, secondPeer := ivnp.Hash{11}, ivnp.Hash{12}
-	firstID, err := first.health.Probe(context.Background(), CircuitPair{OutboundID: 1, InboundID: 21, ReplyRouter: ivnp.Hash{31}}, firstPeer)
+	first := newOwner(foundation.Hash{1}, 1)
+	second := newOwner(foundation.Hash{2}, 2)
+	firstPeer, secondPeer := foundation.Hash{11}, foundation.Hash{12}
+	firstID, err := first.health.Probe(context.Background(), CircuitPair{OutboundID: 1, InboundID: 21, ReplyRouter: foundation.Hash{31}}, firstPeer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondID, err := second.health.Probe(context.Background(), CircuitPair{OutboundID: 2, InboundID: 22, ReplyRouter: ivnp.Hash{32}}, secondPeer)
+	secondID, err := second.health.Probe(context.Background(), CircuitPair{OutboundID: 2, InboundID: 22, ReplyRouter: foundation.Hash{32}}, secondPeer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestDestinationHealthStateAndRotationAreIndependent(t *testing.T) {
 	if _, ok := second.pool.Get(2, now); !ok || second.source.calls != 1 {
 		t.Fatal("failed destination replacement did not retain its last circuit")
 	}
-	if owner, ok := runtime.CircuitOwner(2); !ok || owner != (ivnp.Hash{2}) {
+	if owner, ok := runtime.CircuitOwner(2); !ok || owner != (foundation.Hash{2}) {
 		t.Fatal("failed destination replacement removed its runtime circuit")
 	}
 	if profile, ok := second.profiles.Snapshot(secondPeer); !ok || profile.Failures != 1 {

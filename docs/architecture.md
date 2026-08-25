@@ -7,7 +7,7 @@ IVNP exposes one package root per subsystem. Every subsystem root contains a
 subsystem's `internal` directory. Cross-subsystem code imports only the facade.
 
 ```text
-gosuda.org/ivnp              Stable public facade
+gosuda.org/ivnp/ivnp         Stable public facade
 node                         Complete node composition and durable ownership
 client                       SAM, proxies, address book, and client services
 networking                   Router, tunnels, network database, transports
@@ -22,8 +22,8 @@ internal                     Allocation, wire, relay, and recovery helpers
 
 `architecture_test.go` loads production and test imports with `go list`,
 rejects upward edges, rejects cross-subsystem `internal` imports, and verifies
-every subsystem facade file. Only subsystem roots and `gosuda.org/ivnp` are
-stable public import paths.
+every subsystem facade file. Only subsystem roots and
+`gosuda.org/ivnp/ivnp` are stable public import paths.
 
 `foundation` owns common wire structures: certificates, key certificates,
 identities, mappings, hashes, local Destinations, and signatures.

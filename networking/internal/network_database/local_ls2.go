@@ -1,9 +1,9 @@
-package netdb
+package networkdatabase
 
 import (
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"sync"
 )
@@ -14,54 +14,54 @@ var ErrLocalLeaseSet2 = errors.New("netdb: invalid local LeaseSet2")
 // ECIES local Destination. It deliberately has no transport or tunnel-global
 // state: its caller supplies only that Destination's inbound lease source.
 type LocalLeaseSet2 struct {
-	identity ivnp.Identity
-	hash     ivnp.Hash
+	identity foundation.Identity
+	hash     foundation.Hash
 	public   [32]byte
-	types    []ivnp.CryptoKeyType
+	types    []foundation.CryptoKeyType
 	mu       sync.RWMutex
 	leases   []Lease2
 }
 
-func NewLocalLeaseSet2(destination *ivnp.LocalDestination) (*LocalLeaseSet2, error) {
+func NewLocalLeaseSet2(destination *foundation.LocalDestination) (*LocalLeaseSet2, error) {
 	return NewLocalLeaseSet2WithTypes(destination, nil)
 }
 
 // NewLocalLeaseSet2WithTypes publishes exactly the requested ordered subset of
 // the destination's locally-supported encryption types.
-func NewLocalLeaseSet2WithTypes(destination *ivnp.LocalDestination, requested []ivnp.CryptoKeyType) (*LocalLeaseSet2, error) {
+func NewLocalLeaseSet2WithTypes(destination *foundation.LocalDestination, requested []foundation.CryptoKeyType) (*LocalLeaseSet2, error) {
 	if destination == nil {
 		return nil, ErrLocalLeaseSet2
 	}
 	identity, err := destination.Identity()
-	newLocalLeaseSet2WithTypesRejected := err != nil || (identity.CryptoKeyType() != ivnp.CryptoX25519 && identity.CryptoKeyType() != ivnp.CryptoElGamal) ||
-		(identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519 && identity.SigningKeyType() != ivnp.SigningRedDSASHA512Ed25519)
+	newLocalLeaseSet2WithTypesRejected := err != nil || (identity.CryptoKeyType() != foundation.CryptoX25519 && identity.CryptoKeyType() != foundation.CryptoElGamal) ||
+		(identity.SigningKeyType() != foundation.SigningEdDSASHA512Ed25519 && identity.SigningKeyType() != foundation.SigningRedDSASHA512Ed25519)
 	if !newLocalLeaseSet2WithTypesRejected {
-		newLocalLeaseSet2WithTypesRejected = (identity.CryptoKeyType() == ivnp.CryptoElGamal && identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519)
+		newLocalLeaseSet2WithTypesRejected = (identity.CryptoKeyType() == foundation.CryptoElGamal && identity.SigningKeyType() != foundation.SigningEdDSASHA512Ed25519)
 	}
 	if newLocalLeaseSet2WithTypesRejected {
 		return nil, ErrLocalLeaseSet2
 	}
 	raw := append([]byte(nil), identity.Bytes()...)
-	owned, n, err := ivnp.ParseIdentity(raw)
+	owned, n, err := foundation.ParseIdentity(raw)
 	if err != nil || n != len(raw) {
 		return nil, ErrLocalLeaseSet2
 	}
-	public, err := destination.CryptoPublic(ivnp.CryptoX25519)
+	public, err := destination.CryptoPublic(foundation.CryptoX25519)
 	if err != nil {
 		return nil, ErrLocalLeaseSet2
 	}
 	supported := destination.CryptoTypes()
-	if supported != [3]ivnp.CryptoKeyType{ivnp.CryptoMLKEM1024X25519, ivnp.CryptoMLKEM768X25519, ivnp.CryptoX25519} {
+	if supported != [3]foundation.CryptoKeyType{foundation.CryptoMLKEM1024X25519, foundation.CryptoMLKEM768X25519, foundation.CryptoX25519} {
 		return nil, ErrLocalLeaseSet2
 	}
-	types := append([]ivnp.CryptoKeyType(nil), requested...)
+	types := append([]foundation.CryptoKeyType(nil), requested...)
 	if len(types) == 0 {
 		types = append(types, supported[:]...)
 	}
 	if len(types) > len(supported) {
 		return nil, ErrLocalLeaseSet2
 	}
-	seen := make(map[ivnp.CryptoKeyType]bool, len(types))
+	seen := make(map[foundation.CryptoKeyType]bool, len(types))
 	for _, cryptoType := range types {
 		valid := cryptoType == supported[0] || cryptoType == supported[1] || cryptoType == supported[2]
 		if !valid || seen[cryptoType] {
@@ -72,7 +72,7 @@ func NewLocalLeaseSet2WithTypes(destination *ivnp.LocalDestination, requested []
 	return &LocalLeaseSet2{identity: owned, hash: owned.Hash(), public: public, types: types}, nil
 }
 
-func (s *LocalLeaseSet2) Hash() ivnp.Hash { return s.hash }
+func (s *LocalLeaseSet2) Hash() foundation.Hash { return s.hash }
 
 func (s *LocalLeaseSet2) ReplaceInboundLeases(leases []Lease) error {
 	if s == nil || len(leases) > MaxLeases {
@@ -100,7 +100,7 @@ func (s *LocalLeaseSet2) MarshalTo(dst []byte, nowMillis uint64, sign func([]byt
 	s.mu.RLock()
 	identity := s.identity
 	public := s.public
-	types := append([]ivnp.CryptoKeyType(nil), s.types...)
+	types := append([]foundation.CryptoKeyType(nil), s.types...)
 	leases := append([]Lease2(nil), s.leases...)
 	s.mu.RUnlock()
 	if len(leases) == 0 || len(leases) > MaxLeases {
@@ -134,7 +134,7 @@ func (s *LocalLeaseSet2) MarshalTo(dst []byte, nowMillis uint64, sign func([]byt
 	unsignedLen := len(identityBytes) + 8 + 2 + 1 + keyCount*(4+32) + 1 + len(leases)*40
 	signatureLen, ok := identity.SigningKeyType().SignatureLen()
 	if !ok || len(dst) < unsignedLen+signatureLen {
-		return 0, ivnp.ErrDestinationSmall
+		return 0, foundation.ErrDestinationSmall
 	}
 	off := copy(dst, identityBytes)
 	binary.BigEndian.PutUint32(dst[off:off+4], uint32(published))

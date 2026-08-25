@@ -1,16 +1,16 @@
-package netdb
+package networkdatabase
 
 import (
 	"bytes"
 	"context"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"testing"
 )
 
 func TestExplorationTargetStaysInSelectedBucket(t *testing.T) {
-	var local ivnp.Hash
+	var local foundation.Hash
 	for _, bucket := range []int{0, 7, 8, BucketCount - 1} {
-		target, err := explorationTarget(local, bucket, bytes.NewReader(bytes.Repeat([]byte{0xff}, ivnp.HashLength)))
+		target, err := explorationTarget(local, bucket, bytes.NewReader(bytes.Repeat([]byte{0xff}, foundation.HashLength)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -27,7 +27,7 @@ func TestExplorationTargetStaysInSelectedBucket(t *testing.T) {
 }
 
 func TestExplorerFillsBoundedWindowInOneMaintenancePass(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	addRequestTestFloodfill(database, requestTestHash(0x80))
 	sender := new(requestTestSender)
 	now := uint64(100)
@@ -40,7 +40,7 @@ func TestExplorerFillsBoundedWindowInOneMaintenancePass(t *testing.T) {
 	}
 	explorer, err := NewExplorer(ExplorerConfig{
 		Table: database.Routers(), Requests: requests, Now: func() uint64 { return now },
-		Rand: bytes.NewReader(bytes.Repeat([]byte{2}, explorerMaxInflight*ivnp.HashLength)),
+		Rand: bytes.NewReader(bytes.Repeat([]byte{2}, explorerMaxInflight*foundation.HashLength)),
 	})
 	if err != nil {
 		t.Fatal(err)

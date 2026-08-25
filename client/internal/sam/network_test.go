@@ -7,7 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"io"
 	"net"
 	"strings"
@@ -297,11 +297,11 @@ func testPrivateDestination(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := make([]byte, ivnp.IdentityBaseLength+7)
+	identity := make([]byte, foundation.IdentityBaseLength+7)
 	copy(identity[352:384], public)
-	identity[384] = byte(ivnp.CertificateKey)
+	identity[384] = byte(foundation.CertificateKey)
 	identity[385], identity[386] = 0, 4
-	identity[387], identity[388] = 0, byte(ivnp.SigningEdDSASHA512Ed25519)
+	identity[387], identity[388] = 0, byte(foundation.SigningEdDSASHA512Ed25519)
 	encoding := base64.NewEncoding("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~")
 	encoded := make([]byte, encoding.EncodedLen(len(identity)))
 	encoding.Encode(encoded, identity)

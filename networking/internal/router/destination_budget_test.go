@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	clientapi "gosuda.org/ivnp/interfaces/destination"
-	streamtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
+	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/networking/internal/streaming/tunnel"
 )
 
 type testByteBudget struct {
@@ -32,15 +32,15 @@ func (b *testByteBudget) Release(size int) {
 
 func TestDestinationRoutesEnforcePerSessionAndSharedByteBudgets(t *testing.T) {
 	shared := &testByteBudget{limit: 4}
-	first := &destinationSubscription{route: clientapi.DestinationRoute{Protocol: 18}, messages: make(chan *clientapi.ReceivedMessage, 2), done: make(chan struct{}), maxBytes: 3, shared: shared}
-	second := &destinationSubscription{route: clientapi.DestinationRoute{Protocol: 18}, messages: make(chan *clientapi.ReceivedMessage, 2), done: make(chan struct{}), maxBytes: 3, shared: shared}
-	if err := first.enqueue(streamtunnel.Delivery{Payload: []byte("abc")}); err != nil {
+	first := &destinationSubscription{route: destination.DestinationRoute{Protocol: 18}, messages: make(chan *destination.ReceivedMessage, 2), done: make(chan struct{}), maxBytes: 3, shared: shared}
+	second := &destinationSubscription{route: destination.DestinationRoute{Protocol: 18}, messages: make(chan *destination.ReceivedMessage, 2), done: make(chan struct{}), maxBytes: 3, shared: shared}
+	if err := first.enqueue(streamingtunnel.Delivery{Payload: []byte("abc")}); err != nil {
 		t.Fatal(err)
 	}
-	if err := first.enqueue(streamtunnel.Delivery{Payload: []byte("d")}); err != ErrDestinationBackpressure {
+	if err := first.enqueue(streamingtunnel.Delivery{Payload: []byte("d")}); err != ErrDestinationBackpressure {
 		t.Fatalf("per-route budget = %v", err)
 	}
-	if err := second.enqueue(streamtunnel.Delivery{Payload: []byte("xy")}); err != ErrDestinationBackpressure {
+	if err := second.enqueue(streamingtunnel.Delivery{Payload: []byte("xy")}); err != ErrDestinationBackpressure {
 		t.Fatalf("shared budget = %v", err)
 	}
 	message, err := first.Receive(context.Background())
@@ -48,7 +48,7 @@ func TestDestinationRoutesEnforcePerSessionAndSharedByteBudgets(t *testing.T) {
 		t.Fatal(err)
 	}
 	message.Release()
-	if err = second.enqueue(streamtunnel.Delivery{Payload: []byte("xy")}); err != nil {
+	if err = second.enqueue(streamingtunnel.Delivery{Payload: []byte("xy")}); err != nil {
 		t.Fatal(err)
 	}
 	second.close(false)

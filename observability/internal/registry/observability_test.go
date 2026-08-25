@@ -1,4 +1,4 @@
-package observability
+package registry
 
 import (
 	"bytes"

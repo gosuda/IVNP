@@ -1,12 +1,12 @@
 package sam
 
-import networking "gosuda.org/ivnp/networking"
+import "gosuda.org/ivnp/networking"
 
 import (
 	"bufio"
 	"context"
-	ivnp "gosuda.org/ivnp/foundation"
-	clientapi "gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
 
 	"io"
 	"net"
@@ -18,35 +18,35 @@ import (
 
 type loopController struct {
 	mu        sync.Mutex
-	endpoints map[ivnp.Hash]*loopEndpoint
+	endpoints map[foundation.Hash]*loopEndpoint
 }
 
-func (c *loopController) CreateDestination(_ context.Context, spec clientapi.DestinationSpec) (clientapi.DestinationEndpoint, error) {
+func (c *loopController) CreateDestination(_ context.Context, spec destination.DestinationSpec) (destination.DestinationEndpoint, error) {
 	local, err := spec.Local.Clone()
 	if err != nil {
 		return nil, err
 	}
-	endpoint := &loopEndpoint{local: local, controller: c, subscriptions: make(map[clientapi.DestinationRoute]*loopSubscription)}
+	endpoint := &loopEndpoint{local: local, controller: c, subscriptions: make(map[destination.DestinationRoute]*loopSubscription)}
 	c.mu.Lock()
 	c.endpoints[local.Hash()] = endpoint
 	c.mu.Unlock()
 	return endpoint, nil
 }
-func (c *loopController) DestroyDestination(_ context.Context, endpoint clientapi.DestinationEndpoint) error {
+func (c *loopController) DestroyDestination(_ context.Context, endpoint destination.DestinationEndpoint) error {
 	return endpoint.Close()
 }
 
 type loopEndpoint struct {
-	local         *ivnp.LocalDestination
+	local         *foundation.LocalDestination
 	controller    *loopController
 	mu            sync.Mutex
-	subscriptions map[clientapi.DestinationRoute]*loopSubscription
+	subscriptions map[destination.DestinationRoute]*loopSubscription
 	closed        bool
 }
 
-func (e *loopEndpoint) Hash() ivnp.Hash     { return e.local.Hash() }
-func (e *loopEndpoint) B32() string         { return e.local.B32() }
-func (e *loopEndpoint) Destination() []byte { return e.local.Destination() }
+func (e *loopEndpoint) Hash() foundation.Hash { return e.local.Hash() }
+func (e *loopEndpoint) B32() string           { return e.local.B32() }
+func (e *loopEndpoint) Destination() []byte   { return e.local.Destination() }
 func (e *loopEndpoint) DialI2P(context.Context, string) (net.Conn, error) {
 	left, right := net.Pipe()
 	go func() { defer right.Close(); _, _ = io.Copy(right, right) }()
@@ -63,9 +63,9 @@ func (e *loopEndpoint) SendMessage(_ context.Context, d networking.StreamingTunn
 		return ErrProtocol
 	}
 	target.mu.Lock()
-	sub := target.subscriptions[clientapi.DestinationRoute{Protocol: d.Protocol, ToPort: d.ToPort}]
+	sub := target.subscriptions[destination.DestinationRoute{Protocol: d.Protocol, ToPort: d.ToPort}]
 	if sub == nil {
-		sub = target.subscriptions[clientapi.DestinationRoute{Protocol: d.Protocol}]
+		sub = target.subscriptions[destination.DestinationRoute{Protocol: d.Protocol}]
 	}
 
 	target.mu.Unlock()
@@ -75,7 +75,7 @@ func (e *loopEndpoint) SendMessage(_ context.Context, d networking.StreamingTunn
 	copyDelivery := d
 	copyDelivery.Payload = append([]byte(nil), d.Payload...)
 	go func() {
-		sub.ch <- &clientapi.ReceivedMessage{Delivery: copyDelivery}
+		sub.ch <- &destination.ReceivedMessage{Delivery: copyDelivery}
 	}()
 	return nil
 }
@@ -86,8 +86,8 @@ func (e *loopEndpoint) MarshalDatagramV1To(dst, payload []byte) (int, error) {
 	}
 	return networking.DatagramMarshalV1To(dst, identity, payload, e.local.Sign)
 }
-func (e *loopEndpoint) Subscribe(route clientapi.DestinationRoute, _ int) (clientapi.MessageSubscription, error) {
-	sub := &loopSubscription{ch: make(chan *clientapi.ReceivedMessage, 8), done: make(chan struct{})}
+func (e *loopEndpoint) Subscribe(route destination.DestinationRoute, _ int) (destination.MessageSubscription, error) {
+	sub := &loopSubscription{ch: make(chan *destination.ReceivedMessage, 8), done: make(chan struct{})}
 	e.mu.Lock()
 	e.subscriptions[route] = sub
 	e.mu.Unlock()
@@ -107,12 +107,12 @@ func (e *loopEndpoint) Close() error {
 }
 
 type loopSubscription struct {
-	ch   chan *clientapi.ReceivedMessage
+	ch   chan *destination.ReceivedMessage
 	done chan struct{}
 	once sync.Once
 }
 
-func (s *loopSubscription) Receive(ctx context.Context) (*clientapi.ReceivedMessage, error) {
+func (s *loopSubscription) Receive(ctx context.Context) (*destination.ReceivedMessage, error) {
 	select {
 	case m := <-s.ch:
 		return m, nil
@@ -156,7 +156,7 @@ func readSAMLine(t *testing.T, reader *bufio.Reader) string {
 }
 
 func TestEmbeddedServerKeepsIdleRootSessionAlive(t *testing.T) {
-	controller := &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)}
+	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 	server, err := NewServer(ServerConfig{
 		Address: "127.0.0.1:0", Controller: controller, MaxSessions: 4,
 		CommandTimeout: 40 * time.Millisecond,
@@ -183,12 +183,12 @@ func TestEmbeddedServerKeepsIdleRootSessionAlive(t *testing.T) {
 }
 
 func TestEmbeddedServerLiveLoopbackStylesAndRecovery(t *testing.T) {
-	peer, err := ivnp.GenerateLocalDestination()
+	peer, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer peer.ReleaseSensitive()
-	controller := &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)}
+	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, Resolver: fixedResolver(string(peer.Destination())), MaxSessions: 16})
 	if err != nil {
 		t.Fatal(err)
@@ -238,10 +238,10 @@ func TestEmbeddedServerLiveLoopbackStylesAndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity, err := local.Identity()
-	if err != nil || identity.CryptoKeyType() != ivnp.CryptoElGamal {
+	if err != nil || identity.CryptoKeyType() != foundation.CryptoElGamal {
 		t.Fatalf("transient SAM Destination identity = %#v, %v", identity, err)
 	}
-	if key, keyErr := local.CryptoPublic(ivnp.CryptoX25519); keyErr != nil || key == ([32]byte{}) {
+	if key, keyErr := local.CryptoPublic(foundation.CryptoX25519); keyErr != nil || key == ([32]byte{}) {
 		t.Fatalf("transient SAM LS2 key = %x, %v", key, keyErr)
 	}
 	target := string(local.Destination())

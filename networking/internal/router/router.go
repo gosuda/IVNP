@@ -7,7 +7,7 @@ package router
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/networking/internal/garlic"
 	"gosuda.org/ivnp/networking/internal/i2np"
@@ -53,14 +53,14 @@ type replayFilter struct {
 // sinks that retain or queue them must copy. A nil sink rejects traffic for
 // that route; accepted messages must never be silently dropped.
 type I2NPSource struct {
-	Peer   ivnp.Hash
+	Peer   foundation.Hash
 	Direct bool
 }
 
 type Sinks struct {
-	Router              func(ivnp.Hash, i2np.Message) error
-	Destination         func(ivnp.Hash, ivnp.Hash, i2np.Message) error
-	Tunnel              func(ivnp.Hash, uint32, i2np.Message) error
+	Router              func(foundation.Hash, i2np.Message) error
+	Destination         func(foundation.Hash, foundation.Hash, i2np.Message) error
+	Tunnel              func(foundation.Hash, uint32, i2np.Message) error
 	DatabaseLookup      func(i2np.DatabaseLookupMessage) error
 	DatabaseSearchReply func(i2np.DatabaseSearchReplyMessage) error
 	// DatabaseStoreCompleted observes a store only after Database admitted and
@@ -69,7 +69,7 @@ type Sinks struct {
 	DeliveryStatus         func(i2np.DeliveryStatusMessage) error
 	// DatabaseStoreReply delivers a successful DatabaseStore acknowledgement
 	// through the reply gateway and optional tunnel specified by the store.
-	DatabaseStoreReply       func(ivnp.Hash, uint32, i2np.DeliveryStatusMessage) error
+	DatabaseStoreReply       func(foundation.Hash, uint32, i2np.DeliveryStatusMessage) error
 	Garlic                   func(I2NPSource, i2np.Message) error
 	TunnelBuild              func(I2NPSource, i2np.BuildRecords, i2np.Message) error
 	OutboundTunnelBuildReply func(i2np.Message) error
@@ -82,7 +82,7 @@ type Sinks struct {
 // filter retains each admission-time bucket for longer than the largest
 // accepted I2NP lifetime, so identifier churn cannot evict a live replay.
 type Service struct {
-	database *netdb.Database
+	database *networkdatabase.Database
 	sinks    Sinks
 	replay   replayFilter
 	limiter  rateLimiter
@@ -105,8 +105,8 @@ type preparedI2NP struct {
 	records i2np.BuildRecords
 }
 
-func NewService(database *netdb.Database) *Service { return NewWithSinks(database, Sinks{}) }
-func NewWithSinks(database *netdb.Database, sinks Sinks) *Service {
+func NewService(database *networkdatabase.Database) *Service { return NewWithSinks(database, Sinks{}) }
+func NewWithSinks(database *networkdatabase.Database, sinks Sinks) *Service {
 	return &Service{database: database, sinks: sinks}
 }
 
@@ -147,7 +147,7 @@ func (s *Service) SetDatabaseStoreCompletedSink(sink func(i2np.DatabaseStoreMess
 }
 
 // SetDatabaseStoreReplySink installs the DatabaseStore acknowledgement route.
-func (s *Service) SetDatabaseStoreReplySink(sink func(ivnp.Hash, uint32, i2np.DeliveryStatusMessage) error) {
+func (s *Service) SetDatabaseStoreReplySink(sink func(foundation.Hash, uint32, i2np.DeliveryStatusMessage) error) {
 	s.sinks.DatabaseStoreReply = sink
 }
 
@@ -169,12 +169,12 @@ func (s *Service) SetTunnelTestSink(sink func(i2np.DeliveryStatusMessage) error)
 }
 
 // SetRouterSink installs router-directed Garlic clove forwarding.
-func (s *Service) SetRouterSink(sink func(ivnp.Hash, i2np.Message) error) {
+func (s *Service) SetRouterSink(sink func(foundation.Hash, i2np.Message) error) {
 	s.sinks.Router = sink
 }
 
 // SetTunnelSink installs tunnel-directed Garlic clove forwarding.
-func (s *Service) SetTunnelSink(sink func(ivnp.Hash, uint32, i2np.Message) error) {
+func (s *Service) SetTunnelSink(sink func(foundation.Hash, uint32, i2np.Message) error) {
 	s.sinks.Tunnel = sink
 }
 
@@ -184,7 +184,7 @@ func (s *Service) SetGarlicSink(sink func(I2NPSource, i2np.Message) error) {
 }
 
 // SetDestinationSink installs parsed Garlic destination-clove delivery.
-func (s *Service) SetDestinationSink(sink func(ivnp.Hash, ivnp.Hash, i2np.Message) error) {
+func (s *Service) SetDestinationSink(sink func(foundation.Hash, foundation.Hash, i2np.Message) error) {
 	s.sinks.Destination = sink
 }
 
@@ -198,14 +198,14 @@ func (s *Service) HandleI2NP(message i2np.Message, nowMillis uint64, fromFloodfi
 // HandleI2NPFrom validates and dispatches a frame from an authenticated peer.
 // Its source-scoped limits run before payload parsing and expensive sink work,
 // so one peer cannot consume another peer's admission budget.
-func (s *Service) HandleI2NPFrom(peer ivnp.Hash, message i2np.Message, nowMillis uint64, fromFloodfill bool) error {
+func (s *Service) HandleI2NPFrom(peer foundation.Hash, message i2np.Message, nowMillis uint64, fromFloodfill bool) error {
 	return s.handleI2NP(message, nowMillis, fromFloodfill, I2NPSource{Peer: peer, Direct: true})
 }
 
 // HandleI2NPFromContext is the SSU2 delivery contract. It observes transport
 // cancellation before admission and after bounded parsing; registered sinks
 // remain synchronous and must share the router lifecycle.
-func (s *Service) HandleI2NPFromContext(ctx context.Context, peer ivnp.Hash, message i2np.Message, nowMillis uint64, fromFloodfill bool) error {
+func (s *Service) HandleI2NPFromContext(ctx context.Context, peer foundation.Hash, message i2np.Message, nowMillis uint64, fromFloodfill bool) error {
 	if ctx == nil {
 		return context.Canceled
 	}
@@ -447,13 +447,13 @@ func (s *Service) HandleGarlicCloveSet(set garlic.CloveSet, nowMillis uint64, fr
 			result = appendError(result, ErrDuplicate)
 			continue
 		}
-		if err = s.dispatchPreparedClove(ivnp.Hash{}, clove.Delivery, clove.Message, prepared, nowMillis, fromFloodfill); err != nil {
+		if err = s.dispatchPreparedClove(foundation.Hash{}, clove.Delivery, clove.Message, prepared, nowMillis, fromFloodfill); err != nil {
 			result = appendError(result, err)
 		}
 	}
 }
 
-func (s *Service) dispatchClove(source ivnp.Hash, delivery garlic.Delivery, message i2np.Message, nowMillis uint64, fromFloodfill bool) error {
+func (s *Service) dispatchClove(source foundation.Hash, delivery garlic.Delivery, message i2np.Message, nowMillis uint64, fromFloodfill bool) error {
 	prepared, err := s.prepareClove(delivery, message, nowMillis)
 	if err != nil {
 		return err
@@ -492,7 +492,7 @@ func (s *Service) prepareClove(delivery garlic.Delivery, message i2np.Message, n
 	return preparedI2NP{}, ErrUnhandledI2NP
 }
 
-func (s *Service) dispatchPreparedClove(source ivnp.Hash, delivery garlic.Delivery, message i2np.Message, prepared preparedI2NP, nowMillis uint64, fromFloodfill bool) error {
+func (s *Service) dispatchPreparedClove(source foundation.Hash, delivery garlic.Delivery, message i2np.Message, prepared preparedI2NP, nowMillis uint64, fromFloodfill bool) error {
 	switch delivery.Type {
 	case garlic.DeliveryLocal:
 		if message.Header.Type == i2np.OutboundTunnelBuildReply && s.sinks.OutboundTunnelBuildReply != nil {

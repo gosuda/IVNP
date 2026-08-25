@@ -1,19 +1,19 @@
-package netdb
+package networkdatabase
 
 import (
 	"bytes"
 	"crypto/ed25519"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"testing"
 )
 
 func TestLocalRouterInfoPublishesVerifiedOwnedAdvertisement(t *testing.T) {
-	local, err := ivnp.GenerateLocalAddress()
+	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var peer ivnp.Hash
+	var peer foundation.Hash
 	peer[0] = 0xa5
 	config := LocalRouterInfoConfig{
 		Local: local,
@@ -22,14 +22,14 @@ func TestLocalRouterInfoPublishesVerifiedOwnedAdvertisement(t *testing.T) {
 				Cost:           5,
 				Expiration:     999,
 				TransportStyle: []byte("NTCP2"),
-				Options: []ivnp.MappingEntry{
+				Options: []foundation.MappingEntry{
 					{Key: []byte("host"), Value: []byte("127.0.0.1")},
 					{Key: []byte("port"), Value: []byte("12345")},
 					{Key: []byte("s"), Value: []byte("test-static-key")},
 				},
 			}},
-			Peers: []ivnp.Hash{peer},
-			Options: []ivnp.MappingEntry{
+			Peers: []foundation.Hash{peer},
+			Options: []foundation.MappingEntry{
 				{Key: []byte("caps"), Value: []byte("R")},
 				{Key: []byte("netId"), Value: []byte("2")},
 			},
@@ -83,7 +83,7 @@ func TestLocalRouterInfoPublishesVerifiedOwnedAdvertisement(t *testing.T) {
 }
 
 func TestLocalRouterInfoSnapshotRejectsCorruptedRetainedBytes(t *testing.T) {
-	local, err := ivnp.GenerateLocalAddress()
+	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestLocalRouterInfoSnapshotRejectsCorruptedRetainedBytes(t *testing.T) {
 }
 
 func TestLocalRouterInfoPublishesModernRouterIdentity(t *testing.T) {
-	local, err := ivnp.GenerateLocalRouterAddress()
+	local, err := foundation.GenerateLocalRouterAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestLocalRouterInfoPublishesModernRouterIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Hash() != local.Hash || info.Identity.CryptoKeyType() != ivnp.CryptoX25519 {
+	if info.Hash() != local.Hash || info.Identity.CryptoKeyType() != foundation.CryptoX25519 {
 		t.Fatalf("RouterInfo identity = hash %x type %d", info.Hash(), info.Identity.CryptoKeyType())
 	}
 	crypto, rest := info.Identity.CryptoKeyParts()
@@ -130,14 +130,14 @@ func TestLocalRouterInfoPublishesModernRouterIdentity(t *testing.T) {
 }
 
 func TestLocalRouterInfoCopiesContactsAndInvalidatesOldAdvertisement(t *testing.T) {
-	local, err := ivnp.GenerateLocalAddress()
+	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
 	contacts := RouterInfoContacts{
 		Addresses: []LocalRouterAddress{{
 			TransportStyle: []byte("NTCP2"),
-			Options:        []ivnp.MappingEntry{{Key: []byte("host"), Value: []byte("old")}},
+			Options:        []foundation.MappingEntry{{Key: []byte("host"), Value: []byte("old")}},
 		}},
 	}
 	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{Local: local, Contacts: contacts})
@@ -152,7 +152,7 @@ func TestLocalRouterInfoCopiesContactsAndInvalidatesOldAdvertisement(t *testing.
 
 	if err = owner.ReplaceContacts(RouterInfoContacts{Addresses: []LocalRouterAddress{{
 		TransportStyle: []byte("SSU2"),
-		Options:        []ivnp.MappingEntry{{Key: []byte("host"), Value: []byte("new")}},
+		Options:        []foundation.MappingEntry{{Key: []byte("host"), Value: []byte("new")}},
 	}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestLocalRouterInfoCopiesContactsAndInvalidatesOldAdvertisement(t *testing.
 }
 
 func TestLocalRouterInfoRejectsInvalidIdentityAndContacts(t *testing.T) {
-	local, err := ivnp.GenerateLocalAddress()
+	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestLocalRouterInfoRejectsInvalidIdentityAndContacts(t *testing.T) {
 		t.Fatalf("invalid signing key error = %v, want ErrLocalRouterIdentity", err)
 	}
 
-	local, err = ivnp.GenerateLocalAddress()
+	local, err = foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,11 +197,11 @@ func TestLocalRouterInfoRejectsInvalidIdentityAndContacts(t *testing.T) {
 	}
 	if _, err := NewLocalRouterInfo(LocalRouterInfoConfig{
 		Local: local,
-		Contacts: RouterInfoContacts{Options: []ivnp.MappingEntry{
+		Contacts: RouterInfoContacts{Options: []foundation.MappingEntry{
 			{Key: []byte("z"), Value: nil},
 			{Key: []byte("a"), Value: nil},
 		}},
-	}); !errors.Is(err, ivnp.ErrUnsortedMapping) {
+	}); !errors.Is(err, foundation.ErrUnsortedMapping) {
 		t.Fatalf("unsorted options error = %v, want ivnp.ErrUnsortedMapping", err)
 	}
 }

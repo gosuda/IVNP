@@ -3,9 +3,9 @@ package router
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
-	clientapi "gosuda.org/ivnp/interfaces/destination"
-	streamtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/networking/internal/streaming/tunnel"
 	"net"
 	"sync"
 )
@@ -23,8 +23,8 @@ var (
 // key material stays scoped to that endpoint until Destroy or Close.
 type DestinationManager struct {
 	mu        sync.RWMutex
-	sessions  map[ivnp.Hash]*DestinationSession
-	defaultID ivnp.Hash
+	sessions  map[foundation.Hash]*DestinationSession
+	defaultID foundation.Hash
 	closed    bool
 }
 
@@ -32,7 +32,7 @@ type DestinationManager struct {
 // sender receives protocol-6 packets after Streaming has authenticated them;
 // it must wrap them in Garlic and deliver them through the selected I2P tunnel.
 type DestinationSessionConfig struct {
-	Streaming streamtunnel.TunnelNetworkConfig
+	Streaming streamingtunnel.TunnelNetworkConfig
 	Default   bool
 	// Release tears down resources owned by this destination after its
 	// streaming endpoint has cancelled and joined.
@@ -44,21 +44,21 @@ type DestinationSessionConfig struct {
 // transport socket as an I2P connection.
 type DestinationSession struct {
 	manager *DestinationManager
-	hash    ivnp.Hash
-	stream  *streamtunnel.TunnelNetwork
-	sender  streamtunnel.TunnelSender
+	hash    foundation.Hash
+	stream  *streamingtunnel.TunnelNetwork
+	sender  streamingtunnel.TunnelSender
 	release func()
 	once    sync.Once
 
 	routeMu sync.RWMutex
-	routes  map[clientapi.DestinationRoute]*destinationSubscription
+	routes  map[destination.DestinationRoute]*destinationSubscription
 }
 
 // NewDestinationManager constructs an empty session registry without network
 // I/O. Sessions are added explicitly so an embedded router can own several
 // isolated Destinations.
 func NewDestinationManager() *DestinationManager {
-	return &DestinationManager{sessions: make(map[ivnp.Hash]*DestinationSession)}
+	return &DestinationManager{sessions: make(map[foundation.Hash]*DestinationSession)}
 }
 
 // Create starts a local Destination streaming endpoint and atomically inserts
@@ -67,12 +67,12 @@ func (m *DestinationManager) Create(config DestinationSessionConfig) (*Destinati
 	if m == nil {
 		return nil, ErrDestinationNotFound
 	}
-	stream, err := streamtunnel.NewTunnelNetwork(config.Streaming)
+	stream, err := streamingtunnel.NewTunnelNetwork(config.Streaming)
 	if err != nil {
 		return nil, err
 	}
 	hash := config.Streaming.Destination.Hash()
-	session := &DestinationSession{manager: m, hash: hash, stream: stream, sender: config.Streaming.Sender, release: config.Release, routes: make(map[clientapi.DestinationRoute]*destinationSubscription)}
+	session := &DestinationSession{manager: m, hash: hash, stream: stream, sender: config.Streaming.Sender, release: config.Release, routes: make(map[destination.DestinationRoute]*destinationSubscription)}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -85,7 +85,7 @@ func (m *DestinationManager) Create(config DestinationSessionConfig) (*Destinati
 		return nil, ErrDestinationExists
 	}
 	m.sessions[hash] = session
-	if config.Default || m.defaultID == (ivnp.Hash{}) {
+	if config.Default || m.defaultID == (foundation.Hash{}) {
 		m.defaultID = hash
 	}
 	m.mu.Unlock()
@@ -93,7 +93,7 @@ func (m *DestinationManager) Create(config DestinationSessionConfig) (*Destinati
 }
 
 // Session returns the running Destination with hash.
-func (m *DestinationManager) Session(hash ivnp.Hash) (*DestinationSession, bool) {
+func (m *DestinationManager) Session(hash foundation.Hash) (*DestinationSession, bool) {
 	if m == nil {
 		return nil, false
 	}
@@ -105,7 +105,7 @@ func (m *DestinationManager) Session(hash ivnp.Hash) (*DestinationSession, bool)
 
 // SetDefault chooses the session used when the manager is supplied directly as
 // Router.StreamBackend or ivnp.StreamNetwork.
-func (m *DestinationManager) SetDefault(hash ivnp.Hash) error {
+func (m *DestinationManager) SetDefault(hash foundation.Hash) error {
 	if m == nil {
 		return ErrDestinationNotFound
 	}
@@ -124,7 +124,7 @@ func (m *DestinationManager) SetDefault(hash ivnp.Hash) error {
 // Destroy removes a Destination before closing its streaming endpoint. New
 // inbound delivery cannot acquire it after removal, and blocked stream callers
 // are released by endpoint Close.
-func (m *DestinationManager) Destroy(hash ivnp.Hash) error {
+func (m *DestinationManager) Destroy(hash foundation.Hash) error {
 	if m == nil {
 		return ErrDestinationNotFound
 	}
@@ -136,7 +136,7 @@ func (m *DestinationManager) Destroy(hash ivnp.Hash) error {
 	}
 	delete(m.sessions, hash)
 	if m.defaultID == hash {
-		m.defaultID = ivnp.Hash{}
+		m.defaultID = foundation.Hash{}
 		for candidate := range m.sessions {
 			m.defaultID = candidate
 			break
@@ -149,7 +149,7 @@ func (m *DestinationManager) Destroy(hash ivnp.Hash) error {
 
 // HandleMessage delivers one authenticated destination payload. Streaming is
 // dispatched directly; message protocols use exact-port then wildcard routes.
-func (m *DestinationManager) HandleMessage(ctx context.Context, delivery streamtunnel.Delivery) error {
+func (m *DestinationManager) HandleMessage(ctx context.Context, delivery streamingtunnel.Delivery) error {
 	if m == nil {
 		return ErrDestinationNotFound
 	}
@@ -159,7 +159,7 @@ func (m *DestinationManager) HandleMessage(ctx context.Context, delivery streamt
 	if session == nil {
 		return ErrDestinationNotFound
 	}
-	if delivery.Protocol == streamtunnel.ProtocolStreaming {
+	if delivery.Protocol == streamingtunnel.ProtocolStreaming {
 		return session.stream.HandleDelivery(ctx, delivery)
 	}
 	return session.deliver(delivery)
@@ -168,7 +168,7 @@ func (m *DestinationManager) HandleMessage(ctx context.Context, delivery streamt
 // deliverLocalMessage accepts loopback only from the currently registered
 // session instance. A stale session may retain the same Destination hash after
 // Destroy and recreation, but it must never deliver into its replacement.
-func (m *DestinationManager) deliverLocalMessage(session *DestinationSession, delivery streamtunnel.Delivery) error {
+func (m *DestinationManager) deliverLocalMessage(session *DestinationSession, delivery streamingtunnel.Delivery) error {
 	if m == nil || session == nil {
 		return net.ErrClosed
 	}
@@ -183,7 +183,7 @@ func (m *DestinationManager) deliverLocalMessage(session *DestinationSession, de
 
 // HandleStreaming is retained as the authenticated ingress entry point while
 // dispatching all supported destination protocols.
-func (m *DestinationManager) HandleStreaming(ctx context.Context, delivery streamtunnel.Delivery) error {
+func (m *DestinationManager) HandleStreaming(ctx context.Context, delivery streamingtunnel.Delivery) error {
 	return m.HandleMessage(ctx, delivery)
 }
 
@@ -203,7 +203,7 @@ func (m *DestinationManager) Close() error {
 		sessions = append(sessions, session)
 	}
 	clear(m.sessions)
-	m.defaultID = ivnp.Hash{}
+	m.defaultID = foundation.Hash{}
 	m.mu.Unlock()
 	for _, session := range sessions {
 		session.shutdown()
@@ -212,7 +212,7 @@ func (m *DestinationManager) Close() error {
 }
 
 // Hash returns this session's local Destination hash.
-func (s *DestinationSession) Hash() ivnp.Hash { return s.hash }
+func (s *DestinationSession) Hash() foundation.Hash { return s.hash }
 
 // B32 returns this session's local b32 hostname.
 func (s *DestinationSession) B32() string { return s.stream.B32() }
@@ -228,9 +228,9 @@ func (s *DestinationSession) Destination() []byte {
 // StreamingStats returns the session's non-sensitive streaming congestion
 // snapshot. A destroyed session reports the state retained by its closed
 // endpoint, which has no live connections.
-func (s *DestinationSession) StreamingStats() streamtunnel.NetworkStats {
+func (s *DestinationSession) StreamingStats() streamingtunnel.NetworkStats {
 	if s == nil {
-		return streamtunnel.NetworkStats{}
+		return streamingtunnel.NetworkStats{}
 	}
 	return s.stream.Stats()
 }
@@ -263,33 +263,33 @@ func (s *DestinationSession) ListenI2P(ctx context.Context, address string) (net
 // remote payloads use this Destination's isolated sender and pool. Local
 // delivery avoids creating initiator and responder ratchets under the same
 // Destination hash, which cannot share one directional session slot.
-func (s *DestinationSession) SendMessage(ctx context.Context, delivery streamtunnel.Delivery) error {
+func (s *DestinationSession) SendMessage(ctx context.Context, delivery streamingtunnel.Delivery) error {
 	if s == nil || s.sender == nil {
 		return net.ErrClosed
 	}
-	if delivery.From == (ivnp.Hash{}) {
+	if delivery.From == (foundation.Hash{}) {
 		delivery.From = s.hash
 	}
-	if delivery.From != s.hash || delivery.To == (ivnp.Hash{}) {
-		return streamtunnel.ErrTunnelDestination
+	if delivery.From != s.hash || delivery.To == (foundation.Hash{}) {
+		return streamingtunnel.ErrTunnelDestination
 	}
-	if delivery.To == s.hash && delivery.Protocol != streamtunnel.ProtocolStreaming {
+	if delivery.To == s.hash && delivery.Protocol != streamingtunnel.ProtocolStreaming {
 		return s.manager.deliverLocalMessage(s, delivery)
 	}
 	return s.sender.SendTunnel(ctx, delivery)
 }
 
-func (s *DestinationSession) Subscribe(route clientapi.DestinationRoute, capacity int) (clientapi.MessageSubscription, error) {
+func (s *DestinationSession) Subscribe(route destination.DestinationRoute, capacity int) (destination.MessageSubscription, error) {
 	return s.SubscribeBounded(route, capacity, 0, nil)
 }
 
 // SubscribeBounded installs a count- and byte-bounded authenticated message
 // route. maxBytes zero retains count-only behavior for non-SAM callers.
-func (s *DestinationSession) SubscribeBounded(route clientapi.DestinationRoute, capacity int, maxBytes int64, shared clientapi.ByteBudget) (clientapi.MessageSubscription, error) {
-	if s == nil || route.Protocol == streamtunnel.ProtocolStreaming || capacity < 1 || maxBytes < 0 {
+func (s *DestinationSession) SubscribeBounded(route destination.DestinationRoute, capacity int, maxBytes int64, shared destination.ByteBudget) (destination.MessageSubscription, error) {
+	if s == nil || route.Protocol == streamingtunnel.ProtocolStreaming || capacity < 1 || maxBytes < 0 {
 		return nil, ErrDestinationRoute
 	}
-	subscription := &destinationSubscription{owner: s, route: route, messages: make(chan *clientapi.ReceivedMessage, capacity), done: make(chan struct{}), maxBytes: maxBytes, shared: shared}
+	subscription := &destinationSubscription{owner: s, route: route, messages: make(chan *destination.ReceivedMessage, capacity), done: make(chan struct{}), maxBytes: maxBytes, shared: shared}
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
 	for existing := range s.routes {
@@ -305,12 +305,12 @@ func (s *DestinationSession) SubscribeBounded(route clientapi.DestinationRoute, 
 	return subscription, nil
 }
 
-func (s *DestinationSession) deliver(delivery streamtunnel.Delivery) error {
+func (s *DestinationSession) deliver(delivery streamingtunnel.Delivery) error {
 	s.routeMu.RLock()
-	subscription := s.routes[clientapi.DestinationRoute{Protocol: delivery.Protocol, ToPort: delivery.ToPort}]
+	subscription := s.routes[destination.DestinationRoute{Protocol: delivery.Protocol, ToPort: delivery.ToPort}]
 	if subscription ==
 		nil {
-		subscription = s.routes[clientapi.DestinationRoute{Protocol: delivery.Protocol}]
+		subscription = s.routes[destination.DestinationRoute{Protocol: delivery.Protocol}]
 	}
 
 	s.routeMu.RUnlock()
@@ -355,18 +355,18 @@ func (s *DestinationSession) Close() error {
 
 type destinationSubscription struct {
 	owner       *DestinationSession
-	route       clientapi.DestinationRoute
-	messages    chan *clientapi.ReceivedMessage
+	route       destination.DestinationRoute
+	messages    chan *destination.ReceivedMessage
 	done        chan struct{}
 	maxBytes    int64
 	queuedBytes int64
-	shared      clientapi.ByteBudget
+	shared      destination.ByteBudget
 	mu          sync.Mutex
 	closed      bool
 	once        sync.Once
 }
 
-func (s *destinationSubscription) enqueue(delivery streamtunnel.Delivery) error {
+func (s *destinationSubscription) enqueue(delivery streamingtunnel.Delivery) error {
 	size := len(delivery.Payload)
 	s.mu.Lock()
 	if s.closed {
@@ -382,7 +382,7 @@ func (s *destinationSubscription) enqueue(delivery streamtunnel.Delivery) error 
 		return ErrDestinationBackpressure
 	}
 	payload := append([]byte(nil), delivery.Payload...)
-	message := clientapi.NewReceivedMessage(delivery, s.release)
+	message := destination.NewReceivedMessage(delivery, s.release)
 	message.Delivery.Payload = payload
 	// Charge the route before publishing the message. A receiver may release it
 	// immediately after the channel send becomes visible.
@@ -421,7 +421,7 @@ func (s *destinationSubscription) release(size int) {
 	}
 }
 
-func (s *destinationSubscription) Receive(ctx context.Context) (*clientapi.ReceivedMessage, error) {
+func (s *destinationSubscription) Receive(ctx context.Context) (*destination.ReceivedMessage, error) {
 	if s == nil {
 		return nil, net.ErrClosed
 	}

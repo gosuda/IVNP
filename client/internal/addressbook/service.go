@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	clientapi "gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/interfaces/destination"
 )
 
 var (
@@ -295,4 +295,4 @@ func ensureStateDir(path string) error {
 	return os.MkdirAll(filepath.Dir(path), 0700)
 }
 
-var _ clientapi.DestinationResolver = (*Service)(nil)
+var _ destination.DestinationResolver = (*Service)(nil)

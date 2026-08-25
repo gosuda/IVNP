@@ -1,13 +1,13 @@
 package sam
 
-import networking "gosuda.org/ivnp/networking"
+import "gosuda.org/ivnp/networking"
 
 import (
 	"bufio"
 	"context"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
-	clientapi "gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
 
 	"gosuda.org/ivnp/observability"
 	"io"
@@ -18,7 +18,7 @@ import (
 )
 
 func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {
-	controller := &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)}
+	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 	metrics := observability.NewRegistry()
 	server, err := NewServer(ServerConfig{
 		Address: "127.0.0.1:0", UDPAddress: "127.0.0.1:0", Controller: controller, Metrics: metrics,
@@ -96,7 +96,7 @@ func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {
 }
 
 func TestEmbeddedServerPrimaryRawChildUDPHeader(t *testing.T) {
-	controller := &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)}
+	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", UDPAddress: "127.0.0.1:0", Controller: controller, SessionQueue: 4})
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +151,7 @@ func TestEmbeddedServerPrimaryRawChildUDPHeader(t *testing.T) {
 }
 
 func TestEmbeddedServerUDPQueuedByteBudgetBackpressure(t *testing.T) {
-	controller := &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)}
+	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 	server, err := NewServer(ServerConfig{
 		Address: "127.0.0.1:0", UDPAddress: "127.0.0.1:0", Controller: controller,
 		SessionQueue: 2, MaxSessionQueueBytes: 256, MaxServerQueueBytes: 256,
@@ -191,7 +191,7 @@ func TestEmbeddedServerUDPQueuedByteBudgetBackpressure(t *testing.T) {
 func TestTCPDatagramAndRawInvalidSizeReturnStatus(t *testing.T) {
 	for _, style := range []string{"DATAGRAM", "RAW"} {
 		t.Run(style, func(t *testing.T) {
-			controller := &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)}
+			controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 			server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, MaxDatagramBytes: 1024})
 			if err != nil {
 				t.Fatal(err)
@@ -229,14 +229,14 @@ type blockingUDPController struct {
 	canceled chan struct{}
 }
 
-func (c *blockingUDPController) CreateDestination(ctx context.Context, spec clientapi.DestinationSpec) (clientapi.DestinationEndpoint, error) {
+func (c *blockingUDPController) CreateDestination(ctx context.Context, spec destination.DestinationSpec) (destination.DestinationEndpoint, error) {
 	endpoint, err := c.loop.CreateDestination(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
 	return &blockingUDPEndpoint{loopEndpoint: endpoint.(*loopEndpoint), entered: c.entered, canceled: c.canceled}, nil
 }
-func (c *blockingUDPController) DestroyDestination(_ context.Context, endpoint clientapi.DestinationEndpoint) error {
+func (c *blockingUDPController) DestroyDestination(_ context.Context, endpoint destination.DestinationEndpoint) error {
 	return endpoint.Close()
 }
 
@@ -263,7 +263,7 @@ func (e *blockingUDPEndpoint) SendMessage(ctx context.Context, _ networking.Stre
 
 func TestUDPBlockingDestinationSendCancelsAndWaitIsBounded(t *testing.T) {
 	controller := &blockingUDPController{
-		loop:     &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)},
+		loop:     &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)},
 		entered:  make(chan struct{}),
 		canceled: make(chan struct{}),
 	}

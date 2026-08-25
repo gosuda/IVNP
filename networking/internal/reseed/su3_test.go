@@ -8,7 +8,7 @@ import (
 	"crypto/sha512"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"math/big"
 	"testing"
 	"time"
@@ -22,7 +22,7 @@ func TestVerifySU3JavaNONEwithRSAPKCS1v15(t *testing.T) {
 	version, signerID, content := bytes.Repeat([]byte{'1'}, su3MinimumVersion), []byte("test-signer"), []byte("zip payload")
 	header := make([]byte, su3HeaderLen)
 	copy(header[:7], []byte{'I', '2', 'P', 's', 'u', '3', 0})
-	binary.BigEndian.PutUint16(header[8:10], uint16(ivnp.SigningRSASHA512_4096))
+	binary.BigEndian.PutUint16(header[8:10], uint16(foundation.SigningRSASHA512_4096))
 	binary.BigEndian.PutUint16(header[10:12], su3RSASignatureLen)
 	header[13], header[15] = byte(len(version)), byte(len(signerID))
 	binary.BigEndian.PutUint64(header[16:24], uint64(len(content)))
@@ -35,7 +35,7 @@ func TestVerifySU3JavaNONEwithRSAPKCS1v15(t *testing.T) {
 		t.Fatal(err)
 	}
 	container := append(append([]byte(nil), signed...), signature...)
-	signers := map[string]SU3Signer{"test-signer": {SigningType: ivnp.SigningRSASHA512_4096, PublicKey: private.N.FillBytes(make([]byte, su3RSASignatureLen))}}
+	signers := map[string]SU3Signer{"test-signer": {SigningType: foundation.SigningRSASHA512_4096, PublicKey: private.N.FillBytes(make([]byte, su3RSASignatureLen))}}
 	verified, err := VerifySU3(container, signers, int64(len(content)))
 	if err != nil || !bytes.Equal(verified, content) {
 		t.Fatalf("VerifySU3() = %q, %v", verified, err)
@@ -106,7 +106,7 @@ func TestDefaultSU3SignersLoadExactCertificateNames(t *testing.T) {
 		"reseed@diva.exchange",
 	} {
 		signer, found := signers[signerID]
-		if !found || signer.SigningType != ivnp.SigningRSASHA512_4096 || len(signer.PublicKey) != su3RSASignatureLen {
+		if !found || signer.SigningType != foundation.SigningRSASHA512_4096 || len(signer.PublicKey) != su3RSASignatureLen {
 			t.Fatalf("default signer %q = %#v, found=%t", signerID, signer, found)
 		}
 	}

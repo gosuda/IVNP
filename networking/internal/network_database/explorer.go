@@ -1,4 +1,4 @@
-package netdb
+package networkdatabase
 
 import (
 	"context"

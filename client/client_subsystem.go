@@ -2,49 +2,49 @@
 package client
 
 import (
-	addressbookinternal "gosuda.org/ivnp/client/internal/addressbook"
-	frontendinternal "gosuda.org/ivnp/client/internal/frontend"
-	saminternal "gosuda.org/ivnp/client/internal/sam"
+	"gosuda.org/ivnp/client/internal/addressbook"
+	"gosuda.org/ivnp/client/internal/frontend"
+	"gosuda.org/ivnp/client/internal/sam"
 )
 
 type (
-	AddressBookConfig                        = addressbookinternal.Config
-	AddressBookService                       = addressbookinternal.Service
-	ClientByteBudget                         = frontendinternal.ByteBudget
-	ClientControl                            = frontendinternal.Control
-	ClientControlConfig                      = frontendinternal.ControlConfig
-	ClientDestination                        = frontendinternal.Destination
-	ClientDestinationCatalog                 = frontendinternal.DestinationCatalog
-	ClientDestinationController              = frontendinternal.DestinationController
-	ClientDestinationEndpoint                = frontendinternal.DestinationEndpoint
-	ClientDestinationRoute                   = frontendinternal.DestinationRoute
-	ClientDestinationSpec                    = frontendinternal.DestinationSpec
-	ClientHTTPProxy                          = frontendinternal.HTTPProxy
-	ClientHTTPProxyConfig                    = frontendinternal.HTTPProxyConfig
-	ClientLeaseSetPolicy                     = frontendinternal.LeaseSetPolicy
-	ClientMessageSubscription                = frontendinternal.MessageSubscription
-	ClientReadinessDetails                   = frontendinternal.ReadinessDetails
-	ClientSOCKS5Config                       = frontendinternal.SOCKS5Config
-	ClientSOCKS5Proxy                        = frontendinternal.SOCKS5Proxy
-	ClientStatus                             = frontendinternal.Status
-	ClientStatusProvider                     = frontendinternal.StatusProvider
-	SimpleAnonymousMessagingConfig           = saminternal.Config
-	SimpleAnonymousMessagingListenFunc       = saminternal.ListenFunc
-	SimpleAnonymousMessagingListenPacketFunc = saminternal.ListenPacketFunc
-	SimpleAnonymousMessagingNetwork          = saminternal.Network
-	SimpleAnonymousMessagingServer           = saminternal.Server
-	SimpleAnonymousMessagingServerConfig     = saminternal.ServerConfig
+	AddressBookConfig                        = addressbook.Config
+	AddressBookService                       = addressbook.Service
+	ClientByteBudget                         = frontend.ByteBudget
+	ClientControl                            = frontend.Control
+	ClientControlConfig                      = frontend.ControlConfig
+	ClientDestination                        = frontend.Destination
+	ClientDestinationCatalog                 = frontend.DestinationCatalog
+	ClientDestinationController              = frontend.DestinationController
+	ClientDestinationEndpoint                = frontend.DestinationEndpoint
+	ClientDestinationRoute                   = frontend.DestinationRoute
+	ClientDestinationSpec                    = frontend.DestinationSpec
+	ClientHTTPProxy                          = frontend.HTTPProxy
+	ClientHTTPProxyConfig                    = frontend.HTTPProxyConfig
+	ClientLeaseSetPolicy                     = frontend.LeaseSetPolicy
+	ClientMessageSubscription                = frontend.MessageSubscription
+	ClientReadinessDetails                   = frontend.ReadinessDetails
+	ClientSOCKS5Config                       = frontend.SOCKS5Config
+	ClientSOCKS5Proxy                        = frontend.SOCKS5Proxy
+	ClientStatus                             = frontend.Status
+	ClientStatusProvider                     = frontend.StatusProvider
+	SimpleAnonymousMessagingConfig           = sam.Config
+	SimpleAnonymousMessagingListenFunc       = sam.ListenFunc
+	SimpleAnonymousMessagingListenPacketFunc = sam.ListenPacketFunc
+	SimpleAnonymousMessagingNetwork          = sam.Network
+	SimpleAnonymousMessagingServer           = sam.Server
+	SimpleAnonymousMessagingServerConfig     = sam.ServerConfig
 )
 
 const ()
 
 var (
-	AddressBookNewService              = addressbookinternal.NewService
-	ClientErrInvalidConfig             = frontendinternal.ErrInvalidConfig
-	ClientNewConnectionLimitedListener = frontendinternal.NewConnectionLimitedListener
-	ClientNewControl                   = frontendinternal.NewControl
-	ClientNewHTTPProxy                 = frontendinternal.NewHTTPProxy
-	ClientNewSOCKS5Proxy               = frontendinternal.NewSOCKS5Proxy
-	SimpleAnonymousMessagingNew        = saminternal.New
-	SimpleAnonymousMessagingNewServer  = saminternal.NewServer
+	AddressBookNewService              = addressbook.NewService
+	ClientErrInvalidConfig             = frontend.ErrInvalidConfig
+	ClientNewConnectionLimitedListener = frontend.NewConnectionLimitedListener
+	ClientNewControl                   = frontend.NewControl
+	ClientNewHTTPProxy                 = frontend.NewHTTPProxy
+	ClientNewSOCKS5Proxy               = frontend.NewSOCKS5Proxy
+	SimpleAnonymousMessagingNew        = sam.New
+	SimpleAnonymousMessagingNewServer  = sam.NewServer
 )

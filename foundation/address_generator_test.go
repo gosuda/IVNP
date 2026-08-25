@@ -5,7 +5,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"encoding/base64"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"strings"
 	"testing"
 )
@@ -104,11 +104,11 @@ func TestGenerateLocalAddressIncludesElGamalPublicKey(t *testing.T) {
 	}
 	var plain [222]byte
 	plain[0] = 1
-	ciphertext, err := cryptx.EncryptElGamal(make([]byte, cryptx.ElGamalCiphertextSize), address.EncryptionPublic, plain[:])
+	ciphertext, err := cryptography.EncryptElGamal(make([]byte, cryptography.ElGamalCiphertextSize), address.EncryptionPublic, plain[:])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cryptx.DecryptElGamal(make([]byte, len(plain)), address.EncryptionPrivate, ciphertext); err != nil {
+	if _, err := cryptography.DecryptElGamal(make([]byte, len(plain)), address.EncryptionPrivate, ciphertext); err != nil {
 		t.Fatalf("returned ElGamal private key does not decrypt: %v", err)
 	}
 }

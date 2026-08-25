@@ -1,4 +1,4 @@
-package netdb
+package networkdatabase
 
 import (
 	"crypto/ecdh"
@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/hkdf"
-	cryptx "gosuda.org/ivnp/cryptography"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 )
 
@@ -49,7 +49,7 @@ type ELSClientAuthorization struct {
 // LocalEncryptedLeaseSet owns ELS2 policy and delegates the signed inner LS2
 // construction to the same local LS2 producer used by public publication.
 type LocalEncryptedLeaseSet struct {
-	destination *ivnp.LocalDestination
+	destination *foundation.LocalDestination
 	inner       *LocalLeaseSet2
 	secret      []byte
 	dhClients   [][32]byte
@@ -59,7 +59,7 @@ type LocalEncryptedLeaseSet struct {
 	released    bool
 }
 
-func NewLocalEncryptedLeaseSet(destination *ivnp.LocalDestination, inner *LocalLeaseSet2, authorization EncryptedLeaseSetAuthorization, secret []byte) (*LocalEncryptedLeaseSet, error) {
+func NewLocalEncryptedLeaseSet(destination *foundation.LocalDestination, inner *LocalLeaseSet2, authorization EncryptedLeaseSetAuthorization, secret []byte) (*LocalEncryptedLeaseSet, error) {
 	newLocalEncryptedLeaseSetRejected := destination == nil || inner == nil
 	if !newLocalEncryptedLeaseSetRejected {
 		newLocalEncryptedLeaseSetRejected = (len(authorization.DHClients) != 0 && len(authorization.PSKClients) != 0)
@@ -76,7 +76,7 @@ func NewLocalEncryptedLeaseSet(destination *ivnp.LocalDestination, inner *LocalL
 		return nil, ErrEncryptedLeaseSet
 	}
 	kind := identity.SigningKeyType()
-	if kind != ivnp.SigningEdDSASHA512Ed25519 && kind != ivnp.SigningRedDSASHA512Ed25519 {
+	if kind != foundation.SigningEdDSASHA512Ed25519 && kind != foundation.SigningRedDSASHA512Ed25519 {
 		return nil, ErrEncryptedLeaseSet
 	}
 	return &LocalEncryptedLeaseSet{
@@ -89,24 +89,24 @@ func NewLocalEncryptedLeaseSet(destination *ivnp.LocalDestination, inner *LocalL
 	}, nil
 }
 
-func (s *LocalEncryptedLeaseSet) Hash(date time.Time) (ivnp.Hash, error) {
+func (s *LocalEncryptedLeaseSet) Hash(date time.Time) (foundation.Hash, error) {
 	if s == nil {
-		return ivnp.Hash{}, ErrEncryptedLeaseSet
+		return foundation.Hash{}, ErrEncryptedLeaseSet
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.released {
-		return ivnp.Hash{}, ErrEncryptedLeaseSet
+		return foundation.Hash{}, ErrEncryptedLeaseSet
 	}
 	private, public, err := s.destination.EncryptedLeaseSetBlinding(date, s.secret)
 	defer clear(private[:])
 	if err != nil {
-		return ivnp.Hash{}, err
+		return foundation.Hash{}, err
 	}
 	var data [34]byte
-	binary.BigEndian.PutUint16(data[:2], uint16(ivnp.SigningRedDSASHA512Ed25519))
+	binary.BigEndian.PutUint16(data[:2], uint16(foundation.SigningRedDSASHA512Ed25519))
 	copy(data[2:], public[:])
-	return ivnp.Sum(data[:]), nil
+	return foundation.Sum(data[:]), nil
 }
 
 // ReleaseSensitive clears copied ELS2 blinding and client authorization
@@ -148,7 +148,7 @@ func elsHKDF(salt, input []byte, info string, dst []byte) error {
 }
 
 func elsStream(dst, src, key, nonce []byte) error {
-	stream, err := cryptx.NewChaCha20Stream(key, nonce)
+	stream, err := cryptography.NewChaCha20Stream(key, nonce)
 	if err != nil {
 		return err
 	}
@@ -261,7 +261,7 @@ func (s *LocalEncryptedLeaseSet) MarshalTo(dst []byte, nowMillis uint64) (writte
 	if err != nil {
 		return 0, err
 	}
-	subcredential, err = ivnp.EncryptedLeaseSetSubcredential(identity.SigningKeyType(), s.destination.SigningPublic(), blinded[:])
+	subcredential, err = foundation.EncryptedLeaseSetSubcredential(identity.SigningKeyType(), s.destination.SigningPublic(), blinded[:])
 	if err != nil {
 		return 0, err
 	}
@@ -391,10 +391,10 @@ func (s *LocalEncryptedLeaseSet) finishOuter(dst []byte, blinded [32]byte, priva
 	expires := uint16(latest - uint64(published))
 	unsignedLength := 2 + 32 + 4 + 2 + 2 + 2 + len(outerCiphertext)
 	if len(dst) < unsignedLength+64 {
-		return 0, ivnp.ErrDestinationSmall
+		return 0, foundation.ErrDestinationSmall
 	}
 	off := 0
-	binary.BigEndian.PutUint16(dst[off:off+2], uint16(ivnp.SigningRedDSASHA512Ed25519))
+	binary.BigEndian.PutUint16(dst[off:off+2], uint16(foundation.SigningRedDSASHA512Ed25519))
 	off += 2
 	copy(dst[off:off+32], blinded[:])
 	off += 32
@@ -412,7 +412,7 @@ func (s *LocalEncryptedLeaseSet) finishOuter(dst []byte, blinded [32]byte, priva
 	defer clear(signed)
 	signed[0] = byte(i2np.StoreEncryptedLeaseSet)
 	copy(signed[1:], dst[:off])
-	signature, err := ivnp.Red25519Sign(*private, signed)
+	signature, err := foundation.Red25519Sign(*private, signed)
 	if err != nil {
 		return 0, err
 	}

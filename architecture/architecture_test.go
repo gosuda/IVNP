@@ -1,10 +1,13 @@
-package ivnp_test
+package architecture_test
 
 import (
 	"encoding/json"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -19,6 +22,7 @@ type listedPackage struct {
 
 func TestImportLayersAreAcyclic(t *testing.T) {
 	command := exec.Command("go", "list", "-test", "-json", "./...")
+	command.Dir = ".."
 	output, err := command.Output()
 	if err != nil {
 		if exit, ok := err.(*exec.ExitError); ok {
@@ -59,17 +63,63 @@ func TestImportLayersAreAcyclic(t *testing.T) {
 
 func TestSubsystemFacadeFilesExist(t *testing.T) {
 	for _, path := range []string{
-		"foundation/foundation_subsystem.go",
-		"cryptography/cryptography_subsystem.go",
-		"networking/networking_subsystem.go",
-		"client/client_subsystem.go",
-		"state/state_subsystem.go",
-		"observability/observability_subsystem.go",
-		"node/node_subsystem.go",
+		"../foundation/foundation_subsystem.go",
+		"../cryptography/cryptography_subsystem.go",
+		"../networking/networking_subsystem.go",
+		"../client/client_subsystem.go",
+		"../state/state_subsystem.go",
+		"../observability/observability_subsystem.go",
+		"../node/node_subsystem.go",
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("missing subsystem facade %s: %v", path, err)
 		}
+	}
+}
+
+func TestPublicImportsUseCanonicalPathsWithoutAliases(t *testing.T) {
+	canonical := map[string]bool{
+		modulePath + "/ivnp":                   true,
+		modulePath + "/foundation":             true,
+		modulePath + "/cryptography":           true,
+		modulePath + "/networking":             true,
+		modulePath + "/client":                 true,
+		modulePath + "/state":                  true,
+		modulePath + "/observability":          true,
+		modulePath + "/node":                   true,
+		modulePath + "/interfaces/stream":      true,
+		modulePath + "/interfaces/destination": true,
+	}
+	err := filepath.Walk("..", func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" {
+			return nil
+		}
+		file, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+		if parseErr != nil {
+			return parseErr
+		}
+		for _, spec := range file.Imports {
+			importPath := strings.Trim(spec.Path.Value, `"`)
+			if importPath == modulePath {
+				t.Errorf("%s imports forbidden module root %q; use %q", path, importPath, modulePath+"/ivnp")
+			}
+			if canonical[importPath] && spec.Name != nil {
+				t.Errorf("%s aliases canonical import %q as %q", path, importPath, spec.Name.Name)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -95,7 +145,7 @@ func packageLayer(path string) (int, bool) {
 	switch {
 	case strings.HasPrefix(relative, "command/"), strings.HasPrefix(relative, "integration/"):
 		return 9, true
-	case path == modulePath:
+	case relative == "ivnp":
 		return 8, true
 	case relative == "node", strings.HasPrefix(relative, "node/"):
 		return 7, true

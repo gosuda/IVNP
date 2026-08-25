@@ -3,7 +3,7 @@ package foundation
 import (
 	"bytes"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"testing"
 )
 
@@ -31,10 +31,10 @@ func TestLocalDestinationUsesX25519AndClearsPrivateState(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination.ReleaseSensitive()
-	if _, err := destination.Sign([]byte("closed")); !errors.Is(err, cryptx.ErrSensitiveReleased) {
+	if _, err := destination.Sign([]byte("closed")); !errors.Is(err, cryptography.ErrSensitiveReleased) {
 		t.Fatalf("Sign after release = %v", err)
 	}
-	if err := destination.CopyX25519Private(private); !errors.Is(err, cryptx.ErrSensitiveReleased) {
+	if err := destination.CopyX25519Private(private); !errors.Is(err, cryptography.ErrSensitiveReleased) {
 		t.Fatalf("CopyX25519Private after release = %v", err)
 	}
 	if _, err := clone.Sign([]byte("still live")); err != nil {
@@ -108,8 +108,8 @@ func TestLegacyLocalDestinationPrivateStateRoundTrip(t *testing.T) {
 	if imported.Hash() != destination.Hash() || !bytes.Equal(imported.Destination(), destination.Destination()) {
 		t.Fatal("legacy private state changed public destination")
 	}
-	originalElGamal := make([]byte, cryptx.ElGamalPrivateKeySize)
-	importedElGamal := make([]byte, cryptx.ElGamalPrivateKeySize)
+	originalElGamal := make([]byte, cryptography.ElGamalPrivateKeySize)
+	importedElGamal := make([]byte, cryptography.ElGamalPrivateKeySize)
 	if err = destination.CopyElGamalPrivate(originalElGamal); err != nil {
 		t.Fatal(err)
 	}

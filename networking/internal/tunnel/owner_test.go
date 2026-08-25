@@ -2,12 +2,12 @@ package tunnel
 
 import (
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"testing"
 )
 
 func TestOwnedPoolsRejectCrossDestinationCircuits(t *testing.T) {
-	var alice, bob ivnp.Hash
+	var alice, bob foundation.Hash
 	alice[0], bob[0] = 1, 2
 	alicePool := NewOwnedPool(alice, 2)
 	bobPool := NewOwnedPool(bob, 2)
@@ -27,7 +27,7 @@ func TestOwnedPoolsRejectCrossDestinationCircuits(t *testing.T) {
 }
 
 func TestRuntimeRetainsCreatorOwnerOnInstalledCircuit(t *testing.T) {
-	var owner ivnp.Hash
+	var owner foundation.Hash
 	owner[0] = 9
 	runtime := NewRuntime(RuntimeConfig{Now: func() uint64 { return 1 }})
 	if err := runtime.RegisterOutbound(OutboundCircuit{ID: 7, Owner: owner, NextTunnelID: 8, ExpiresAt: 100}); err != nil {

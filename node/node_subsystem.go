@@ -2,25 +2,25 @@
 package node
 
 import (
-	runtimeinternal "gosuda.org/ivnp/node/internal/runtime"
+	"gosuda.org/ivnp/node/internal/runtime"
 	"gosuda.org/ivnp/state"
 )
 
 type (
-	Subsystem             = runtimeinternal.Daemon
-	Options               = runtimeinternal.Options
-	Status                = runtimeinternal.Status
-	DestinationPolicy     = runtimeinternal.DestinationPolicy
-	DestinationPolicyKind = runtimeinternal.DestinationPolicyKind
+	Subsystem             = noderuntime.Daemon
+	Options               = noderuntime.Options
+	Status                = noderuntime.Status
+	DestinationPolicy     = noderuntime.DestinationPolicy
+	DestinationPolicyKind = noderuntime.DestinationPolicyKind
 )
 
 const (
-	DestinationPublicLeaseSet2            = runtimeinternal.DestinationPublicLS2
-	DestinationEncryptedWithoutAuth       = runtimeinternal.DestinationEncryptedNone
-	DestinationEncryptedWithDiffieHellman = runtimeinternal.DestinationEncryptedDH
-	DestinationEncryptedWithPreSharedKey  = runtimeinternal.DestinationEncryptedPSK
+	DestinationPublicLeaseSet2            = noderuntime.DestinationPublicLS2
+	DestinationEncryptedWithoutAuth       = noderuntime.DestinationEncryptedNone
+	DestinationEncryptedWithDiffieHellman = noderuntime.DestinationEncryptedDH
+	DestinationEncryptedWithPreSharedKey  = noderuntime.DestinationEncryptedPSK
 )
 
 func NewSubsystem(configuration state.ConfigurationOperating, options Options) (*Subsystem, error) {
-	return runtimeinternal.New(configuration, options)
+	return noderuntime.New(configuration, options)
 }

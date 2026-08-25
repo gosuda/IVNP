@@ -1,9 +1,9 @@
-package netdb
+package networkdatabase
 
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"log/slog"
 )
@@ -14,7 +14,7 @@ var ErrRouterInfoPublisherConfig = errors.New("netdb: invalid RouterInfo publish
 // only signing and local-admission boundary while NetDB observes immutable
 // snapshots for network confirmation.
 type RouterInfoSource interface {
-	Hash() ivnp.Hash
+	Hash() foundation.Hash
 	Snapshot() RouterInfo
 }
 
@@ -26,7 +26,7 @@ type RouterInfoPublisherConfig struct {
 	Registry         *PublicationTokenRegistry
 	Now              func() uint64
 	Random           func() uint32
-	PreferredTargets []ivnp.Hash
+	PreferredTargets []foundation.Hash
 	Logger           *slog.Logger
 }
 

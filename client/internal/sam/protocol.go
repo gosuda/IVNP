@@ -1,6 +1,6 @@
 package sam
 
-import networking "gosuda.org/ivnp/networking"
+import "gosuda.org/ivnp/networking"
 
 import "cmp"
 
@@ -8,8 +8,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
-	clientapi "gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
 
 	"net"
 	"net/netip"
@@ -42,13 +42,13 @@ func (s *Server) dispatch(connection *serverConnection, cmd command) (bool, erro
 			return false, connection.writeLine("DEST REPLY RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_OPTIONS")
 		}
 		signatureType := cmd.values["SIGNATURE_TYPE"]
-		var local *ivnp.LocalDestination
+		var local *foundation.LocalDestination
 		var err error
 		switch {
 		case signatureType == "" || signatureType == "7" || strings.EqualFold(signatureType, "EdDSA_SHA512_Ed25519"):
-			local, err = ivnp.GenerateLegacyLocalDestination()
+			local, err = foundation.GenerateLegacyLocalDestination()
 		case signatureType == "11" || strings.EqualFold(signatureType, "RedDSA_SHA512_Ed25519"):
-			local, err = ivnp.GenerateEncryptedLocalDestination()
+			local, err = foundation.GenerateEncryptedLocalDestination()
 		default:
 			return false, connection.writeLine("DEST REPLY RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_SIGNATURE_TYPE")
 		}
@@ -122,7 +122,7 @@ func (s *Server) createSession(connection *serverConnection, cmd command) error 
 		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_OPTIONS")
 	}
 	defer clearLeaseSetPolicy(&policy)
-	var local *ivnp.LocalDestination
+	var local *foundation.LocalDestination
 	destinationValue := cmd.values["DESTINATION"]
 	if destinationValue == "" || strings.EqualFold(destinationValue, "TRANSIENT") {
 		signatureType := cmd.values["SIGNATURE_TYPE"]
@@ -134,9 +134,9 @@ func (s *Server) createSession(connection *serverConnection, cmd command) error 
 			return connection.writeLine("SESSION STATUS RESULT=INVALID_KEY")
 		}
 		if policy.Encrypted {
-			local, err = ivnp.GenerateEncryptedLocalDestination()
+			local, err = foundation.GenerateEncryptedLocalDestination()
 		} else {
-			local, err = ivnp.GenerateLegacyLocalDestination()
+			local, err = foundation.GenerateLegacyLocalDestination()
 		}
 	} else {
 		if cmd.values["SIGNATURE_TYPE"] != "" {
@@ -153,7 +153,7 @@ func (s *Server) createSession(connection *serverConnection, cmd command) error 
 		return connection.writeLine("SESSION STATUS RESULT=INVALID_KEY")
 	}
 	defer clear(private)
-	endpoint, err := s.config.Controller.CreateDestination(s.ctx, clientapi.DestinationSpec{Local: local, Policy: policy})
+	endpoint, err := s.config.Controller.CreateDestination(s.ctx, destination.DestinationSpec{Local: local, Policy: policy})
 	local.ReleaseSensitive()
 	clearLeaseSetPolicy(&policy)
 	if err != nil {
@@ -163,7 +163,7 @@ func (s *Server) createSession(connection *serverConnection, cmd command) error 
 		}
 		return connection.writeLine("SESSION STATUS RESULT=" + result)
 	}
-	if ready, ok := endpoint.(clientapi.ReadyDestinationEndpoint); ok {
+	if ready, ok := endpoint.(destination.ReadyDestinationEndpoint); ok {
 		readyCtx, cancel := context.WithTimeout(s.ctx, s.config.ReadinessTimeout)
 		err = waitReadyConnection(readyCtx, connection, ready)
 		cancel()
@@ -189,10 +189,10 @@ func (s *Server) createSession(connection *serverConnection, cmd command) error 
 	}
 	connection.root = root
 	if style == styleDatagram {
-		err = root.startReceiver(clientapi.DestinationRoute{Protocol: networking.DatagramProtocolDatagram1, ToPort: listenPort}, s.config.SessionQueue)
+		err = root.startReceiver(destination.DestinationRoute{Protocol: networking.DatagramProtocolDatagram1, ToPort: listenPort}, s.config.SessionQueue)
 	}
 	if style == styleRaw {
-		err = root.startReceiver(clientapi.DestinationRoute{Protocol: listenProtocol, ToPort: listenPort}, s.config.SessionQueue)
+		err = root.startReceiver(destination.DestinationRoute{Protocol: listenProtocol, ToPort: listenPort}, s.config.SessionQueue)
 	}
 	if err != nil {
 		connection.root = nil
@@ -201,7 +201,7 @@ func (s *Server) createSession(connection *serverConnection, cmd command) error 
 	}
 	return connection.writeLine("SESSION STATUS RESULT=OK DESTINATION=" + string(private))
 }
-func waitReadyConnection(parent context.Context, connection *serverConnection, ready clientapi.ReadyDestinationEndpoint) error {
+func waitReadyConnection(parent context.Context, connection *serverConnection, ready destination.ReadyDestinationEndpoint) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	readyDone := make(chan error, 1)
@@ -268,10 +268,10 @@ func (s *Server) addSubsession(connection *serverConnection, cmd command) error 
 	root.children[id] = child
 	root.mu.Unlock()
 	if style == styleDatagram {
-		err = child.startReceiver(clientapi.DestinationRoute{Protocol: networking.DatagramProtocolDatagram1, ToPort: listenPort}, s.config.SessionQueue)
+		err = child.startReceiver(destination.DestinationRoute{Protocol: networking.DatagramProtocolDatagram1, ToPort: listenPort}, s.config.SessionQueue)
 	}
 	if style == styleRaw {
-		err = child.startReceiver(clientapi.DestinationRoute{Protocol: listenProtocol, ToPort: listenPort}, s.config.SessionQueue)
+		err = child.startReceiver(destination.DestinationRoute{Protocol: listenProtocol, ToPort: listenPort}, s.config.SessionQueue)
 	}
 	if err != nil {
 		_ = root.removeChild(id)
@@ -333,8 +333,8 @@ func reservedRawProtocol(protocol uint8) bool {
 }
 func quoteToken(value string) string { return fmt.Sprintf("%q", value) }
 
-func sessionPolicy(values map[string]string) (clientapi.LeaseSetPolicy, error) {
-	policy := clientapi.LeaseSetPolicy{CryptoTypes: []uint16{7, 6, 4}}
+func sessionPolicy(values map[string]string) (destination.LeaseSetPolicy, error) {
+	policy := destination.LeaseSetPolicy{CryptoTypes: []uint16{7, 6, 4}}
 	if value := values["I2CP.LEASESETTYPE"]; value != "" {
 		switch value {
 		case "3":
@@ -380,7 +380,7 @@ func sessionPolicy(values map[string]string) (clientapi.LeaseSetPolicy, error) {
 		sort.Strings(keys)
 		for _, key := range keys {
 			encoded := values[key]
-			raw, err := ivnp.DecodeI2PBase64([]byte(encoded))
+			raw, err := foundation.DecodeI2PBase64([]byte(encoded))
 			if err != nil || len(raw) != 32 {
 				clear(raw)
 				return policy, ErrUnsupported
@@ -554,7 +554,7 @@ func (s *Server) samTargetMatchesSource(host string, source netip.Addr) bool {
 	return false
 }
 
-func clearLeaseSetPolicy(policy *clientapi.LeaseSetPolicy) {
+func clearLeaseSetPolicy(policy *destination.LeaseSetPolicy) {
 	if policy == nil {
 		return
 	}

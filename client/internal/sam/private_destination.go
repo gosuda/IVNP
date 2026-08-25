@@ -6,7 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 )
 
 var ErrInvalidKey = errors.New("sam: invalid private destination")
@@ -14,7 +14,7 @@ var ErrInvalidKey = errors.New("sam: invalid private destination")
 // SAM private Destinations are the binary public Destination followed by the
 // encryption private key and signing private key, encoded with I2P base64. For
 // Ed25519 SAM carries the 32-byte seed, not Go's 64-byte expanded key.
-func encodePrivateDestination(destination *ivnp.LocalDestination) ([]byte, error) {
+func encodePrivateDestination(destination *foundation.LocalDestination) ([]byte, error) {
 	if destination == nil {
 		return nil, ErrInvalidKey
 	}
@@ -33,25 +33,25 @@ func encodePrivateDestination(destination *ivnp.LocalDestination) ([]byte, error
 	if publicLength == 0 || len(state) < 2+publicLength+32 {
 		return nil, ErrInvalidKey
 	}
-	publicRaw, err := ivnp.DecodeI2PBase64(state[2 : 2+publicLength])
+	publicRaw, err := foundation.DecodeI2PBase64(state[2 : 2+publicLength])
 	if err != nil {
 		return nil, ErrInvalidKey
 	}
 	defer clear(publicRaw)
-	identity, consumed, err := ivnp.ParseIdentity(publicRaw)
+	identity, consumed, err := foundation.ParseIdentity(publicRaw)
 	if err != nil || consumed != len(publicRaw) {
 		return nil, ErrInvalidKey
 	}
 	offset := 2 + publicLength
 	var signing []byte
 	switch identity.SigningKeyType() {
-	case ivnp.SigningEdDSASHA512Ed25519:
+	case foundation.SigningEdDSASHA512Ed25519:
 		if len(state) < offset+ed25519.PrivateKeySize+32 {
 			return nil, ErrInvalidKey
 		}
 		signing = state[offset : offset+ed25519.SeedSize]
 		offset += ed25519.PrivateKeySize
-	case ivnp.SigningRedDSASHA512Ed25519:
+	case foundation.SigningRedDSASHA512Ed25519:
 		if len(state) < offset+32+32 {
 			return nil, ErrInvalidKey
 		}
@@ -61,16 +61,16 @@ func encodePrivateDestination(destination *ivnp.LocalDestination) ([]byte, error
 		return nil, ErrInvalidKey
 	}
 	switch identity.CryptoKeyType() {
-	case ivnp.CryptoX25519:
+	case foundation.CryptoX25519:
 		x25519 := state[offset : offset+32]
 		wire := make([]byte, len(publicRaw)+32+len(signing))
 		position := copy(wire, publicRaw)
 		position += copy(wire[position:], x25519)
 		copy(wire[position:], signing)
-		encoded := []byte(ivnp.EncodeI2PBase64(wire))
+		encoded := []byte(foundation.EncodeI2PBase64(wire))
 		clear(wire)
 		return encoded, nil
-	case ivnp.CryptoElGamal:
+	case foundation.CryptoElGamal:
 		elgamalOffset := offset + 32
 		if len(state) < elgamalOffset+256 {
 			return nil, ErrInvalidKey
@@ -79,7 +79,7 @@ func encodePrivateDestination(destination *ivnp.LocalDestination) ([]byte, error
 		position := copy(wire, publicRaw)
 		position += copy(wire[position:], state[elgamalOffset:elgamalOffset+256])
 		copy(wire[position:], signing)
-		encoded := []byte(ivnp.EncodeI2PBase64(wire))
+		encoded := []byte(foundation.EncodeI2PBase64(wire))
 		clear(wire)
 		return encoded, nil
 	default:
@@ -87,19 +87,19 @@ func encodePrivateDestination(destination *ivnp.LocalDestination) ([]byte, error
 	}
 }
 
-func decodePrivateDestination(encoded string) (*ivnp.LocalDestination, error) {
-	wire, err := ivnp.DecodeI2PBase64([]byte(encoded))
+func decodePrivateDestination(encoded string) (*foundation.LocalDestination, error) {
+	wire, err := foundation.DecodeI2PBase64([]byte(encoded))
 	if err != nil {
 		return nil, ErrInvalidKey
 	}
 	defer clear(wire)
-	identity, consumed, err := ivnp.ParseIdentity(wire)
-	if err != nil || (identity.CryptoKeyType() != ivnp.CryptoX25519 && identity.CryptoKeyType() != ivnp.CryptoElGamal) {
+	identity, consumed, err := foundation.ParseIdentity(wire)
+	if err != nil || (identity.CryptoKeyType() != foundation.CryptoX25519 && identity.CryptoKeyType() != foundation.CryptoElGamal) {
 		return nil, ErrInvalidKey
 	}
 	const signingLength = ed25519.SeedSize
 	encryptionLength := 32
-	if identity.CryptoKeyType() == ivnp.CryptoElGamal {
+	if identity.CryptoKeyType() == foundation.CryptoElGamal {
 		encryptionLength = 256
 	}
 	if len(wire) != consumed+encryptionLength+signingLength {
@@ -109,10 +109,10 @@ func decodePrivateDestination(encoded string) (*ivnp.LocalDestination, error) {
 	signing := wire[consumed+encryptionLength:]
 	var private []byte
 	switch identity.SigningKeyType() {
-	case ivnp.SigningEdDSASHA512Ed25519:
+	case foundation.SigningEdDSASHA512Ed25519:
 		private = ed25519.NewKeyFromSeed(signing)
-	case ivnp.SigningRedDSASHA512Ed25519:
-		if identity.CryptoKeyType() != ivnp.CryptoX25519 {
+	case foundation.SigningRedDSASHA512Ed25519:
+		if identity.CryptoKeyType() != foundation.CryptoX25519 {
 			return nil, ErrInvalidKey
 		}
 		private = append([]byte(nil), signing...)
@@ -122,7 +122,7 @@ func decodePrivateDestination(encoded string) (*ivnp.LocalDestination, error) {
 	defer clear(private)
 	var x25519 []byte
 	var elgamal []byte
-	if identity.CryptoKeyType() == ivnp.CryptoElGamal {
+	if identity.CryptoKeyType() == foundation.CryptoElGamal {
 		generated, generateErr := ecdh.X25519().GenerateKey(rand.Reader)
 		if generateErr != nil {
 			return nil, ErrInvalidKey
@@ -132,7 +132,7 @@ func decodePrivateDestination(encoded string) (*ivnp.LocalDestination, error) {
 	} else {
 		x25519 = encryptionPrivate
 	}
-	public := []byte(ivnp.EncodeI2PBase64(identity.Bytes()))
+	public := []byte(foundation.EncodeI2PBase64(identity.Bytes()))
 	state := make([]byte, 2+len(public)+len(private)+32+len(elgamal)+1)
 	defer clear(state)
 	binary.BigEndian.PutUint16(state[:2], uint16(len(public)))
@@ -141,7 +141,7 @@ func decodePrivateDestination(encoded string) (*ivnp.LocalDestination, error) {
 	offset += copy(state[offset:], x25519)
 	offset += copy(state[offset:], elgamal)
 	state[offset] = 0x07
-	destination, err := ivnp.ImportLocalDestination(state)
+	destination, err := foundation.ImportLocalDestination(state)
 	if err != nil {
 		return nil, ErrInvalidKey
 	}

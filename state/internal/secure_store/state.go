@@ -1,5 +1,5 @@
 // Package state persists the long-lived private identity material of an I2P router.
-package state
+package securestore
 
 import (
 	"bytes"
@@ -11,8 +11,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	cryptx "gosuda.org/ivnp/cryptography"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/state/internal/filesystem_store"
 	"io"
 	"os"
@@ -35,7 +35,7 @@ const (
 	masterKeySize          = 32
 	nonceSize              = 12
 	headerSize             = len(stateMagic) + 1 + nonceSize
-	routerIdentityMaxBytes = ivnp.IdentityBaseLength + ivnp.CertificateHeader + 4
+	routerIdentityMaxBytes = foundation.IdentityBaseLength + foundation.CertificateHeader + 4
 )
 
 var (
@@ -51,14 +51,14 @@ var (
 // Bundle is the durable private identity material for one router. Runtime
 // sessions, network database records, and tunnels are intentionally absent.
 type Bundle struct {
-	Router             ivnp.LocalRouterAddress
+	Router             foundation.LocalRouterAddress
 	NTCP2StaticPrivate []byte
 	NTCP2StaticIV      []byte
 	SSU2StaticPrivate  []byte
 	SSU2IntroKey       []byte
 	// Destinations remains the decoded legacy ElGamal representation solely so
 	// older encrypted bundles can be migrated on their next save.
-	Destinations map[string]ivnp.LocalAddress
+	Destinations map[string]foundation.LocalAddress
 	// DestinationPrivate holds the opaque LocalDestination private encoding.
 	// It is the only persisted client-destination representation used by new
 	// daemon runtimes.
@@ -334,7 +334,7 @@ func (s *Store) save(bundle Bundle) error {
 	if _, err := ensureParent(s.StatePath); err != nil {
 		return err
 	}
-	if err := fsstore.WriteAtomic(s.StatePath, data, 0o600, s.maxStateBytes()); err != nil {
+	if err := filesystemstore.WriteAtomic(s.StatePath, data, 0o600, s.maxStateBytes()); err != nil {
 		return err
 	}
 	return nil
@@ -346,9 +346,9 @@ func (s *Store) readState() ([]byte, error) {
 		return nil, err
 	}
 	defer file.Close()
-	data, err := fsstore.ReadBoundedFile(file, int64(s.maxStateBytes()))
+	data, err := filesystemstore.ReadBoundedFile(file, int64(s.maxStateBytes()))
 	if err != nil {
-		if errors.Is(err, fsstore.ErrTooLarge) {
+		if errors.Is(err, filesystemstore.ErrTooLarge) {
 			return nil, fmt.Errorf("%w: file exceeds limit", ErrInvalidState)
 		}
 		return nil, err
@@ -362,7 +362,7 @@ func (s *Store) loadMasterKey() ([]byte, error) {
 		return nil, err
 	}
 	defer file.Close()
-	key, err := fsstore.ReadBoundedFile(file, masterKeySize)
+	key, err := filesystemstore.ReadBoundedFile(file, masterKeySize)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +421,7 @@ func (s *Store) loadOrCreateMasterKey() ([]byte, error) {
 		}
 
 		if writeErr == nil {
-			writeErr = fsstore.
+			writeErr = filesystemstore.
 				SyncDir(dir)
 		}
 		if writeErr != nil {
@@ -445,7 +445,7 @@ func (s *Store) encodeBundle(bundle Bundle) ([]byte, error) {
 	}
 	capacity := 2 + len(bundle.Router.RouterIdentity) + ed25519.PrivateKeySize + 32 + 32 + aes.BlockSize + 32 + 32 + 2 + 2
 	for name, address := range bundle.Destinations {
-		capacity += 1 + len(name) + 2 + len(address.Destination) + ed25519.PrivateKeySize + cryptx.ElGamalPrivateKeySize
+		capacity += 1 + len(name) + 2 + len(address.Destination) + ed25519.PrivateKeySize + cryptography.ElGamalPrivateKeySize
 	}
 	for name, policy := range bundle.EncryptedLeaseSetPolicies {
 		capacity += 1 + len(name) + 2 + len(policy.Secret) + 1 + 2 + 32*(len(policy.DHClients)+len(policy.PSKClients))
@@ -585,7 +585,7 @@ func (s *Store) decodeBundle(data []byte) (Bundle, error) {
 	if count > s.maxDestinations() {
 		return Bundle{}, ErrInvalidState
 	}
-	bundle.Destinations = make(map[string]ivnp.LocalAddress, count)
+	bundle.Destinations = make(map[string]foundation.LocalAddress, count)
 	for range count {
 		if len(data) < 1 {
 			return Bundle{}, ErrInvalidState
@@ -701,7 +701,7 @@ func (s *Store) decodeBundle(data []byte) (Bundle, error) {
 			}
 			private := append([]byte(nil), data[:privateLen]...)
 			data = data[privateLen:]
-			destination, importErr := ivnp.ImportLocalDestination(private)
+			destination, importErr := foundation.ImportLocalDestination(private)
 			if importErr != nil {
 				clear(private)
 				return Bundle{}, ErrInvalidState
@@ -740,7 +740,7 @@ func (s *Store) decodeBundle(data []byte) (Bundle, error) {
 				return Bundle{}, ErrInvalidState
 			}
 			policies := make([]RemoteELSAuthorization, count)
-			seen := make(map[ivnp.Hash]struct{}, count)
+			seen := make(map[foundation.Hash]struct{}, count)
 			for index := range policies {
 				if len(data) < 2 {
 					return Bundle{}, ErrInvalidState
@@ -752,7 +752,7 @@ func (s *Store) decodeBundle(data []byte) (Bundle, error) {
 				}
 				identityBytes := append([]byte(nil), data[:identityLen]...)
 				data = data[identityLen:]
-				identity, consumed, err := ivnp.ParseIdentity(identityBytes)
+				identity, consumed, err := foundation.ParseIdentity(identityBytes)
 				if err != nil || consumed != len(identityBytes) {
 					clear(identityBytes)
 					return Bundle{}, ErrInvalidState
@@ -821,7 +821,7 @@ func (s *Store) validateBundle(bundle Bundle) error {
 		if name == "" || len(name) > s.maxNameBytes() || !utf8.ValidString(name) || len(private) == 0 || bundle.Destinations[name].Destination != nil {
 			return ErrInvalidBundle
 		}
-		destination, err := ivnp.ImportLocalDestination(private)
+		destination, err := foundation.ImportLocalDestination(private)
 		if err != nil {
 			return ErrInvalidBundle
 		}
@@ -854,9 +854,9 @@ func (s *Store) validateBundle(bundle Bundle) error {
 		if validateBundleRejected {
 			return ErrInvalidBundle
 		}
-		seen := make(map[ivnp.Hash]struct{}, len(policies))
+		seen := make(map[foundation.Hash]struct{}, len(policies))
 		for _, policy := range policies {
-			identity, consumed, err := ivnp.ParseIdentity(policy.Identity)
+			identity, consumed, err := foundation.ParseIdentity(policy.Identity)
 			if err != nil || consumed != len(policy.Identity) || len(policy.Secret) > 0xffff {
 				return ErrInvalidBundle
 			}
@@ -888,12 +888,12 @@ func (s *Store) validateBundle(bundle Bundle) error {
 	return nil
 }
 
-func validateAddress(address ivnp.LocalAddress) error {
-	identity, err := ivnp.ParseDestination(address.Destination)
-	if err != nil || !bytes.Equal(address.Destination, []byte(ivnp.EncodeI2PBase64(identity.Bytes()))) || identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519 || identity.CryptoKeyType() != ivnp.CryptoElGamal {
+func validateAddress(address foundation.LocalAddress) error {
+	identity, err := foundation.ParseDestination(address.Destination)
+	if err != nil || !bytes.Equal(address.Destination, []byte(foundation.EncodeI2PBase64(identity.Bytes()))) || identity.SigningKeyType() != foundation.SigningEdDSASHA512Ed25519 || identity.CryptoKeyType() != foundation.CryptoElGamal {
 		return ErrInvalidBundle
 	}
-	if address.Hash != identity.Hash() || len(address.SigningPublic) != ed25519.PublicKeySize || len(address.SigningPrivate) != ed25519.PrivateKeySize || len(address.EncryptionPublic) != cryptx.ElGamalPublicKeySize || len(address.EncryptionPrivate) != cryptx.ElGamalPrivateKeySize {
+	if address.Hash != identity.Hash() || len(address.SigningPublic) != ed25519.PublicKeySize || len(address.SigningPrivate) != ed25519.PrivateKeySize || len(address.EncryptionPublic) != cryptography.ElGamalPublicKeySize || len(address.EncryptionPrivate) != cryptography.ElGamalPrivateKeySize {
 		return ErrInvalidBundle
 	}
 	signingFirst, signingRest := identity.SigningKeyParts()
@@ -907,19 +907,19 @@ func validateAddress(address ivnp.LocalAddress) error {
 	}
 	// Encrypting and decrypting a fixed valid legacy block verifies the stored
 	// ElGamal exponent against the public key as well as validating its range.
-	plaintext := make([]byte, cryptx.ElGamalPlaintextSize)
-	ciphertext, err := cryptx.EncryptElGamal(make([]byte, cryptx.ElGamalCiphertextSize), address.EncryptionPublic, plaintext)
+	plaintext := make([]byte, cryptography.ElGamalPlaintextSize)
+	ciphertext, err := cryptography.EncryptElGamal(make([]byte, cryptography.ElGamalCiphertextSize), address.EncryptionPublic, plaintext)
 	if err != nil {
 		return ErrInvalidBundle
 	}
-	decrypted, err := cryptx.DecryptElGamal(make([]byte, cryptx.ElGamalPlaintextSize), address.EncryptionPrivate, ciphertext)
+	decrypted, err := cryptography.DecryptElGamal(make([]byte, cryptography.ElGamalPlaintextSize), address.EncryptionPrivate, ciphertext)
 	if err != nil || !bytes.Equal(decrypted, plaintext) {
 		return ErrInvalidBundle
 	}
 	return nil
 }
 
-func appendRouterAddress(dst []byte, address ivnp.LocalRouterAddress) []byte {
+func appendRouterAddress(dst []byte, address foundation.LocalRouterAddress) []byte {
 	var length [2]byte
 	binary.BigEndian.PutUint16(length[:], uint16(len(address.RouterIdentity)))
 	dst = append(dst, length[:]...)
@@ -928,29 +928,29 @@ func appendRouterAddress(dst []byte, address ivnp.LocalRouterAddress) []byte {
 	return append(dst, address.X25519Private[:]...)
 }
 
-func parseRouterAddress(data []byte) (ivnp.LocalRouterAddress, []byte, error) {
+func parseRouterAddress(data []byte) (foundation.LocalRouterAddress, []byte, error) {
 	if len(data) < 2 {
-		return ivnp.LocalRouterAddress{}, nil, ErrInvalidState
+		return foundation.LocalRouterAddress{}, nil, ErrInvalidState
 	}
 	identityLength := int(binary.BigEndian.Uint16(data[:2]))
 	data = data[2:]
 	if identityLength == 0 || identityLength > routerIdentityMaxBytes || len(data) < identityLength+ed25519.PrivateKeySize+32 {
-		return ivnp.LocalRouterAddress{}, nil, ErrInvalidState
+		return foundation.LocalRouterAddress{}, nil, ErrInvalidState
 	}
-	address := ivnp.LocalRouterAddress{
+	address := foundation.LocalRouterAddress{
 		RouterIdentity: append([]byte(nil), data[:identityLength]...),
 		SigningPrivate: append(ed25519.PrivateKey(nil), data[identityLength:identityLength+ed25519.PrivateKeySize]...),
 	}
 	copy(address.X25519Private[:], data[identityLength+ed25519.PrivateKeySize:identityLength+ed25519.PrivateKeySize+32])
 	data = data[identityLength+ed25519.PrivateKeySize+32:]
-	identity, consumed, err := ivnp.ParseIdentity(address.RouterIdentity)
+	identity, consumed, err := foundation.ParseIdentity(address.RouterIdentity)
 	if err != nil || consumed != len(address.RouterIdentity) {
-		return ivnp.LocalRouterAddress{}, nil, ErrInvalidState
+		return foundation.LocalRouterAddress{}, nil, ErrInvalidState
 	}
 	signing, signingRest := identity.SigningKeyParts()
 	crypto, cryptoRest := identity.CryptoKeyParts()
 	if len(signingRest) != 0 || len(cryptoRest) != 0 || len(signing) != ed25519.PublicKeySize || len(crypto) != len(address.X25519Public) {
-		return ivnp.LocalRouterAddress{}, nil, ErrInvalidState
+		return foundation.LocalRouterAddress{}, nil, ErrInvalidState
 	}
 	address.Hash = identity.Hash()
 	address.SigningPublic = append(ed25519.PublicKey(nil), signing...)
@@ -958,15 +958,15 @@ func parseRouterAddress(data []byte) (ivnp.LocalRouterAddress, []byte, error) {
 	return address, data, nil
 }
 
-func validateRouterAddress(address ivnp.LocalRouterAddress) error {
+func validateRouterAddress(address foundation.LocalRouterAddress) error {
 	if len(address.RouterIdentity) == 0 || len(address.RouterIdentity) > routerIdentityMaxBytes {
 		return ErrInvalidBundle
 	}
-	identity, consumed, err := ivnp.ParseIdentity(address.RouterIdentity)
+	identity, consumed, err := foundation.ParseIdentity(address.RouterIdentity)
 	validateRouterAddressRejected := err != nil || consumed != len(address.RouterIdentity) || !bytes.Equal(address.RouterIdentity, identity.Bytes()) ||
-		identity.Certificate().Type != ivnp.CertificateKey || identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519
+		identity.Certificate().Type != foundation.CertificateKey || identity.SigningKeyType() != foundation.SigningEdDSASHA512Ed25519
 	if !validateRouterAddressRejected {
-		validateRouterAddressRejected = identity.CryptoKeyType() != ivnp.CryptoX25519
+		validateRouterAddressRejected = identity.CryptoKeyType() != foundation.CryptoX25519
 	}
 	if validateRouterAddressRejected {
 		return ErrInvalidBundle
@@ -990,7 +990,7 @@ func validateRouterAddress(address ivnp.LocalRouterAddress) error {
 	return nil
 }
 
-func appendAddress(dst []byte, address ivnp.LocalAddress) []byte {
+func appendAddress(dst []byte, address foundation.LocalAddress) []byte {
 	var length [2]byte
 	binary.BigEndian.PutUint16(length[:], uint16(len(address.Destination)))
 	dst = append(dst, length[:]...)
@@ -999,29 +999,29 @@ func appendAddress(dst []byte, address ivnp.LocalAddress) []byte {
 	return append(dst, address.EncryptionPrivate[:]...)
 }
 
-func parseAddress(data []byte) (ivnp.LocalAddress, []byte, error) {
+func parseAddress(data []byte) (foundation.LocalAddress, []byte, error) {
 	if len(data) < 2 {
-		return ivnp.LocalAddress{}, nil, ErrInvalidState
+		return foundation.LocalAddress{}, nil, ErrInvalidState
 	}
 	destinationLength := int(binary.BigEndian.Uint16(data[:2]))
 	data = data[2:]
-	if destinationLength == 0 || destinationLength > 2048 || len(data) < destinationLength+ed25519.PrivateKeySize+cryptx.ElGamalPrivateKeySize {
-		return ivnp.LocalAddress{}, nil, ErrInvalidState
+	if destinationLength == 0 || destinationLength > 2048 || len(data) < destinationLength+ed25519.PrivateKeySize+cryptography.ElGamalPrivateKeySize {
+		return foundation.LocalAddress{}, nil, ErrInvalidState
 	}
-	address := ivnp.LocalAddress{
+	address := foundation.LocalAddress{
 		Destination:       append([]byte(nil), data[:destinationLength]...),
 		SigningPrivate:    append(ed25519.PrivateKey(nil), data[destinationLength:destinationLength+ed25519.PrivateKeySize]...),
-		EncryptionPrivate: cryptx.ElGamalPrivateKey(data[destinationLength+ed25519.PrivateKeySize : destinationLength+ed25519.PrivateKeySize+cryptx.ElGamalPrivateKeySize]),
+		EncryptionPrivate: cryptography.ElGamalPrivateKey(data[destinationLength+ed25519.PrivateKeySize : destinationLength+ed25519.PrivateKeySize+cryptography.ElGamalPrivateKeySize]),
 	}
-	data = data[destinationLength+ed25519.PrivateKeySize+cryptx.ElGamalPrivateKeySize:]
-	identity, err := ivnp.ParseDestination(address.Destination)
+	data = data[destinationLength+ed25519.PrivateKeySize+cryptography.ElGamalPrivateKeySize:]
+	identity, err := foundation.ParseDestination(address.Destination)
 	if err != nil {
-		return ivnp.LocalAddress{}, nil, ErrInvalidState
+		return foundation.LocalAddress{}, nil, ErrInvalidState
 	}
 	signing, signingRest := identity.SigningKeyParts()
 	crypto, cryptoRest := identity.CryptoKeyParts()
-	if len(signingRest) != 0 || len(cryptoRest) != 0 || len(signing) != ed25519.PublicKeySize || len(crypto) != cryptx.ElGamalPublicKeySize {
-		return ivnp.LocalAddress{}, nil, ErrInvalidState
+	if len(signingRest) != 0 || len(cryptoRest) != 0 || len(signing) != ed25519.PublicKeySize || len(crypto) != cryptography.ElGamalPublicKeySize {
+		return foundation.LocalAddress{}, nil, ErrInvalidState
 	}
 	address.Hash = identity.Hash()
 	address.SigningPublic = append(ed25519.PublicKey(nil), signing...)
@@ -1030,7 +1030,7 @@ func parseAddress(data []byte) (ivnp.LocalAddress, []byte, error) {
 }
 
 func generateBundle() (Bundle, error) {
-	router, err := ivnp.GenerateLocalRouterAddress()
+	router, err := foundation.GenerateLocalRouterAddress()
 	if err != nil {
 		return Bundle{}, err
 	}
@@ -1048,7 +1048,7 @@ func generateBundle() (Bundle, error) {
 		NTCP2StaticIV:             make([]byte, aes.BlockSize),
 		SSU2StaticPrivate:         append([]byte(nil), ssu.Bytes()...),
 		SSU2IntroKey:              make([]byte, 32),
-		Destinations:              make(map[string]ivnp.LocalAddress),
+		Destinations:              make(map[string]foundation.LocalAddress),
 		DestinationPrivate:        make(map[string][]byte),
 		EncryptedLeaseSetPolicies: make(map[string]EncryptedLeaseSetPolicy),
 	}
@@ -1099,7 +1099,7 @@ func (s *Store) openPrivateFile(path string) (*os.File, error) {
 	if _, err := ensureParent(path); err != nil {
 		return nil, err
 	}
-	file, info, err := fsstore.OpenRegular(path)
+	file, info, err := filesystemstore.OpenRegular(path)
 	if err != nil {
 		return nil, err
 	}
@@ -1153,7 +1153,7 @@ func cloneBundle(bundle Bundle) Bundle {
 		NTCP2StaticIV:              append([]byte(nil), bundle.NTCP2StaticIV...),
 		SSU2StaticPrivate:          append([]byte(nil), bundle.SSU2StaticPrivate...),
 		SSU2IntroKey:               append([]byte(nil), bundle.SSU2IntroKey...),
-		Destinations:               make(map[string]ivnp.LocalAddress, len(bundle.Destinations)),
+		Destinations:               make(map[string]foundation.LocalAddress, len(bundle.Destinations)),
 		DestinationPrivate:         make(map[string][]byte, len(bundle.DestinationPrivate)),
 		EncryptedLeaseSetPolicies:  make(map[string]EncryptedLeaseSetPolicy, len(bundle.EncryptedLeaseSetPolicies)),
 		DestinationAddressPolicies: make(map[string][]RemoteELSAuthorization, len(bundle.DestinationAddressPolicies)),
@@ -1188,8 +1188,8 @@ func cloneBundle(bundle Bundle) Bundle {
 	return cloned
 }
 
-func cloneRouterAddress(address ivnp.LocalRouterAddress) ivnp.LocalRouterAddress {
-	return ivnp.LocalRouterAddress{
+func cloneRouterAddress(address foundation.LocalRouterAddress) foundation.LocalRouterAddress {
+	return foundation.LocalRouterAddress{
 		RouterIdentity: append([]byte(nil), address.RouterIdentity...),
 		Hash:           address.Hash,
 		SigningPublic:  append(ed25519.PublicKey(nil), address.SigningPublic...),
@@ -1199,8 +1199,8 @@ func cloneRouterAddress(address ivnp.LocalRouterAddress) ivnp.LocalRouterAddress
 	}
 }
 
-func cloneAddress(address ivnp.LocalAddress) ivnp.LocalAddress {
-	cloned := ivnp.LocalAddress{
+func cloneAddress(address foundation.LocalAddress) foundation.LocalAddress {
+	cloned := foundation.LocalAddress{
 		Destination:       append([]byte(nil), address.Destination...),
 		Hash:              address.Hash,
 		SigningPublic:     append(ed25519.PublicKey(nil), address.SigningPublic...),

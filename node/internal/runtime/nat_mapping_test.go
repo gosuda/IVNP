@@ -1,15 +1,15 @@
-package daemon
+package noderuntime
 
-import state "gosuda.org/ivnp/state"
+import "gosuda.org/ivnp/state"
 
-import networking "gosuda.org/ivnp/networking"
+import "gosuda.org/ivnp/networking"
 
 import "cmp"
 
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 
 	"io"
 	"log/slog"
@@ -491,7 +491,7 @@ func snapshotTransportOptions(t *testing.T, info networking.NetworkDatabaseRoute
 
 func newNATMappingTestLocal(t *testing.T) *networking.RouterLocalRouterInfo {
 	t.Helper()
-	identity, err := ivnp.GenerateLocalRouterAddress()
+	identity, err := foundation.GenerateLocalRouterAddress()
 	if err != nil {
 		t.Fatal(err)
 	}

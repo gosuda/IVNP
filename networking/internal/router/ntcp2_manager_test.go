@@ -6,7 +6,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/network_database"
 	"gosuda.org/ivnp/networking/internal/transport/ntcp2"
@@ -26,8 +26,8 @@ func TestNTCP2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 
 	alice, aliceStatic, aliceIV := newNTCP2TestLocal(t, "127.0.0.1:1")
 	bob, bobStatic, bobIV := newNTCP2TestLocal(t, listener.Addr().String())
-	aliceDB := netdb.NewDatabase(alice.Hash(), 16)
-	bobDB := netdb.NewDatabase(bob.Hash(), 16)
+	aliceDB := networkdatabase.NewDatabase(alice.Hash(), 16)
+	bobDB := networkdatabase.NewDatabase(bob.Hash(), 16)
 	bobInfo := bob.Snapshot()
 	if err = aliceDB.AdmitRouterInfo(bobInfo, false, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatalf("admit Bob RouterInfo: %v", err)
@@ -130,7 +130,7 @@ func TestSelectNTCP2AddressAcceptsNativeI2PDShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := netdb.ParseRouterInfo(wire)
+	info, err := networkdatabase.ParseRouterInfo(wire)
 	if err != nil {
 		t.Fatalf("parse native i2pd RouterInfo: %v", err)
 	}
@@ -142,11 +142,11 @@ func TestSelectNTCP2AddressAcceptsNativeI2PDShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("select native i2pd NTCP2 address: %v", err)
 	}
-	static, err := ivnp.DecodeI2PBase64([]byte("9Lm8rFllOrFjaqhW-GJO0cKc-AoGA6ySWwa26Dool0c="))
+	static, err := foundation.DecodeI2PBase64([]byte("9Lm8rFllOrFjaqhW-GJO0cKc-AoGA6ySWwa26Dool0c="))
 	if err != nil {
 		t.Fatal(err)
 	}
-	iv, err := ivnp.DecodeI2PBase64([]byte("eSToe7Gh5ZM45xq~qP3LoQ=="))
+	iv, err := foundation.DecodeI2PBase64([]byte("eSToe7Gh5ZM45xq~qP3LoQ=="))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestNTCP2I2NPUsesTransportHeader(t *testing.T) {
 }
 
 func TestNTCP2InboundRouterInfoPolicyRejectsStaleFutureAndRotationDowngrade(t *testing.T) {
-	local, err := ivnp.GenerateLocalAddress()
+	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestNTCP2InboundRouterInfoPolicyRejectsStaleFutureAndRotationDowngrade(t *t
 		t.Fatal(err)
 	}
 	manager, err := NewNTCP2Manager(NTCP2ManagerConfig{
-		Database:      netdb.NewDatabase(ivnp.Hash{}, 16),
+		Database:      networkdatabase.NewDatabase(foundation.Hash{}, 16),
 		StaticPrivate: managerStatic.Bytes(),
 		StaticIV:      make([]byte, 16),
 	})
@@ -217,10 +217,10 @@ func TestNTCP2InboundRouterInfoPolicyRejectsStaleFutureAndRotationDowngrade(t *t
 	if _, err = rand.Read(staticThree); err != nil {
 		t.Fatal(err)
 	}
-	publish := func(static []byte, at uint64) netdb.RouterInfo {
+	publish := func(static []byte, at uint64) networkdatabase.RouterInfo {
 		t.Helper()
 		if err := owner.ReplaceAddresses([]PublishedAddress{{Transport: "NTCP2", Options: []MappingOption{
-			{Key: "s", Value: ivnp.EncodeI2PBase64(static)},
+			{Key: "s", Value: foundation.EncodeI2PBase64(static)},
 			{Key: "v", Value: "2"},
 		}}}); err != nil {
 			t.Fatal(err)
@@ -232,7 +232,7 @@ func TestNTCP2InboundRouterInfoPolicyRejectsStaleFutureAndRotationDowngrade(t *t
 		return info
 	}
 
-	stale := publish(staticOne, now-netdb.RouterInfoMaxAgeMillis-1)
+	stale := publish(staticOne, now-networkdatabase.RouterInfoMaxAgeMillis-1)
 	if manager.admitInboundPeer(stale, staticOne, now) {
 		t.Fatal("accepted RouterInfo older than NTCP2 maximum age")
 	}
@@ -247,7 +247,7 @@ func TestNTCP2InboundRouterInfoPolicyRejectsStaleFutureAndRotationDowngrade(t *t
 	if manager.admitInboundPeer(first, staticOne, now) {
 		t.Fatal("accepted archived RouterInfo with a rotated static key")
 	}
-	future := publish(staticThree, now+netdb.RouterInfoMaxFutureMillis+1)
+	future := publish(staticThree, now+networkdatabase.RouterInfoMaxFutureMillis+1)
 	if manager.admitInboundPeer(future, staticThree, now) {
 		t.Fatal("accepted RouterInfo beyond maximum future skew")
 	}
@@ -259,7 +259,7 @@ func TestNTCP2InboundRouterInfoPolicyRejectsStaleFutureAndRotationDowngrade(t *t
 
 func newNTCP2TestLocal(t *testing.T, endpoint string) (*LocalRouterInfo, []byte, []byte) {
 	t.Helper()
-	local, err := ivnp.GenerateLocalAddress()
+	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,9 +284,9 @@ func newNTCP2TestLocal(t *testing.T, endpoint string) (*LocalRouterInfo, []byte,
 		Cost:      3,
 		Options: []MappingOption{
 			{Key: "host", Value: host},
-			{Key: "i", Value: ivnp.EncodeI2PBase64(iv)},
+			{Key: "i", Value: foundation.EncodeI2PBase64(iv)},
 			{Key: "port", Value: port},
-			{Key: "s", Value: ivnp.EncodeI2PBase64(static.PublicKey().Bytes())},
+			{Key: "s", Value: foundation.EncodeI2PBase64(static.PublicKey().Bytes())},
 			{Key: "v", Value: "2"},
 		},
 	}}); err != nil {

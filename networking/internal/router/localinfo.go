@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/network_database"
 	"gosuda.org/ivnp/observability"
 	"sort"
@@ -21,7 +21,7 @@ var ErrLocalRouterInfoOptions = errors.New("router: invalid local RouterInfo opt
 // SSU2 address.  LocalRouterInfo alone translates leases into RouterInfo
 // options and signs the replacement snapshot.
 type SSU2Introducer struct {
-	Peer       ivnp.Hash
+	Peer       foundation.Hash
 	RelayTag   uint32
 	Expiration time.Time
 }
@@ -32,12 +32,12 @@ type SSU2Introducer struct {
 // Options extend the generated netId and optional router.version properties;
 // callers must not supply duplicate property keys.
 type LocalRouterInfoConfig struct {
-	Local         ivnp.LocalIdentityOwner
-	Database      *netdb.Database
+	Local         foundation.LocalIdentityOwner
+	Database      *networkdatabase.Database
 	Clock         Clock
 	NetworkID     uint32
 	RouterVersion string
-	Peers         []ivnp.Hash
+	Peers         []foundation.Hash
 	Options       []MappingOption
 	Metrics       *observability.Registry
 }
@@ -47,15 +47,15 @@ type LocalRouterInfoConfig struct {
 // retains an immutable snapshot, and admits each successful publication into
 // the supplied local netdb.
 type LocalRouterInfo struct {
-	info     *netdb.LocalRouterInfo
-	database *netdb.Database
+	info     *networkdatabase.LocalRouterInfo
+	database *networkdatabase.Database
 	clock    Clock
 	metrics  *observability.Registry
 
 	mu           sync.Mutex
 	addresses    []PublishedAddress
-	peers        []ivnp.Hash
-	baseOptions  []ivnp.MappingEntry
+	peers        []foundation.Hash
+	baseOptions  []foundation.MappingEntry
 	reachability Reachability
 }
 
@@ -73,11 +73,11 @@ func NewLocalRouterInfo(config LocalRouterInfoConfig) (*LocalRouterInfo, error) 
 	if err != nil {
 		return nil, err
 	}
-	contacts := netdb.RouterInfoContacts{
-		Peers:   append([]ivnp.Hash(nil), config.Peers...),
+	contacts := networkdatabase.RouterInfoContacts{
+		Peers:   append([]foundation.Hash(nil), config.Peers...),
 		Options: baseOptions,
 	}
-	info, err := netdb.NewLocalRouterInfo(netdb.LocalRouterInfoConfig{
+	info, err := networkdatabase.NewLocalRouterInfo(networkdatabase.LocalRouterInfoConfig{
 		Local:    config.Local,
 		Contacts: contacts,
 	})
@@ -89,13 +89,13 @@ func NewLocalRouterInfo(config LocalRouterInfoConfig) (*LocalRouterInfo, error) 
 		database:    config.Database,
 		clock:       config.Clock,
 		metrics:     config.Metrics,
-		peers:       append([]ivnp.Hash(nil), config.Peers...),
+		peers:       append([]foundation.Hash(nil), config.Peers...),
 		baseOptions: cloneI2PMappingEntries(baseOptions),
 	}, nil
 }
 
 // Hash returns the immutable local RouterIdentity hash.
-func (l *LocalRouterInfo) Hash() ivnp.Hash { return l.info.Hash() }
+func (l *LocalRouterInfo) Hash() foundation.Hash { return l.info.Hash() }
 
 // Sign returns an authenticated signature for a native router transport
 // control message using this local RouterInfo's immutable signing key.
@@ -105,10 +105,10 @@ func (l *LocalRouterInfo) Sign(message []byte) []byte {
 
 // Snapshot returns the last signed RouterInfo, or its zero value before the
 // first successful publication or after contact data changes.
-func (l *LocalRouterInfo) Snapshot() netdb.RouterInfo {
+func (l *LocalRouterInfo) Snapshot() networkdatabase.RouterInfo {
 	info, ok := l.info.Snapshot()
 	if !ok {
-		return netdb.RouterInfo{}
+		return networkdatabase.RouterInfo{}
 	}
 	return info
 }
@@ -245,7 +245,7 @@ func (l *LocalRouterInfo) UpdateSSU2Introducers(ctx context.Context, leases []SS
 		for leaseIndex, lease := range owned {
 			slot := strconv.Itoa(leaseIndex)
 			options = append(options,
-				MappingOption{Key: "ih" + slot, Value: ivnp.EncodeI2PBase64(lease.Peer[:])},
+				MappingOption{Key: "ih" + slot, Value: foundation.EncodeI2PBase64(lease.Peer[:])},
 				MappingOption{Key: "itag" + slot, Value: strconv.FormatUint(uint64(lease.RelayTag), 10)},
 				MappingOption{Key: "iexp" + slot, Value: strconv.FormatInt(lease.Expiration.Unix(), 10)},
 			)
@@ -274,25 +274,25 @@ func (l *LocalRouterInfo) UpdateSSU2Introducers(ctx context.Context, leases []SS
 	return nil
 }
 
-func (l *LocalRouterInfo) contactsLocked(addresses []PublishedAddress, reachability Reachability) (netdb.RouterInfoContacts, error) {
+func (l *LocalRouterInfo) contactsLocked(addresses []PublishedAddress, reachability Reachability) (networkdatabase.RouterInfoContacts, error) {
 	options, err := localRouterCapabilities(l.baseOptions, reachability)
 	if err != nil {
-		return netdb.RouterInfoContacts{}, err
+		return networkdatabase.RouterInfoContacts{}, err
 	}
-	contacts := netdb.RouterInfoContacts{
-		Addresses: make([]netdb.LocalRouterAddress, len(addresses)),
-		Peers:     append([]ivnp.Hash(nil), l.peers...),
+	contacts := networkdatabase.RouterInfoContacts{
+		Addresses: make([]networkdatabase.LocalRouterAddress, len(addresses)),
+		Peers:     append([]foundation.Hash(nil), l.peers...),
 		Options:   options,
 	}
 	for index, address := range addresses {
 		options, err := mappingOptions(address.Options)
 		if err != nil {
-			return netdb.RouterInfoContacts{}, err
+			return networkdatabase.RouterInfoContacts{}, err
 		}
 		if len(address.Transport) == 0 || len(address.Transport) > 255 {
-			return netdb.RouterInfoContacts{}, ErrLocalRouterInfoOptions
+			return networkdatabase.RouterInfoContacts{}, ErrLocalRouterInfoOptions
 		}
-		contacts.Addresses[index] = netdb.LocalRouterAddress{
+		contacts.Addresses[index] = networkdatabase.LocalRouterAddress{
 			Cost:           address.Cost,
 			TransportStyle: []byte(address.Transport),
 			Options:        options,
@@ -301,22 +301,22 @@ func (l *LocalRouterInfo) contactsLocked(addresses []PublishedAddress, reachabil
 	return contacts, nil
 }
 
-func localRouterBaseOptions(networkID uint32, version string, options []MappingOption) ([]ivnp.MappingEntry, error) {
-	entries := make([]ivnp.MappingEntry, 0, len(options)+2)
-	entries = append(entries, ivnp.MappingEntry{Key: []byte("netId"), Value: []byte(strconv.FormatUint(uint64(networkID), 10))})
+func localRouterBaseOptions(networkID uint32, version string, options []MappingOption) ([]foundation.MappingEntry, error) {
+	entries := make([]foundation.MappingEntry, 0, len(options)+2)
+	entries = append(entries, foundation.MappingEntry{Key: []byte("netId"), Value: []byte(strconv.FormatUint(uint64(networkID), 10))})
 	if version != "" {
-		entries = append(entries, ivnp.MappingEntry{Key: []byte("router.version"), Value: []byte(version)})
+		entries = append(entries, foundation.MappingEntry{Key: []byte("router.version"), Value: []byte(version)})
 	}
 	for _, option := range options {
 		if option.Key == "caps" {
 			return nil, ErrLocalRouterInfoOptions
 		}
-		entries = append(entries, ivnp.MappingEntry{Key: []byte(option.Key), Value: []byte(option.Value)})
+		entries = append(entries, foundation.MappingEntry{Key: []byte(option.Key), Value: []byte(option.Value)})
 	}
 	return canonicalMappingEntries(entries)
 }
 
-func localRouterCapabilities(base []ivnp.MappingEntry, reachability Reachability) ([]ivnp.MappingEntry, error) {
+func localRouterCapabilities(base []foundation.MappingEntry, reachability Reachability) ([]foundation.MappingEntry, error) {
 	entries := cloneI2PMappingEntries(base)
 	if reachability == ReachabilityUnknown {
 		return entries, nil
@@ -325,33 +325,33 @@ func localRouterCapabilities(base []ivnp.MappingEntry, reachability Reachability
 	if reachability == ReachabilityFirewalled {
 		capability = 'U'
 	}
-	entries = append(entries, ivnp.MappingEntry{Key: []byte("caps"), Value: []byte{capability}})
+	entries = append(entries, foundation.MappingEntry{Key: []byte("caps"), Value: []byte{capability}})
 	return canonicalMappingEntries(entries)
 }
 
-func mappingOptions(options []MappingOption) ([]ivnp.MappingEntry, error) {
-	entries := make([]ivnp.MappingEntry, len(options))
+func mappingOptions(options []MappingOption) ([]foundation.MappingEntry, error) {
+	entries := make([]foundation.MappingEntry, len(options))
 	for index, option := range options {
-		entries[index] = ivnp.MappingEntry{Key: []byte(option.Key), Value: []byte(option.Value)}
+		entries[index] = foundation.MappingEntry{Key: []byte(option.Key), Value: []byte(option.Value)}
 	}
 	return canonicalMappingEntries(entries)
 }
 
-func canonicalMappingEntries(entries []ivnp.MappingEntry) ([]ivnp.MappingEntry, error) {
+func canonicalMappingEntries(entries []foundation.MappingEntry) ([]foundation.MappingEntry, error) {
 	owned := cloneI2PMappingEntries(entries)
 	sort.Slice(owned, func(left, right int) bool {
 		return bytes.Compare(owned[left].Key, owned[right].Key) < 0
 	})
-	if _, err := ivnp.MappingEncodedLen(owned); err != nil {
+	if _, err := foundation.MappingEncodedLen(owned); err != nil {
 		return nil, err
 	}
 	return owned, nil
 }
 
-func cloneI2PMappingEntries(entries []ivnp.MappingEntry) []ivnp.MappingEntry {
-	owned := make([]ivnp.MappingEntry, len(entries))
+func cloneI2PMappingEntries(entries []foundation.MappingEntry) []foundation.MappingEntry {
+	owned := make([]foundation.MappingEntry, len(entries))
 	for index, entry := range entries {
-		owned[index] = ivnp.MappingEntry{
+		owned[index] = foundation.MappingEntry{
 			Key:   append([]byte(nil), entry.Key...),
 			Value: append([]byte(nil), entry.Value...),
 		}

@@ -3,7 +3,7 @@ package addressbook
 import (
 	"context"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,7 +15,7 @@ import (
 
 func newDestinationString(t *testing.T) string {
 	t.Helper()
-	local, err := ivnp.GenerateLocalDestination()
+	local, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}

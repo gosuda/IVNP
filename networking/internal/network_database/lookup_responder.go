@@ -1,9 +1,9 @@
-package netdb
+package networkdatabase
 
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"sync"
@@ -20,13 +20,13 @@ const lookupResponderQueue = 64
 
 // ReplySender owns the selected direct or tunnel route for a NetDB reply.
 type ReplySender interface {
-	SendNetDBReply(context.Context, ivnp.Hash, uint32, i2np.Message) error
+	SendNetDBReply(context.Context, foundation.Hash, uint32, i2np.Message) error
 }
 
 // ReplyPathSource supplies the current local direct or inbound-tunnel return
 // path for confirmed publication. A zero tunnel ID means direct delivery.
 type ReplyPathSource interface {
-	NetDBReplyPath() (gateway ivnp.Hash, tunnelID uint32, ok bool)
+	NetDBReplyPath() (gateway foundation.Hash, tunnelID uint32, ok bool)
 }
 
 // LookupReplyWrapper is the explicit encrypted-reply boundary. Validation runs
@@ -41,7 +41,7 @@ type LookupReplyWrapper interface {
 type LookupResponderConfig struct {
 	Database *Database
 	Sender   ReplySender
-	Local    ivnp.Hash
+	Local    foundation.Hash
 	Now      func() uint64
 	Random   func() uint32
 	Wrapper  LookupReplyWrapper
@@ -57,7 +57,7 @@ type lookupJob struct {
 type LookupResponder struct {
 	database *Database
 	sender   ReplySender
-	local    ivnp.Hash
+	local    foundation.Hash
 	now      func() uint64
 	random   func() uint32
 	wrapper  LookupReplyWrapper
@@ -73,7 +73,7 @@ type LookupResponder struct {
 }
 
 func NewLookupResponder(config LookupResponderConfig) (*LookupResponder, error) {
-	if config.Database == nil || config.Sender == nil || config.Local == (ivnp.Hash{}) || config.Now == nil || config.Random == nil {
+	if config.Database == nil || config.Sender == nil || config.Local == (foundation.Hash{}) || config.Now == nil || config.Random == nil {
 		return nil, ErrLookupResponderConfig
 	}
 	return &LookupResponder{database: config.Database, sender: config.Sender, local: config.Local, now: config.Now, random: config.Random, wrapper: config.Wrapper, jobs: make(chan lookupJob, lookupResponderQueue), done: make(chan struct{})}, nil
@@ -173,7 +173,7 @@ func (r *LookupResponder) respond(ctx context.Context, lookup i2np.DatabaseLooku
 			if err != nil {
 				return err
 			}
-			payload, err = MarshalDatabaseStore(lookup.Key, i2np.StoreRouterInfo, compressed, 0, ivnp.Hash{}, 0)
+			payload, err = MarshalDatabaseStore(lookup.Key, i2np.StoreRouterInfo, compressed, 0, foundation.Hash{}, 0)
 			if err != nil {
 				return err
 			}
@@ -182,7 +182,7 @@ func (r *LookupResponder) respond(ctx context.Context, lookup i2np.DatabaseLooku
 		typeID, data, ok := r.database.StoredLeaseSet(lookup.Key)
 		if ok {
 			var err error
-			payload, err = MarshalDatabaseStore(lookup.Key, typeID, data, 0, ivnp.Hash{}, 0)
+			payload, err = MarshalDatabaseStore(lookup.Key, typeID, data, 0, foundation.Hash{}, 0)
 			if err != nil {
 				return err
 			}
@@ -193,13 +193,13 @@ func (r *LookupResponder) respond(ctx context.Context, lookup i2np.DatabaseLooku
 			if err != nil {
 				return err
 			}
-			payload, err = MarshalDatabaseStore(lookup.Key, i2np.StoreRouterInfo, compressed, 0, ivnp.Hash{}, 0)
+			payload, err = MarshalDatabaseStore(lookup.Key, i2np.StoreRouterInfo, compressed, 0, foundation.Hash{}, 0)
 			if err != nil {
 				return err
 			}
 		} else if typeID, data, ok := r.database.StoredLeaseSet(lookup.Key); ok {
 			var err error
-			payload, err = MarshalDatabaseStore(lookup.Key, typeID, data, 0, ivnp.Hash{}, 0)
+			payload, err = MarshalDatabaseStore(lookup.Key, typeID, data, 0, foundation.Hash{}, 0)
 			if err != nil {
 				return err
 			}
@@ -232,10 +232,10 @@ func (r *LookupResponder) respond(ctx context.Context, lookup i2np.DatabaseLooku
 }
 
 func (r *LookupResponder) searchReply(lookup i2np.DatabaseLookupMessage) []byte {
-	excluded := make(map[ivnp.Hash]struct{}, lookup.ExcludedCount())
-	for off := 0; off < len(lookup.Excluded); off += ivnp.HashLength {
-		var hash ivnp.Hash
-		copy(hash[:], lookup.Excluded[off:off+ivnp.HashLength])
+	excluded := make(map[foundation.Hash]struct{}, lookup.ExcludedCount())
+	for off := 0; off < len(lookup.Excluded); off += foundation.HashLength {
+		var hash foundation.Hash
+		copy(hash[:], lookup.Excluded[off:off+foundation.HashLength])
 		excluded[hash] = struct{}{}
 	}
 	var refs []RouterRef
@@ -244,20 +244,20 @@ func (r *LookupResponder) searchReply(lookup i2np.DatabaseLookupMessage) []byte 
 	} else {
 		refs = r.database.Routers().ClosestFloodfillsExcludingInto(make([]RouterRef, 16), RoutingKey(lookup.Key, r.now()), excluded)
 	}
-	peers := make([]ivnp.Hash, 0, 3)
+	peers := make([]foundation.Hash, 0, 3)
 	for _, ref := range refs {
 		peers = append(peers, ref.Hash)
 		if len(peers) == 3 {
 			break
 		}
 	}
-	payload := make([]byte, 32+1+len(peers)*ivnp.HashLength+32)
+	payload := make([]byte, 32+1+len(peers)*foundation.HashLength+32)
 	copy(payload[:32], lookup.Key[:])
 	payload[32] = byte(len(peers))
 	off := 33
 	for _, peer := range peers {
-		copy(payload[off:off+ivnp.HashLength], peer[:])
-		off += ivnp.HashLength
+		copy(payload[off:off+foundation.HashLength], peer[:])
+		off += foundation.HashLength
 	}
 	copy(payload[off:], r.local[:])
 	return payload

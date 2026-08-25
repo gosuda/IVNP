@@ -1,14 +1,14 @@
-package netdb
+package networkdatabase
 
 import (
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"testing"
 )
 
 func routerWithSeed(seed byte) RouterInfo {
 	encoded := legacyIdentity()
 	encoded[0] = seed
-	identity, _, err := ivnp.ParseIdentity(encoded)
+	identity, _, err := foundation.ParseIdentity(encoded)
 	if err != nil {
 		panic(err)
 	}
@@ -16,7 +16,7 @@ func routerWithSeed(seed byte) RouterInfo {
 }
 
 func TestStoreVerifiedNeverDowngradesRouterInfo(t *testing.T) {
-	var local ivnp.Hash
+	var local foundation.Hash
 	table := NewTable(local, 4)
 	newer := routerWithSeed(1)
 	newer.Published = 20
@@ -30,8 +30,8 @@ func TestStoreVerifiedNeverDowngradesRouterInfo(t *testing.T) {
 	}
 }
 func TestDistanceMetricAndClosestSelection(t *testing.T) {
-	var local ivnp.Hash
-	var near, middle, far ivnp.Hash
+	var local foundation.Hash
+	var near, middle, far foundation.Hash
 	near[31] = 1
 	middle[0] = 1
 	far[0] = 0x80
@@ -62,17 +62,17 @@ func TestDistanceMetricAndClosestSelection(t *testing.T) {
 }
 
 func TestJavaKademliaRangeVectors(t *testing.T) {
-	local := ivnp.Hash{}
+	local := foundation.Hash{}
 	vectors := []struct {
-		peer ivnp.Hash
+		peer foundation.Hash
 		want int
 	}{
-		{peer: ivnp.Hash{}, want: -1},
-		{peer: ivnp.Hash{31: 0x01}, want: 0},
-		{peer: ivnp.Hash{31: 0x02}, want: 8},
-		{peer: ivnp.Hash{31: 0x0f}, want: 31},
-		{peer: ivnp.Hash{0: 0x80}, want: 2040},
-		{peer: ivnp.Hash{0: 0xf0}, want: 2047},
+		{peer: foundation.Hash{}, want: -1},
+		{peer: foundation.Hash{31: 0x01}, want: 0},
+		{peer: foundation.Hash{31: 0x02}, want: 8},
+		{peer: foundation.Hash{31: 0x0f}, want: 31},
+		{peer: foundation.Hash{0: 0x80}, want: 2040},
+		{peer: foundation.Hash{0: 0xf0}, want: 2047},
 	}
 	for _, vector := range vectors {
 		if got := kademliaRange(local, vector.peer); got != vector.want {
@@ -83,10 +83,10 @@ func TestJavaKademliaRangeVectors(t *testing.T) {
 
 func TestJavaKBucketRejectTrimmerAndIndependentRouterStore(t *testing.T) {
 	candidate := routerWithSeed(10)
-	candidateRange := kademliaRange(ivnp.Hash{}, candidate.Hash())
-	table := NewTable(ivnp.Hash{}, 5)
+	candidateRange := kademliaRange(foundation.Hash{}, candidate.Hash())
+	table := NewTable(foundation.Hash{}, 5)
 	table.mu.Lock()
-	table.routing.buckets = []kBucket{{begin: uint16(candidateRange), end: uint16(candidateRange), members: make([]ivnp.Hash, 5)}}
+	table.routing.buckets = []kBucket{{begin: uint16(candidateRange), end: uint16(candidateRange), members: make([]foundation.Hash, 5)}}
 	table.mu.Unlock()
 	table.StoreVerified(candidate, false, 1)
 	if _, ok := table.Get(candidate.Hash()); !ok {
@@ -103,9 +103,9 @@ func TestJavaKBucketRejectTrimmerAndIndependentRouterStore(t *testing.T) {
 func TestJavaKBucketSplitShape(t *testing.T) {
 	set := newKBucketSet(5)
 	for marker := byte(0x80); marker <= 0x85; marker++ {
-		var peer ivnp.Hash
+		var peer foundation.Hash
 		peer[0], peer[31] = marker, marker
-		set.add(ivnp.Hash{}, peer, 1)
+		set.add(foundation.Hash{}, peer, 1)
 	}
 	if len(set.buckets) != 2 {
 		t.Fatalf("bucket count = %d, want 2", len(set.buckets))
@@ -118,12 +118,12 @@ func TestJavaKBucketSplitShape(t *testing.T) {
 func TestJavaKBucketSplitReinsertionRejectsTerminalOverflow(t *testing.T) {
 	set := newKBucketSet(5)
 	for marker := byte(1); marker <= 7; marker++ {
-		var peer ivnp.Hash
+		var peer foundation.Hash
 		peer[0], peer[31] = 0x80, marker
-		if got := kademliaRange(ivnp.Hash{}, peer); got != 2040 {
+		if got := kademliaRange(foundation.Hash{}, peer); got != 2040 {
 			t.Fatalf("range = %d, want 2040", got)
 		}
-		set.add(ivnp.Hash{}, peer, 1)
+		set.add(foundation.Hash{}, peer, 1)
 	}
 	index := set.bucketIndex(2040)
 	terminal := set.buckets[index]
@@ -136,13 +136,13 @@ func TestJavaKBucketSplitReinsertionRejectsTerminalOverflow(t *testing.T) {
 }
 
 func TestClosestIntoHasNoHeapAllocation(t *testing.T) {
-	var local ivnp.Hash
+	var local foundation.Hash
 	table := NewTable(local, 4)
 	for seed := byte(1); seed <= 3; seed++ {
 		table.StoreVerified(routerWithSeed(seed), seed&1 == 1, 1)
 	}
 	out := make([]RouterRef, 0, 3)
-	var target ivnp.Hash
+	var target foundation.Hash
 	allocs := testing.AllocsPerRun(1_000, func() { out = table.ClosestInto(out[:0], target) })
 	if allocs != 0 {
 		t.Fatalf("ClosestInto allocations/run = %f, want 0", allocs)

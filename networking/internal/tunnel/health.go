@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"sync"
 )
@@ -27,16 +27,16 @@ const (
 // status through InboundID. Peers is a fixed union of the tested paths.
 type CircuitPair struct {
 	OutboundID       uint32
-	OutboundEndpoint ivnp.Hash
+	OutboundEndpoint foundation.Hash
 	InboundID        uint32
 	InboundLocalID   uint32
-	ReplyRouter      ivnp.Hash
+	ReplyRouter      foundation.Hash
 	PeerCount        uint8
-	Peers            [2 * i2np.MaxVariableBuildRecords]ivnp.Hash
+	Peers            [2 * i2np.MaxVariableBuildRecords]foundation.Hash
 }
 
 type pendingProbe struct {
-	peers            [2 * i2np.MaxVariableBuildRecords]ivnp.Hash
+	peers            [2 * i2np.MaxVariableBuildRecords]foundation.Hash
 	peerCount        uint8
 	outboundID       uint32
 	inboundLocalID   uint32
@@ -120,7 +120,7 @@ func NewHealth(config HealthConfig) (*Health, error) {
 		runtime: config.Runtime, pool: config.Pool, maintainer: config.Maintainer,
 		profiles: config.Profiles, now: config.Now, timeout: config.Timeout,
 		max: config.MaxPending, failureThreshold: config.FailureThreshold,
-		requireActivity: owner != (ivnp.Hash{}) && !config.ProbeBeforeActivity,
+		requireActivity: owner != (foundation.Hash{}) && !config.ProbeBeforeActivity,
 		pending:         make(map[uint32]pendingProbe), failures: make(map[uint32]uint8),
 		ctx: lifecycle, cancel: cancel,
 	}
@@ -134,7 +134,7 @@ func NewHealth(config HealthConfig) (*Health, error) {
 // Probe sends one DeliveryStatus message through pair. The endpoint delivers
 // it back through pair's inbound route; callers wire HandleDeliveryStatus to
 // that route's local I2NP handler.
-func (h *Health) Probe(ctx context.Context, pair CircuitPair, peer ivnp.Hash) (uint32, error) {
+func (h *Health) Probe(ctx context.Context, pair CircuitPair, peer foundation.Hash) (uint32, error) {
 	h.lifecycleMu.RLock()
 	defer h.lifecycleMu.RUnlock()
 	if h.closed {
@@ -154,9 +154,9 @@ func (h *Health) Probe(ctx context.Context, pair CircuitPair, peer ivnp.Hash) (u
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	probeRejected := pair.OutboundID == 0 || pair.InboundID == 0 || pair.ReplyRouter == (ivnp.Hash{})
+	probeRejected := pair.OutboundID == 0 || pair.InboundID == 0 || pair.ReplyRouter == (foundation.Hash{})
 	if !probeRejected {
-		probeRejected = (pair.PeerCount == 0 && peer == (ivnp.Hash{}))
+		probeRejected = (pair.PeerCount == 0 && peer == (foundation.Hash{}))
 	}
 	if probeRejected {
 		return 0, ErrHealthConfig

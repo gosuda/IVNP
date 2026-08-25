@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/observability"
 	"sync"
@@ -12,7 +12,7 @@ import (
 )
 
 type capturedTunnelMessage struct {
-	peer    ivnp.Hash
+	peer    foundation.Hash
 	message i2np.Message
 }
 
@@ -21,7 +21,7 @@ type captureTunnelSender struct {
 	messages []capturedTunnelMessage
 }
 
-func (s *captureTunnelSender) Send(_ context.Context, peer ivnp.Hash, message i2np.Message) error {
+func (s *captureTunnelSender) Send(_ context.Context, peer foundation.Hash, message i2np.Message) error {
 	copy := message
 	copy.Payload = append([]byte(nil), message.Payload...)
 	s.mu.Lock()
@@ -40,7 +40,7 @@ func (s *captureTunnelSender) take() []capturedTunnelMessage {
 
 type discardTunnelSender struct{}
 
-func (discardTunnelSender) Send(context.Context, ivnp.Hash, i2np.Message) error { return nil }
+func (discardTunnelSender) Send(context.Context, foundation.Hash, i2np.Message) error { return nil }
 
 func deliveryStatusFrame(t *testing.T, id uint32) []byte {
 	t.Helper()
@@ -70,7 +70,7 @@ func TestRuntimeTunnelRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var firstHop ivnp.Hash
+	var firstHop foundation.Hash
 	firstHop[0] = 1
 	outboundSender := new(captureTunnelSender)
 	outbound := NewRuntime(RuntimeConfig{Sender: outboundSender, Now: func() uint64 { return 100 }})
@@ -132,7 +132,7 @@ func TestRuntimeTransitForwarding(t *testing.T) {
 		t.Fatal("producer failed")
 	}
 
-	var nextPeer ivnp.Hash
+	var nextPeer foundation.Hash
 	nextPeer[0] = 99
 	transitSender := new(captureTunnelSender)
 	transit := NewRuntime(RuntimeConfig{Sender: transitSender, Now: func() uint64 { return 100 }})
@@ -205,7 +205,7 @@ func TestRuntimeActiveTunnelCountsSeparateOwnersAndTransit(t *testing.T) {
 	now := uint64(100)
 	metrics := observability.NewRegistry()
 	runtime := NewRuntime(RuntimeConfig{Now: func() uint64 { return now }, Metrics: metrics})
-	var client ivnp.Hash
+	var client foundation.Hash
 	client[0] = 1
 	for _, circuit := range []InboundCircuit{
 		{ID: 1, Endpoint: NewEndpoint(1, 1), ExpiresAt: 200},

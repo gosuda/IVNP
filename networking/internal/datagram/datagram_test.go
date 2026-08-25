@@ -3,7 +3,7 @@ package datagram
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"testing"
 )
 
@@ -12,11 +12,11 @@ func TestV1ParsesAndVerifiesEd25519(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := make([]byte, ivnp.IdentityBaseLength+7)
+	identity := make([]byte, foundation.IdentityBaseLength+7)
 	copy(identity[352:384], public)
-	identity[384] = byte(ivnp.CertificateKey)
+	identity[384] = byte(foundation.CertificateKey)
 	identity[385], identity[386] = 0, 4
-	identity[387], identity[388] = 0, byte(ivnp.SigningEdDSASHA512Ed25519)
+	identity[387], identity[388] = 0, byte(foundation.SigningEdDSASHA512Ed25519)
 	payload := []byte("datagram")
 	wire := append(identity, ed25519.Sign(private, payload)...)
 	wire = append(wire, payload...)
@@ -30,7 +30,7 @@ func TestV1ParsesAndVerifiesEd25519(t *testing.T) {
 }
 
 func TestV1RoundTripsLegacyElGamalDestination(t *testing.T) {
-	destination, err := ivnp.GenerateLegacyLocalDestination()
+	destination, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestDatagramVersionAndReservedFlagsReject(t *testing.T) {
 			t.Errorf("V2 flags %x error = %v, want ErrDatagram", flags, err)
 		}
 	}
-	var hash ivnp.Hash
+	var hash foundation.Hash
 	for _, flags := range [][2]byte{{0, 2}, {0, 0x23}} {
 		wire := append(append([]byte(nil), hash[:]...), flags[:]...)
 		if _, err := ParseV3(wire); err != ErrDatagram {
@@ -115,12 +115,12 @@ func TestV2OfflineAuthorizationAndTargetBinding(t *testing.T) {
 	const expires = uint32(100)
 	offline := make([]byte, 4+2+len(onlinePublic))
 	offline[3] = byte(expires)
-	offline[5] = byte(ivnp.SigningEdDSASHA512Ed25519)
+	offline[5] = byte(foundation.SigningEdDSASHA512Ed25519)
 	copy(offline[6:], onlinePublic)
 	offline = append(offline, ed25519.Sign(offlinePrivate, offline)...)
 	flags := []byte{0, byte(flagOffline | 2)}
 	payload := []byte("target-bound")
-	var target ivnp.Hash
+	var target foundation.Hash
 	target[0] = 42
 	signedRest := append(append([]byte(nil), flags...), offline...)
 	signedRest = append(signedRest, payload...)
@@ -144,18 +144,18 @@ func TestV2OfflineAuthorizationAndTargetBinding(t *testing.T) {
 	}
 }
 
-func testEd25519Identity(t *testing.T) (ivnp.Identity, ed25519.PrivateKey) {
+func testEd25519Identity(t *testing.T) (foundation.Identity, ed25519.PrivateKey) {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw := make([]byte, ivnp.IdentityBaseLength+7)
+	raw := make([]byte, foundation.IdentityBaseLength+7)
 	copy(raw[352:384], public)
-	raw[384] = byte(ivnp.CertificateKey)
+	raw[384] = byte(foundation.CertificateKey)
 	raw[385], raw[386] = 0, 4
-	raw[387], raw[388] = 0, byte(ivnp.SigningEdDSASHA512Ed25519)
-	identity, used, err := ivnp.ParseIdentity(raw)
+	raw[387], raw[388] = 0, byte(foundation.SigningEdDSASHA512Ed25519)
+	identity, used, err := foundation.ParseIdentity(raw)
 	if err != nil || used != len(raw) {
 		t.Fatalf("ParseIdentity = %#v, %d, %v", identity, used, err)
 	}

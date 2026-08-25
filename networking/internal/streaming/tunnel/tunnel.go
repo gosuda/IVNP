@@ -1,7 +1,7 @@
-package tunnel
+package streamingtunnel
 
-import streamapi "gosuda.org/ivnp/interfaces/stream"
-import destinationapi "gosuda.org/ivnp/interfaces/destination"
+import "gosuda.org/ivnp/interfaces/stream"
+import "gosuda.org/ivnp/interfaces/destination"
 
 import "cmp"
 
@@ -13,7 +13,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/networking/internal/streaming"
 	"io"
@@ -79,7 +79,7 @@ var (
 	ErrTunnelReset        = errors.New("streaming: peer reset the connection")
 )
 
-type Delivery = destinationapi.Delivery
+type Delivery = destination.Delivery
 
 // TunnelSender injects an I2P Streaming payload into the caller's Garlic and
 // tunnel delivery path. It deliberately has no net.Conn or raw socket surface:
@@ -92,7 +92,7 @@ type TunnelSender interface {
 // TunnelNetworkConfig configures one local ECIES I2P Destination streaming
 // endpoint.
 type TunnelNetworkConfig struct {
-	Destination     *ivnp.LocalDestination
+	Destination     *foundation.LocalDestination
 	Sender          TunnelSender
 	AcceptQueue     int
 	ReadQueue       int
@@ -105,8 +105,8 @@ type TunnelNetworkConfig struct {
 // payloads to HandleDelivery and provide a sender backed by their tunnel pool.
 // One maintenance worker handles retransmission for every connection.
 type TunnelNetwork struct {
-	localHash      ivnp.Hash
-	localIdentity  ivnp.Identity
+	localHash      foundation.Hash
+	localIdentity  foundation.Identity
 	localRaw       []byte
 	localB32       string
 	sign           func([]byte) ([]byte, error)
@@ -140,7 +140,7 @@ type NetworkStats struct {
 }
 
 type inboundKey struct {
-	from ivnp.Hash
+	from foundation.Hash
 	id   uint32
 }
 
@@ -235,7 +235,7 @@ func (n *TunnelNetwork) Destination() []byte {
 	if n == nil {
 		return nil
 	}
-	return []byte(ivnp.EncodeI2PBase64(n.localRaw))
+	return []byte(foundation.EncodeI2PBase64(n.localRaw))
 }
 
 // DialI2P opens an authenticated Streaming connection with an ephemeral local
@@ -262,7 +262,7 @@ func (n *TunnelNetwork) DialI2PFromPort(ctx context.Context, address string, loc
 	if err != nil {
 		return nil, err
 	}
-	connection := n.newConn(localID, 0, target, ivnp.Identity{}, localPort, port, true)
+	connection := n.newConn(localID, 0, target, foundation.Identity{}, localPort, port, true)
 	if err = n.register(connection); err != nil {
 		return nil, err
 	}
@@ -302,7 +302,7 @@ func (n *TunnelNetwork) ListenI2P(ctx context.Context, address string) (net.List
 		return nil, net.ErrClosed
 	}
 	if _, exists := n.listeners[port]; exists {
-		return nil, streamapi.ErrAddressInUse
+		return nil, stream.ErrAddressInUse
 	}
 	n.listeners[port] = listener
 	go func() {
@@ -385,12 +385,12 @@ func (n *TunnelNetwork) Close() error {
 func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery, packet Packet) error {
 	handleSynchronizeRejected := packet.ReceiveStreamID == 0 || packet.Sequence != 0 || packet.Flags&FlagNoACK == 0 || len(packet.Payload) != 0 || packet.NACKCount != 8
 	if !handleSynchronizeRejected {
-		handleSynchronizeRejected = len(packet.NACKs) != ivnp.HashLength
+		handleSynchronizeRejected = len(packet.NACKs) != foundation.HashLength
 	}
 	if handleSynchronizeRejected {
 		return ErrTunnelPacket
 	}
-	var target ivnp.Hash
+	var target foundation.Hash
 	copy(target[:], packet.NACKs)
 	if target != n.localHash {
 		return ErrTunnelDestination
@@ -440,7 +440,7 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 	}
 }
 
-func (n *TunnelNetwork) newConn(localID, remoteID uint32, peer ivnp.Hash, peerIdentity ivnp.Identity, localPort, remotePort uint16, outbound bool) *tunnelConn {
+func (n *TunnelNetwork) newConn(localID, remoteID uint32, peer foundation.Hash, peerIdentity foundation.Identity, localPort, remotePort uint16, outbound bool) *tunnelConn {
 	connection := &tunnelConn{
 		network:            n,
 		localID:            localID,
@@ -706,8 +706,8 @@ type tunnelConn struct {
 	network *TunnelNetwork
 
 	localID, remoteID uint32
-	peer              ivnp.Hash
-	peerIdentity      ivnp.Identity
+	peer              foundation.Hash
+	peerIdentity      foundation.Identity
 	localPort         uint16
 	remotePort        uint16
 	outbound          bool
@@ -1358,7 +1358,7 @@ func (c *tunnelConn) RemoteDestination() []byte {
 	if c == nil {
 		return nil
 	}
-	return []byte(ivnp.EncodeI2PBase64(c.peerIdentity.Bytes()))
+	return []byte(foundation.EncodeI2PBase64(c.peerIdentity.Bytes()))
 }
 
 func (c *tunnelConn) LocalI2PPort() uint16  { return c.localPort }
@@ -1562,51 +1562,51 @@ func (n *TunnelNetwork) signedControl(packet Packet, options controlOptions) ([]
 	return wire, nil
 }
 
-func verifyControl(packet Packet, wire []byte, claimed ivnp.Hash, known *ivnp.Identity, requireFrom bool) (ivnp.Identity, int, error) {
+func verifyControl(packet Packet, wire []byte, claimed foundation.Hash, known *foundation.Identity, requireFrom bool) (foundation.Identity, int, error) {
 	if packet.Flags&FlagSignatureIncluded == 0 || packet.Flags&^streamingKnownFlags != 0 {
-		return ivnp.Identity{}, 0, ErrTunnelPacket
+		return foundation.Identity{}, 0, ErrTunnelPacket
 	}
-	identity := ivnp.Identity{}
+	identity := foundation.Identity{}
 	offset := 0
 	if packet.Flags&FlagDelayRequested != 0 {
 		if len(packet.Options) < 2 {
-			return ivnp.Identity{}, 0, ErrTunnelPacket
+			return foundation.Identity{}, 0, ErrTunnelPacket
 		}
 		offset += 2
 	}
 	if packet.Flags&FlagFromIncluded != 0 {
-		_, consumed, err := ivnp.ParseIdentity(packet.Options[offset:])
+		_, consumed, err := foundation.ParseIdentity(packet.Options[offset:])
 		if err != nil {
-			return ivnp.Identity{}, 0, ErrTunnelIdentity
+			return foundation.Identity{}, 0, ErrTunnelIdentity
 		}
 		raw := append([]byte(nil), packet.Options[offset:offset+consumed]...)
-		identity, consumed, err = ivnp.ParseIdentity(raw)
+		identity, consumed, err = foundation.ParseIdentity(raw)
 		if err != nil || consumed != len(raw) || identity.Hash() != claimed {
-			return ivnp.Identity{}, 0, ErrTunnelIdentity
+			return foundation.Identity{}, 0, ErrTunnelIdentity
 		}
 		offset += len(raw)
 	} else {
 		if requireFrom || known == nil {
-			return ivnp.Identity{}, 0, ErrTunnelIdentity
+			return foundation.Identity{}, 0, ErrTunnelIdentity
 		}
 		identity = *known
 	}
 	peerMaxPayloadSize := -1
 	if packet.Flags&FlagMaxPacketSize != 0 {
 		if len(packet.Options)-offset < 2 {
-			return ivnp.Identity{}, 0, ErrTunnelPacket
+			return foundation.Identity{}, 0, ErrTunnelPacket
 		}
 		peerMaxPayloadSize = int(binary.BigEndian.Uint16(packet.Options[offset : offset+2]))
 		offset += 2
 	}
 	signatureLen, ok := identity.SigningKeyType().SignatureLen()
 	if !ok || len(packet.Options)-offset != signatureLen {
-		return ivnp.Identity{}, 0, ErrTunnelPacket
+		return foundation.Identity{}, 0, ErrTunnelPacket
 	}
 	optionStart := 17 + len(packet.NACKs) + 5
 	signatureOffset := optionStart + offset
 	if signatureOffset < 0 || signatureOffset+signatureLen > len(wire) {
-		return ivnp.Identity{}, 0, ErrTunnelPacket
+		return foundation.Identity{}, 0, ErrTunnelPacket
 	}
 	signed := append([]byte(nil), wire...)
 	signature := append([]byte(nil), signed[signatureOffset:signatureOffset+signatureLen]...)
@@ -1615,7 +1615,7 @@ func verifyControl(packet Packet, wire []byte, claimed ivnp.Hash, known *ivnp.Id
 	clear(signed)
 	clear(signature)
 	if err != nil || !valid {
-		return ivnp.Identity{}, 0, ErrTunnelSignature
+		return foundation.Identity{}, 0, ErrTunnelSignature
 	}
 	return identity, peerMaxPayloadSize, nil
 }
@@ -1662,20 +1662,20 @@ func splitI2PAddress(address string) (string, uint16, error) {
 	return host, uint16(value), nil
 }
 
-func parsePeerAddress(address string) (ivnp.Hash, uint16, error) {
+func parsePeerAddress(address string) (foundation.Hash, uint16, error) {
 	host, port, err := splitI2PAddress(address)
 	if err != nil || host == "" {
-		return ivnp.Hash{}, 0, ErrTunnelAddress
+		return foundation.Hash{}, 0, ErrTunnelAddress
 	}
 	hash, err := parseDestinationHost(host)
 	if err != nil {
-		return ivnp.Hash{}, 0, err
+		return foundation.Hash{}, 0, err
 	}
 	return hash, port, nil
 }
 
-func parseDestinationHost(host string) (ivnp.Hash, error) {
-	var hash ivnp.Hash
+func parseDestinationHost(host string) (foundation.Hash, error) {
+	var hash foundation.Hash
 	if before, ok := strings.CutSuffix(strings.ToLower(host), ".b32.i2p"); ok {
 		encoded := before
 		decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(encoded))
@@ -1692,15 +1692,15 @@ func parseDestinationHost(host string) (ivnp.Hash, error) {
 	return identity.Hash(), nil
 }
 
-func decodeDestination(encoded []byte) (ivnp.Identity, []byte, error) {
-	identity, err := ivnp.ParseDestination(encoded)
+func decodeDestination(encoded []byte) (foundation.Identity, []byte, error) {
+	identity, err := foundation.ParseDestination(encoded)
 	if err != nil {
-		return ivnp.Identity{}, nil, ErrTunnelIdentity
+		return foundation.Identity{}, nil, ErrTunnelIdentity
 	}
 	return identity, append([]byte(nil), identity.Bytes()...), nil
 }
 
-func hashB32(hash ivnp.Hash) string { return ivnp.B32(hash) }
+func hashB32(hash foundation.Hash) string { return foundation.B32(hash) }
 
 func sequenceAfter(left, right uint32) bool         { return int32(left-right) > 0 }
 func sequenceBeforeOrEqual(left, right uint32) bool { return int32(left-right) <= 0 }

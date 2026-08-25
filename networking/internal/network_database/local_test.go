@@ -1,17 +1,17 @@
-package netdb
+package networkdatabase
 
 import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
 	"testing"
 )
 
 func TestLocalLeaseSetSnapshotExpiresAndReplaces(t *testing.T) {
 	identityBytes := legacyIdentity()
-	identity, _, err := ivnp.ParseIdentity(identityBytes)
+	identity, _, err := foundation.ParseIdentity(identityBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestLocalLeaseSetSnapshotExpiresAndReplaces(t *testing.T) {
 
 func TestLocalLeaseSetCopiesIdentityAndBoundsLeases(t *testing.T) {
 	identityBytes := legacyIdentity()
-	identity, _, err := ivnp.ParseIdentity(identityBytes)
+	identity, _, err := foundation.ParseIdentity(identityBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestLocalLeaseSetSnapshotMarshalLegacy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var gateway ivnp.Hash
+	var gateway foundation.Hash
 	gateway[0] = 1
 	if err := local.ReplaceInboundLeases([]Lease{{Gateway: gateway, TunnelID: 1, EndDate: 2}}); err != nil {
 		t.Fatal(err)
@@ -172,7 +172,7 @@ func TestLocalLeaseSetSnapshotMarshalLegacyRejectsMalformedKeysAndSignature(t *t
 
 	if _, err := snapshot.MarshalLegacy(wireBytes, encryptionKey, signingKey, func([]byte) ([]byte, error) {
 		return make([]byte, ed25519.SignatureSize-1), nil
-	}); !errors.Is(err, ivnp.ErrMalformedSignature) {
+	}); !errors.Is(err, foundation.ErrMalformedSignature) {
 		t.Fatalf("short signature error = %v, want ivnp.ErrMalformedSignature", err)
 	}
 	if _, err := snapshot.MarshalLegacy(wireBytes[:len(wireBytes)-1], encryptionKey, signingKey, signer); !errors.Is(err, wire.ErrShortBuffer) {
@@ -181,7 +181,7 @@ func TestLocalLeaseSetSnapshotMarshalLegacyRejectsMalformedKeysAndSignature(t *t
 }
 
 func TestLocalLeaseSetSnapshotRejectsCorruptedRetainedIdentity(t *testing.T) {
-	identity, _, err := ivnp.ParseIdentity(legacyIdentity())
+	identity, _, err := foundation.ParseIdentity(legacyIdentity())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,19 +195,19 @@ func TestLocalLeaseSetSnapshotRejectsCorruptedRetainedIdentity(t *testing.T) {
 	}
 }
 
-func ed25519Identity(t *testing.T) (ivnp.Identity, ed25519.PrivateKey) {
+func ed25519Identity(t *testing.T) (foundation.Identity, ed25519.PrivateKey) {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	encoded := make([]byte, ivnp.IdentityBaseLength+7)
+	encoded := make([]byte, foundation.IdentityBaseLength+7)
 	copy(encoded[352:384], public)
-	encoded[384] = byte(ivnp.CertificateKey)
+	encoded[384] = byte(foundation.CertificateKey)
 	encoded[385], encoded[386] = 0, 4
-	encoded[387], encoded[388] = 0, byte(ivnp.SigningEdDSASHA512Ed25519)
-	encoded[389], encoded[390] = 0, byte(ivnp.CryptoElGamal)
-	identity, n, err := ivnp.ParseIdentity(encoded)
+	encoded[387], encoded[388] = 0, byte(foundation.SigningEdDSASHA512Ed25519)
+	encoded[389], encoded[390] = 0, byte(foundation.CryptoElGamal)
+	identity, n, err := foundation.ParseIdentity(encoded)
 	if err != nil {
 		t.Fatal(err)
 	}

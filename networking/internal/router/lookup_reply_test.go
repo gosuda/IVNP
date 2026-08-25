@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/garlic"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/network_database"
@@ -20,7 +20,7 @@ type encryptedLookupReplyCapture struct {
 	ready   chan struct{}
 }
 
-func (capture *encryptedLookupReplyCapture) SendNetDBReply(_ context.Context, _ ivnp.Hash, _ uint32, message i2np.Message) error {
+func (capture *encryptedLookupReplyCapture) SendNetDBReply(_ context.Context, _ foundation.Hash, _ uint32, message i2np.Message) error {
 	capture.mu.Lock()
 	capture.message = i2np.Message{Header: message.Header, Payload: append([]byte(nil), message.Payload...)}
 	capture.mu.Unlock()
@@ -33,7 +33,7 @@ func (capture *encryptedLookupReplyCapture) SendNetDBReply(_ context.Context, _ 
 
 func TestLookupResponderEncryptsECIESReplyEndToEnd(t *testing.T) {
 	const now = uint64(1_700_000_000_000)
-	local, from, key := ivnp.Hash{1}, ivnp.Hash{2}, ivnp.Hash{3}
+	local, from, key := foundation.Hash{1}, foundation.Hash{2}, foundation.Hash{3}
 	var replyKey [32]byte
 	var replyTag [8]byte
 	for index := range replyKey {
@@ -46,7 +46,7 @@ func TestLookupResponderEncryptsECIESReplyEndToEnd(t *testing.T) {
 	wireLookup := make([]byte, 32+32+1+2+32+1+8)
 	copy(wireLookup[:32], key[:])
 	copy(wireLookup[32:64], from[:])
-	wireLookup[64] = uint8(netdb.RouterInfoLookup<<2) | 1<<4
+	wireLookup[64] = uint8(networkdatabase.RouterInfoLookup<<2) | 1<<4
 	binary.BigEndian.PutUint16(wireLookup[65:67], 0)
 	copy(wireLookup[67:99], replyKey[:])
 	wireLookup[99] = 1
@@ -57,8 +57,8 @@ func TestLookupResponderEncryptsECIESReplyEndToEnd(t *testing.T) {
 	}
 
 	capture := &encryptedLookupReplyCapture{ready: make(chan struct{}, 1)}
-	responder, err := netdb.NewLookupResponder(netdb.LookupResponderConfig{
-		Database: netdb.NewDatabase(local, netdb.DefaultBucketCapacity),
+	responder, err := networkdatabase.NewLookupResponder(networkdatabase.LookupResponderConfig{
+		Database: networkdatabase.NewDatabase(local, networkdatabase.DefaultBucketCapacity),
 		Sender:   capture,
 		Local:    local,
 		Now:      func() uint64 { return now },
@@ -119,10 +119,10 @@ func TestLookupResponderEncryptsECIESReplyEndToEnd(t *testing.T) {
 }
 
 func TestLookupResponderRejectsIncompleteEncryptedMetadataAtIngress(t *testing.T) {
-	local := ivnp.Hash{1}
+	local := foundation.Hash{1}
 	capture := &encryptedLookupReplyCapture{ready: make(chan struct{}, 1)}
-	responder, err := netdb.NewLookupResponder(netdb.LookupResponderConfig{
-		Database: netdb.NewDatabase(local, netdb.DefaultBucketCapacity),
+	responder, err := networkdatabase.NewLookupResponder(networkdatabase.LookupResponderConfig{
+		Database: networkdatabase.NewDatabase(local, networkdatabase.DefaultBucketCapacity),
 		Sender:   capture,
 		Local:    local,
 		Now:      func() uint64 { return 1_700_000_000_000 },
@@ -133,7 +133,7 @@ func TestLookupResponderRejectsIncompleteEncryptedMetadataAtIngress(t *testing.T
 		t.Fatal(err)
 	}
 	lookup := i2np.DatabaseLookupMessage{
-		From: ivnp.Hash{2}, Flags: 1 << 4, ReplyKey: make([]byte, 32), ReplyTagLen: 8,
+		From: foundation.Hash{2}, Flags: 1 << 4, ReplyKey: make([]byte, 32), ReplyTagLen: 8,
 	}
 	if err = responder.Enqueue(lookup); !errors.Is(err, garlic.ErrLookupReply) {
 		t.Fatalf("Enqueue() = %v, want ErrLookupReply", err)

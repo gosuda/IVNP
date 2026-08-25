@@ -1,16 +1,16 @@
-package ecies
+package garlicecies
 
 import (
 	"bytes"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/networking/internal/transport/noise"
 	"testing"
 )
 
 func TestHybridE1EKEMTranscriptAndMixKey(t *testing.T) {
-	for _, cryptoType := range []uint16{cryptx.MLKEM768X25519, cryptx.MLKEM1024X25519} {
+	for _, cryptoType := range []uint16{cryptography.MLKEM768X25519, cryptography.MLKEM1024X25519} {
 		t.Run(string(rune(cryptoType)), func(t *testing.T) {
-			params, _ := cryptx.Parameters(cryptoType)
+			params, _ := cryptography.Parameters(cryptoType)
 			initiator, err := NewHybridInitiator(cryptoType)
 			if err != nil {
 				t.Fatal(err)
@@ -51,7 +51,7 @@ func TestHybridE1EKEMTranscriptAndMixKey(t *testing.T) {
 }
 
 func TestHybridRejectsMalformedSections(t *testing.T) {
-	initiator, err := NewHybridInitiator(cryptx.MLKEM768X25519)
+	initiator, err := NewHybridInitiator(cryptography.MLKEM768X25519)
 	if err != nil {
 		t.Fatal(err)
 	}

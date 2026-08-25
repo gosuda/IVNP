@@ -1,4 +1,4 @@
-package ecies
+package garlicecies
 
 import (
 	"bytes"

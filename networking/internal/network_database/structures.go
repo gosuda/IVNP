@@ -1,13 +1,13 @@
 // Package netdb parses and validates I2P network-database structures without
 // copying their wire data. It deliberately separates parsing from signature
 // verification so callers can apply admission policy before expensive crypto.
-package netdb
+package networkdatabase
 
 import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
 )
 
@@ -33,7 +33,7 @@ type RouterAddress struct {
 	Cost           uint8
 	Expiration     uint64
 	TransportStyle []byte
-	Options        ivnp.Mapping
+	Options        foundation.Mapping
 	raw            []byte
 }
 
@@ -61,7 +61,7 @@ func ParseRouterAddress(src []byte) (RouterAddress, int, error) {
 	if err != nil {
 		return RouterAddress{}, 0, err
 	}
-	options, n, err := ivnp.ParseMapping(cursor.Bytes())
+	options, n, err := foundation.ParseMapping(cursor.Bytes())
 	if err != nil {
 		return RouterAddress{}, 0, err
 	}
@@ -95,24 +95,24 @@ func (it *RouterAddressIterator) Next() (RouterAddress, bool, error) {
 
 // RouterInfo is a fully delimited signed netdb RouterInfo.
 type RouterInfo struct {
-	Identity     ivnp.Identity
+	Identity     foundation.Identity
 	Published    uint64
 	addressCount uint8
 	addresses    []byte
 	PeerHashes   []byte
-	Options      ivnp.Mapping
+	Options      foundation.Mapping
 	Signature    []byte
 	Unsigned     []byte
 	raw          []byte
 }
 
-func (r RouterInfo) Bytes() []byte     { return r.raw }
-func (r RouterInfo) Hash() ivnp.Hash   { return r.Identity.Hash() }
-func (r RouterInfo) AddressCount() int { return int(r.addressCount) }
+func (r RouterInfo) Bytes() []byte         { return r.raw }
+func (r RouterInfo) Hash() foundation.Hash { return r.Identity.Hash() }
+func (r RouterInfo) AddressCount() int     { return int(r.addressCount) }
 func (r RouterInfo) Addresses() RouterAddressIterator {
 	return RouterAddressIterator{rest: r.addresses, left: r.addressCount}
 }
-func (r RouterInfo) PeerCount() int { return len(r.PeerHashes) / ivnp.HashLength }
+func (r RouterInfo) PeerCount() int { return len(r.PeerHashes) / foundation.HashLength }
 
 // IsFloodfill reports the RouterInfo capability defined by I2P: the `caps`
 // option contains the ASCII capability letter `f`.
@@ -139,7 +139,7 @@ func ParseRouterInfo(src []byte) (RouterInfo, error) {
 	if len(src) > MaxRouterInfoBytes {
 		return RouterInfo{}, ErrStructureTooLarge
 	}
-	identity, n, err := ivnp.ParseIdentity(src)
+	identity, n, err := foundation.ParseIdentity(src)
 	if err != nil {
 		return RouterInfo{}, err
 	}
@@ -167,12 +167,12 @@ func ParseRouterInfo(src []byte) (RouterInfo, error) {
 	if err != nil {
 		return RouterInfo{}, err
 	}
-	peerBytes := int(peerCount) * ivnp.HashLength
+	peerBytes := int(peerCount) * foundation.HashLength
 	peerHashes, err := cursor.ReadBytes(peerBytes)
 	if err != nil {
 		return RouterInfo{}, err
 	}
-	options, used, err := ivnp.ParseMapping(cursor.Bytes())
+	options, used, err := foundation.ParseMapping(cursor.Bytes())
 	if err != nil {
 		return RouterInfo{}, err
 	}
@@ -184,7 +184,7 @@ func ParseRouterInfo(src []byte) (RouterInfo, error) {
 	}
 	signingLen, ok := identity.SigningKeyType().SignatureLen()
 	if !ok {
-		return RouterInfo{}, ivnp.ErrUnknownKeyType
+		return RouterInfo{}, foundation.ErrUnknownKeyType
 	}
 	unsignedEnd := n + cursor.Offset()
 	signature, err := cursor.ReadBytes(signingLen)
@@ -209,7 +209,7 @@ func ParseRouterInfo(src []byte) (RouterInfo, error) {
 
 // Lease authorizes one inbound tunnel until EndDate milliseconds since epoch.
 type Lease struct {
-	Gateway  ivnp.Hash
+	Gateway  foundation.Hash
 	TunnelID uint32
 	EndDate  uint64
 }
@@ -245,7 +245,7 @@ func (it *LeaseIterator) Next() (Lease, bool, error) {
 
 // LeaseSet is the legacy DatabaseStore type 1 payload.
 type LeaseSet struct {
-	Destination   ivnp.Identity
+	Destination   foundation.Identity
 	EncryptionKey []byte
 	SigningKey    []byte
 	leaseCount    uint8
@@ -256,7 +256,7 @@ type LeaseSet struct {
 }
 
 func (s LeaseSet) Bytes() []byte         { return s.raw }
-func (s LeaseSet) Hash() ivnp.Hash       { return s.Destination.Hash() }
+func (s LeaseSet) Hash() foundation.Hash { return s.Destination.Hash() }
 func (s LeaseSet) LeaseCount() int       { return int(s.leaseCount) }
 func (s LeaseSet) Leases() LeaseIterator { return LeaseIterator{rest: s.leases} }
 
@@ -270,7 +270,7 @@ func ParseLeaseSet(src []byte) (LeaseSet, error) {
 	if len(src) > MaxLeaseSetBytes {
 		return LeaseSet{}, ErrStructureTooLarge
 	}
-	destination, n, err := ivnp.ParseIdentity(src)
+	destination, n, err := foundation.ParseIdentity(src)
 	if err != nil {
 		return LeaseSet{}, err
 	}
@@ -281,7 +281,7 @@ func ParseLeaseSet(src []byte) (LeaseSet, error) {
 	}
 	signingKeyLen, ok := destination.SigningKeyType().PublicKeyLen()
 	if !ok {
-		return LeaseSet{}, ivnp.ErrUnknownKeyType
+		return LeaseSet{}, foundation.ErrUnknownKeyType
 	}
 	signingKey, err := cursor.ReadBytes(signingKeyLen)
 	if err != nil {
@@ -306,7 +306,7 @@ func ParseLeaseSet(src []byte) (LeaseSet, error) {
 	unsignedEnd := n + cursor.Offset()
 	signatureLen, ok := destination.SigningKeyType().SignatureLen()
 	if !ok {
-		return LeaseSet{}, ivnp.ErrUnknownKeyType
+		return LeaseSet{}, foundation.ErrUnknownKeyType
 	}
 	signature, err := cursor.ReadBytes(signatureLen)
 	if err != nil {
@@ -320,7 +320,7 @@ func ParseLeaseSet(src []byte) (LeaseSet, error) {
 
 // LeaseSet2Header is the common signed-structure prefix for LS2 and MetaLS.
 type LeaseSet2Header struct {
-	Destination ivnp.Identity
+	Destination foundation.Identity
 	Published   uint32
 	Expires     uint16
 	Flags       uint16
@@ -332,7 +332,7 @@ const leaseSetOfflineFlag = 1
 // OfflineSignature authorizes a transient signing public key.
 type OfflineSignature struct {
 	Expires   uint32
-	Type      ivnp.SigningKeyType
+	Type      foundation.SigningKeyType
 	PublicKey []byte
 	Signature []byte
 	Signed    []byte
@@ -341,7 +341,7 @@ type OfflineSignature struct {
 func (o OfflineSignature) Present() bool { return o.PublicKey != nil }
 
 func parseLeaseSet2Header(src []byte) (LeaseSet2Header, int, error) {
-	destination, n, err := ivnp.ParseIdentity(src)
+	destination, n, err := foundation.ParseIdentity(src)
 	if err != nil {
 		return LeaseSet2Header{}, 0, err
 	}
@@ -371,10 +371,10 @@ func parseLeaseSet2Header(src []byte) (LeaseSet2Header, int, error) {
 	if err != nil {
 		return LeaseSet2Header{}, 0, err
 	}
-	offlineType := ivnp.SigningKeyType(typeID)
+	offlineType := foundation.SigningKeyType(typeID)
 	keyLen, ok := offlineType.PublicKeyLen()
 	if !ok {
-		return LeaseSet2Header{}, 0, ivnp.ErrUnknownKeyType
+		return LeaseSet2Header{}, 0, foundation.ErrUnknownKeyType
 	}
 	publicKey, err := cursor.ReadBytes(keyLen)
 	if err != nil {
@@ -382,7 +382,7 @@ func parseLeaseSet2Header(src []byte) (LeaseSet2Header, int, error) {
 	}
 	signatureLen, ok := destination.SigningKeyType().SignatureLen()
 	if !ok {
-		return LeaseSet2Header{}, 0, ivnp.ErrUnknownKeyType
+		return LeaseSet2Header{}, 0, foundation.ErrUnknownKeyType
 	}
 	signature, err := cursor.ReadBytes(signatureLen)
 	if err != nil {
@@ -394,7 +394,7 @@ func parseLeaseSet2Header(src []byte) (LeaseSet2Header, int, error) {
 
 // Lease2 authorizes one inbound tunnel until EndDate seconds since epoch.
 type Lease2 struct {
-	Gateway  ivnp.Hash
+	Gateway  foundation.Hash
 	TunnelID uint32
 	EndDate  uint32
 }
@@ -430,7 +430,7 @@ func (it *Lease2Iterator) Next() (Lease2, bool, error) {
 
 // EncryptionKey is a self-delimiting LeaseSet2 encryption key.
 type EncryptionKey struct {
-	Type ivnp.CryptoKeyType
+	Type foundation.CryptoKeyType
 	Data []byte
 }
 
@@ -447,8 +447,8 @@ func (it *EncryptionKeyIterator) Next() (EncryptionKey, bool, error) {
 	if len(it.rest) < 4 {
 		return EncryptionKey{}, false, wire.ErrShortBuffer
 	}
-	keyType := ivnp.CryptoKeyType(binary.BigEndian.Uint16(it.rest[:2]))
-	if keyType == ivnp.CryptoKeyType(5) {
+	keyType := foundation.CryptoKeyType(binary.BigEndian.Uint16(it.rest[:2]))
+	if keyType == foundation.CryptoKeyType(5) {
 		return EncryptionKey{}, false, ErrNoSupportedEncryptionKey
 	}
 	keyLen := int(binary.BigEndian.Uint16(it.rest[2:4]))
@@ -467,7 +467,7 @@ func (it *EncryptionKeyIterator) Next() (EncryptionKey, bool, error) {
 // LeaseSet2 is an exact unencrypted LS2 DatabaseStore type 3 payload.
 type LeaseSet2 struct {
 	Header     LeaseSet2Header
-	Options    ivnp.Mapping
+	Options    foundation.Mapping
 	keyCount   uint8
 	keys       []byte
 	leaseCount uint8
@@ -477,9 +477,9 @@ type LeaseSet2 struct {
 	raw        []byte
 }
 
-func (s LeaseSet2) Bytes() []byte   { return s.raw }
-func (s LeaseSet2) Hash() ivnp.Hash { return s.Header.Destination.Hash() }
-func (s LeaseSet2) KeyCount() int   { return int(s.keyCount) }
+func (s LeaseSet2) Bytes() []byte         { return s.raw }
+func (s LeaseSet2) Hash() foundation.Hash { return s.Header.Destination.Hash() }
+func (s LeaseSet2) KeyCount() int         { return int(s.keyCount) }
 func (s LeaseSet2) Keys() EncryptionKeyIterator {
 	return EncryptionKeyIterator{rest: s.keys, left: s.keyCount}
 }
@@ -488,7 +488,7 @@ func (s LeaseSet2) Keys() EncryptionKeyIterator {
 // order, independent of the order selected by the remote LeaseSet producer.
 // Callers pass 7, 6, 4 to prefer ML-KEM-1024/X25519, then
 // ML-KEM-768/X25519, then X25519.
-func (s LeaseSet2) SelectEncryptionKey(supported ...ivnp.CryptoKeyType) (EncryptionKey, error) {
+func (s LeaseSet2) SelectEncryptionKey(supported ...foundation.CryptoKeyType) (EncryptionKey, error) {
 	for _, preferred := range supported {
 		iterator := s.Keys()
 		for {
@@ -510,7 +510,7 @@ func (s LeaseSet2) SelectEncryptionKey(supported ...ivnp.CryptoKeyType) (Encrypt
 // SelectUsableEncryptionKey selects by caller preference only when the LS2
 // still has a live lease at nowMillis. It is the resolution boundary used by
 // callers that must not downgrade an ELS2 to a plaintext/expired route.
-func (s LeaseSet2) SelectUsableEncryptionKey(nowMillis uint64, supported ...ivnp.CryptoKeyType) (EncryptionKey, error) {
+func (s LeaseSet2) SelectUsableEncryptionKey(nowMillis uint64, supported ...foundation.CryptoKeyType) (EncryptionKey, error) {
 	now := nowMillis / 1000
 	leases := s.Leases()
 	live := false
@@ -548,7 +548,7 @@ func (s LeaseSet2) Verify() (bool, error) {
 		signingType = s.Header.Offline.Type
 		first, rest = s.Header.Offline.PublicKey, nil
 	}
-	return ivnp.VerifySignaturePrefixed(byte(3), signingType, first, rest, s.Unsigned, s.Signature)
+	return foundation.VerifySignaturePrefixed(byte(3), signingType, first, rest, s.Unsigned, s.Signature)
 }
 
 // ParseLeaseSet2 parses the full exact LS2 payload and validates canonical
@@ -562,7 +562,7 @@ func ParseLeaseSet2(src []byte) (LeaseSet2, error) {
 		return LeaseSet2{}, err
 	}
 	cursor := wire.NewCursor(src[n:])
-	options, used, err := ivnp.ParseMapping(cursor.Bytes())
+	options, used, err := foundation.ParseMapping(cursor.Bytes())
 	if err != nil {
 		return LeaseSet2{}, err
 	}
@@ -618,7 +618,7 @@ func ParseLeaseSet2(src []byte) (LeaseSet2, error) {
 	}
 	signatureLen, ok := signingType.SignatureLen()
 	if !ok {
-		return LeaseSet2{}, ivnp.ErrUnknownKeyType
+		return LeaseSet2{}, foundation.ErrUnknownKeyType
 	}
 	signature, err := cursor.ReadBytes(signatureLen)
 	if err != nil {

@@ -2,7 +2,7 @@ package router
 
 import (
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 	"hash/maphash"
 	"net"
@@ -207,7 +207,7 @@ func rateLimitCounters(counters rateCounters) RateLimitCounters {
 	return RateLimitCounters{Allowed: counters.allowed, Denied: counters.denied}
 }
 
-func rateKey(peer ivnp.Hash) [32]byte { return [32]byte(peer) }
+func rateKey(peer foundation.Hash) [32]byte { return [32]byte(peer) }
 
 func rateKeyFromAddr(remote net.Addr) (key [32]byte, ok bool) {
 	endpoint, ok := remote.(interface{ AddrPort() netip.AddrPort })

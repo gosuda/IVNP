@@ -8,9 +8,9 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
-	ivnp "gosuda.org/ivnp/foundation"
-	eciesgarlic "gosuda.org/ivnp/networking/internal/garlic/ecies"
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/garlic/ecies"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/observability"
 	"io"
@@ -39,7 +39,7 @@ var (
 
 // ShortBuildHop is one ECIES-X25519 participant in path order.
 type ShortBuildHop struct {
-	Router          ivnp.Hash
+	Router          foundation.Hash
 	StaticKey       [32]byte
 	ReceiveTunnelID uint32
 	Options         ShortBuildOptions
@@ -59,7 +59,7 @@ type ShortBuildOptions struct {
 type OutboundBuild struct {
 	CircuitID     uint32
 	Hops          []ShortBuildHop
-	ReplyRouter   ivnp.Hash
+	ReplyRouter   foundation.Hash
 	ReplyTunnelID uint32
 	ExpiresAt     uint64
 
@@ -73,7 +73,7 @@ type OutboundBuild struct {
 type InboundBuild struct {
 	CircuitID        uint32
 	OutboundTunnelID uint32
-	CarrierEndpoint  ivnp.Hash
+	CarrierEndpoint  foundation.Hash
 	Hops             []ShortBuildHop
 	ExpiresAt        uint64
 
@@ -88,7 +88,7 @@ type InboundBuild struct {
 // requested inbound tunnel. Implementations own the ECIES existing-session
 // packet codec; BuildManager owns neither a garlic session nor packet buffers.
 type BuildReplySender interface {
-	SendBuildReply(context.Context, ivnp.Hash, uint32, GarlicReplyKey, i2np.Message) error
+	SendBuildReply(context.Context, foundation.Hash, uint32, GarlicReplyKey, i2np.Message) error
 }
 
 // BuildAdmission decides whether a valid transit request may consume local
@@ -100,17 +100,17 @@ type BuildAdmission func(ShortBuildRequest) bool
 type BuildBandwidth func(ShortBuildRequest) uint32
 
 // BuildStaticKeyLookup returns a retained RouterInfo identity encryption key.
-type BuildStaticKeyLookup func(ivnp.Hash) ([32]byte, bool)
+type BuildStaticKeyLookup func(foundation.Hash) ([32]byte, bool)
 
 // ReplyRouterInfoSeeder sends the selected inbound gateway RouterInfo to the
 // outbound endpoint before its build request. The endpoint needs that address
 // to route OutboundTunnelBuildReply through the requested inbound tunnel.
-type ReplyRouterInfoSeeder func(context.Context, ivnp.Hash, ivnp.Hash) error
+type ReplyRouterInfoSeeder func(context.Context, foundation.Hash, foundation.Hash) error
 
 // BuildSource identifies how a build reached the local router. Direct sources
 // are authenticated transport peers; a zero source is tunnel-originated.
 type BuildSource struct {
-	Router ivnp.Hash
+	Router foundation.Hash
 	Direct bool
 }
 
@@ -133,9 +133,9 @@ type BuildManager struct {
 	sender              Sender
 	replyKeys           GarlicReplyKeyRegistry
 	replySender         BuildReplySender
-	local               ivnp.Hash
+	local               foundation.Hash
 	staticPrivateKey    *ecdh.PrivateKey
-	legacyPrivate       cryptx.ElGamalPrivateKey
+	legacyPrivate       cryptography.ElGamalPrivateKey
 	legacyEnabled       bool
 	admit               BuildAdmission
 	bandwidth           BuildBandwidth
@@ -198,7 +198,7 @@ type pendingVariableBuild struct {
 type VariableOutboundBuild struct {
 	CircuitID     uint32
 	Hops          []VariableBuildHop
-	ReplyRouter   ivnp.Hash
+	ReplyRouter   foundation.Hash
 	ReplyTunnelID uint32
 	ExpiresAt     uint64
 	retireID      uint32
@@ -212,7 +212,7 @@ type BuildManagerConfig struct {
 	Sender              Sender
 	ReplyKeys           GarlicReplyKeyRegistry
 	ReplySender         BuildReplySender
-	LocalRouter         ivnp.Hash
+	LocalRouter         foundation.Hash
 	StaticPrivate       []byte
 	LegacyPrivate       []byte
 	Admission           BuildAdmission
@@ -233,7 +233,7 @@ type BuildManagerConfig struct {
 func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
 	newBuildManagerRejected := config.Runtime == nil || config.Sender == nil || config.ReplyKeys == nil || config.Now == nil || len(config.StaticPrivate) != 0 && len(config.StaticPrivate) != 32
 	if !newBuildManagerRejected {
-		newBuildManagerRejected = len(config.LegacyPrivate) != 0 && len(config.LegacyPrivate) != cryptx.ElGamalPrivateKeySize
+		newBuildManagerRejected = len(config.LegacyPrivate) != 0 && len(config.LegacyPrivate) != cryptography.ElGamalPrivateKeySize
 	}
 	if newBuildManagerRejected {
 		return nil, ErrBuildConfig
@@ -358,7 +358,7 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		return 0, err
 	}
 	now := m.now()
-	startOutboundRejected := build.CircuitID == 0 || len(build.Hops) < 1 || len(build.Hops) > i2np.MaxVariableBuildRecords || build.ReplyRouter == (ivnp.Hash{}) || build.ReplyTunnelID == 0 || build.Hops[len(build.Hops)-1].Router == build.ReplyRouter
+	startOutboundRejected := build.CircuitID == 0 || len(build.Hops) < 1 || len(build.Hops) > i2np.MaxVariableBuildRecords || build.ReplyRouter == (foundation.Hash{}) || build.ReplyTunnelID == 0 || build.Hops[len(build.Hops)-1].Router == build.ReplyRouter
 	if !startOutboundRejected {
 		startOutboundRejected = build.ExpiresAt <= now
 	}
@@ -366,7 +366,7 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		return 0, ErrBuildConfig
 	}
 	for index, hop := range build.Hops {
-		if hop.ReceiveTunnelID == 0 || hop.Router == (ivnp.Hash{}) || hop.StaticKey == ([32]byte{}) || !validShortBuildOptions(hop.Options, false) || !m.validHopStaticKey(hop) {
+		if hop.ReceiveTunnelID == 0 || hop.Router == (foundation.Hash{}) || hop.StaticKey == ([32]byte{}) || !validShortBuildOptions(hop.Options, false) || !m.validHopStaticKey(hop) {
 			return 0, ErrBuildConfig
 		}
 		for previous := range index {
@@ -442,7 +442,7 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 				m.metrics.IncTunnelBuildFailures()
 			}
 			if m.logger != nil {
-				m.logger.Warn("tunnel build reply RouterInfo seed failed", "direction", "outbound", "endpoint", ivnp.EncodeI2PBase64(endpoint[:]), "error", err)
+				m.logger.Warn("tunnel build reply RouterInfo seed failed", "direction", "outbound", "endpoint", foundation.EncodeI2PBase64(endpoint[:]), "error", err)
 			}
 			clearBuildKeys(keys)
 			return 0, err
@@ -487,7 +487,7 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 			m.metrics.IncTunnelBuildFailures()
 		}
 		if m.logger != nil {
-			m.logger.Warn("tunnel build send failed", "direction", "outbound", "reply_id", replyID, "peer", ivnp.EncodeI2PBase64(build.Hops[0].Router[:]), "error", err)
+			m.logger.Warn("tunnel build send failed", "direction", "outbound", "reply_id", replyID, "peer", foundation.EncodeI2PBase64(build.Hops[0].Router[:]), "error", err)
 		}
 		return 0, err
 	}
@@ -519,15 +519,15 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 	}
 	now := m.now()
 	carrierEndpoint := build.CarrierEndpoint
-	if build.OutboundTunnelID != 0 && carrierEndpoint == (ivnp.Hash{}) && m.pool != nil {
+	if build.OutboundTunnelID != 0 && carrierEndpoint == (foundation.Hash{}) && m.pool != nil {
 		if carrier, ok := m.pool.Get(build.OutboundTunnelID, now); ok && carrier.Direction == Outbound && carrier.HopCount != 0 {
 			carrierEndpoint = carrier.Hops[carrier.HopCount-1]
 		}
 	}
-	if build.OutboundTunnelID != 0 && carrierEndpoint == (ivnp.Hash{}) {
+	if build.OutboundTunnelID != 0 && carrierEndpoint == (foundation.Hash{}) {
 		return 0, ErrBuildConfig
 	}
-	startInboundRejected := build.CircuitID == 0 || build.CircuitID == build.OutboundTunnelID || m.local == (ivnp.Hash{}) || m.localDelivery == nil || build.ExpiresAt <= now || len(build.Hops) < 1
+	startInboundRejected := build.CircuitID == 0 || build.CircuitID == build.OutboundTunnelID || m.local == (foundation.Hash{}) || m.localDelivery == nil || build.ExpiresAt <= now || len(build.Hops) < 1
 	if !startInboundRejected {
 		startInboundRejected = len(build.Hops) >= i2np.MaxVariableBuildRecords
 	}
@@ -552,12 +552,12 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 					m.metrics.IncTunnelBuildFailures()
 				}
 				if m.logger != nil {
-					m.logger.Warn("tunnel build reply session failed", "direction", "inbound", "peer", ivnp.EncodeI2PBase64(replyPeer[:]), "error", err)
+					m.logger.Warn("tunnel build reply session failed", "direction", "inbound", "peer", foundation.EncodeI2PBase64(replyPeer[:]), "error", err)
 				}
 				return 0, err
 			}
 			if m.logger != nil {
-				m.logger.Debug("tunnel build reply session ready", "direction", "inbound", "peer", ivnp.EncodeI2PBase64(replyPeer[:]))
+				m.logger.Debug("tunnel build reply session ready", "direction", "inbound", "peer", foundation.EncodeI2PBase64(replyPeer[:]))
 			}
 		}
 	}
@@ -666,7 +666,7 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 				m.metrics.IncTunnelBuildFailures()
 			}
 			if m.logger != nil {
-				m.logger.Warn("tunnel build send failed", "direction", "inbound", "reply_id", replyID, "peer", ivnp.EncodeI2PBase64(build.Hops[0].Router[:]), "error", err)
+				m.logger.Warn("tunnel build send failed", "direction", "inbound", "reply_id", replyID, "peer", foundation.EncodeI2PBase64(build.Hops[0].Router[:]), "error", err)
 			}
 			return 0, err
 		}
@@ -675,7 +675,7 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 	frameMessage := message
 	if carrierEndpoint != build.Hops[0].Router {
 		encrypted := make([]byte, 32+7+3+10+message.EncodedLen()+16)
-		sealed, wrapErr := eciesgarlic.SealRouterMessage(encrypted, build.Hops[0].StaticKey[:], message, now, m.random)
+		sealed, wrapErr := garlicecies.SealRouterMessage(encrypted, build.Hops[0].StaticKey[:], message, now, m.random)
 		if wrapErr != nil {
 			m.removeInboundPending(replyID)
 			return 0, wrapErr
@@ -728,7 +728,7 @@ func (m *BuildManager) HandleBuild(message i2np.Message) error {
 
 // HandleBuildFrom processes a build received from an authenticated transport
 // peer.
-func (m *BuildManager) HandleBuildFrom(predecessor ivnp.Hash, message i2np.Message) error {
+func (m *BuildManager) HandleBuildFrom(predecessor foundation.Hash, message i2np.Message) error {
 	return m.handleBuild(BuildSource{Router: predecessor, Direct: true}, message)
 }
 
@@ -809,7 +809,7 @@ func (m *BuildManager) handleInboundReply(message i2np.Message) error {
 			return err
 		}
 	}
-	owner := ivnp.Hash{}
+	owner := foundation.Hash{}
 	if m.pool != nil {
 		owner = m.pool.Owner()
 	}
@@ -855,7 +855,7 @@ func (m *BuildManager) hasInboundPending(id uint32) bool {
 }
 
 func (m *BuildManager) handleTransit(source BuildSource, message i2np.Message) error {
-	if m.local == (ivnp.Hash{}) || m.staticPrivateKey == nil {
+	if m.local == (foundation.Hash{}) || m.staticPrivateKey == nil {
 		return ErrBuildConfig
 	}
 	records, err := i2np.ParseBuildRecords(i2np.ShortTunnelBuild, message.Payload)
@@ -936,7 +936,7 @@ func (m *BuildManager) handleTransit(source BuildSource, message i2np.Message) e
 		// The ECIES wrapper requires derived garlic material only for a remote
 		// reply gateway. Java I2P and i2pd both allow the matching local
 		// gateway to receive the unwrapped reply through local Service.
-		canReply := m.replySender != nil && request.NextRouter != (ivnp.Hash{}) && request.NextTunnelID != 0 && (request.NextRouter == m.local || keys.HasGarlicKeys)
+		canReply := m.replySender != nil && request.NextRouter != (foundation.Hash{}) && request.NextTunnelID != 0 && (request.NextRouter == m.local || keys.HasGarlicKeys)
 		if !canReply {
 			if accept {
 				m.runtime.RemoveCircuit(request.ReceiveTunnelID)
@@ -972,14 +972,14 @@ func (m *BuildManager) handleTransit(source BuildSource, message i2np.Message) e
 func (m *BuildManager) validTransitRequest(request ShortBuildRequest, keys ShortBuildKeys, now uint64, source BuildSource) bool {
 	requestTime := uint64(request.RequestMinutes) * 60_000
 	roundedNow := now - now%60_000
-	validTransitRequestRejected := !source.Direct || source.Router == (ivnp.Hash{}) || source.Router == m.local
+	validTransitRequestRejected := !source.Direct || source.Router == (foundation.Hash{}) || source.Router == m.local
 	if !validTransitRequestRejected {
 		validTransitRequestRejected = !request.Gateway && !request.Endpoint && request.NextRouter == source.Router
 	}
 	if validTransitRequestRejected {
 		return false
 	}
-	validTransitRequestRejected = request.LifetimeSeconds != shortBuildLifetime || request.ReceiveTunnelID == 0 || request.NextTunnelID == 0 || request.NextMessageID == 0 || request.NextRouter == (ivnp.Hash{}) || !request.Endpoint && request.NextRouter == m.local
+	validTransitRequestRejected = request.LifetimeSeconds != shortBuildLifetime || request.ReceiveTunnelID == 0 || request.NextTunnelID == 0 || request.NextMessageID == 0 || request.NextRouter == (foundation.Hash{}) || !request.Endpoint && request.NextRouter == m.local
 	if !validTransitRequestRejected {
 		validTransitRequestRejected = request.ReceiveTunnelID == request.NextTunnelID
 	}
@@ -1065,7 +1065,7 @@ func sealBuildReply(record []byte, keys ShortBuildKeys, slot uint8, random io.Re
 	if includeBandwidth {
 		var value [10]byte
 		digits := strconv.AppendUint(value[:0], uint64(bandwidth), 10)
-		n, err := ivnp.MarshalMappingTo(reply[:], []ivnp.MappingEntry{{Key: []byte("b"), Value: digits}})
+		n, err := foundation.MarshalMappingTo(reply[:], []foundation.MappingEntry{{Key: []byte("b"), Value: digits}})
 		if err != nil {
 			return err
 		}
@@ -1144,7 +1144,7 @@ func (m *BuildManager) HandleReply(message i2np.Message) error {
 			return err
 		}
 	}
-	owner := ivnp.Hash{}
+	owner := foundation.Hash{}
 	if m.pool != nil {
 		owner = m.pool.Owner()
 	}
@@ -1350,28 +1350,28 @@ func marshalShortBuildOptions(options ShortBuildOptions) ([]byte, error) {
 	if options == (ShortBuildOptions{}) {
 		return nil, nil
 	}
-	entries := make([]ivnp.MappingEntry, 0, 3)
+	entries := make([]foundation.MappingEntry, 0, 3)
 	if options.Limit != 0 {
-		entries = append(entries, ivnp.MappingEntry{Key: []byte("l"), Value: []byte(strconv.FormatUint(uint64(options.Limit), 10))})
+		entries = append(entries, foundation.MappingEntry{Key: []byte("l"), Value: []byte(strconv.FormatUint(uint64(options.Limit), 10))})
 	}
 	if options.Minimum != 0 {
-		entries = append(entries, ivnp.MappingEntry{Key: []byte("m"), Value: []byte(strconv.FormatUint(uint64(options.Minimum), 10))})
+		entries = append(entries, foundation.MappingEntry{Key: []byte("m"), Value: []byte(strconv.FormatUint(uint64(options.Minimum), 10))})
 	}
 	if options.Requested != 0 {
-		entries = append(entries, ivnp.MappingEntry{Key: []byte("r"), Value: []byte(strconv.FormatUint(uint64(options.Requested), 10))})
+		entries = append(entries, foundation.MappingEntry{Key: []byte("r"), Value: []byte(strconv.FormatUint(uint64(options.Requested), 10))})
 	}
-	size, err := ivnp.MappingEncodedLen(entries)
+	size, err := foundation.MappingEncodedLen(entries)
 	if err != nil {
 		return nil, err
 	}
 	wire := make([]byte, size)
-	if _, err = ivnp.MarshalMappingTo(wire, entries); err != nil {
+	if _, err = foundation.MarshalMappingTo(wire, entries); err != nil {
 		return nil, err
 	}
 	return wire, nil
 }
 
-func parseShortBuildOptions(mapping ivnp.Mapping, gateway bool) (ShortBuildOptions, bool) {
+func parseShortBuildOptions(mapping foundation.Mapping, gateway bool) (ShortBuildOptions, bool) {
 	var options ShortBuildOptions
 	it := mapping.Iterator()
 	for {
@@ -1424,7 +1424,7 @@ func cloneInboundBuild(build InboundBuild) InboundBuild {
 
 func validateShortBuildHops(hops []ShortBuildHop) error {
 	for index, hop := range hops {
-		if hop.ReceiveTunnelID == 0 || hop.Router == (ivnp.Hash{}) || hop.StaticKey == ([32]byte{}) {
+		if hop.ReceiveTunnelID == 0 || hop.Router == (foundation.Hash{}) || hop.StaticKey == ([32]byte{}) {
 			return ErrBuildConfig
 		}
 		for previous := range index {
@@ -1499,7 +1499,7 @@ func clearBuildKey(key *ShortBuildKeys) {
 func buildPeerDiagnostics(hops []ShortBuildHop) []string {
 	peers := make([]string, len(hops))
 	for index := range hops {
-		peers[index] = ivnp.EncodeI2PBase64(hops[index].Router[:])
+		peers[index] = foundation.EncodeI2PBase64(hops[index].Router[:])
 	}
 	return peers
 }

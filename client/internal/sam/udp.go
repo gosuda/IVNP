@@ -1,6 +1,6 @@
 package sam
 
-import networking "gosuda.org/ivnp/networking"
+import "gosuda.org/ivnp/networking"
 
 import (
 	"bytes"

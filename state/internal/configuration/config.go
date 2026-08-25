@@ -1,5 +1,5 @@
 // Package config parses bounded i2pd-style INI configuration files.
-package config
+package configuration
 
 import (
 	"errors"

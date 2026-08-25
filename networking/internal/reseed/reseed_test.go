@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/networking/internal/network_database"
 	"net/http"
@@ -55,7 +55,7 @@ func TestReadRouterInfoUsesBoundedPoolBuffer(t *testing.T) {
 
 func TestClientRejectsInsecureEndpointBeforeNetwork(t *testing.T) {
 	client := Client{}
-	database := netdb.NewDatabase(ivnp.Hash{}, netdb.DefaultBucketCapacity)
+	database := networkdatabase.NewDatabase(foundation.Hash{}, networkdatabase.DefaultBucketCapacity)
 	if _, err := client.FetchInto(context.Background(), "http://example.invalid/reseed.zip?netid=2", database, 0); !errors.Is(err, ErrInsecureURL) {
 		t.Fatalf("FetchInto() error = %v, want ErrInsecureURL", err)
 	}
@@ -63,7 +63,7 @@ func TestClientRejectsInsecureEndpointBeforeNetwork(t *testing.T) {
 
 func TestClientRequiresExactNetworkQueryAndNoCredentials(t *testing.T) {
 	client := Client{}
-	database := netdb.NewDatabase(ivnp.Hash{}, netdb.DefaultBucketCapacity)
+	database := networkdatabase.NewDatabase(foundation.Hash{}, networkdatabase.DefaultBucketCapacity)
 	for _, endpoint := range []string{
 		"https://reseed.example/i2pseeds.su3",
 		"https://reseed.example/i2pseeds.su3?netid=3",
@@ -84,7 +84,7 @@ func TestClientRejectsPlainZIPWithoutTestFixtureOption(t *testing.T) {
 	}))
 	defer server.Close()
 
-	database := netdb.NewDatabase(ivnp.Hash{}, netdb.DefaultBucketCapacity)
+	database := networkdatabase.NewDatabase(foundation.Hash{}, networkdatabase.DefaultBucketCapacity)
 	client := Client{HTTPClient: server.Client()}
 	endpoint := server.URL + "/i2pseeds.su3?netid=2"
 	if _, err := client.FetchInto(context.Background(), endpoint, database, 1); !errors.Is(err, ErrUnsignedArchive) {
@@ -105,7 +105,7 @@ func TestClientSendsStandardReseedUserAgent(t *testing.T) {
 	}))
 	defer server.Close()
 	client := Client{HTTPClient: server.Client(), AllowHTTP: true}
-	database := netdb.NewDatabase(ivnp.Hash{}, netdb.DefaultBucketCapacity)
+	database := networkdatabase.NewDatabase(foundation.Hash{}, networkdatabase.DefaultBucketCapacity)
 	_, _ = client.FetchInto(context.Background(), server.URL+"/i2pseeds.su3?netid=2", database, 0)
 	if gotAgent != ReseedUserAgent || gotQuery != "netid=2" {
 		t.Fatalf("request User-Agent/query = %q/%q", gotAgent, gotQuery)
@@ -137,7 +137,7 @@ func TestClientRejectsUnsafeRedirects(t *testing.T) {
 			}))
 			defer server.Close()
 			client := Client{HTTPClient: server.Client()}
-			database := netdb.NewDatabase(ivnp.Hash{}, netdb.DefaultBucketCapacity)
+			database := networkdatabase.NewDatabase(foundation.Hash{}, networkdatabase.DefaultBucketCapacity)
 			_, err := client.FetchInto(context.Background(), server.URL+"/i2pseeds.su3?netid=2", database, 0)
 			if !errors.Is(err, ErrUnsafeRedirect) {
 				t.Fatalf("FetchInto() error = %v, want ErrUnsafeRedirect", err)
@@ -157,7 +157,7 @@ func TestLiveReseedIntegration(t *testing.T) {
 		"https://spiral.likogan.dev/i2pseeds.su3?netid=2",
 		"https://reseed.stormycloud.org/i2pseeds.su3?netid=2",
 	}
-	database := netdb.NewDatabase(ivnp.Hash{}, netdb.DefaultBucketCapacity)
+	database := networkdatabase.NewDatabase(foundation.Hash{}, networkdatabase.DefaultBucketCapacity)
 	client := Client{HTTPClient: &http.Client{Timeout: 30 * time.Second}}
 	now := time.Now()
 	successes := 0

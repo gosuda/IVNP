@@ -8,8 +8,8 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
 	"io"
 )
 
@@ -51,7 +51,7 @@ const (
 type VariableBuildRequest struct {
 	ReceiveTunnelID uint32
 	NextTunnelID    uint32
-	NextRouter      ivnp.Hash
+	NextRouter      foundation.Hash
 	LayerKey        [32]byte
 	IVKey           [32]byte
 	ReplyKey        [32]byte
@@ -80,9 +80,9 @@ type VariableBuildKeys struct {
 // VariableBuildHop describes one participant in a mixed 528-byte path. Exactly
 // the key corresponding to Kind is used.
 type VariableBuildHop struct {
-	Router          ivnp.Hash
+	Router          foundation.Hash
 	Kind            VariableBuildKind
-	ElGamalKey      cryptx.ElGamalPublicKey
+	ElGamalKey      cryptography.ElGamalPublicKey
 	StaticKey       [32]byte
 	ReceiveTunnelID uint32
 }
@@ -90,7 +90,7 @@ type VariableBuildHop struct {
 // MarshalElGamalBuildRequest encodes the exact 222-byte legacy request. The
 // historical local-router-hash field is required on the wire even though a
 // transit hop does not consume it.
-func MarshalElGamalBuildRequest(dst []byte, request VariableBuildRequest, local ivnp.Hash, random io.Reader) error {
+func MarshalElGamalBuildRequest(dst []byte, request VariableBuildRequest, local foundation.Hash, random io.Reader) error {
 	marshalElGamalBuildRequestRejected := len(dst) < LegacyBuildRequestPlainSize || random == nil || !validVariableRequest(request)
 	if !marshalElGamalBuildRequestRejected {
 		marshalElGamalBuildRequestRejected = request.Gateway && request.Endpoint
@@ -190,7 +190,7 @@ func ParseLongECIESBuildRequest(plaintext []byte) (VariableBuildRequest, error) 
 	if parseLongECIESBuildRequestRejected {
 		return VariableBuildRequest{}, ErrLegacyBuildRecord
 	}
-	mapping, used, err := ivnp.ParseMapping(plaintext[168:])
+	mapping, used, err := foundation.ParseMapping(plaintext[168:])
 	if err != nil || used > 296 || mapping.EncodedLen() > 296 {
 		return VariableBuildRequest{}, ErrLegacyBuildRecord
 	}
@@ -198,12 +198,12 @@ func ParseLongECIESBuildRequest(plaintext []byte) (VariableBuildRequest, error) 
 }
 
 // EncryptElGamalBuildRequest creates a complete 528-byte legacy record.
-func EncryptElGamalBuildRequest(dst []byte, hop ivnp.Hash, public cryptx.ElGamalPublicKey, plaintext []byte) error {
+func EncryptElGamalBuildRequest(dst []byte, hop foundation.Hash, public cryptography.ElGamalPublicKey, plaintext []byte) error {
 	if len(dst) < VariableBuildRecordSize || len(plaintext) != LegacyBuildRequestPlainSize {
 		return ErrLegacyBuildRecord
 	}
-	var encrypted [cryptx.ElGamalCiphertextSize]byte
-	if _, err := cryptx.EncryptElGamal(encrypted[:], public, plaintext); err != nil {
+	var encrypted [cryptography.ElGamalCiphertextSize]byte
+	if _, err := cryptography.EncryptElGamal(encrypted[:], public, plaintext); err != nil {
 		return err
 	}
 	copy(dst[:legacyBuildPeerSize], hop[:legacyBuildPeerSize])
@@ -214,14 +214,14 @@ func EncryptElGamalBuildRequest(dst []byte, hop ivnp.Hash, public cryptx.ElGamal
 }
 
 // DecryptElGamalBuildRequest authenticates and decrypts one legacy record.
-func DecryptElGamalBuildRequest(dst, record []byte, local ivnp.Hash, private cryptx.ElGamalPrivateKey) ([]byte, error) {
+func DecryptElGamalBuildRequest(dst, record []byte, local foundation.Hash, private cryptography.ElGamalPrivateKey) ([]byte, error) {
 	if len(dst) < LegacyBuildRequestPlainSize || len(record) != VariableBuildRecordSize || subtle.ConstantTimeCompare(record[:legacyBuildPeerSize], local[:legacyBuildPeerSize]) != 1 {
 		return nil, ErrLegacyBuildRecord
 	}
-	var encrypted [cryptx.ElGamalCiphertextSize]byte
+	var encrypted [cryptography.ElGamalCiphertextSize]byte
 	copy(encrypted[1:257], record[legacyBuildEncryptedOffset:272])
 	copy(encrypted[258:], record[272:VariableBuildRecordSize])
-	plaintext, err := cryptx.DecryptElGamal(dst[:LegacyBuildRequestPlainSize], private, encrypted[:])
+	plaintext, err := cryptography.DecryptElGamal(dst[:LegacyBuildRequestPlainSize], private, encrypted[:])
 	clear(encrypted[:])
 	if err != nil {
 		clear(dst[:LegacyBuildRequestPlainSize])
@@ -232,11 +232,11 @@ func DecryptElGamalBuildRequest(dst, record []byte, local ivnp.Hash, private cry
 
 // EncryptLongECIESBuildRequest creates one long Noise-N record using a fresh
 // X25519 ephemeral key and returns the key/AD for its authenticated response.
-func EncryptLongECIESBuildRequest(dst []byte, hop ivnp.Hash, static []byte, plaintext []byte) (VariableBuildKeys, error) {
+func EncryptLongECIESBuildRequest(dst []byte, hop foundation.Hash, static []byte, plaintext []byte) (VariableBuildKeys, error) {
 	return encryptLongECIESBuildRequest(dst, hop, static, plaintext, rand.Reader)
 }
 
-func encryptLongECIESBuildRequest(dst []byte, hop ivnp.Hash, static, plaintext []byte, random io.Reader) (VariableBuildKeys, error) {
+func encryptLongECIESBuildRequest(dst []byte, hop foundation.Hash, static, plaintext []byte, random io.Reader) (VariableBuildKeys, error) {
 	var keys VariableBuildKeys
 	if len(dst) < VariableBuildRecordSize || len(static) != 32 || len(plaintext) != LongBuildRequestPlainSize || random == nil {
 		return keys, ErrLegacyBuildRecord
@@ -263,7 +263,7 @@ func encryptLongECIESBuildRequest(dst []byte, hop ivnp.Hash, static, plaintext [
 		return keys, err
 	}
 	ciphertext, err := state.EncryptAndHash(dst[longBuildCipherOffset:VariableBuildRecordSize], plaintext)
-	if err != nil || len(ciphertext) != LongBuildRequestPlainSize+cryptx.ChaChaTagSize {
+	if err != nil || len(ciphertext) != LongBuildRequestPlainSize+cryptography.ChaChaTagSize {
 		return keys, ErrLegacyBuildRecord
 	}
 	keys.Kind = VariableBuildLongECIES
@@ -277,7 +277,7 @@ func encryptLongECIESBuildRequest(dst []byte, hop ivnp.Hash, static, plaintext [
 }
 
 // DecryptLongECIESBuildRequest validates and decrypts a long Noise-N request.
-func DecryptLongECIESBuildRequest(dst, record []byte, local ivnp.Hash, staticPrivate []byte) ([]byte, VariableBuildKeys, error) {
+func DecryptLongECIESBuildRequest(dst, record []byte, local foundation.Hash, staticPrivate []byte) ([]byte, VariableBuildKeys, error) {
 	var keys VariableBuildKeys
 	if len(dst) < LongBuildRequestPlainSize || len(record) != VariableBuildRecordSize || len(staticPrivate) != 32 || subtle.ConstantTimeCompare(record[:legacyBuildPeerSize], local[:legacyBuildPeerSize]) != 1 {
 		return nil, keys, ErrLegacyBuildRecord
@@ -335,7 +335,7 @@ func PreprocessVariableBuildRecords(records []byte, keys []VariableBuildKeys, po
 // ProcessVariableBuildRecords consumes the one record addressed to local,
 // installs its protected reply, and encrypts every other record with this hop's
 // CBC reply key. The caller selects the local identity kind.
-func ProcessVariableBuildRecords(records, plaintextDst []byte, local ivnp.Hash, kind VariableBuildKind, staticPrivate []byte, elgamalPrivate cryptx.ElGamalPrivateKey, accept bool, random io.Reader) (VariableBuildRequest, VariableBuildKeys, uint8, error) {
+func ProcessVariableBuildRecords(records, plaintextDst []byte, local foundation.Hash, kind VariableBuildKind, staticPrivate []byte, elgamalPrivate cryptography.ElGamalPrivateKey, accept bool, random io.Reader) (VariableBuildRequest, VariableBuildKeys, uint8, error) {
 	var keys VariableBuildKeys
 	if len(records)%VariableBuildRecordSize != 0 || len(plaintextDst) < LongBuildRequestPlainSize || random == nil {
 		return VariableBuildRequest{}, keys, 0, ErrLegacyBuildRecord
@@ -427,12 +427,12 @@ func OpenVariableBuildReplies(replies []byte, keys []VariableBuildKeys, position
 			code = record[VariableBuildRecordSize-1]
 		case VariableBuildLongECIES:
 			plaintext := dst[hop*LongBuildResponsePlainSize : (hop+1)*LongBuildResponsePlainSize]
-			cipher, err := cryptx.NewChaCha20Poly1305(keys[hop].ResponseKey[:])
+			cipher, err := cryptography.NewChaCha20Poly1305(keys[hop].ResponseKey[:])
 			if err != nil {
 				clear(dst)
 				return err
 			}
-			var nonce [cryptx.ChaChaNonceSize]byte
+			var nonce [cryptography.ChaChaNonceSize]byte
 			if _, err = cipher.OpenTo(plaintext, nonce[:], record[:], keys[hop].ResponseAD[:]); err != nil {
 				clear(dst)
 				return ErrLegacyBuildRecord
@@ -478,11 +478,11 @@ func sealVariableBuildReply(record []byte, keys VariableBuildKeys, random io.Rea
 			return err
 		}
 		plaintext[LongBuildResponsePlainSize-1] = code
-		cipher, err := cryptx.NewChaCha20Poly1305(keys.ResponseKey[:])
+		cipher, err := cryptography.NewChaCha20Poly1305(keys.ResponseKey[:])
 		if err != nil {
 			return err
 		}
-		var nonce [cryptx.ChaChaNonceSize]byte
+		var nonce [cryptography.ChaChaNonceSize]byte
 		_, err = cipher.SealTo(record, nonce[:], plaintext[:], keys.ResponseAD[:])
 		clear(plaintext[:])
 		return err
@@ -534,7 +534,7 @@ func setVariableFlags(request *VariableBuildRequest, flags byte) bool {
 	return true
 }
 func validVariableRequest(request VariableBuildRequest) bool {
-	return request.ReceiveTunnelID != 0 && request.NextTunnelID != 0 && request.NextMessageID != 0 && request.NextRouter != (ivnp.Hash{}) && request.ReceiveTunnelID != request.NextTunnelID
+	return request.ReceiveTunnelID != 0 && request.NextTunnelID != 0 && request.NextMessageID != 0 && request.NextRouter != (foundation.Hash{}) && request.ReceiveTunnelID != request.NextTunnelID
 }
 func allZero(value []byte) bool {
 	var accumulator byte

@@ -3,7 +3,7 @@ package tunnel
 import (
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
 )
 
@@ -19,7 +19,7 @@ const (
 
 type Block struct {
 	Delivery       DeliveryType
-	Gateway        ivnp.Hash
+	Gateway        foundation.Hash
 	TunnelID       uint32
 	MessageID      uint32
 	Fragment       uint8

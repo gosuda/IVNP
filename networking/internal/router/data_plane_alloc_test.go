@@ -1,8 +1,8 @@
 package router
 
 import (
-	ivnp "gosuda.org/ivnp/foundation"
-	streamtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/streaming/tunnel"
 	"testing"
 )
 
@@ -12,8 +12,8 @@ func TestStreamingDestinationFramingHasZeroAllocations(t *testing.T) {
 		nextID++
 		return nextID, nil
 	}}
-	delivery := streamtunnel.Delivery{
-		From: ivnp.Hash{1}, To: ivnp.Hash{2}, Protocol: streamtunnel.ProtocolStreaming,
+	delivery := streamingtunnel.Delivery{
+		From: foundation.Hash{1}, To: foundation.Hash{2}, Protocol: streamingtunnel.ProtocolStreaming,
 		FromPort: 1234, ToPort: 4321, Payload: []byte("prewarmed streaming frame"),
 	}
 	set := make([]byte, 1024)

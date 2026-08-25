@@ -3,7 +3,7 @@ package router
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/network_database"
 	"gosuda.org/ivnp/networking/internal/tunnel"
@@ -80,8 +80,8 @@ type AddressPublisherCloser interface {
 
 // LocalInfo owns immutable local RouterInfo snapshots and their publication.
 type LocalInfo interface {
-	Hash() ivnp.Hash
-	Snapshot() netdb.RouterInfo
+	Hash() foundation.Hash
+	Snapshot() networkdatabase.RouterInfo
 	ReplaceAddresses([]PublishedAddress) error
 	SetReachability(Reachability)
 	Publish(context.Context) error
@@ -112,10 +112,10 @@ type TransportBindings struct {
 	SSU2           *net.UDPConn
 	LocalInfo      LocalInfo
 	HandleI2NP     func(i2np.Message, uint64, bool) error
-	HandleI2NPFrom func(ivnp.Hash, i2np.Message, uint64, bool) error
+	HandleI2NPFrom func(foundation.Hash, i2np.Message, uint64, bool) error
 	// HandleI2NPContext is the bounded SSU2 dispatch contract. Implementations
 	// must return when ctx is canceled and must not retain message.Payload.
-	HandleI2NPContext func(context.Context, ivnp.Hash, i2np.Message, uint64, bool) error
+	HandleI2NPContext func(context.Context, foundation.Hash, i2np.Message, uint64, bool) error
 	Clock             Clock
 }
 
@@ -125,7 +125,7 @@ type TransportManager interface {
 	Start(context.Context, TransportBindings) error
 	Close() error
 	Wait() error
-	Send(context.Context, ivnp.Hash, i2np.Message) error
+	Send(context.Context, foundation.Hash, i2np.Message) error
 	Status() TransportStatus
 }
 
@@ -139,7 +139,7 @@ type StreamBackend interface {
 // ReseedRunner is reserved for router-owned bootstrap work. It intentionally
 // mirrors reseed.Client without adding a second admission path to netdb.
 type ReseedRunner interface {
-	FetchAny(context.Context, []string, *netdb.Database, uint64) (int, error)
+	FetchAny(context.Context, []string, *networkdatabase.Database, uint64) (int, error)
 }
 
 // Config defines optional native transport bindings and bootstrap reseed
@@ -168,7 +168,7 @@ type NetDBRequestHandler interface {
 }
 
 type Dependencies struct {
-	Database  *netdb.Database
+	Database  *networkdatabase.Database
 	Service   *Service
 	LocalInfo LocalInfo
 	Transport TransportManager
@@ -190,21 +190,21 @@ type Dependencies struct {
 	// and advances every destination-local request domain.
 	RequestHandler NetDBRequestHandler
 	// LookupResponder owns bounded DatabaseLookup reply work.
-	LookupResponder *netdb.LookupResponder
+	LookupResponder *networkdatabase.LookupResponder
 	// DeliveryStatusMux correlates confirmed publication and health tokens.
 	DeliveryStatusMux *DeliveryStatusMux
 	// TunnelTest handles live tunnel health probes.
 	TunnelTest DeliveryStatusHandler
 	// RouterDelivery and TunnelDelivery forward authenticated non-local Garlic
 	// cloves to their selected production route.
-	RouterDelivery func(ivnp.Hash, i2np.Message) error
-	TunnelDelivery func(ivnp.Hash, uint32, i2np.Message) error
+	RouterDelivery func(foundation.Hash, i2np.Message) error
+	TunnelDelivery func(foundation.Hash, uint32, i2np.Message) error
 	// GarlicReceiver authenticates legacy ElGamal/AES Garlic, one-time ECIES
 	// build and DatabaseLookup replies, and destination ratchet Garlic cloves.
 	GarlicReceiver *GarlicReceiver
 	// DatabaseStoreReply delivers successful store acknowledgements over the
 	// caller's selected direct or tunnel reply path.
-	DatabaseStoreReply func(ivnp.Hash, uint32, i2np.DeliveryStatusMessage) error
+	DatabaseStoreReply func(foundation.Hash, uint32, i2np.DeliveryStatusMessage) error
 }
 
 // Status is a consistent lifecycle snapshot. Error is the first recorded
@@ -345,7 +345,7 @@ func New(cfg Config, deps Dependencies) (*Router, error) {
 		}
 		deps.Service.SetGarlicSink(deps.GarlicReceiver.HandleGarlicFrom)
 		if deps.Destinations != nil {
-			deps.Service.SetDestinationSink(func(from, to ivnp.Hash, message i2np.Message) error {
+			deps.Service.SetDestinationSink(func(from, to foundation.Hash, message i2np.Message) error {
 				return deps.GarlicReceiver.HandleDestinationData(from, to, message, deps.Destinations)
 			})
 		}

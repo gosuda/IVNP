@@ -5,8 +5,8 @@ import (
 	"crypto/ecdh"
 	"crypto/sha256"
 	"encoding/binary"
-	cryptx "gosuda.org/ivnp/cryptography"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
 	"testing"
 )
 
@@ -91,7 +91,7 @@ func TestVariableBuildRecordTampering(t *testing.T) {
 		t.Fatalf("long tamper error = %v", err)
 	}
 
-	public, secret, err := cryptx.GenerateElGamalKeyPair()
+	public, secret, err := cryptography.GenerateElGamalKeyPair()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,11 +116,11 @@ func TestVariableBuildOneHopLegacyAndLong(t *testing.T) {
 			records := make([]byte, VariableBuildRecordSize)
 			request := variableBuildTestRequest(next, 5, 6, 7)
 			var static []byte
-			var legacy cryptx.ElGamalPrivateKey
+			var legacy cryptography.ElGamalPrivateKey
 			var keys VariableBuildKeys
 			var err error
 			if kind == VariableBuildElGamal {
-				public, private, generateErr := cryptx.GenerateElGamalKeyPair()
+				public, private, generateErr := cryptography.GenerateElGamalKeyPair()
 				if generateErr != nil {
 					t.Fatal(generateErr)
 				}
@@ -163,9 +163,9 @@ func TestVariableBuildMixedThreeHopFourRecords(t *testing.T) {
 	positions := []uint8{2, 0, 3}
 	records := bytes.Repeat([]byte{0x9a}, legacyBuildMinRecords*VariableBuildRecordSize)
 	keys := make([]VariableBuildKeys, hops)
-	hashes := make([]ivnp.Hash, hops)
+	hashes := make([]foundation.Hash, hops)
 	statics := make([][]byte, hops)
-	legacy := make([]cryptx.ElGamalPrivateKey, hops)
+	legacy := make([]cryptography.ElGamalPrivateKey, hops)
 	kinds := []VariableBuildKind{VariableBuildElGamal, VariableBuildLongECIES, VariableBuildElGamal}
 	requests := make([]VariableBuildRequest, hops)
 	for hop := range hops {
@@ -174,7 +174,7 @@ func TestVariableBuildMixedThreeHopFourRecords(t *testing.T) {
 		requests[hop].Endpoint = hop == hops-1
 		record := records[int(positions[hop])*VariableBuildRecordSize : (int(positions[hop])+1)*VariableBuildRecordSize]
 		if kinds[hop] == VariableBuildElGamal {
-			public, private, err := cryptx.GenerateElGamalKeyPair()
+			public, private, err := cryptography.GenerateElGamalKeyPair()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -217,7 +217,7 @@ func TestVariableBuildMixedThreeHopFourRecords(t *testing.T) {
 	}
 }
 
-func variableBuildTestRequest(next ivnp.Hash, receive, tunnel, message uint32) VariableBuildRequest {
+func variableBuildTestRequest(next foundation.Hash, receive, tunnel, message uint32) VariableBuildRequest {
 	request := VariableBuildRequest{ReceiveTunnelID: receive, NextTunnelID: tunnel, NextRouter: next, RequestHours: 1, RequestMinutes: 1, LifetimeSeconds: legacyBuildLifetimeSeconds, NextMessageID: message}
 	for index := range request.LayerKey {
 		request.LayerKey[index], request.IVKey[index], request.ReplyKey[index] = byte(index+1), byte(index+33), byte(index+65)

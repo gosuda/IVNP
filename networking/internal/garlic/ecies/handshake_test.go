@@ -1,4 +1,4 @@
-package ecies
+package garlicecies
 
 import (
 	"bytes"
@@ -7,7 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"io"
 	"testing"
 )
@@ -17,7 +17,7 @@ func TestAttachPayloadKDFMatchesJavaVector(t *testing.T) {
 	for i := range split {
 		split[i] = byte(i)
 	}
-	cipher, err := cryptx.NewChaCha20Poly1305(split)
+	cipher, err := cryptography.NewChaCha20Poly1305(split)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestHandshakeUsesJavaRawStaticPremessage(t *testing.T) {
 }
 
 func TestBoundECIESHandshakeAndHybridReplies(t *testing.T) {
-	for _, cryptoType := range []uint16{4, cryptx.MLKEM768X25519, cryptx.MLKEM1024X25519} {
+	for _, cryptoType := range []uint16{4, cryptography.MLKEM768X25519, cryptography.MLKEM1024X25519} {
 		t.Run(handshakeName(cryptoType), func(t *testing.T) {
 			curve := ecdh.X25519()
 			aliceStatic, err := curve.GenerateKey(rand.Reader)
@@ -151,7 +151,7 @@ func TestECIESHandshakeRejectsRemovedType5AndReleases(t *testing.T) {
 	if responder, err := NewResponder(bob.Bytes(), 5); err == nil || responder != nil {
 		t.Fatalf("NewResponder(type 5) = %#v, %v", responder, err)
 	}
-	for _, cryptoType := range []uint16{4, cryptx.MLKEM768X25519, cryptx.MLKEM1024X25519} {
+	for _, cryptoType := range []uint16{4, cryptography.MLKEM768X25519, cryptography.MLKEM1024X25519} {
 		if initiator, err := newInitiator(alice.Bytes(), bob.PublicKey().Bytes(), cryptoType, true, bytes.NewReader(nil)); !errors.Is(err, io.EOF) || initiator != nil {
 			t.Fatalf("newInitiator(type %d) injected randomness failure = %#v, %v", cryptoType, initiator, err)
 		}
@@ -185,6 +185,6 @@ func handshakeName(cryptoType uint16) string {
 	if cryptoType == 4 {
 		return "x25519"
 	}
-	params, _ := cryptx.Parameters(cryptoType)
+	params, _ := cryptography.Parameters(cryptoType)
 	return params.NoiseIdentifier
 }

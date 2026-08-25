@@ -1,15 +1,15 @@
-package daemon
+package noderuntime
 
-import state "gosuda.org/ivnp/state"
+import "gosuda.org/ivnp/state"
 
-import client "gosuda.org/ivnp/client"
+import "gosuda.org/ivnp/client"
 
-import networking "gosuda.org/ivnp/networking"
+import "gosuda.org/ivnp/networking"
 
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 
 	"net"
 	"time"
@@ -79,14 +79,14 @@ func (c clientDestinationController) CreateDestination(ctx context.Context, spec
 	if err := policy.Validate(); err != nil {
 		return nil, err
 	}
-	var local *ivnp.LocalDestination
+	var local *foundation.LocalDestination
 	var err error
 	if spec.Local != nil {
 		local, err = spec.Local.Clone()
 	} else if spec.Policy.Encrypted {
-		local, err = ivnp.GenerateEncryptedLocalDestination()
+		local, err = foundation.GenerateEncryptedLocalDestination()
 	} else {
-		local, err = ivnp.GenerateLocalDestination()
+		local, err = foundation.GenerateLocalDestination()
 	}
 	if err != nil {
 		return nil, err
@@ -142,9 +142,9 @@ func (e *clientDestinationEndpoint) session() (*networking.RouterDestinationSess
 	return e.runtime.session, nil
 }
 
-func (e *clientDestinationEndpoint) Hash() ivnp.Hash {
+func (e *clientDestinationEndpoint) Hash() foundation.Hash {
 	if e == nil || e.runtime == nil || e.runtime.local == nil {
-		return ivnp.Hash{}
+		return foundation.Hash{}
 	}
 	return e.runtime.local.Hash()
 }

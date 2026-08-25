@@ -1,18 +1,18 @@
-package netdb
+package networkdatabase
 
 import (
 	"bytes"
 	"crypto/ecdh"
 	"encoding/binary"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"time"
 )
 
 // DecryptEncryptedLeaseSet verifies, decrypts, and validates an ELS2 for the
 // specified unblinded destination. It never accepts a plaintext downgrade.
-func DecryptEncryptedLeaseSet(set EncryptedLeaseSet, identity ivnp.Identity, secret []byte, authorization ELSClientAuthorization, nowMillis uint64) (LeaseSet2, error) {
-	if set.SigningType != ivnp.SigningRedDSASHA512Ed25519 || set.Flags != 0 || set.Expires == 0 {
+func DecryptEncryptedLeaseSet(set EncryptedLeaseSet, identity foundation.Identity, secret []byte, authorization ELSClientAuthorization, nowMillis uint64) (LeaseSet2, error) {
+	if set.SigningType != foundation.SigningRedDSASHA512Ed25519 || set.Flags != 0 || set.Expires == 0 {
 		return LeaseSet2{}, ErrEncryptedLeaseSet
 	}
 	valid, err := set.Verify()
@@ -28,11 +28,11 @@ func DecryptEncryptedLeaseSet(set EncryptedLeaseSet, identity ivnp.Identity, sec
 	if len(rest) != 0 {
 		return LeaseSet2{}, ErrEncryptedLeaseSet
 	}
-	blinded, err := ivnp.BlindEncryptedLeaseSetPublic(kind, public, time.Unix(int64(set.Published), 0), secret)
+	blinded, err := foundation.BlindEncryptedLeaseSetPublic(kind, public, time.Unix(int64(set.Published), 0), secret)
 	if err != nil || !bytes.Equal(blinded[:], set.BlindedPublicKey) {
 		return LeaseSet2{}, ErrEncryptedLeaseSet
 	}
-	subcredential, err := ivnp.EncryptedLeaseSetSubcredential(kind, public, blinded[:])
+	subcredential, err := foundation.EncryptedLeaseSetSubcredential(kind, public, blinded[:])
 	if err != nil {
 		return LeaseSet2{}, err
 	}

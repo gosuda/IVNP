@@ -1,4 +1,4 @@
-package fsstore
+package filesystemstore
 
 import (
 	"bytes"

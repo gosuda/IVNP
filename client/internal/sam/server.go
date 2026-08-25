@@ -5,8 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
-	clientapi "gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/observability"
 	"io"
@@ -31,8 +31,8 @@ type ServerConfig struct {
 	UDPAddress             string
 	Listen                 ListenFunc
 	ListenPacket           ListenPacketFunc
-	Controller             clientapi.DestinationController
-	Resolver               clientapi.DestinationResolver
+	Controller             destination.DestinationController
+	Resolver               destination.DestinationResolver
 	PanicReporter          ingress.Reporter
 	Metrics                *observability.Registry
 	MaxConnections         int
@@ -55,7 +55,7 @@ type Server struct {
 	config       ServerConfig
 	mu           sync.RWMutex
 	sessions     map[string]*samSession
-	destinations map[ivnp.Hash]*samSession
+	destinations map[foundation.Hash]*samSession
 	listener     net.Listener
 	connections  map[net.Conn]struct{}
 	udp          net.PacketConn
@@ -130,7 +130,7 @@ func NewServer(config ServerConfig) (*Server, error) {
 	if config.ReadinessTimeout <= 0 {
 		config.ReadinessTimeout = 2 * time.Minute
 	}
-	return &Server{config: config, sessions: make(map[string]*samSession), destinations: make(map[ivnp.Hash]*samSession), connections: make(map[net.Conn]struct{}), done: make(chan struct{}), sem: make(chan struct{}, config.MaxConnections), queueBytes: newByteBudget(config.MaxServerQueueBytes)}, nil
+	return &Server{config: config, sessions: make(map[string]*samSession), destinations: make(map[foundation.Hash]*samSession), connections: make(map[net.Conn]struct{}), done: make(chan struct{}), sem: make(chan struct{}, config.MaxConnections), queueBytes: newByteBudget(config.MaxServerQueueBytes)}, nil
 }
 
 func (s *Server) Start(parent context.Context) error {

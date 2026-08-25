@@ -3,7 +3,7 @@ package i2np
 import (
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
 	"testing"
 )
@@ -77,7 +77,7 @@ func TestDatabaseLookupMaximumAndConditionalTagBounds(t *testing.T) {
 	payload[64] = lookupDelivery | lookupEncrypted
 	binary.BigEndian.PutUint32(payload[65:69], 1)
 	binary.BigEndian.PutUint16(payload[69:71], MaxDatabaseLookupExcluded)
-	off := 71 + MaxDatabaseLookupExcluded*ivnp.HashLength
+	off := 71 + MaxDatabaseLookupExcluded*foundation.HashLength
 	off += 32
 	payload[off] = MaxDatabaseReplyTags
 	lookup, err := ParseDatabaseLookup(payload)
@@ -117,7 +117,7 @@ func TestDatabaseLookupReplyLayouts(t *testing.T) {
 
 func testDatabaseLookupReplyLayout(t *testing.T, test databaseLookupLayoutCase) {
 	t.Helper()
-	size := 65 + 2 + test.exclusions*ivnp.HashLength
+	size := 65 + 2 + test.exclusions*foundation.HashLength
 	if test.flags&lookupDelivery != 0 {
 		size += 4
 	}
@@ -134,9 +134,9 @@ func testDatabaseLookupReplyLayout(t *testing.T, test databaseLookupLayoutCase) 
 	binary.BigEndian.PutUint16(payload[off:off+2], uint16(test.exclusions))
 	off += 2
 	for i := range test.exclusions {
-		payload[off+i*ivnp.HashLength] = byte(i + 1)
+		payload[off+i*foundation.HashLength] = byte(i + 1)
 	}
-	off += test.exclusions * ivnp.HashLength
+	off += test.exclusions * foundation.HashLength
 	if test.tagLen != 0 {
 		payload[off] = 0xa5
 		off += 32

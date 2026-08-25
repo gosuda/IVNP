@@ -3,7 +3,7 @@ package datagram
 
 import (
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
 	"gosuda.org/ivnp/networking/internal/i2np"
 )
@@ -36,7 +36,7 @@ var (
 )
 
 type V1 struct {
-	From      ivnp.Identity
+	From      foundation.Identity
 	Signature []byte
 	Payload   []byte
 }
@@ -89,13 +89,13 @@ func (d V1) EncodedLen() int {
 
 // MarshalV1To writes a protocol-17 Datagram1. For DSA-SHA1 the signer gets
 // SHA-256(payload); every other signing type receives payload directly.
-func MarshalV1To(dst []byte, from ivnp.Identity, payload []byte, signer Signer) (int, error) {
+func MarshalV1To(dst []byte, from foundation.Identity, payload []byte, signer Signer) (int, error) {
 	if signer == nil || len(payload) > MaxSize {
 		return 0, ErrDatagram
 	}
 	signatureLen, ok := from.SigningKeyType().SignatureLen()
 	if !ok {
-		return 0, ivnp.ErrUnknownKeyType
+		return 0, foundation.ErrUnknownKeyType
 	}
 	total := from.EncodedLen() + signatureLen + len(payload)
 	if total > MaxSize {
@@ -105,9 +105,9 @@ func MarshalV1To(dst []byte, from ivnp.Identity, payload []byte, signer Signer) 
 		return 0, wire.ErrShortBuffer
 	}
 	signingInput := payload
-	var digest ivnp.Hash
-	if from.SigningKeyType() == ivnp.SigningDSASHA1 {
-		digest = ivnp.Sum(payload)
+	var digest foundation.Hash
+	if from.SigningKeyType() == foundation.SigningDSASHA1 {
+		digest = foundation.Sum(payload)
 		signingInput = digest[:]
 	}
 	signature, err := signer(signingInput)
@@ -143,13 +143,13 @@ func ParseV1(src []byte) (V1, error) {
 	if len(src) > MaxWireSize {
 		return V1{}, ErrDatagram
 	}
-	identity, n, err := ivnp.ParseIdentity(src)
+	identity, n, err := foundation.ParseIdentity(src)
 	if err != nil {
 		return V1{}, err
 	}
 	signatureLen, ok := identity.SigningKeyType().SignatureLen()
 	if !ok {
-		return V1{}, ivnp.ErrUnknownKeyType
+		return V1{}, foundation.ErrUnknownKeyType
 	}
 	if len(src)-n < signatureLen {
 		return V1{}, wire.ErrShortBuffer
@@ -158,8 +158,8 @@ func ParseV1(src []byte) (V1, error) {
 }
 
 func (d V1) Verify() (bool, error) {
-	if d.From.SigningKeyType() == ivnp.SigningDSASHA1 {
-		hash := ivnp.Sum(d.Payload)
+	if d.From.SigningKeyType() == foundation.SigningDSASHA1 {
+		hash := foundation.Sum(d.Payload)
 		return d.From.Verify(hash[:], d.Signature)
 	}
 	return d.From.Verify(d.Payload, d.Signature)

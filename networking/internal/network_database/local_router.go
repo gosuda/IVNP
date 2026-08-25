@@ -1,11 +1,11 @@
-package netdb
+package networkdatabase
 
 import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"sync"
 )
 
@@ -17,7 +17,7 @@ type LocalRouterAddress struct {
 	Cost           uint8
 	Expiration     uint64
 	TransportStyle []byte
-	Options        []ivnp.MappingEntry
+	Options        []foundation.MappingEntry
 }
 
 // RouterInfoContacts is the mutable contact data of a locally-owned
@@ -25,15 +25,15 @@ type LocalRouterAddress struct {
 // replaceable after construction.
 type RouterInfoContacts struct {
 	Addresses []LocalRouterAddress
-	Peers     []ivnp.Hash
-	Options   []ivnp.MappingEntry
+	Peers     []foundation.Hash
+	Options   []foundation.MappingEntry
 }
 
 // LocalRouterInfoConfig creates a local RouterInfo owner. Local supplies a
 // locally-owned RouterIdentity or legacy Destination and its Ed25519 private
 // signing key. Contacts may be replaced atomically before the next publication.
 type LocalRouterInfoConfig struct {
-	Local    ivnp.LocalIdentityOwner
+	Local    foundation.LocalIdentityOwner
 	Contacts RouterInfoContacts
 }
 
@@ -45,7 +45,7 @@ type LocalRouterInfo struct {
 	mu        sync.RWMutex
 	identity  []byte
 	private   ed25519.PrivateKey
-	hash      ivnp.Hash
+	hash      foundation.Hash
 	contacts  RouterInfoContacts
 	raw       []byte
 	published uint64
@@ -71,7 +71,7 @@ func NewLocalRouterInfo(config LocalRouterInfoConfig) (*LocalRouterInfo, error) 
 	privateProof := ed25519.Sign(signingPrivate, identity.Bytes())
 	privateMatchesPublic := ed25519.Verify(first, identity.Bytes(), privateProof)
 	clear(privateProof)
-	newLocalRouterInfoRejected := identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519 ||
+	newLocalRouterInfoRejected := identity.SigningKeyType() != foundation.SigningEdDSASHA512Ed25519 ||
 		len(rest) != 0 ||
 		identity.Hash() != config.Local.IdentityHash() ||
 		!bytes.Equal(first, signingPublic) ||
@@ -95,7 +95,7 @@ func NewLocalRouterInfo(config LocalRouterInfoConfig) (*LocalRouterInfo, error) 
 }
 
 // Hash returns the immutable RouterIdentity hash.
-func (r *LocalRouterInfo) Hash() ivnp.Hash { return r.hash }
+func (r *LocalRouterInfo) Hash() foundation.Hash { return r.hash }
 
 // Sign returns an Ed25519 signature made by this local RouterInfo's immutable
 // router signing key. It is intended for authenticated router transport
@@ -176,19 +176,19 @@ func cloneRouterInfoContacts(contacts RouterInfoContacts) (RouterInfoContacts, e
 	if len(contacts.Addresses) > MaxRouterAddresses || len(contacts.Peers) > MaxRouterPeers {
 		return RouterInfoContacts{}, ErrTooManyItems
 	}
-	if _, err := ivnp.MappingEncodedLen(contacts.Options); err != nil {
+	if _, err := foundation.MappingEncodedLen(contacts.Options); err != nil {
 		return RouterInfoContacts{}, err
 	}
 	owned := RouterInfoContacts{
 		Addresses: make([]LocalRouterAddress, len(contacts.Addresses)),
-		Peers:     append([]ivnp.Hash(nil), contacts.Peers...),
+		Peers:     append([]foundation.Hash(nil), contacts.Peers...),
 		Options:   cloneMappingEntries(contacts.Options),
 	}
 	for index, address := range contacts.Addresses {
 		if len(address.TransportStyle) == 0 || len(address.TransportStyle) > 255 {
 			return RouterInfoContacts{}, ErrMalformed
 		}
-		if _, err := ivnp.MappingEncodedLen(address.Options); err != nil {
+		if _, err := foundation.MappingEncodedLen(address.Options); err != nil {
 			return RouterInfoContacts{}, err
 		}
 		owned.Addresses[index] = LocalRouterAddress{
@@ -201,10 +201,10 @@ func cloneRouterInfoContacts(contacts RouterInfoContacts) (RouterInfoContacts, e
 	return owned, nil
 }
 
-func cloneMappingEntries(entries []ivnp.MappingEntry) []ivnp.MappingEntry {
-	owned := make([]ivnp.MappingEntry, len(entries))
+func cloneMappingEntries(entries []foundation.MappingEntry) []foundation.MappingEntry {
+	owned := make([]foundation.MappingEntry, len(entries))
 	for index, entry := range entries {
-		owned[index] = ivnp.MappingEntry{
+		owned[index] = foundation.MappingEntry{
 			Key:   append([]byte(nil), entry.Key...),
 			Value: append([]byte(nil), entry.Value...),
 		}
@@ -213,23 +213,23 @@ func cloneMappingEntries(entries []ivnp.MappingEntry) []ivnp.MappingEntry {
 }
 
 func marshalLocalRouterInfo(identity []byte, private ed25519.PrivateKey, published uint64, contacts RouterInfoContacts) ([]byte, error) {
-	parsedIdentity, consumed, err := ivnp.ParseIdentity(identity)
+	parsedIdentity, consumed, err := foundation.ParseIdentity(identity)
 	if err != nil || consumed != len(identity) {
 		return nil, ErrLocalRouterIdentity
 	}
 	signatureLen, ok := parsedIdentity.SigningKeyType().SignatureLen()
 	if !ok {
-		return nil, ivnp.ErrUnknownKeyType
+		return nil, foundation.ErrUnknownKeyType
 	}
 
-	n := len(identity) + 8 + 1 + 1 + len(contacts.Peers)*ivnp.HashLength + signatureLen
-	optionsLen, err := ivnp.MappingEncodedLen(contacts.Options)
+	n := len(identity) + 8 + 1 + 1 + len(contacts.Peers)*foundation.HashLength + signatureLen
+	optionsLen, err := foundation.MappingEncodedLen(contacts.Options)
 	if err != nil {
 		return nil, err
 	}
 	n += optionsLen
 	for _, address := range contacts.Addresses {
-		optionsLen, err = ivnp.MappingEncodedLen(address.Options)
+		optionsLen, err = foundation.MappingEncodedLen(address.Options)
 		if err != nil {
 			return nil, err
 		}
@@ -253,7 +253,7 @@ func marshalLocalRouterInfo(identity []byte, private ed25519.PrivateKey, publish
 		raw[offset] = byte(len(address.TransportStyle))
 		offset++
 		offset += copy(raw[offset:], address.TransportStyle)
-		written, err := ivnp.MarshalMappingTo(raw[offset:], address.Options)
+		written, err := foundation.MarshalMappingTo(raw[offset:], address.Options)
 		if err != nil {
 			return nil, err
 		}
@@ -264,7 +264,7 @@ func marshalLocalRouterInfo(identity []byte, private ed25519.PrivateKey, publish
 	for _, peer := range contacts.Peers {
 		offset += copy(raw[offset:], peer[:])
 	}
-	written, err := ivnp.MarshalMappingTo(raw[offset:], contacts.Options)
+	written, err := foundation.MarshalMappingTo(raw[offset:], contacts.Options)
 	if err != nil {
 		return nil, err
 	}

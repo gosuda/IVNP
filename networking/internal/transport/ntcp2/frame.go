@@ -4,14 +4,14 @@ package ntcp2
 import (
 	"encoding/binary"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
 	"math"
 )
 
 const (
 	FrameLengthLen    = 2
-	FrameTagLen       = cryptx.ChaChaTagSize
+	FrameTagLen       = cryptography.ChaChaTagSize
 	MinEncryptedFrame = FrameTagLen
 	MaxEncryptedFrame = 1<<16 - 1
 	MaxPlaintextFrame = MaxEncryptedFrame - FrameTagLen
@@ -57,17 +57,17 @@ func (s *SipState) nextMask() uint16 {
 // Direction owns one unidirectional post-handshake cipher state. It is not
 // safe for concurrent use; one transport goroutine must own each direction.
 type Direction struct {
-	cipher   *cryptx.ChaCha20Poly1305
+	cipher   *cryptography.ChaCha20Poly1305
 	sip      SipState
 	nonce    uint64
-	nonceBuf [cryptx.ChaChaNonceSize]byte
+	nonceBuf [cryptography.ChaChaNonceSize]byte
 	released bool
 }
 
-var _ cryptx.Sensitive = (*Direction)(nil)
+var _ cryptography.Sensitive = (*Direction)(nil)
 
 func NewDirection(chachaKey, sipKey, sipIV []byte) (*Direction, error) {
-	cipher, err := cryptx.NewChaCha20Poly1305(chachaKey)
+	cipher, err := cryptography.NewChaCha20Poly1305(chachaKey)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +98,7 @@ func (d *Direction) ReleaseSensitive() {
 // already contain a complete sequence of NTCP2 blocks.
 func (d *Direction) SealTo(dst, plaintext []byte) ([]byte, error) {
 	if d == nil || d.released {
-		return nil, cryptx.ErrSensitiveReleased
+		return nil, cryptography.ErrSensitiveReleased
 	}
 	if len(plaintext) > MaxPlaintextFrame {
 		return nil, ErrFrameTooLarge
@@ -122,7 +122,7 @@ func (d *Direction) SealTo(dst, plaintext []byte) ([]byte, error) {
 // OpenTo authenticates and decrypts one complete obfuscated NTCP2 frame.
 func (d *Direction) OpenTo(dst, input []byte) ([]byte, error) {
 	if d == nil || d.released {
-		return nil, cryptx.ErrSensitiveReleased
+		return nil, cryptography.ErrSensitiveReleased
 	}
 	if len(input) < FrameLengthLen {
 		return nil, wire.ErrShortBuffer

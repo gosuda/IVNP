@@ -1,10 +1,10 @@
 // Package ecies implements the ECIES-X25519 garlic handshake building blocks.
 // It is separate from the legacy ElGamal/AES garlic codec.
-package ecies
+package garlicecies
 
 import (
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/networking/internal/transport/noise"
 )
 
@@ -14,19 +14,19 @@ var ErrHybrid = errors.New("garlic/ecies: invalid hybrid handshake section")
 // e1 position in an I2P IKhfs NS message. It is single-goroutine handshake
 // state and must not be shared between local destinations or sessions.
 type HybridInitiator struct {
-	params  cryptx.MLKEMParameters
-	public  cryptx.MLKEMPublicKey
-	private *cryptx.MLKEMPrivateKey
+	params  cryptography.MLKEMParameters
+	public  cryptography.MLKEMPublicKey
+	private *cryptography.MLKEMPrivateKey
 }
 
 // NewHybridInitiator creates an e1 keypair for a registered ML-KEM/X25519
 // LeaseSet2 crypto type.
 func NewHybridInitiator(cryptoType uint16) (*HybridInitiator, error) {
-	params, known := cryptx.Parameters(cryptoType)
+	params, known := cryptography.Parameters(cryptoType)
 	if !known {
 		return nil, ErrHybrid
 	}
-	public, private, err := cryptx.GenerateMLKEM(cryptoType)
+	public, private, err := cryptography.GenerateMLKEM(cryptoType)
 	if err != nil {
 		return nil, err
 	}
@@ -49,8 +49,8 @@ func (h *HybridInitiator) ReleaseSensitive() {
 		h.private.ReleaseSensitive()
 		h.private = nil
 	}
-	h.params = cryptx.MLKEMParameters{}
-	h.public = cryptx.MLKEMPublicKey{}
+	h.params = cryptography.MLKEMParameters{}
+	h.public = cryptography.MLKEMPublicKey{}
 }
 
 // EncryptE1 writes the EncryptAndHash(e1) section immediately after ECIES IK
@@ -73,7 +73,7 @@ func (h *HybridInitiator) ConsumeEKEM(state *noise.SymmetricState, dst, cipherte
 		return ErrHybrid
 	}
 	if h.private == nil {
-		return cryptx.ErrSensitiveReleased
+		return cryptography.ErrSensitiveReleased
 	}
 	defer h.private.ReleaseSensitive()
 	defer func() { h.private = nil }()
@@ -88,15 +88,15 @@ func (h *HybridInitiator) ConsumeEKEM(state *noise.SymmetricState, dst, cipherte
 // HybridResponder receives e1 then produces ekem1. It is single-goroutine
 // handshake state and must be discarded on any transcript authentication error.
 type HybridResponder struct {
-	params cryptx.MLKEMParameters
-	public cryptx.MLKEMPublicKey
+	params cryptography.MLKEMParameters
+	public cryptography.MLKEMPublicKey
 	ready  bool
 }
 
 func NewHybridResponder(cryptoType uint16) (*HybridResponder, error) {
-	params, known := cryptx.Parameters(cryptoType)
+	params, known := cryptography.Parameters(cryptoType)
 	if !known {
-		return nil, cryptx.ErrMLKEMUnsupported
+		return nil, cryptography.ErrMLKEMUnsupported
 	}
 	return &HybridResponder{params: params}, nil
 }
@@ -106,8 +106,8 @@ func (h *HybridResponder) ReleaseSensitive() {
 	if h == nil {
 		return
 	}
-	h.params = cryptx.MLKEMParameters{}
-	h.public = cryptx.MLKEMPublicKey{}
+	h.params = cryptography.MLKEMParameters{}
+	h.public = cryptography.MLKEMPublicKey{}
 	h.ready = false
 }
 
@@ -120,7 +120,7 @@ func (h *HybridResponder) ConsumeE1(state *noise.SymmetricState, dst, ciphertext
 	if err != nil || len(encoded) != h.params.PublicKeySize {
 		return ErrHybrid
 	}
-	public, err := cryptx.NewMLKEMPublicKey(h.params.CryptoType, encoded)
+	public, err := cryptography.NewMLKEMPublicKey(h.params.CryptoType, encoded)
 	if err != nil {
 		return err
 	}
@@ -134,7 +134,7 @@ func (h *HybridResponder) EncryptEKEM(state *noise.SymmetricState, dst []byte) (
 	if h == nil || state == nil || !h.ready {
 		return nil, ErrHybrid
 	}
-	shared, ciphertext, err := cryptx.Encapsulate(h.public)
+	shared, ciphertext, err := cryptography.Encapsulate(h.public)
 	if err != nil {
 		return nil, err
 	}

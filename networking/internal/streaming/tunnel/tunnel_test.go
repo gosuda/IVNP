@@ -1,10 +1,10 @@
-package tunnel
+package streamingtunnel
 
 import (
 	"bytes"
 	"context"
-	ivnp "gosuda.org/ivnp/foundation"
-	streamapi "gosuda.org/ivnp/interfaces/stream"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/stream"
 	"gosuda.org/ivnp/networking/internal/streaming"
 	"io"
 	"net"
@@ -14,14 +14,14 @@ import (
 )
 
 var (
-	_ net.Conn                = (*tunnelConn)(nil)
-	_ streamapi.StreamNetwork = (*TunnelNetwork)(nil)
+	_ net.Conn             = (*tunnelConn)(nil)
+	_ stream.StreamNetwork = (*TunnelNetwork)(nil)
 )
 
 func TestTunnelNetworkDialListenOrderedBytes(t *testing.T) {
-	fabric := &streamFabric{networks: make(map[ivnp.Hash]*TunnelNetwork), zeroSYNACKPorts: true}
+	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork), zeroSYNACKPorts: true}
 	client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
-	listener, err := (streamapi.ListenerConfig{Network: server}).Listen(context.Background(), ":8080")
+	listener, err := (stream.ListenerConfig{Network: server}).Listen(context.Background(), ":8080")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestTunnelNetworkDialListenOrderedBytes(t *testing.T) {
 }
 
 func TestTunnelNetworkHonorsJavaPeerPayloadMSS(t *testing.T) {
-	fabric := &streamFabric{networks: make(map[ivnp.Hash]*TunnelNetwork)}
+	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
 	client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
 	listener, err := server.ListenI2P(context.Background(), ":8081")
 	if err != nil {
@@ -162,7 +162,7 @@ func TestTunnelNetworkHonorsJavaPeerPayloadMSS(t *testing.T) {
 }
 
 func TestTunnelNetworkRetransmitsLostPacket(t *testing.T) {
-	fabric := &streamFabric{networks: make(map[ivnp.Hash]*TunnelNetwork), dropFirstData: true}
+	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork), dropFirstData: true}
 	client, server := newTunnelNetworkPair(t, fabric, 20*time.Millisecond)
 	listener, err := server.ListenI2P(context.Background(), ":77")
 	if err != nil {
@@ -210,7 +210,7 @@ func TestTunnelNetworkRetransmitsLostPacket(t *testing.T) {
 }
 
 func TestTunnelNetworkCloseRetransmitsPendingDataBeforeEOF(t *testing.T) {
-	fabric := &streamFabric{networks: make(map[ivnp.Hash]*TunnelNetwork), dropFirstData: true}
+	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork), dropFirstData: true}
 	client, server := newTunnelNetworkPair(t, fabric, 20*time.Millisecond)
 	listener, err := server.ListenI2P(context.Background(), ":78")
 	if err != nil {
@@ -270,7 +270,7 @@ func TestTunnelNetworkCloseRetransmitsPendingDataBeforeEOF(t *testing.T) {
 }
 
 func TestTunnelNetworkCloseCancelsBlockedRetransmission(t *testing.T) {
-	destination, err := ivnp.GenerateLocalDestination()
+	destination, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestTunnelNetworkCloseCancelsBlockedRetransmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	connection := network.newConn(1, 2, ivnp.Hash{1}, ivnp.Identity{}, 1, 2, true)
+	connection := network.newConn(1, 2, foundation.Hash{1}, foundation.Identity{}, 1, 2, true)
 	if err := network.register(connection); err != nil {
 		_ = network.Close()
 		t.Fatal(err)
@@ -306,7 +306,7 @@ func TestTunnelNetworkCloseCancelsBlockedRetransmission(t *testing.T) {
 }
 
 func TestTunnelNetworkCloseDrainsPacingQueue(t *testing.T) {
-	destination, err := ivnp.GenerateLocalDestination()
+	destination, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestTunnelNetworkCloseDrainsPacingQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	connection := network.newConn(1, 2, ivnp.Hash{1}, ivnp.Identity{}, 1, 2, true)
+	connection := network.newConn(1, 2, foundation.Hash{1}, foundation.Identity{}, 1, 2, true)
 	if err := network.register(connection); err != nil {
 		t.Fatal(err)
 	}
@@ -351,13 +351,13 @@ func TestEarliestQueuedRequestDoesNotHeadOfLineBlock(t *testing.T) {
 }
 
 func TestStreamingSignatureParsesJavaOptionOrder(t *testing.T) {
-	fabric := &streamFabric{networks: make(map[ivnp.Hash]*TunnelNetwork)}
+	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
 	client, _ := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
 	packet := Packet{
 		ReceiveStreamID: 1,
 		Sequence:        0,
 		NACKCount:       8,
-		NACKs:           make([]byte, ivnp.HashLength),
+		NACKs:           make([]byte, foundation.HashLength),
 		Flags:           FlagSynchronize | FlagNoACK | FlagDelayRequested,
 		Options:         []byte{0, 5},
 	}
@@ -377,7 +377,7 @@ func TestStreamingSignatureParsesJavaOptionOrder(t *testing.T) {
 }
 
 func TestTunnelNetworkRejectsTamperedSynchronize(t *testing.T) {
-	fabric := &streamFabric{networks: make(map[ivnp.Hash]*TunnelNetwork)}
+	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
 	client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
 	packet := Packet{
 		ReceiveStreamID: 1,
@@ -399,7 +399,7 @@ func TestTunnelNetworkRejectsTamperedSynchronize(t *testing.T) {
 
 func TestTunnelReliabilityKarnFastRetransmitAndNACKs(t *testing.T) {
 	network := &TunnelNetwork{retransmit: time.Second, maxRetries: 4, readCapacity: 1}
-	connection := network.newConn(1, 2, ivnp.Hash{1}, ivnp.Identity{}, 1, 2, true)
+	connection := network.newConn(1, 2, foundation.Hash{1}, foundation.Identity{}, 1, 2, true)
 	now := time.Now()
 
 	connection.pending[1] = pendingPacket{wire: []byte{1}, sent: now.Add(-100 * time.Millisecond), retransmitted: true}
@@ -437,11 +437,11 @@ func TestTunnelReliabilityKarnFastRetransmitAndNACKs(t *testing.T) {
 
 func newTunnelNetworkPair(t *testing.T, fabric *streamFabric, retransmit time.Duration) (*TunnelNetwork, *TunnelNetwork) {
 	t.Helper()
-	clientDestination, err := ivnp.GenerateLocalDestination()
+	clientDestination, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverDestination, err := ivnp.GenerateLocalDestination()
+	serverDestination, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func newTunnelNetworkPair(t *testing.T, fabric *streamFabric, retransmit time.Du
 
 type streamFabric struct {
 	mu              sync.Mutex
-	networks        map[ivnp.Hash]*TunnelNetwork
+	networks        map[foundation.Hash]*TunnelNetwork
 	dropFirstData   bool
 	dropped         bool
 	maxDataPacket   int

@@ -1,10 +1,10 @@
-package clientapi
+package frontend
 
 import (
 	"bufio"
 	"context"
 	"fmt"
-	streamapi "gosuda.org/ivnp/interfaces/stream"
+	"gosuda.org/ivnp/interfaces/stream"
 	"gosuda.org/ivnp/internal/ingress"
 	"io"
 	"net"
@@ -23,7 +23,7 @@ const (
 
 // HTTPProxyConfig configures a local HTTP CONNECT and absolute-form proxy.
 type HTTPProxyConfig struct {
-	Network           streamapi.StreamNetwork
+	Network           stream.StreamNetwork
 	Resolver          DestinationResolver
 	ListenAddress     string
 	AllowRemote       bool
@@ -218,7 +218,7 @@ func (p *HTTPProxy) forwardRequest(w http.ResponseWriter, request *http.Request,
 		if err := buffered.Flush(); err != nil {
 			return
 		}
-		relay(client, outbound, buffered.Reader)
+		relayConnections(client, outbound, buffered.Reader)
 		return
 	}
 

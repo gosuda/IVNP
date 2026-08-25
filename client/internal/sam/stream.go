@@ -3,10 +3,10 @@ package sam
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
-	clientapi "gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/ingress"
-	internalrelay "gosuda.org/ivnp/internal/relay"
+	"gosuda.org/ivnp/internal/relay"
 	"net"
 	"strings"
 	"sync"
@@ -67,7 +67,7 @@ func (s *Server) handleStream(connection *serverConnection, cmd command) (bool, 
 		var outbound net.Conn
 		var dialErr error
 		if fromPort != 0 {
-			source, ok := session.endpoint.(clientapi.SourcePortDestinationEndpoint)
+			source, ok := session.endpoint.(destination.SourcePortDestinationEndpoint)
 			if !ok {
 				return true, connection.writeLine("STREAM STATUS RESULT=I2P_ERROR MESSAGE=FROM_PORT_UNSUPPORTED")
 			}
@@ -210,7 +210,7 @@ func (s *Server) forwardRelay(session *samSession, inbound, local net.Conn) {
 }
 
 func (s *Server) relay(left, right net.Conn, leftReader net.Conn) error {
-	return internalrelay.BidirectionalContained(left, right, leftReader, func(value any) error {
+	return relay.BidirectionalContained(left, right, leftReader, func(value any) error {
 		return ingress.Report(value, s.config.PanicReporter, ingress.BoundarySAMWorker, right.RemoteAddr())
 	})
 }
@@ -265,7 +265,7 @@ func (s *Server) resolveTarget(ctx context.Context, target string) (string, erro
 	if strings.HasSuffix(strings.ToLower(target), ".b32.i2p") {
 		return target, nil
 	}
-	if _, err := ivnp.ParseDestination([]byte(target)); err == nil {
+	if _, err := foundation.ParseDestination([]byte(target)); err == nil {
 		return target, nil
 	}
 	if s.config.Resolver == nil {

@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
 )
 
@@ -213,12 +213,12 @@ const (
 
 // DatabaseStoreMessage is a validated, zero-copy DatabaseStore payload.
 type DatabaseStoreMessage struct {
-	Key           ivnp.Hash
+	Key           foundation.Hash
 	Type          StoreType
 	RawType       uint8
 	ReplyToken    uint32
 	ReplyTunnelID uint32
-	ReplyGateway  ivnp.Hash
+	ReplyGateway  foundation.Hash
 	Data          []byte
 }
 
@@ -282,8 +282,8 @@ const (
 // DatabaseLookupMessage is a validated DatabaseLookup payload. Excluded and
 // ReplyTags are flat 32-byte or tag-length records to avoid per-record slices.
 type DatabaseLookupMessage struct {
-	Key           ivnp.Hash
-	From          ivnp.Hash
+	Key           foundation.Hash
+	From          foundation.Hash
 	Flags         uint8
 	ReplyTunnelID uint32
 	Excluded      []byte
@@ -292,7 +292,7 @@ type DatabaseLookupMessage struct {
 	ReplyTagLen   uint8
 }
 
-func (m DatabaseLookupMessage) ExcludedCount() int { return len(m.Excluded) / ivnp.HashLength }
+func (m DatabaseLookupMessage) ExcludedCount() int { return len(m.Excluded) / foundation.HashLength }
 func (m DatabaseLookupMessage) ReplyTagCount() int {
 	if m.ReplyTagLen == 0 {
 		return 0
@@ -361,7 +361,7 @@ func ParseDatabaseLookup(payload []byte) (DatabaseLookupMessage, error) {
 		return DatabaseLookupMessage{}, ErrPayloadTooLarge
 	}
 	off += 2
-	excludedLen := excludedCount * ivnp.HashLength
+	excludedLen := excludedCount * foundation.HashLength
 	if excludedLen > len(payload)-off {
 		return DatabaseLookupMessage{}, wire.ErrShortBuffer
 	}
@@ -409,12 +409,12 @@ func ParseDatabaseLookup(payload []byte) (DatabaseLookupMessage, error) {
 
 // DatabaseSearchReplyMessage is a validated, zero-copy search reply.
 type DatabaseSearchReplyMessage struct {
-	Key   ivnp.Hash
+	Key   foundation.Hash
 	Peers []byte // exactly PeerCount() adjacent Hash values
-	From  ivnp.Hash
+	From  foundation.Hash
 }
 
-func (m DatabaseSearchReplyMessage) PeerCount() int { return len(m.Peers) / ivnp.HashLength }
+func (m DatabaseSearchReplyMessage) PeerCount() int { return len(m.Peers) / foundation.HashLength }
 
 func ParseDatabaseSearchReply(payload []byte) (DatabaseSearchReplyMessage, error) {
 	if len(payload) > MaxDatabaseSearchReplyPayload {
@@ -424,13 +424,13 @@ func ParseDatabaseSearchReply(payload []byte) (DatabaseSearchReplyMessage, error
 		return DatabaseSearchReplyMessage{}, wire.ErrShortBuffer
 	}
 	count := int(payload[32])
-	expected := 32 + 1 + count*ivnp.HashLength + 32
+	expected := 32 + 1 + count*foundation.HashLength + 32
 	if len(payload) != expected {
 		return DatabaseSearchReplyMessage{}, ErrMalformed
 	}
 	var out DatabaseSearchReplyMessage
 	copy(out.Key[:], payload[:32])
-	out.Peers = payload[33 : 33+count*ivnp.HashLength]
+	out.Peers = payload[33 : 33+count*foundation.HashLength]
 	copy(out.From[:], payload[len(payload)-32:])
 	return out, nil
 }

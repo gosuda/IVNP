@@ -1,11 +1,11 @@
-package netdb
+package networkdatabase
 
 import (
 	"context"
 	cryptorand "crypto/rand"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/observability"
@@ -58,7 +58,7 @@ type RequestSender interface {
 // local router hash to which the floodfill should send the answer. When Tunnel
 // is true, TunnelID must identify the inbound reply tunnel at that gateway.
 type ReplyRoute interface {
-	DatabaseLookupReplyRoute() (gateway ivnp.Hash, tunnelID uint32, tunnel bool)
+	DatabaseLookupReplyRoute() (gateway foundation.Hash, tunnelID uint32, tunnel bool)
 }
 
 // RequestManagerConfig controls logical request lifetime and bounded work. Now
@@ -80,29 +80,29 @@ type RequestManagerConfig struct {
 // itself is retained in Database; callers fetch it from Database after Err is
 // nil.
 type LookupResult struct {
-	Key  ivnp.Hash
+	Key  foundation.Hash
 	Type LookupType
 	Err  error
 }
 
 type requestKey struct {
-	key ivnp.Hash
+	key foundation.Hash
 }
 
 type pendingRequest struct {
-	key              ivnp.Hash
+	key              foundation.Hash
 	typeID           LookupType
 	deadline         uint64
 	responseDeadline uint64
-	routingKey       ivnp.Hash
-	seed             ivnp.Hash
+	routingKey       foundation.Hash
+	seed             foundation.Hash
 	waiters          []chan LookupResult
-	candidates       []ivnp.Hash
-	candidate        map[ivnp.Hash]struct{}
-	attempted        map[ivnp.Hash]struct{}
-	sent             map[ivnp.Hash]struct{}
-	fallbacks        []ivnp.Hash
-	refreshing       map[ivnp.Hash]struct{}
+	candidates       []foundation.Hash
+	candidate        map[foundation.Hash]struct{}
+	attempted        map[foundation.Hash]struct{}
+	sent             map[foundation.Hash]struct{}
+	fallbacks        []foundation.Hash
+	refreshing       map[foundation.Hash]struct{}
 	inFlight         bool
 	wakeups          int
 }
@@ -111,7 +111,7 @@ type sendWork struct {
 	key        requestKey
 	typeID     LookupType
 	peer       RouterRef
-	exclusions []ivnp.Hash
+	exclusions []foundation.Hash
 }
 type sendJob struct {
 	work sendWork
@@ -201,21 +201,21 @@ func NewRequestManager(database *Database, sender RequestSender, route ReplyRout
 }
 
 // LookupRouterInfo starts or coalesces a RouterInfo lookup.
-func (m *RequestManager) LookupRouterInfo(ctx context.Context, key ivnp.Hash) (<-chan LookupResult, error) {
+func (m *RequestManager) LookupRouterInfo(ctx context.Context, key foundation.Hash) (<-chan LookupResult, error) {
 	return m.Lookup(ctx, RouterInfoLookup, key)
 }
 
 // LookupLeaseSet starts or coalesces a LeaseSet lookup. Any LeaseSet store
 // variant completes this request.
-func (m *RequestManager) LookupLeaseSet(ctx context.Context, key ivnp.Hash) (<-chan LookupResult, error) {
+func (m *RequestManager) LookupLeaseSet(ctx context.Context, key foundation.Hash) (<-chan LookupResult, error) {
 	return m.Lookup(ctx, LeaseSetLookup, key)
 }
 
-func (m *RequestManager) Lookup(ctx context.Context, typeID LookupType, key ivnp.Hash) (<-chan LookupResult, error) {
+func (m *RequestManager) Lookup(ctx context.Context, typeID LookupType, key foundation.Hash) (<-chan LookupResult, error) {
 	return m.lookup(ctx, typeID, key, false)
 }
 
-func (m *RequestManager) lookup(ctx context.Context, typeID LookupType, key ivnp.Hash, forceRefresh bool) (<-chan LookupResult, error) {
+func (m *RequestManager) lookup(ctx context.Context, typeID LookupType, key foundation.Hash, forceRefresh bool) (<-chan LookupResult, error) {
 	if typeID != RouterInfoLookup && typeID != LeaseSetLookup && typeID != ExplorationLookup {
 		return nil, errors.New("netdb: unknown lookup type")
 	}
@@ -281,15 +281,15 @@ func (m *RequestManager) lookup(ctx context.Context, typeID LookupType, key ivnp
 		routingKey: RoutingKey(key, now),
 		deadline:   deadline,
 		waiters:    []chan LookupResult{result},
-		candidates: make([]ivnp.Hash, 0, m.maxCandidates),
-		candidate:  make(map[ivnp.Hash]struct{}, m.maxCandidates),
-		attempted:  make(map[ivnp.Hash]struct{}, m.maxCandidates),
-		sent:       make(map[ivnp.Hash]struct{}, javaIterativeSearchLimit),
-		refreshing: make(map[ivnp.Hash]struct{}, m.maxCandidates),
-		fallbacks:  make([]ivnp.Hash, 0, len(allTargets)),
+		candidates: make([]foundation.Hash, 0, m.maxCandidates),
+		candidate:  make(map[foundation.Hash]struct{}, m.maxCandidates),
+		attempted:  make(map[foundation.Hash]struct{}, m.maxCandidates),
+		sent:       make(map[foundation.Hash]struct{}, javaIterativeSearchLimit),
+		refreshing: make(map[foundation.Hash]struct{}, m.maxCandidates),
+		fallbacks:  make([]foundation.Hash, 0, len(allTargets)),
 	}
 	if m.responders != nil {
-		responsive := m.responders.Candidates(make([]ivnp.Hash, 0, 1))
+		responsive := m.responders.Candidates(make([]foundation.Hash, 0, 1))
 		for _, candidate := range responsive {
 			if ref, known := m.database.Routers().Get(candidate); known && ref.Floodfill && m.addCandidateLocked(req, candidate) {
 				req.seed = candidate
@@ -320,19 +320,19 @@ func (m *RequestManager) lookup(ctx context.Context, typeID LookupType, key ivnp
 
 // Explore sends a type-3 DatabaseLookup through the same bounded request
 // lifecycle as ordinary lookup work.
-func (m *RequestManager) Explore(ctx context.Context, key ivnp.Hash) (<-chan LookupResult, error) {
+func (m *RequestManager) Explore(ctx context.Context, key foundation.Hash) (<-chan LookupResult, error) {
 	return m.Lookup(ctx, ExplorationLookup, key)
 }
 
 // BuildDatabaseLookup serializes the unencrypted RouterInfo or LeaseSet lookup
 // format parsed by i2np.ParseDatabaseLookup. Exclusions are copied directly as
 // 32-byte hashes and must be the peers already queried by this request.
-func BuildDatabaseLookup(key ivnp.Hash, typeID LookupType, route ReplyRoute, exclusions []ivnp.Hash) ([]byte, error) {
+func BuildDatabaseLookup(key foundation.Hash, typeID LookupType, route ReplyRoute, exclusions []foundation.Hash) ([]byte, error) {
 	if route == nil || len(exclusions) > i2np.MaxDatabaseLookupExcluded {
 		return nil, ErrInvalidReplyRoute
 	}
 	gateway, tunnelID, tunnel := route.DatabaseLookupReplyRoute()
-	if gateway == (ivnp.Hash{}) || (tunnel && tunnelID == 0) {
+	if gateway == (foundation.Hash{}) || (tunnel && tunnelID == 0) {
 		return nil, ErrInvalidReplyRoute
 	}
 	flags := byte(typeID << 2)
@@ -341,7 +341,7 @@ func BuildDatabaseLookup(key ivnp.Hash, typeID LookupType, route ReplyRoute, exc
 	default:
 		return nil, errors.New("netdb: unknown lookup type")
 	}
-	length := 32 + 32 + 1 + 2 + len(exclusions)*ivnp.HashLength
+	length := 32 + 32 + 1 + 2 + len(exclusions)*foundation.HashLength
 	if tunnel {
 		flags |= 1
 		length += 4
@@ -358,8 +358,8 @@ func BuildDatabaseLookup(key ivnp.Hash, typeID LookupType, route ReplyRoute, exc
 	binary.BigEndian.PutUint16(payload[off:off+2], uint16(len(exclusions)))
 	off += 2
 	for _, exclusion := range exclusions {
-		copy(payload[off:off+ivnp.HashLength], exclusion[:])
-		off += ivnp.HashLength
+		copy(payload[off:off+foundation.HashLength], exclusion[:])
+		off += foundation.HashLength
 	}
 	return payload, nil
 }
@@ -371,7 +371,7 @@ func BuildDatabaseLookup(key ivnp.Hash, typeID LookupType, route ReplyRoute, exc
 // already queried for its key.
 func (m *RequestManager) HandleDatabaseSearchReply(reply i2np.DatabaseSearchReplyMessage) {
 	lookupKey := requestKey{key: reply.Key}
-	var refresh []ivnp.Hash
+	var refresh []foundation.Hash
 	m.mu.Lock()
 	req := m.pending[lookupKey]
 	if req == nil {
@@ -386,9 +386,9 @@ func (m *RequestManager) HandleDatabaseSearchReply(reply i2np.DatabaseSearchRepl
 		m.responders.Record(reply.From)
 	}
 	req.responseDeadline = 0
-	for off := 0; off < len(reply.Peers) && len(req.candidates) < m.maxCandidates; off += ivnp.HashLength {
-		var peer ivnp.Hash
-		copy(peer[:], reply.Peers[off:off+ivnp.HashLength])
+	for off := 0; off < len(reply.Peers) && len(req.candidates) < m.maxCandidates; off += foundation.HashLength {
+		var peer foundation.Hash
+		copy(peer[:], reply.Peers[off:off+foundation.HashLength])
 		if !m.addCandidateLocked(req, peer) {
 			continue
 		}
@@ -410,7 +410,7 @@ func (m *RequestManager) HandleDatabaseSearchReply(reply i2np.DatabaseSearchRepl
 		}
 	}
 	m.mu.Unlock()
-	var refreshFailed []ivnp.Hash
+	var refreshFailed []foundation.Hash
 	for _, peer := range refresh {
 		if _, err := m.lookup(m.ctx, RouterInfoLookup, peer, true); err != nil {
 			refreshFailed = append(refreshFailed, peer)
@@ -557,7 +557,7 @@ func (m *RequestManager) Pending() int {
 	return n
 }
 
-func (m *RequestManager) lookupPresent(typeID LookupType, key ivnp.Hash) bool {
+func (m *RequestManager) lookupPresent(typeID LookupType, key foundation.Hash) bool {
 	switch typeID {
 	case RouterInfoLookup:
 		_, ok := m.database.Routers().Get(key)
@@ -579,7 +579,7 @@ func (m *RequestManager) lookupPresent(typeID LookupType, key ivnp.Hash) bool {
 	}
 }
 
-func (m *RequestManager) addCandidateLocked(req *pendingRequest, peer ivnp.Hash) bool {
+func (m *RequestManager) addCandidateLocked(req *pendingRequest, peer foundation.Hash) bool {
 	if len(req.candidates) == m.maxCandidates {
 		return false
 	}
@@ -616,10 +616,10 @@ func (m *RequestManager) prepareSendLocked(key requestKey, req *pendingRequest) 
 	if len(req.sent) >= min(m.maxCandidates, javaIterativeSearchLimit) {
 		return nil, ErrRequestExpired
 	}
-	var selected ivnp.Hash
+	var selected foundation.Hash
 	var peer RouterRef
 	found := false
-	if req.seed != (ivnp.Hash{}) && len(req.attempted) == 0 {
+	if req.seed != (foundation.Hash{}) && len(req.attempted) == 0 {
 		if current, known := m.database.Routers().Get(req.seed); known {
 			selected, peer, found = req.seed, current, true
 		}
@@ -645,7 +645,7 @@ func (m *RequestManager) prepareSendLocked(key requestKey, req *pendingRequest) 
 		req.attempted[selected] = struct{}{}
 		req.sent[selected] = struct{}{}
 		req.inFlight = true
-		exclusions := make([]ivnp.Hash, 0, len(req.sent))
+		exclusions := make([]foundation.Hash, 0, len(req.sent))
 		for _, exclusion := range req.candidates {
 			if _, sent := req.sent[exclusion]; sent {
 				exclusions = append(exclusions, exclusion)

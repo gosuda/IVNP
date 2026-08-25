@@ -1,17 +1,17 @@
-package netdb
+package networkdatabase
 
 import (
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"testing"
 )
 
 func TestFloodfillCapabilityUsesCapsOption(t *testing.T) {
 	encoded := make([]byte, 16)
-	n, err := ivnp.MarshalMappingTo(encoded, []ivnp.MappingEntry{{Key: []byte("caps"), Value: []byte("XfR")}})
+	n, err := foundation.MarshalMappingTo(encoded, []foundation.MappingEntry{{Key: []byte("caps"), Value: []byte("XfR")}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mapping, _, err := ivnp.ParseMapping(encoded[:n])
+	mapping, _, err := foundation.ParseMapping(encoded[:n])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,11 +19,11 @@ func TestFloodfillCapabilityUsesCapsOption(t *testing.T) {
 		t.Fatal("caps=f RouterInfo was not floodfill")
 	}
 	encoded = make([]byte, 16)
-	n, err = ivnp.MarshalMappingTo(encoded, []ivnp.MappingEntry{{Key: []byte("caps"), Value: []byte("R")}})
+	n, err = foundation.MarshalMappingTo(encoded, []foundation.MappingEntry{{Key: []byte("caps"), Value: []byte("R")}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mapping, _, err = ivnp.ParseMapping(encoded[:n])
+	mapping, _, err = foundation.ParseMapping(encoded[:n])
 	if err != nil {
 		t.Fatal(err)
 	}

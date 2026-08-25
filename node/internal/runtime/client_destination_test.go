@@ -1,13 +1,13 @@
-package daemon
+package noderuntime
 
-import client "gosuda.org/ivnp/client"
+import "gosuda.org/ivnp/client"
 
-import networking "gosuda.org/ivnp/networking"
+import "gosuda.org/ivnp/networking"
 
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 
 	"path/filepath"
 	"testing"
@@ -30,7 +30,7 @@ func TestNeutralDestinationControllerUsesDaemonOwnedIsolatedGraph(t *testing.T) 
 	defer d.Close()
 	beforeRuntime := d.clientRuntimeSnapshot()
 	beforeDurable := len(d.bundle.DestinationPrivate)
-	source, err := ivnp.GenerateLocalDestination()
+	source, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}

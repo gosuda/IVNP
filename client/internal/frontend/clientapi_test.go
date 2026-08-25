@@ -1,4 +1,4 @@
-package clientapi
+package frontend
 
 import (
 	"bufio"
@@ -717,7 +717,7 @@ func TestRelayPreservesHalfClose(t *testing.T) {
 	defer rightClient.Close()
 	relayDone := make(chan struct{})
 	go func() {
-		relay(leftRelay, rightRelay, leftRelay)
+		relayConnections(leftRelay, rightRelay, leftRelay)
 		close(relayDone)
 	}()
 	if _, err := io.WriteString(leftClient, "request"); err != nil {

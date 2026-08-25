@@ -1,6 +1,6 @@
 package main
 
-import client "gosuda.org/ivnp/client"
+import "gosuda.org/ivnp/client"
 
 import (
 	"bufio"
@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	ivnp "gosuda.org/ivnp"
+	"gosuda.org/ivnp/ivnp"
 )
 
 const (

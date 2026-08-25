@@ -4,7 +4,7 @@ package sam
 
 import (
 	"context"
-	ivnp "gosuda.org/ivnp/interfaces/stream"
+	"gosuda.org/ivnp/interfaces/stream"
 	"io"
 	"net"
 	"net/http"
@@ -100,7 +100,7 @@ func TestJavaI2PStreamDialIntegration(t *testing.T) {
 	if err = clientNetwork.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	listener, err := (ivnp.ListenerConfig{Network: serverNetwork}).Listen(ctx, ":23191")
+	listener, err := (stream.ListenerConfig{Network: serverNetwork}).Listen(ctx, ":23191")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestJavaI2PStreamDialIntegration(t *testing.T) {
 		serverDone <- err
 	}()
 
-	conn, err := (ivnp.Dialer{Network: clientNetwork}).DialContext(ctx, "i2p", net.JoinHostPort(serverNetwork.B32(), "23191"))
+	conn, err := (stream.Dialer{Network: clientNetwork}).DialContext(ctx, "i2p", net.JoinHostPort(serverNetwork.B32(), "23191"))
 	if err != nil {
 		t.Fatal(err)
 	}

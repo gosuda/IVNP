@@ -1,9 +1,9 @@
-package clientapi
+package frontend
 
 import (
 	"bufio"
 	"context"
-	streamapi "gosuda.org/ivnp/interfaces/stream"
+	"gosuda.org/ivnp/interfaces/stream"
 	"gosuda.org/ivnp/internal/ingress"
 	"io"
 	"net"
@@ -15,7 +15,7 @@ const defaultSOCKS5Address = "127.0.0.1:4447"
 // SOCKS5Config configures a local SOCKS5 CONNECT proxy. Only no-authentication
 // domain-name CONNECT requests to I2P destinations are accepted.
 type SOCKS5Config struct {
-	Network           streamapi.StreamNetwork
+	Network           stream.StreamNetwork
 	ListenAddress     string
 	AllowRemote       bool
 	MaxConnections    int
@@ -209,7 +209,7 @@ func (p *SOCKS5Proxy) serveConnection(connection net.Conn) {
 	if !p.reply(connection, 0) {
 		return
 	}
-	relay(connection, outbound, reader)
+	relayConnections(connection, outbound, reader)
 }
 
 func (p *SOCKS5Proxy) reply(connection net.Conn, code byte) bool {

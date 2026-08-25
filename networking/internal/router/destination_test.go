@@ -3,9 +3,9 @@ package router
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
-	clientapi "gosuda.org/ivnp/interfaces/destination"
-	streamtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/networking/internal/streaming/tunnel"
 	"io"
 	"net"
 	"sync"
@@ -16,7 +16,7 @@ import (
 var _ StreamBackend = (*DestinationManager)(nil)
 
 func TestDestinationManagerOwnsStreamSessions(t *testing.T) {
-	fabric := &destinationFabric{targets: make(map[ivnp.Hash]*DestinationManager)}
+	fabric := &destinationFabric{targets: make(map[foundation.Hash]*DestinationManager)}
 	left := NewDestinationManager()
 	right := NewDestinationManager()
 	t.Cleanup(func() {
@@ -24,19 +24,19 @@ func TestDestinationManagerOwnsStreamSessions(t *testing.T) {
 		_ = right.Close()
 	})
 
-	leftDestination, err := ivnp.GenerateLocalDestination()
+	leftDestination, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
-	rightDestination, err := ivnp.GenerateLocalDestination()
+	rightDestination, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
-	leftSession, err := left.Create(DestinationSessionConfig{Default: true, Streaming: streamtunnel.TunnelNetworkConfig{Destination: leftDestination, Sender: fabric}})
+	leftSession, err := left.Create(DestinationSessionConfig{Default: true, Streaming: streamingtunnel.TunnelNetworkConfig{Destination: leftDestination, Sender: fabric}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rightSession, err := right.Create(DestinationSessionConfig{Default: true, Streaming: streamtunnel.TunnelNetworkConfig{Destination: rightDestination, Sender: fabric}})
+	rightSession, err := right.Create(DestinationSessionConfig{Default: true, Streaming: streamingtunnel.TunnelNetworkConfig{Destination: rightDestination, Sender: fabric}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestDestinationManagerOwnsStreamSessions(t *testing.T) {
 	if _, ok := right.Session(rightSession.Hash()); ok {
 		t.Fatal("destroyed destination remained registered")
 	}
-	if err := right.HandleStreaming(context.Background(), streamtunnel.Delivery{To: rightSession.Hash(), Protocol: streamtunnel.ProtocolStreaming}); err != ErrDestinationNotFound {
+	if err := right.HandleStreaming(context.Background(), streamingtunnel.Delivery{To: rightSession.Hash(), Protocol: streamingtunnel.ProtocolStreaming}); err != ErrDestinationNotFound {
 		t.Fatalf("delivery to destroyed destination = %v", err)
 	}
 }
@@ -93,29 +93,29 @@ func TestDestinationManagerOwnsStreamSessions(t *testing.T) {
 func TestDestinationSessionDeliversSelfMessagesLocally(t *testing.T) {
 	manager := NewDestinationManager()
 	t.Cleanup(func() { _ = manager.Close() })
-	destination, err := ivnp.GenerateLocalDestination()
+	localDestination, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
 	session, err := manager.Create(DestinationSessionConfig{
 		Default: true,
-		Streaming: streamtunnel.TunnelNetworkConfig{
-			Destination: destination,
-			Sender:      &destinationFabric{targets: make(map[ivnp.Hash]*DestinationManager)},
+		Streaming: streamingtunnel.TunnelNetworkConfig{
+			Destination: localDestination,
+			Sender:      &destinationFabric{targets: make(map[foundation.Hash]*DestinationManager)},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, protocol := range []uint8{17, 18} {
-		route := clientapi.DestinationRoute{Protocol: protocol, ToPort: 4444}
+		route := destination.DestinationRoute{Protocol: protocol, ToPort: 4444}
 		subscription, subscribeErr := session.Subscribe(route, 1)
 		if subscribeErr != nil {
 			t.Fatal(subscribeErr)
 		}
 		for sequence := range 4 {
 			payload := []byte{protocol, byte(sequence), 0x49, 0x32, 0x50}
-			if sendErr := session.SendMessage(context.Background(), streamtunnel.Delivery{
+			if sendErr := session.SendMessage(context.Background(), streamingtunnel.Delivery{
 				To: session.Hash(), Protocol: protocol, FromPort: 3333, ToPort: route.ToPort, Payload: payload,
 			}); sendErr != nil {
 				t.Fatalf("protocol %d self message %d: %v", protocol, sequence, sendErr)
@@ -146,7 +146,7 @@ func TestDestinationSessionDeliversSelfMessagesLocally(t *testing.T) {
 func TestDestinationSessionRejectsStaleSelfDeliveryAfterRecreate(t *testing.T) {
 	manager := NewDestinationManager()
 	t.Cleanup(func() { _ = manager.Close() })
-	original, err := ivnp.GenerateLocalDestination()
+	original, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,10 +154,10 @@ func TestDestinationSessionRejectsStaleSelfDeliveryAfterRecreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fabric := &destinationFabric{targets: make(map[ivnp.Hash]*DestinationManager)}
+	fabric := &destinationFabric{targets: make(map[foundation.Hash]*DestinationManager)}
 	stale, err := manager.Create(DestinationSessionConfig{
 		Default: true,
-		Streaming: streamtunnel.TunnelNetworkConfig{
+		Streaming: streamingtunnel.TunnelNetworkConfig{
 			Destination: original,
 			Sender:      fabric,
 		},
@@ -170,7 +170,7 @@ func TestDestinationSessionRejectsStaleSelfDeliveryAfterRecreate(t *testing.T) {
 	}
 	replacement, err := manager.Create(DestinationSessionConfig{
 		Default: true,
-		Streaming: streamtunnel.TunnelNetworkConfig{
+		Streaming: streamingtunnel.TunnelNetworkConfig{
 			Destination: recreated,
 			Sender:      fabric,
 		},
@@ -178,13 +178,13 @@ func TestDestinationSessionRejectsStaleSelfDeliveryAfterRecreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	route := clientapi.DestinationRoute{Protocol: 17, ToPort: 4444}
+	route := destination.DestinationRoute{Protocol: 17, ToPort: 4444}
 	subscription, err := replacement.Subscribe(route, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer subscription.Close()
-	delivery := streamtunnel.Delivery{
+	delivery := streamingtunnel.Delivery{
 		To: replacement.Hash(), Protocol: route.Protocol,
 		FromPort: 3333, ToPort: route.ToPort, Payload: []byte("replacement"),
 	}
@@ -208,10 +208,10 @@ func TestDestinationSessionRejectsStaleSelfDeliveryAfterRecreate(t *testing.T) {
 
 type destinationFabric struct {
 	mu      sync.Mutex
-	targets map[ivnp.Hash]*DestinationManager
+	targets map[foundation.Hash]*DestinationManager
 }
 
-func (f *destinationFabric) SendTunnel(ctx context.Context, delivery streamtunnel.Delivery) error {
+func (f *destinationFabric) SendTunnel(ctx context.Context, delivery streamingtunnel.Delivery) error {
 	f.mu.Lock()
 	target := f.targets[delivery.To]
 	f.mu.Unlock()

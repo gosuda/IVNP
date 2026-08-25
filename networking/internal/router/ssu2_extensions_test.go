@@ -3,7 +3,7 @@ package router
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/network_database"
 	"gosuda.org/ivnp/networking/internal/transport/ssu2"
@@ -51,11 +51,11 @@ func TestSSU2PeerTestOutcomeTable(t *testing.T) {
 func TestSSU2RelayTagPublicationAndExpiry(t *testing.T) {
 	local, _, _ := newSSU2TestLocal(t, "127.0.0.1:23456")
 	now := time.Now()
-	var peer ivnp.Hash
+	var peer foundation.Hash
 	peer[0] = 9
 	manager := &SSU2Manager{
 		bindings:         TransportBindings{LocalInfo: local, Clock: WallClock{}},
-		advertisedRelays: map[ivnp.Hash]ssu2RelayTagLease{peer: {peer: peer, tag: 77, expires: now.Add(time.Minute)}},
+		advertisedRelays: map[foundation.Hash]ssu2RelayTagLease{peer: {peer: peer, tag: 77, expires: now.Add(time.Minute)}},
 	}
 	if _, err := manager.publishRelaySnapshot(context.Background()); err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestSSU2RelayTagPublicationAndExpiry(t *testing.T) {
 
 func TestSSU2NewTokenCacheExpiryAndPathTimeout(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	peer := ivnp.Hash{1}
+	peer := foundation.Hash{1}
 	remote := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 34567}
 	manager := &SSU2Manager{
 		bindings:      TransportBindings{Clock: fixedClock{now: now}},
@@ -126,7 +126,7 @@ func TestSSU2ManagerLiveEgressShutdownAndIOStats(t *testing.T) {
 	})
 	if err = manager.Start(ctx, TransportBindings{
 		SSU2: conn, LocalInfo: local, Clock: WallClock{},
-		HandleI2NPContext: func(context.Context, ivnp.Hash, i2np.Message, uint64, bool) error { return nil },
+		HandleI2NPContext: func(context.Context, foundation.Hash, i2np.Message, uint64, bool) error { return nil },
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -166,11 +166,11 @@ func TestSSU2ManagerLivePeerTestOrchestration(t *testing.T) {
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
 	charlie, charlieStatic, charlieIntro := newSSU2TestLocal(t, charlieConn.LocalAddr().String())
-	aliceDB, bobDB, charlieDB := netdb.NewDatabase(alice.Hash(), 16), netdb.NewDatabase(bob.Hash(), 16), netdb.NewDatabase(charlie.Hash(), 16)
+	aliceDB, bobDB, charlieDB := networkdatabase.NewDatabase(alice.Hash(), 16), networkdatabase.NewDatabase(bob.Hash(), 16), networkdatabase.NewDatabase(charlie.Hash(), 16)
 	now := uint64(time.Now().UnixMilli())
 	for _, admission := range []struct {
-		database *netdb.Database
-		info     netdb.RouterInfo
+		database *networkdatabase.Database
+		info     networkdatabase.RouterInfo
 	}{
 		{aliceDB, bob.Snapshot()}, {aliceDB, charlie.Snapshot()},
 		{bobDB, charlie.Snapshot()}, {charlieDB, alice.Snapshot()},
@@ -212,7 +212,7 @@ func TestSSU2ManagerLivePeerTestOrchestration(t *testing.T) {
 	} {
 		if err := start.manager.Start(ctx, TransportBindings{
 			SSU2: start.conn, LocalInfo: start.local, Clock: WallClock{},
-			HandleI2NPContext: func(context.Context, ivnp.Hash, i2np.Message, uint64, bool) error { return nil },
+			HandleI2NPContext: func(context.Context, foundation.Hash, i2np.Message, uint64, bool) error { return nil },
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -246,7 +246,7 @@ func TestSSU2DispatchShutdownCancelsContextAwareCallback(t *testing.T) {
 		dispatchQueues: []chan *ssu2DispatchBatch{queue},
 		bindings: TransportBindings{
 			Clock: fixedClock{now: time.Unix(1, 0)},
-			HandleI2NPContext: func(ctx context.Context, _ ivnp.Hash, _ i2np.Message, _ uint64, _ bool) error {
+			HandleI2NPContext: func(ctx context.Context, _ foundation.Hash, _ i2np.Message, _ uint64, _ bool) error {
 				close(entered)
 				<-ctx.Done()
 				return ctx.Err()
@@ -281,12 +281,12 @@ func TestSSU2LiveRelayTagLeasePublishesRenewsAndWithdraws(t *testing.T) {
 	bobConn := newSSU2LoopbackConn(t)
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
-	aliceDB := netdb.NewDatabase(alice.Hash(), 16)
-	bobDB := netdb.NewDatabase(bob.Hash(), 16)
+	aliceDB := networkdatabase.NewDatabase(alice.Hash(), 16)
+	bobDB := networkdatabase.NewDatabase(bob.Hash(), 16)
 	now := uint64(time.Now().UnixMilli())
 	for _, admission := range []struct {
-		database *netdb.Database
-		info     netdb.RouterInfo
+		database *networkdatabase.Database
+		info     networkdatabase.RouterInfo
 	}{
 		{aliceDB, bob.Snapshot()},
 		{bobDB, alice.Snapshot()},
@@ -347,12 +347,12 @@ func TestSSU2LiveNewTokenCacheSkipsRetryAndExpires(t *testing.T) {
 	t.Cleanup(proxy.Close)
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, proxy.conn.LocalAddr().String())
-	aliceDB := netdb.NewDatabase(alice.Hash(), 16)
-	bobDB := netdb.NewDatabase(bob.Hash(), 16)
+	aliceDB := networkdatabase.NewDatabase(alice.Hash(), 16)
+	bobDB := networkdatabase.NewDatabase(bob.Hash(), 16)
 	now := uint64(time.Now().UnixMilli())
 	for _, admission := range []struct {
-		database *netdb.Database
-		info     netdb.RouterInfo
+		database *networkdatabase.Database
+		info     networkdatabase.RouterInfo
 	}{
 		{aliceDB, bob.Snapshot()},
 		{bobDB, alice.Snapshot()},
@@ -420,12 +420,12 @@ func TestSSU2LivePathMigrationRejectsWrongSourceReplayAndTimeout(t *testing.T) {
 	t.Cleanup(proxy.Close)
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, proxy.primary.LocalAddr().String())
-	aliceDB := netdb.NewDatabase(alice.Hash(), 16)
-	bobDB := netdb.NewDatabase(bob.Hash(), 16)
+	aliceDB := networkdatabase.NewDatabase(alice.Hash(), 16)
+	bobDB := networkdatabase.NewDatabase(bob.Hash(), 16)
 	now := uint64(time.Now().UnixMilli())
 	for _, admission := range []struct {
-		database *netdb.Database
-		info     netdb.RouterInfo
+		database *networkdatabase.Database
+		info     networkdatabase.RouterInfo
 	}{
 		{aliceDB, bob.Snapshot()},
 		{bobDB, alice.Snapshot()},
@@ -505,7 +505,7 @@ func newSSU2LoopbackConn(t *testing.T) *net.UDPConn {
 	return conn
 }
 
-func newSSU2LiveManager(t *testing.T, database *netdb.Database, static, intro []byte, tokenLifetime, idleTimeout time.Duration) *SSU2Manager {
+func newSSU2LiveManager(t *testing.T, database *networkdatabase.Database, static, intro []byte, tokenLifetime, idleTimeout time.Duration) *SSU2Manager {
 	t.Helper()
 	manager, err := NewSSU2Manager(SSU2ManagerConfig{
 		Database: database, StaticPrivate: static, IntroKey: intro, TokenLifetime: tokenLifetime,
@@ -526,7 +526,7 @@ func startSSU2LiveManager(t *testing.T, ctx context.Context, manager *SSU2Manage
 
 	if err := manager.Start(ctx, TransportBindings{
 		SSU2: conn, LocalInfo: local, Clock: WallClock{},
-		HandleI2NPContext: func(_ context.Context, _ ivnp.Hash, message i2np.Message, now uint64, floodfill bool) error {
+		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message i2np.Message, now uint64, floodfill bool) error {
 			return handle(message, now, floodfill)
 		},
 	}); err != nil {
@@ -569,7 +569,7 @@ func ssu2LiveMessage(id uint32) i2np.Message {
 	}
 }
 
-func hasSSU2IntroducerOptions(info netdb.RouterInfo) bool {
+func hasSSU2IntroducerOptions(info networkdatabase.RouterInfo) bool {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -589,20 +589,20 @@ func hasSSU2IntroducerOptions(info netdb.RouterInfo) bool {
 	}
 }
 
-func liveSessionAbsent(manager *SSU2Manager, peer ivnp.Hash) bool {
+func liveSessionAbsent(manager *SSU2Manager, peer foundation.Hash) bool {
 	manager.mu.RLock()
 	defer manager.mu.RUnlock()
 	return manager.sessionsByPeer[peer] == nil
 }
 
-func liveSessionRemoteIs(manager *SSU2Manager, peer ivnp.Hash, remote *net.UDPAddr) bool {
+func liveSessionRemoteIs(manager *SSU2Manager, peer foundation.Hash, remote *net.UDPAddr) bool {
 	manager.mu.RLock()
 	session := manager.sessionsByPeer[peer]
 	manager.mu.RUnlock()
 	return session != nil && sameUDPAddress(session.remoteAddr(), remote)
 }
 
-func livePathCandidatePresent(manager *SSU2Manager, peer ivnp.Hash) bool {
+func livePathCandidatePresent(manager *SSU2Manager, peer foundation.Hash) bool {
 	manager.mu.RLock()
 	session := manager.sessionsByPeer[peer]
 	manager.mu.RUnlock()
@@ -614,7 +614,7 @@ func livePathCandidatePresent(manager *SSU2Manager, peer ivnp.Hash) bool {
 	return session.candidate != nil
 }
 
-func liveNewTokenPresent(manager *SSU2Manager, peer ivnp.Hash) bool {
+func liveNewTokenPresent(manager *SSU2Manager, peer foundation.Hash) bool {
 	manager.mu.RLock()
 	defer manager.mu.RUnlock()
 	for _, lease := range manager.newTokens {
@@ -807,12 +807,12 @@ func TestSSU2PeerTestOutOfSessionRolesRequireApprovedExactEndpoints(t *testing.T
 	now := time.Now()
 	alice, _, _ := newSSU2TestLocal(t, "127.0.0.1:31001")
 	charlie, _, _ := newSSU2TestLocal(t, "127.0.0.1:31002")
-	database := netdb.NewDatabase(alice.Hash(), 16)
+	database := networkdatabase.NewDatabase(alice.Hash(), 16)
 	if err := database.AdmitRouterInfo(charlie.Snapshot(), false, uint64(now.UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	state := &ssu2PeerTestState{
-		nonce: 41, alice: alice.Hash(), bob: ivnp.Hash{9}, expires: now.Add(time.Minute),
+		nonce: 41, alice: alice.Hash(), bob: foundation.Hash{9}, expires: now.Add(time.Minute),
 	}
 	callbacks := 0
 	manager := &SSU2Manager{
@@ -857,12 +857,12 @@ func TestSSU2PeerTestOutOfSessionRolesRequireApprovedExactEndpoints(t *testing.T
 	}
 
 	remoteAlice, _, _ := newSSU2TestLocal(t, "127.0.0.1:31004")
-	charlieDB := netdb.NewDatabase(charlie.Hash(), 16)
+	charlieDB := networkdatabase.NewDatabase(charlie.Hash(), 16)
 	if err := charlieDB.AdmitRouterInfo(remoteAlice.Snapshot(), false, uint64(now.UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	charlieState := &ssu2PeerTestState{
-		nonce: 42, alice: remoteAlice.Hash(), bob: ivnp.Hash{8}, charlie: charlie.Hash(), expires: now.Add(time.Minute),
+		nonce: 42, alice: remoteAlice.Hash(), bob: foundation.Hash{8}, charlie: charlie.Hash(), expires: now.Add(time.Minute),
 	}
 	charlieManager := &SSU2Manager{
 		database:  charlieDB,
@@ -889,14 +889,14 @@ func TestSSU2RelayTagDirectionsRenewPerPeerAndCapDistinctAdvertisements(t *testi
 		timeout:          time.Second,
 		tokenLifetime:    time.Minute,
 		bindings:         TransportBindings{Clock: fixedClock{now: now}},
-		introducers:      make(map[uint32]ivnp.Hash),
-		relayGrants:      make(map[ivnp.Hash]ssu2RelayTagLease),
-		advertisedRelays: make(map[ivnp.Hash]ssu2RelayTagLease),
-		relayTagPending:  make(map[ivnp.Hash]time.Time),
-		sessionsByPeer:   make(map[ivnp.Hash]*ssu2TransportSession),
+		introducers:      make(map[uint32]foundation.Hash),
+		relayGrants:      make(map[foundation.Hash]ssu2RelayTagLease),
+		advertisedRelays: make(map[foundation.Hash]ssu2RelayTagLease),
+		relayTagPending:  make(map[foundation.Hash]time.Time),
+		sessionsByPeer:   make(map[foundation.Hash]*ssu2TransportSession),
 		sessionsByID:     make(map[uint64]*ssu2TransportSession),
 	}
-	grantPeer := ivnp.Hash{1}
+	grantPeer := foundation.Hash{1}
 	manager.relayGrants[grantPeer] = ssu2RelayTagLease{peer: grantPeer, tag: 11, expires: now.Add(time.Second)}
 	manager.introducers[11] = grantPeer
 	manager.handleRelayTagRequest(&ssu2TransportSession{peer: grantPeer})
@@ -908,14 +908,14 @@ func TestSSU2RelayTagDirectionsRenewPerPeerAndCapDistinctAdvertisements(t *testi
 	}
 
 	for index := range ssu2RelayTarget {
-		peer := ivnp.Hash{byte(index + 2)}
+		peer := foundation.Hash{byte(index + 2)}
 		manager.relayTagPending[peer] = now.Add(time.Second)
 		manager.handleRelayTag(&ssu2TransportSession{peer: peer}, ssu2.RelayTag{Tag: uint32(20 + index), Expiration: uint32(now.Add(30 * time.Second).Unix())})
 	}
 	if len(manager.advertisedRelays) != ssu2RelayTarget {
 		t.Fatalf("advertised introducers = %d, want exactly %d distinct peers", len(manager.advertisedRelays), ssu2RelayTarget)
 	}
-	renewPeer := ivnp.Hash{2}
+	renewPeer := foundation.Hash{2}
 	manager.relayTagPending[renewPeer] = now.Add(time.Second)
 	manager.handleRelayTag(&ssu2TransportSession{peer: renewPeer}, ssu2.RelayTag{Tag: 99, Expiration: uint32(now.Add(40 * time.Second).Unix())})
 	if len(manager.advertisedRelays) != ssu2RelayTarget || manager.advertisedRelays[renewPeer].tag != 99 {
@@ -925,7 +925,7 @@ func TestSSU2RelayTagDirectionsRenewPerPeerAndCapDistinctAdvertisements(t *testi
 	if manager.advertisedRelays[renewPeer].tag != 99 {
 		t.Fatal("unsolicited RelayTag replaced a directionally requested lease")
 	}
-	extra := ivnp.Hash{9}
+	extra := foundation.Hash{9}
 	manager.relayTagPending[extra] = now.Add(time.Second)
 	manager.handleRelayTag(&ssu2TransportSession{peer: extra}, ssu2.RelayTag{Tag: 100, Expiration: uint32(now.Add(40 * time.Second).Unix())})
 	if _, accepted := manager.advertisedRelays[extra]; accepted || len(manager.advertisedRelays) != ssu2RelayTarget {
@@ -948,14 +948,14 @@ func TestSSU2RelayPublicationWorkerRetriesToExactSnapshot(t *testing.T) {
 	})
 	if err = manager.Start(ctx, TransportBindings{
 		SSU2: conn, LocalInfo: flaky, Clock: WallClock{},
-		HandleI2NPContext: func(context.Context, ivnp.Hash, i2np.Message, uint64, bool) error { return nil },
+		HandleI2NPContext: func(context.Context, foundation.Hash, i2np.Message, uint64, bool) error { return nil },
 	}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
 	manager.mu.Lock()
 	for index := range ssu2RelayTarget {
-		peer := ivnp.Hash{byte(index + 1)}
+		peer := foundation.Hash{byte(index + 1)}
 		manager.advertisedRelays[peer] = ssu2RelayTagLease{peer: peer, tag: uint32(70 + index), expires: now.Add(time.Minute)}
 	}
 	manager.relayRevision++
@@ -991,11 +991,11 @@ func TestSSU2NewTokenCacheIsBoundedReplacesAndClears(t *testing.T) {
 		newTokens:      make(map[string]ssu2NewTokenLease),
 		peerTests:      make(map[uint32]*ssu2PeerTestState),
 		sessionsByID:   make(map[uint64]*ssu2TransportSession),
-		sessionsByPeer: make(map[ivnp.Hash]*ssu2TransportSession),
+		sessionsByPeer: make(map[foundation.Hash]*ssu2TransportSession),
 	}
 	expiration := uint32(now.Add(30 * time.Minute).Unix())
 	for index := range ssu2MaxNewTokens + 32 {
-		peer := ivnp.Hash{byte(index), byte(index >> 8)}
+		peer := foundation.Hash{byte(index), byte(index >> 8)}
 		remote := net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(10000+index)))
 		session := &ssu2TransportSession{peer: peer, remote: remote, sendID: uint64(index + 1)}
 		manager.storeNewToken(session, ssu2.NewToken{Token: uint64(index + 10), Expiration: expiration})
@@ -1003,7 +1003,7 @@ func TestSSU2NewTokenCacheIsBoundedReplacesAndClears(t *testing.T) {
 	if len(manager.newTokens) != ssu2MaxNewTokens {
 		t.Fatalf("NewToken cache size = %d, want %d", len(manager.newTokens), ssu2MaxNewTokens)
 	}
-	peer := ivnp.Hash{7}
+	peer := foundation.Hash{7}
 	remote := net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:25000"))
 	first := &ssu2TransportSession{peer: peer, remote: remote, sendID: 9001}
 	second := &ssu2TransportSession{peer: peer, remote: remote, sendID: 9002}
@@ -1056,7 +1056,7 @@ func TestSSU2RelayPermutationRandomizesOnlyIndependentFlows(t *testing.T) {
 
 func TestSSU2PeerTestControlUsesBoundedRelayMixingClass(t *testing.T) {
 	peer, _, _ := newSSU2TestLocal(t, "127.0.0.1:31020")
-	database := netdb.NewDatabase(ivnp.Hash{1}, 4)
+	database := networkdatabase.NewDatabase(foundation.Hash{1}, 4)
 	now := time.Now()
 	if err := database.AdmitRouterInfo(peer.Snapshot(), false, uint64(now.UnixMilli())); err != nil {
 		t.Fatal(err)

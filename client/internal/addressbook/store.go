@@ -1,6 +1,6 @@
 package addressbook
 
-import state "gosuda.org/ivnp/state"
+import "gosuda.org/ivnp/state"
 
 import (
 	"encoding/json"

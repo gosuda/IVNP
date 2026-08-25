@@ -1,12 +1,12 @@
 package sam
 
-import networking "gosuda.org/ivnp/networking"
+import "gosuda.org/ivnp/networking"
 
 import (
 	"encoding/base32"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
-	clientapi "gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/ingress"
 
 	"io"
@@ -85,7 +85,7 @@ func (s *Server) handleSend(connection *serverConnection, cmd command) error {
 	return connection.writeLine(cmd.verb + " STATUS RESULT=OK")
 }
 
-func (s *samSession) receiveLoop(subscription clientapi.MessageSubscription) {
+func (s *samSession) receiveLoop(subscription destination.MessageSubscription) {
 	defer func() {
 		if value := recover(); value != nil {
 			_ = ingress.Report(value, s.server.config.PanicReporter, ingress.BoundarySAMWorker, s.control.RemoteAddr())
@@ -115,7 +115,7 @@ func (s *samSession) receiveLoop(subscription clientapi.MessageSubscription) {
 				if verifyErr != nil || !valid || packet.V1.From.Hash() != delivery.From {
 					return
 				}
-				source := ivnp.EncodeI2PBase64(packet.V1.From.Bytes())
+				source := foundation.EncodeI2PBase64(packet.V1.From.Bytes())
 				if s.udpTarget != nil {
 					header := fmt.Sprintf("%s\nFROM_PORT=%d\nTO_PORT=%d\n\n", source, delivery.FromPort, delivery.ToPort)
 					wire := make([]byte, len(header)+len(packet.V1.Payload))
@@ -149,11 +149,11 @@ func (s *samSession) receiveLoop(subscription clientapi.MessageSubscription) {
 	}
 }
 
-func destinationHash(value string) (ivnp.Hash, error) {
-	if identity, err := ivnp.ParseDestination([]byte(value)); err == nil {
+func destinationHash(value string) (foundation.Hash, error) {
+	if identity, err := foundation.ParseDestination([]byte(value)); err == nil {
 		return identity.Hash(), nil
 	}
-	var hash ivnp.Hash
+	var hash foundation.Hash
 	lower := strings.ToLower(value)
 	if !strings.HasSuffix(lower, ".b32.i2p") {
 		return hash, ErrProtocol

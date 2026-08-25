@@ -2,46 +2,46 @@
 package state
 
 import (
-	configurationinternal "gosuda.org/ivnp/state/internal/configuration"
-	filesystemstoreinternal "gosuda.org/ivnp/state/internal/filesystem_store"
-	securestateinternal "gosuda.org/ivnp/state/internal/secure_store"
+	"gosuda.org/ivnp/state/internal/configuration"
+	"gosuda.org/ivnp/state/internal/filesystem_store"
+	"gosuda.org/ivnp/state/internal/secure_store"
 )
 
 type (
-	ConfigurationAddressBook              = configurationinternal.AddressBook
-	ConfigurationEndpoint                 = configurationinternal.Endpoint
-	ConfigurationListener                 = configurationinternal.Listener
-	ConfigurationLog                      = configurationinternal.Log
-	ConfigurationNetDB                    = configurationinternal.NetDB
-	ConfigurationNetwork                  = configurationinternal.Network
-	ConfigurationOperating                = configurationinternal.Operating
-	ConfigurationReseed                   = configurationinternal.Reseed
-	ConfigurationRouter                   = configurationinternal.Router
-	ConfigurationState                    = configurationinternal.State
-	ConfigurationTransport                = configurationinternal.Transport
-	ConfigurationTunnel                   = configurationinternal.Tunnel
-	SecureStateBundle                     = securestateinternal.Bundle
-	SecureStateEncryptedLeaseSetPolicy    = securestateinternal.EncryptedLeaseSetPolicy
-	SecureStateLock                       = securestateinternal.Lock
-	SecureStateRemoteELSAuthorization     = securestateinternal.RemoteELSAuthorization
-	SecureStateRemoteELSAuthorizationKind = securestateinternal.RemoteELSAuthorizationKind
-	SecureStateStore                      = securestateinternal.Store
+	ConfigurationAddressBook              = configuration.AddressBook
+	ConfigurationEndpoint                 = configuration.Endpoint
+	ConfigurationListener                 = configuration.Listener
+	ConfigurationLog                      = configuration.Log
+	ConfigurationNetDB                    = configuration.NetDB
+	ConfigurationNetwork                  = configuration.Network
+	ConfigurationOperating                = configuration.Operating
+	ConfigurationReseed                   = configuration.Reseed
+	ConfigurationRouter                   = configuration.Router
+	ConfigurationState                    = configuration.State
+	ConfigurationTransport                = configuration.Transport
+	ConfigurationTunnel                   = configuration.Tunnel
+	SecureStateBundle                     = securestore.Bundle
+	SecureStateEncryptedLeaseSetPolicy    = securestore.EncryptedLeaseSetPolicy
+	SecureStateLock                       = securestore.Lock
+	SecureStateRemoteELSAuthorization     = securestore.RemoteELSAuthorization
+	SecureStateRemoteELSAuthorizationKind = securestore.RemoteELSAuthorizationKind
+	SecureStateStore                      = securestore.Store
 )
 
 const (
-	SecureStateRemoteELSAuthorizationDH   = securestateinternal.RemoteELSAuthorizationDH
-	SecureStateRemoteELSAuthorizationNone = securestateinternal.RemoteELSAuthorizationNone
-	SecureStateRemoteELSAuthorizationPSK  = securestateinternal.RemoteELSAuthorizationPSK
+	SecureStateRemoteELSAuthorizationDH   = securestore.RemoteELSAuthorizationDH
+	SecureStateRemoteELSAuthorizationNone = securestore.RemoteELSAuthorizationNone
+	SecureStateRemoteELSAuthorizationPSK  = securestore.RemoteELSAuthorizationPSK
 )
 
 var (
-	ConfigurationErrInvalidOperating   = configurationinternal.ErrInvalidOperating
-	ConfigurationLoadOperating         = configurationinternal.LoadOperating
-	ConfigurationLoadOrCreateOperating = configurationinternal.LoadOrCreateOperating
-	ConfigurationParseOperating        = configurationinternal.ParseOperating
-	FilesystemStoreOpenRegular         = filesystemstoreinternal.OpenRegular
-	FilesystemStoreReadBoundedFile     = filesystemstoreinternal.ReadBoundedFile
-	FilesystemStoreWriteAtomic         = filesystemstoreinternal.WriteAtomic
-	SecureStateErrStateLocked          = securestateinternal.ErrStateLocked
-	SecureStateNewStore                = securestateinternal.NewStore
+	ConfigurationErrInvalidOperating   = configuration.ErrInvalidOperating
+	ConfigurationLoadOperating         = configuration.LoadOperating
+	ConfigurationLoadOrCreateOperating = configuration.LoadOrCreateOperating
+	ConfigurationParseOperating        = configuration.ParseOperating
+	FilesystemStoreOpenRegular         = filesystemstore.OpenRegular
+	FilesystemStoreReadBoundedFile     = filesystemstore.ReadBoundedFile
+	FilesystemStoreWriteAtomic         = filesystemstore.WriteAtomic
+	SecureStateErrStateLocked          = securestore.ErrStateLocked
+	SecureStateNewStore                = securestore.NewStore
 )

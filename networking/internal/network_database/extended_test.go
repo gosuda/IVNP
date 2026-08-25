@@ -1,9 +1,9 @@
-package netdb
+package networkdatabase
 
 import (
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
 	"testing"
 )
@@ -33,9 +33,9 @@ func TestMetaLeaseSetBoundsAndFlags(t *testing.T) {
 }
 
 func TestEncryptedLeaseSetLengthValidation(t *testing.T) {
-	keyLen, _ := ivnp.SigningDSASHA1.PublicKeyLen()
+	keyLen, _ := foundation.SigningDSASHA1.PublicKeyLen()
 	payload := make([]byte, 2+keyLen+4+2+2+2+1+40)
-	binary.BigEndian.PutUint16(payload[:2], uint16(ivnp.SigningDSASHA1))
+	binary.BigEndian.PutUint16(payload[:2], uint16(foundation.SigningDSASHA1))
 	offset := 2 + keyLen + 4 + 2 + 2
 	binary.BigEndian.PutUint16(payload[offset:offset+2], 1)
 	offset += 2

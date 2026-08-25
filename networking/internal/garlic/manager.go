@@ -4,8 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 	"io"
 	"sync"
@@ -72,7 +72,7 @@ type SessionManager struct {
 
 type sessionManagerShard struct {
 	mu       sync.Mutex
-	peers    map[ivnp.Hash]*outboundPeer
+	peers    map[foundation.Hash]*outboundPeer
 	maxPeers int
 }
 
@@ -121,7 +121,7 @@ func NewSessionManager(config SessionManagerConfig) *SessionManager {
 		tagLifetime: config.TagLifetime, random: config.Random,
 	}
 	for index := range manager.shards {
-		manager.shards[index] = sessionManagerShard{peers: make(map[ivnp.Hash]*outboundPeer), maxPeers: peersPerShard}
+		manager.shards[index] = sessionManagerShard{peers: make(map[foundation.Hash]*outboundPeer), maxPeers: peersPerShard}
 	}
 	return manager
 }
@@ -134,7 +134,7 @@ func (m *SessionManager) InboundTags() *TagStore {
 	}
 	return m.inbound
 }
-func (m *SessionManager) peerShard(peer ivnp.Hash) *sessionManagerShard {
+func (m *SessionManager) peerShard(peer foundation.Hash) *sessionManagerShard {
 	return &m.shards[binary.LittleEndian.Uint64(peer[:8])%uint64(len(m.shards))]
 }
 
@@ -143,7 +143,7 @@ func (m *SessionManager) peerShard(peer ivnp.Hash) *sessionManagerShard {
 // starts a new ElGamal session. Tags delivered by this packet remain pending
 // until ConfirmOutboundTags records transport confirmation. The returned packet
 // aliases dst.
-func (m *SessionManager) Encrypt(dst []byte, peer ivnp.Hash, recipient cryptx.ElGamalPublicKey, payload []byte, now uint64) ([]byte, error) {
+func (m *SessionManager) Encrypt(dst []byte, peer foundation.Hash, recipient cryptography.ElGamalPublicKey, payload []byte, now uint64) ([]byte, error) {
 	if m == nil {
 		return nil, ErrSessionManagerClosed
 	}
@@ -208,7 +208,7 @@ func (m *SessionManager) Encrypt(dst []byte, peer ivnp.Hash, recipient cryptx.El
 // session and decrypts it into dst. A matching existing tag is consumed before
 // decryption and is never retried as new-session input, even if CBC validation
 // fails. payload and deliveredTags alias dst.
-func (m *SessionManager) Receive(dst, packet []byte, private cryptx.ElGamalPrivateKey, now uint64) (payload, deliveredTags []byte, isNew bool, err error) {
+func (m *SessionManager) Receive(dst, packet []byte, private cryptography.ElGamalPrivateKey, now uint64) (payload, deliveredTags []byte, isNew bool, err error) {
 	if m == nil {
 		return nil, nil, false, ErrSessionManagerClosed
 	}
@@ -272,7 +272,7 @@ func (m *SessionManager) Expire(now uint64) int {
 // confirmed pool. Call it only after the transport confirms delivery of the
 // packet(s) that carried those tags. It returns the number of promoted tags.
 // Pending and confirmed tags share MaxTagsPerPeer capacity.
-func (m *SessionManager) ConfirmOutboundTags(peer ivnp.Hash, now uint64) int {
+func (m *SessionManager) ConfirmOutboundTags(peer foundation.Hash, now uint64) int {
 	if m == nil {
 		return 0
 	}
@@ -346,7 +346,7 @@ func (m *SessionManager) installInbound(tags []byte, key [32]byte, now uint64) {
 	}
 }
 
-func (m *SessionManager) releaseReserved(shard *sessionManagerShard, peer ivnp.Hash, tag [32]byte, reserved bool) {
+func (m *SessionManager) releaseReserved(shard *sessionManagerShard, peer foundation.Hash, tag [32]byte, reserved bool) {
 	if !reserved {
 		return
 	}
@@ -374,7 +374,7 @@ func (m *SessionManager) expiresAt(now uint64) uint64 {
 	return now + m.tagLifetime
 }
 
-func (m *SessionManager) installPendingOutboundLocked(shard *sessionManagerShard, peer ivnp.Hash, key [32]byte, tags []byte, expires uint64) {
+func (m *SessionManager) installPendingOutboundLocked(shard *sessionManagerShard, peer foundation.Hash, key [32]byte, tags []byte, expires uint64) {
 	state := shard.peers[peer]
 	if state == nil {
 		if len(shard.peers) >= shard.maxPeers && !m.evictPeerLocked(shard) {
@@ -440,7 +440,7 @@ func (m *SessionManager) expireOutboundShardLocked(shard *sessionManagerShard, n
 }
 
 func (m *SessionManager) evictPeerLocked(shard *sessionManagerShard) bool {
-	var oldestPeer ivnp.Hash
+	var oldestPeer foundation.Hash
 	var oldest uint64 = ^uint64(0)
 	found := false
 	for peer, state := range shard.peers {

@@ -2,7 +2,7 @@ package ssu2
 
 import (
 	"encoding/binary"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
 )
 
@@ -91,7 +91,7 @@ func ParseHolePunch(packet, introKey []byte) (LongHeader, []byte, error) {
 }
 
 func buildOutOfSession(dst, introKey []byte, header LongHeader, payload []byte) ([]byte, error) {
-	if len(introKey) != cryptx.ChaChaKeySize || header.DestinationID == 0 || header.SourceID == 0 || SameConnectionID(header.DestinationID, header.SourceID) || !validOutOfSessionPayload(header.Type, payload) {
+	if len(introKey) != cryptography.ChaChaKeySize || header.DestinationID == 0 || header.SourceID == 0 || SameConnectionID(header.DestinationID, header.SourceID) || !validOutOfSessionPayload(header.Type, payload) {
 		return nil, ErrHandshake
 	}
 	switch header.Type {
@@ -109,9 +109,9 @@ func buildOutOfSession(dst, introKey []byte, header LongHeader, payload []byte) 
 	if err := header.MarshalTo(dst[:LongHeaderLen]); err != nil {
 		return nil, err
 	}
-	var nonce [cryptx.ChaChaNonceSize]byte
+	var nonce [cryptography.ChaChaNonceSize]byte
 	binary.LittleEndian.PutUint64(nonce[4:], uint64(header.PacketNumber))
-	aead, err := cryptx.NewChaCha20Poly1305(introKey)
+	aead, err := cryptography.NewChaCha20Poly1305(introKey)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func buildOutOfSession(dst, introKey []byte, header LongHeader, payload []byte) 
 }
 
 func parseOutOfSession(packet, introKey []byte, expected PacketType) (LongHeader, []byte, error) {
-	if len(packet) < LongHeaderLen+PacketTagLen+8 || len(packet) > MaxIPv4PacketLen || len(introKey) != cryptx.ChaChaKeySize {
+	if len(packet) < LongHeaderLen+PacketTagLen+8 || len(packet) > MaxIPv4PacketLen || len(introKey) != cryptography.ChaChaKeySize {
 		return LongHeader{}, nil, ErrHandshake
 	}
 	if err := ProtectHeader(packet, introKey, introKey, 0); err != nil {
@@ -150,9 +150,9 @@ func parseOutOfSession(packet, introKey []byte, expected PacketType) (LongHeader
 	default:
 		return LongHeader{}, nil, ErrHandshake
 	}
-	var nonce [cryptx.ChaChaNonceSize]byte
+	var nonce [cryptography.ChaChaNonceSize]byte
 	binary.LittleEndian.PutUint64(nonce[4:], uint64(header.PacketNumber))
-	aead, err := cryptx.NewChaCha20Poly1305(introKey)
+	aead, err := cryptography.NewChaCha20Poly1305(introKey)
 	if err != nil {
 		return LongHeader{}, nil, err
 	}
@@ -244,8 +244,8 @@ func maskHeaderExtension(extension, introKey []byte) error {
 	if len(extension) != 16 {
 		return ErrHandshake
 	}
-	var nonce [cryptx.ChaChaNonceSize]byte
-	stream, err := cryptx.NewChaCha20Stream(introKey, nonce[:])
+	var nonce [cryptography.ChaChaNonceSize]byte
+	stream, err := cryptography.NewChaCha20Stream(introKey, nonce[:])
 	if err != nil {
 		return err
 	}

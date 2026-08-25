@@ -1,11 +1,11 @@
-package netdb
+package networkdatabase
 
 import (
 	"bytes"
 	"compress/gzip"
 	"encoding/hex"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/pool"
 	"testing"
 )
@@ -28,14 +28,14 @@ func TestRoutingKeyMatchesI2PDUTCDateTransform(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := RoutingKey(ivnp.Hash{}, 1_787_529_600_000)
+	got := RoutingKey(foundation.Hash{}, 1_787_529_600_000)
 	if !bytes.Equal(got[:], want) {
 		t.Fatalf("routing key = %x, want %x", got, want)
 	}
 }
 
 func TestInflateRouterInfoExactBoundary(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	exact := make([]byte, MaxRouterInfoBytes)
 	inflated, err := database.inflateRouterInfo(gzipBytes(t, exact))
 	if err != nil || len(inflated) != MaxRouterInfoBytes {

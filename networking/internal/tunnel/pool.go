@@ -2,7 +2,7 @@ package tunnel
 
 import (
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"sort"
 	"sync"
@@ -31,15 +31,15 @@ type Entry struct {
 	Expires   uint64
 	// Owner is immutable creator identity. A zero owner is reserved for
 	// router exploratory/transit creator circuits.
-	Owner ivnp.Hash
+	Owner foundation.Hash
 	// Gateway and GatewayTunnelID identify the first hop of an inbound tunnel
 	// and its receive-tunnel namespace. ID remains the creator's local circuit.
-	Gateway         ivnp.Hash
+	Gateway         foundation.Hash
 	GatewayTunnelID uint32
 	// Hops is immutable creator-path metadata used only by bounded health
 	// accounting. It avoids retaining a caller-owned slice in the pool.
 	HopCount uint8
-	Hops     [i2np.MaxVariableBuildRecords]ivnp.Hash
+	Hops     [i2np.MaxVariableBuildRecords]foundation.Hash
 }
 
 // Pool owns bounded active tunnel metadata. Transport delivery and tunnel
@@ -47,15 +47,15 @@ type Entry struct {
 type Pool struct {
 	mu      sync.RWMutex
 	max     int
-	owner   ivnp.Hash
+	owner   foundation.Hash
 	tunnels map[uint32]Entry
 }
 
-func NewPool(max int) *Pool { return NewOwnedPool(ivnp.Hash{}, max) }
+func NewPool(max int) *Pool { return NewOwnedPool(foundation.Hash{}, max) }
 
 // NewOwnedPool creates one creator-only pool. A nonzero owner denotes a local
 // Destination; zero is the separate router exploratory owner.
-func NewOwnedPool(owner ivnp.Hash, max int) *Pool {
+func NewOwnedPool(owner foundation.Hash, max int) *Pool {
 	if max <= 0 {
 		max = 64
 	}
@@ -63,9 +63,9 @@ func NewOwnedPool(owner ivnp.Hash, max int) *Pool {
 }
 
 // Owner is immutable for the life of a pool.
-func (p *Pool) Owner() ivnp.Hash {
+func (p *Pool) Owner() foundation.Hash {
 	if p == nil {
-		return ivnp.Hash{}
+		return foundation.Hash{}
 	}
 	return p.owner
 }

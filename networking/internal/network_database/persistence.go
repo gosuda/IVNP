@@ -1,13 +1,13 @@
-package netdb
+package networkdatabase
 
-import state "gosuda.org/ivnp/state"
+import "gosuda.org/ivnp/state"
 
 import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 
 	"os"
 	"sync"
@@ -15,7 +15,7 @@ import (
 
 const (
 	routerSnapshotVersion = uint16(1)
-	routerSnapshotHeader  = 8 + 2 + 4 + ivnp.HashLength + 4
+	routerSnapshotHeader  = 8 + 2 + 4 + foundation.HashLength + 4
 	routerSnapshotDigest  = sha256.Size
 )
 
@@ -34,7 +34,7 @@ type RouterInfoStore struct {
 	path      string
 	database  *Database
 	networkID uint32
-	local     ivnp.Hash
+	local     foundation.Hash
 	max       int
 
 	mu              sync.Mutex
@@ -114,10 +114,10 @@ func (s *RouterInfoStore) Load(nowMillis uint64) (RouterInfoLoadResult, error) {
 }
 
 func (s *RouterInfoStore) loadLocked(data []byte, nowMillis uint64) (RouterInfoLoadResult, error) {
-	if len(data) < routerSnapshotHeader || !bytes.Equal(data[:8], routerSnapshotMagic[:]) || binary.BigEndian.Uint16(data[8:10]) != routerSnapshotVersion || binary.BigEndian.Uint32(data[10:14]) != s.networkID || !bytes.Equal(data[14:14+ivnp.HashLength], s.local[:]) {
+	if len(data) < routerSnapshotHeader || !bytes.Equal(data[:8], routerSnapshotMagic[:]) || binary.BigEndian.Uint16(data[8:10]) != routerSnapshotVersion || binary.BigEndian.Uint32(data[10:14]) != s.networkID || !bytes.Equal(data[14:14+foundation.HashLength], s.local[:]) {
 		return RouterInfoLoadResult{}, ErrRouterSnapshotHeader
 	}
-	count := int(binary.BigEndian.Uint32(data[14+ivnp.HashLength : routerSnapshotHeader]))
+	count := int(binary.BigEndian.Uint32(data[14+foundation.HashLength : routerSnapshotHeader]))
 	if count > s.max {
 		return RouterInfoLoadResult{}, ErrRouterSnapshotOverflow
 	}
@@ -201,8 +201,8 @@ func (s *RouterInfoStore) encode(peers []RouterRef) ([]byte, error) {
 	copy(data[:8], routerSnapshotMagic[:])
 	binary.BigEndian.PutUint16(data[8:10], routerSnapshotVersion)
 	binary.BigEndian.PutUint32(data[10:14], s.networkID)
-	copy(data[14:14+ivnp.HashLength], s.local[:])
-	binary.BigEndian.PutUint32(data[14+ivnp.HashLength:routerSnapshotHeader], uint32(len(peers)))
+	copy(data[14:14+foundation.HashLength], s.local[:])
+	binary.BigEndian.PutUint32(data[14+foundation.HashLength:routerSnapshotHeader], uint32(len(peers)))
 	cursor := routerSnapshotHeader
 	for _, peer := range peers {
 		wire := peer.Info.Bytes()

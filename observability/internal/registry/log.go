@@ -1,6 +1,6 @@
 // Package observability provides bounded, secret-safe logging, metrics, and
 // status endpoints for IVNP processes.
-package observability
+package registry
 
 import "cmp"
 

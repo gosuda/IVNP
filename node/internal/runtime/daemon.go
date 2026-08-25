@@ -1,11 +1,11 @@
-// Package daemon composes IVNP's durable state, native router runtime, and local services.
-package daemon
+// Package noderuntime composes IVNP's durable state, native router runtime, and local services.
+package noderuntime
 
-import state "gosuda.org/ivnp/state"
+import "gosuda.org/ivnp/state"
 
-import client "gosuda.org/ivnp/client"
+import "gosuda.org/ivnp/client"
 
-import networking "gosuda.org/ivnp/networking"
+import "gosuda.org/ivnp/networking"
 
 import "cmp"
 
@@ -17,7 +17,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/internal/parallelism"
 
@@ -155,7 +155,7 @@ type Status struct {
 // exploratory/transit components are intentionally not retained here.
 type destinationRuntime struct {
 	name              string
-	local             *ivnp.LocalDestination
+	local             *foundation.LocalDestination
 	ratchet           *networking.GarlicRatchetManager
 	pool              *networking.TunnelPool
 	profiles          *networking.TunnelPeerProfiles
@@ -254,7 +254,7 @@ func (r *destinationRuntime) maintain(ctx context.Context, now uint64) error {
 		result = errors.Join(result, err)
 		if err == nil && r.maintainer != nil {
 			if pair, ok := r.maintainer.Pair(now); ok && pair.PeerCount != 0 {
-				_, err = r.health.Probe(ctx, pair, ivnp.Hash{})
+				_, err = r.health.Probe(ctx, pair, foundation.Hash{})
 				if !errors.Is(err, networking.TunnelErrProbePending) && !errors.Is(err, networking.TunnelErrProbeNotReady) {
 					result = errors.Join(result, err)
 				}
@@ -403,7 +403,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			bundle.DestinationPrivate = make(map[string][]byte)
 		}
 		migrated := false
-		legacyHashes := make(map[ivnp.Hash]string, len(bundle.Destinations))
+		legacyHashes := make(map[foundation.Hash]string, len(bundle.Destinations))
 		for name, address := range bundle.Destinations {
 			if previous, exists := legacyHashes[address.Hash]; exists {
 				return nil, fmt.Errorf("%w: %q and %q", ErrDuplicateDestination, previous, name)
@@ -411,7 +411,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			legacyHashes[address.Hash] = name
 		}
 		for name := range bundle.Destinations {
-			local, localErr := ivnp.GenerateLocalDestination()
+			local, localErr := foundation.GenerateLocalDestination()
 			if localErr != nil {
 				return nil, localErr
 			}
@@ -425,7 +425,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			migrated = true
 		}
 		if len(bundle.DestinationPrivate) == 0 {
-			local, localErr := ivnp.GenerateLocalDestination()
+			local, localErr := foundation.GenerateLocalDestination()
 			if localErr != nil {
 				return nil, localErr
 			}
@@ -455,7 +455,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 	if _, loadErr := netdbStore.Load(uint64(clock.Now().UnixMilli())); loadErr != nil {
 		logger.Warn("ignoring invalid NetDB router snapshot", "path", netdbStore.Path(), "error", loadErr)
 	}
-	var bootstrapPeers []ivnp.Hash
+	var bootstrapPeers []foundation.Hash
 	if len(cfg.NetDB.BootstrapRouterInfoPaths) != 0 {
 		loadedPeers, loadErr := networking.NetworkDatabaseLoadStaticRouterInfos(cfg.NetDB.BootstrapRouterInfoPaths, database, uint64(clock.Now().UnixMilli()))
 		if loadErr != nil {
@@ -614,9 +614,9 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		if len(bundle.DestinationPrivate) > 64 {
 			return nil, ErrTooManyDestinations
 		}
-		seenDestinations := make(map[ivnp.Hash]string, len(bundle.DestinationPrivate))
+		seenDestinations := make(map[foundation.Hash]string, len(bundle.DestinationPrivate))
 		for name, encoded := range bundle.DestinationPrivate {
-			destination, importErr := ivnp.ImportLocalDestination(encoded)
+			destination, importErr := foundation.ImportLocalDestination(encoded)
 			if importErr != nil {
 				return nil, importErr
 			}
@@ -722,13 +722,13 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			now: now, clockNow: clock.Now, garlicReceiver: garlicReceiver, status: statusMux,
 			buildReplies: buildReplies, requests: requestHandlers, publishers: destinationPublishers,
 			publicationTokens: publicationTokens,
-			preferredPeers:    append([]ivnp.Hash(nil), bootstrapPeers...),
+			preferredPeers:    append([]foundation.Hash(nil), bootstrapPeers...),
 			responders:        responders,
 			metrics:           registry,
 			logger:            logger,
 		}
 		for name, encoded := range bundle.DestinationPrivate {
-			destination, importErr := ivnp.ImportLocalDestination(encoded)
+			destination, importErr := foundation.ImportLocalDestination(encoded)
 			if importErr != nil {
 				return nil, importErr
 			}
@@ -769,14 +769,14 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		StreamBackend: destinations, Destinations: destinations, Tunnels: tunnels, BuildManager: buildManager,
 		ClientBuildReplies: buildReplies, RequestHandler: requestHandlers,
 		LookupResponder: lookupResponder, DeliveryStatusMux: statusMux, TunnelTest: tunnelTest, GarlicReceiver: garlicReceiver,
-		RouterDelivery: func(target ivnp.Hash, message networking.I2NPMessage) error {
-			if target == (ivnp.Hash{}) || target == bundle.Router.Hash {
+		RouterDelivery: func(target foundation.Hash, message networking.I2NPMessage) error {
+			if target == (foundation.Hash{}) || target == bundle.Router.Hash {
 				return networking.RouterErrDataPlaneConfig
 			}
 			return mux.Send(context.Background(), target, message)
 		},
-		TunnelDelivery: func(target ivnp.Hash, tunnelID uint32, message networking.I2NPMessage) error {
-			if target == (ivnp.Hash{}) || tunnelID == 0 {
+		TunnelDelivery: func(target foundation.Hash, tunnelID uint32, message networking.I2NPMessage) error {
+			if target == (foundation.Hash{}) || tunnelID == 0 {
 				return networking.RouterErrDataPlaneConfig
 			}
 			if target == bundle.Router.Hash {
@@ -1267,7 +1267,7 @@ func (d *Daemon) maintainTunnelHealth(now uint64) {
 	if !ok || pair.PeerCount == 0 {
 		return
 	}
-	if _, err := d.tunnelHealth.Probe(d.ctx, pair, ivnp.Hash{}); err != nil && !errors.Is(err, networking.TunnelErrProbePending) && !errors.Is(err, networking.TunnelErrProbeNotReady) && d.ctx.Err() == nil {
+	if _, err := d.tunnelHealth.Probe(d.ctx, pair, foundation.Hash{}); err != nil && !errors.Is(err, networking.TunnelErrProbePending) && !errors.Is(err, networking.TunnelErrProbeNotReady) && d.ctx.Err() == nil {
 		d.recordMaintenanceError(err)
 	}
 }
@@ -1574,7 +1574,7 @@ func (d *Daemon) ClientStatus(context.Context) (client.ClientStatus, error) {
 	return client.ClientStatus{
 		Ready:      status.Running && snapshot.Bootstrap.Stage >= 4,
 		State:      routerStateString(status.Router.State),
-		RouterHash: ivnp.EncodeI2PBase64(routerHash[:]),
+		RouterHash: foundation.EncodeI2PBase64(routerHash[:]),
 		Readiness:  readiness,
 	}, status.Error
 }
@@ -1610,7 +1610,7 @@ func (d *Daemon) ListDestinations(context.Context) ([]client.ClientDestination, 
 	d.mu.Unlock()
 	items := make([]client.ClientDestination, 0, len(private))
 	for name, encoded := range private {
-		destination, err := ivnp.ImportLocalDestination(encoded)
+		destination, err := foundation.ImportLocalDestination(encoded)
 		clear(encoded)
 		if err != nil {
 			return nil, err
@@ -1675,7 +1675,7 @@ func (d *Daemon) UpdateDestinationAddressPolicies(name string, policies []state.
 			break
 		}
 	}
-	var previousContexts map[ivnp.Hash]networking.RouterRemoteELSContext
+	var previousContexts map[foundation.Hash]networking.RouterRemoteELSContext
 	if active != nil {
 		previousContexts, err = remoteELSContexts(previous.DestinationAddressPolicies[name])
 		if err != nil {
@@ -1704,10 +1704,10 @@ func (d *Daemon) UpdateDestinationAddressPolicies(name string, policies []state.
 	return nil
 }
 
-func remoteELSContexts(policies []state.SecureStateRemoteELSAuthorization) (map[ivnp.Hash]networking.RouterRemoteELSContext, error) {
-	contexts := make(map[ivnp.Hash]networking.RouterRemoteELSContext, len(policies))
+func remoteELSContexts(policies []state.SecureStateRemoteELSAuthorization) (map[foundation.Hash]networking.RouterRemoteELSContext, error) {
+	contexts := make(map[foundation.Hash]networking.RouterRemoteELSContext, len(policies))
 	for _, policy := range policies {
-		identity, consumed, err := ivnp.ParseIdentity(policy.Identity)
+		identity, consumed, err := foundation.ParseIdentity(policy.Identity)
 		if err != nil || consumed != len(policy.Identity) {
 			releaseRemoteELSContexts(contexts)
 			return nil, networking.RouterErrDataPlaneConfig
@@ -1746,7 +1746,7 @@ func releaseRemoteELSContext(context *networking.RouterRemoteELSContext) {
 	*context = networking.RouterRemoteELSContext{}
 }
 
-func releaseRemoteELSContexts(contexts map[ivnp.Hash]networking.RouterRemoteELSContext) {
+func releaseRemoteELSContexts(contexts map[foundation.Hash]networking.RouterRemoteELSContext) {
 	for hash, context := range contexts {
 		releaseRemoteELSContext(&context)
 		contexts[hash] = context
@@ -1924,7 +1924,7 @@ func sendNetDBThroughPair(ctx context.Context, peer networking.NetworkDatabaseRo
 	if !ok {
 		return sender.Send(ctx, peer.Hash, message)
 	}
-	if seedReplyRouterInfo != nil && pair.OutboundEndpoint != (ivnp.Hash{}) {
+	if seedReplyRouterInfo != nil && pair.OutboundEndpoint != (foundation.Hash{}) {
 		if err := seedReplyRouterInfo(ctx, pair.OutboundEndpoint, peer.Hash); err != nil {
 			return err
 		}
@@ -1958,8 +1958,8 @@ func sendNetDBThroughPair(ctx context.Context, peer networking.NetworkDatabaseRo
 	})
 }
 
-func transportPeerEligibility(sender networking.TunnelSender) func(ivnp.Hash) bool {
-	selector, ok := sender.(interface{ CanSend(ivnp.Hash) bool })
+func transportPeerEligibility(sender networking.TunnelSender) func(foundation.Hash) bool {
+	selector, ok := sender.(interface{ CanSend(foundation.Hash) bool })
 	if !ok {
 		return nil
 	}
@@ -1967,12 +1967,12 @@ func transportPeerEligibility(sender networking.TunnelSender) func(ivnp.Hash) bo
 }
 
 type daemonReplyRoute struct {
-	local      ivnp.Hash
+	local      foundation.Hash
 	maintainer *networking.TunnelPairedPoolMaintainer
 	now        func() uint64
 }
 
-func (r daemonReplyRoute) DatabaseLookupReplyRoute() (ivnp.Hash, uint32, bool) {
+func (r daemonReplyRoute) DatabaseLookupReplyRoute() (foundation.Hash, uint32, bool) {
 	if r.maintainer != nil {
 		if pair, ok := r.maintainer.Pair(r.now()); ok {
 			return pair.ReplyRouter, pair.InboundID, true
@@ -1982,10 +1982,10 @@ func (r daemonReplyRoute) DatabaseLookupReplyRoute() (ivnp.Hash, uint32, bool) {
 }
 
 // NetDBReplyPath supplies the shared confirmed-publication reply path.
-func (r daemonReplyRoute) NetDBReplyPath() (ivnp.Hash, uint32, bool) {
+func (r daemonReplyRoute) NetDBReplyPath() (foundation.Hash, uint32, bool) {
 	gateway, tunnelID, tunnel := r.DatabaseLookupReplyRoute()
-	if gateway == (ivnp.Hash{}) {
-		return ivnp.Hash{}, 0, false
+	if gateway == (foundation.Hash{}) {
+		return foundation.Hash{}, 0, false
 	}
 	if !tunnel {
 		return gateway, 0, true
@@ -2002,7 +2002,7 @@ func (s inboundLeaseSource) CurrentInboundLeases(now uint64) []networking.Networ
 	entries := s.pool.Snapshot(now)
 	leases := make([]networking.NetworkDatabaseLease, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Direction == networking.TunnelInbound && entry.Gateway != (ivnp.Hash{}) && entry.GatewayTunnelID != 0 && entry.Expires > now {
+		if entry.Direction == networking.TunnelInbound && entry.Gateway != (foundation.Hash{}) && entry.GatewayTunnelID != 0 && entry.Expires > now {
 			leases = append(leases, networking.NetworkDatabaseLease{Gateway: entry.Gateway, TunnelID: entry.GatewayTunnelID, EndDate: entry.Expires})
 		}
 	}
@@ -2019,8 +2019,8 @@ type daemonReplySender struct {
 	now     func() uint64
 }
 
-func (s daemonReplySender) SendNetDBReply(ctx context.Context, gateway ivnp.Hash, tunnelID uint32, message networking.I2NPMessage) error {
-	if s.sender == nil || gateway == (ivnp.Hash{}) || s.now == nil {
+func (s daemonReplySender) SendNetDBReply(ctx context.Context, gateway foundation.Hash, tunnelID uint32, message networking.I2NPMessage) error {
+	if s.sender == nil || gateway == (foundation.Hash{}) || s.now == nil {
 		return networking.RouterErrDataPlaneConfig
 	}
 
@@ -2044,7 +2044,7 @@ func (s daemonReplySender) SendNetDBReply(ctx context.Context, gateway ivnp.Hash
 	return s.tunnels.SendBlock(ctx, outbound.ID, networking.TunnelBlock{Delivery: networking.TunnelDeliveryTunnel, Gateway: gateway, TunnelID: tunnelID, Data: frame})
 }
 
-func (s daemonReplySender) SendStatus(gateway ivnp.Hash, tunnelID uint32, status networking.I2NPDeliveryStatusMessage) error {
+func (s daemonReplySender) SendStatus(gateway foundation.Hash, tunnelID uint32, status networking.I2NPDeliveryStatusMessage) error {
 	payload := make([]byte, 12)
 	binary.BigEndian.PutUint32(payload[:4], status.MessageID)
 	binary.BigEndian.PutUint64(payload[4:], status.Timestamp)
@@ -2057,7 +2057,7 @@ func nowFromClock(clock networking.RouterClock) func() uint64 {
 }
 
 func buildReplyRouterInfoSeeder(database *networking.NetworkDatabase, sender networking.TunnelSender, now func() uint64) networking.TunnelReplyRouterInfoSeeder {
-	return func(ctx context.Context, endpoint, replyRouter ivnp.Hash) error {
+	return func(ctx context.Context, endpoint, replyRouter foundation.Hash) error {
 		ref, ok := database.Routers().Get(replyRouter)
 		if !ok {
 			return fmt.Errorf("daemon: reply-gateway RouterInfo unavailable")
@@ -2066,7 +2066,7 @@ func buildReplyRouterInfoSeeder(database *networking.NetworkDatabase, sender net
 		if err != nil {
 			return err
 		}
-		payload, err := networking.NetworkDatabaseMarshalDatabaseStore(replyRouter, networking.I2NPStoreRouterInfo, compressed, 0, ivnp.Hash{}, 0)
+		payload, err := networking.NetworkDatabaseMarshalDatabaseStore(replyRouter, networking.I2NPStoreRouterInfo, compressed, 0, foundation.Hash{}, 0)
 		if err != nil {
 			return err
 		}
@@ -2105,9 +2105,9 @@ func randomMessageID() (uint32, error) {
 	}
 }
 
-func destinationPrivate(destination *ivnp.LocalDestination) ([]byte, error) {
+func destinationPrivate(destination *foundation.LocalDestination) ([]byte, error) {
 	if destination == nil {
-		return nil, ivnp.ErrInvalidIdentity
+		return nil, foundation.ErrInvalidIdentity
 	}
 	private := make([]byte, destination.PrivateEncodedLen())
 	n, err := destination.MarshalPrivateTo(private)
@@ -2125,7 +2125,7 @@ func newStaticAddressPublisher(cfg state.ConfigurationOperating, bundle state.Se
 		if err != nil {
 			return nil, err
 		}
-		options := []networking.RouterMappingOption{{Key: "i", Value: ivnp.EncodeI2PBase64(bundle.NTCP2StaticIV)}, {Key: "s", Value: ivnp.EncodeI2PBase64(private.PublicKey().Bytes())}, {Key: "v", Value: "2"}}
+		options := []networking.RouterMappingOption{{Key: "i", Value: foundation.EncodeI2PBase64(bundle.NTCP2StaticIV)}, {Key: "s", Value: foundation.EncodeI2PBase64(private.PublicKey().Bytes())}, {Key: "v", Value: "2"}}
 		if cfg.NTCP2.Advertised.Host != "" && cfg.NTCP2.Advertised.Port != 0 {
 			options = append(options,
 				networking.RouterMappingOption{Key: "host", Value: cfg.NTCP2.Advertised.Host},
@@ -2139,7 +2139,7 @@ func newStaticAddressPublisher(cfg state.ConfigurationOperating, bundle state.Se
 		if err != nil {
 			return nil, err
 		}
-		options := []networking.RouterMappingOption{{Key: "i", Value: ivnp.EncodeI2PBase64(bundle.SSU2IntroKey)}, {Key: "s", Value: ivnp.EncodeI2PBase64(private.PublicKey().Bytes())}, {Key: "v", Value: "2"}}
+		options := []networking.RouterMappingOption{{Key: "i", Value: foundation.EncodeI2PBase64(bundle.SSU2IntroKey)}, {Key: "s", Value: foundation.EncodeI2PBase64(private.PublicKey().Bytes())}, {Key: "v", Value: "2"}}
 		if cfg.SSU2.Advertised.Host != "" && cfg.SSU2.Advertised.Port != 0 {
 			options = append(options, networking.RouterMappingOption{Key: "host", Value: cfg.SSU2.Advertised.Host}, networking.RouterMappingOption{Key: "port", Value: fmt.Sprint(cfg.SSU2.Advertised.Port)})
 		}

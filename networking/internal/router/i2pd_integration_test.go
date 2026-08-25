@@ -9,7 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/garlic"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/network_database"
@@ -37,7 +37,7 @@ func TestI2PDNTCP2Interop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read native i2pd RouterInfo: %v", err)
 	}
-	peer, err := netdb.ParseRouterInfo(wire)
+	peer, err := networkdatabase.ParseRouterInfo(wire)
 	if err != nil {
 		t.Fatalf("parse native i2pd RouterInfo: %v", err)
 	}
@@ -48,12 +48,12 @@ func TestI2PDNTCP2Interop(t *testing.T) {
 	if _, err = selectNTCP2Address(peer); err != nil {
 		t.Fatalf("select native i2pd NTCP2 address: %v", err)
 	}
-	if !netdb.IsFloodfill(peer) {
+	if !networkdatabase.IsFloodfill(peer) {
 		t.Fatal("native i2pd peer is not floodfill and cannot prove direct DatabaseLookup handling")
 	}
 
 	alice, aliceStatic, aliceIV := newI2PDInteropLocal(t)
-	database := netdb.NewDatabase(alice.Hash(), 16)
+	database := networkdatabase.NewDatabase(alice.Hash(), 16)
 	if err = database.AdmitRouterInfo(peer, false, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatalf("admit native i2pd RouterInfo: %v", err)
 	}
@@ -144,7 +144,7 @@ func requireNativeI2PDRouterInfoStore(t *testing.T, received <-chan i2np.Message
 
 func newI2PDInteropLocal(t *testing.T) (*LocalRouterInfo, []byte, []byte) {
 	t.Helper()
-	local, err := ivnp.GenerateLocalRouterAddress()
+	local, err := foundation.GenerateLocalRouterAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func newI2PDInteropLocal(t *testing.T) (*LocalRouterInfo, []byte, []byte) {
 		Cost:      14,
 		Options: []MappingOption{
 			{Key: "caps", Value: "4"},
-			{Key: "s", Value: ivnp.EncodeI2PBase64(static.PublicKey().Bytes())},
+			{Key: "s", Value: foundation.EncodeI2PBase64(static.PublicKey().Bytes())},
 			{Key: "v", Value: "2"},
 		},
 	}}); err != nil {
@@ -179,7 +179,7 @@ func newI2PDInteropLocal(t *testing.T) (*LocalRouterInfo, []byte, []byte) {
 		t.Fatal(err)
 	}
 	snapshot := owner.Snapshot()
-	if snapshot.Identity.CryptoKeyType() != ivnp.CryptoX25519 || snapshot.Identity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519 {
+	if snapshot.Identity.CryptoKeyType() != foundation.CryptoX25519 || snapshot.Identity.SigningKeyType() != foundation.SigningEdDSASHA512Ed25519 {
 		t.Fatalf("local RouterInfo identity = crypto %d signing %d", snapshot.Identity.CryptoKeyType(), snapshot.Identity.SigningKeyType())
 	}
 	return owner, static.Bytes(), iv
@@ -208,7 +208,7 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read native i2pd RouterInfo: %v", err)
 	}
-	peer, err := netdb.ParseRouterInfo(wire)
+	peer, err := networkdatabase.ParseRouterInfo(wire)
 	if err != nil {
 		t.Fatalf("parse native i2pd RouterInfo: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 		t.Fatalf("select native i2pd NTCP2 address: %v", err)
 	}
 	buildKeyBytes, trailingKeyBytes := peer.Identity.CryptoKeyParts()
-	if peer.Identity.CryptoKeyType() != ivnp.CryptoX25519 || len(buildKeyBytes) != 32 || len(trailingKeyBytes) != 0 {
+	if peer.Identity.CryptoKeyType() != foundation.CryptoX25519 || len(buildKeyBytes) != 32 || len(trailingKeyBytes) != 0 {
 		t.Fatalf("native i2pd identity encryption key type=%d lengths=%d/%d", peer.Identity.CryptoKeyType(), len(buildKeyBytes), len(trailingKeyBytes))
 	}
 	var buildStatic [32]byte
@@ -233,7 +233,7 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read native reply-gateway i2pd RouterInfo: %v", err)
 	}
-	replyPeer, err := netdb.ParseRouterInfo(replyWire)
+	replyPeer, err := networkdatabase.ParseRouterInfo(replyWire)
 	if err != nil {
 		t.Fatalf("parse native reply-gateway i2pd RouterInfo: %v", err)
 	}
@@ -245,14 +245,14 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 		t.Fatalf("select native reply-gateway i2pd NTCP2 address: %v", err)
 	}
 	replyBuildKeyBytes, replyTrailingKeyBytes := replyPeer.Identity.CryptoKeyParts()
-	if replyPeer.Identity.CryptoKeyType() != ivnp.CryptoX25519 || len(replyBuildKeyBytes) != 32 || len(replyTrailingKeyBytes) != 0 {
+	if replyPeer.Identity.CryptoKeyType() != foundation.CryptoX25519 || len(replyBuildKeyBytes) != 32 || len(replyTrailingKeyBytes) != 0 {
 		t.Fatalf("native reply-gateway identity encryption key type=%d lengths=%d/%d", replyPeer.Identity.CryptoKeyType(), len(replyBuildKeyBytes), len(replyTrailingKeyBytes))
 	}
 	var replyBuildStatic [32]byte
 	copy(replyBuildStatic[:], replyBuildKeyBytes)
 
 	alice, aliceStatic, aliceIV := newI2PDInteropLocal(t)
-	database := netdb.NewDatabase(alice.Hash(), 16)
+	database := networkdatabase.NewDatabase(alice.Hash(), 16)
 	now := func() uint64 { return uint64(time.Now().UnixMilli()) }
 	if err = database.AdmitRouterInfo(peer, false, now()); err != nil {
 		t.Fatalf("admit native endpoint i2pd RouterInfo: %v", err)
@@ -272,7 +272,7 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 	random := new(i2pdBuildDiagnosticRandom)
 	sender := &i2pdBuildDiagnosticSender{
 		next: transportManager, random: random,
-		statics: map[ivnp.Hash][32]byte{peer.Hash(): buildStatic, replyPeer.Hash(): replyBuildStatic},
+		statics: map[foundation.Hash][32]byte{peer.Hash(): buildStatic, replyPeer.Hash(): replyBuildStatic},
 	}
 	runtime := tunnel.NewRuntime(tunnel.RuntimeConfig{Sender: sender, Now: now})
 	replyKeys := garlic.NewReplyKeyRegistry(4)
@@ -292,15 +292,15 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 	buildManager, err = tunnel.NewBuildManager(tunnel.BuildManagerConfig{
 		Runtime: runtime, Sender: sender, ReplyKeys: replyKeys,
 		LocalRouter: alice.Hash(), StaticPrivate: aliceStatic,
-		SeedReplyRouterInfo: func(seedCtx context.Context, endpoint, replyRouter ivnp.Hash) error {
+		SeedReplyRouterInfo: func(seedCtx context.Context, endpoint, replyRouter foundation.Hash) error {
 			if endpoint != peer.Hash() || replyRouter != replyPeer.Hash() {
 				return fmt.Errorf("unexpected reply RouterInfo seed endpoint=%s reply=%s", endpoint, replyRouter)
 			}
-			compressed, compressErr := netdb.CompressRouterInfo(replyWire)
+			compressed, compressErr := networkdatabase.CompressRouterInfo(replyWire)
 			if compressErr != nil {
 				return compressErr
 			}
-			payload, marshalErr := netdb.MarshalDatabaseStore(replyRouter, i2np.StoreRouterInfo, compressed, 0, ivnp.Hash{}, 0)
+			payload, marshalErr := networkdatabase.MarshalDatabaseStore(replyRouter, i2np.StoreRouterInfo, compressed, 0, foundation.Hash{}, 0)
 			if marshalErr != nil {
 				return marshalErr
 			}
@@ -406,8 +406,8 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 		t.Fatalf("decrypted outbound request = %+v, reply ID %d", inspected, replyID)
 	}
 	t.Logf("signed_router_hash=%s record_count=4 receive_tunnel_id=%d next_tunnel_id=%d next_router=%s gateway=%t endpoint=%t request_minutes=%d lifetime_seconds=%d next_message_id=%d options_len=%d",
-		ivnp.EncodeI2PBase64(replyPeerHash[:]), inspected.ReceiveTunnelID, inspected.NextTunnelID,
-		ivnp.EncodeI2PBase64(inspected.NextRouter[:]), inspected.Gateway, inspected.Endpoint,
+		foundation.EncodeI2PBase64(replyPeerHash[:]), inspected.ReceiveTunnelID, inspected.NextTunnelID,
+		foundation.EncodeI2PBase64(inspected.NextRouter[:]), inspected.Gateway, inspected.Endpoint,
 		inspected.RequestMinutes, inspected.LifetimeSeconds, inspected.NextMessageID, inspected.Options.EncodedLen())
 	select {
 	case result := <-inboundResults:
@@ -450,7 +450,7 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 		t.Fatalf("decrypted outbound-tunnel request = %+v, reply ID %d", inspected, outboundReplyID)
 	}
 	t.Logf("outbound_tunnel receive_tunnel_id=%d next_tunnel_id=%d next_router=%s gateway=%t endpoint=%t request_minutes=%d lifetime_seconds=%d next_message_id=%d options_len=%d",
-		inspected.ReceiveTunnelID, inspected.NextTunnelID, ivnp.EncodeI2PBase64(inspected.NextRouter[:]),
+		inspected.ReceiveTunnelID, inspected.NextTunnelID, foundation.EncodeI2PBase64(inspected.NextRouter[:]),
 		inspected.Gateway, inspected.Endpoint, inspected.RequestMinutes, inspected.LifetimeSeconds,
 		inspected.NextMessageID, inspected.Options.EncodedLen())
 	select {
@@ -465,12 +465,12 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 		t.Fatal("native i2pd ignored the outbound ShortTunnelBuild reply for 15 seconds")
 	}
 
-	compressed, err := netdb.CompressRouterInfo(alice.Snapshot().Bytes())
+	compressed, err := networkdatabase.CompressRouterInfo(alice.Snapshot().Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
 	const publicationToken = uint32(0x10203040)
-	storePayload, err := netdb.MarshalDatabaseStore(alice.Hash(), i2np.StoreRouterInfo, compressed, publicationToken, replyPeerHash, receiveID)
+	storePayload, err := networkdatabase.MarshalDatabaseStore(alice.Hash(), i2np.StoreRouterInfo, compressed, publicationToken, replyPeerHash, receiveID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,18 +524,18 @@ func (r *i2pdBuildDiagnosticRandom) snapshot() []byte {
 type i2pdBuildDiagnosticSender struct {
 	next    *NTCP2Manager
 	random  *i2pdBuildDiagnosticRandom
-	statics map[ivnp.Hash][32]byte
+	statics map[foundation.Hash][32]byte
 
 	mu      sync.Mutex
 	request tunnel.ShortBuildRequest
 	err     error
 }
 
-func (s *i2pdBuildDiagnosticSender) Send(ctx context.Context, peer ivnp.Hash, message i2np.Message) error {
+func (s *i2pdBuildDiagnosticSender) Send(ctx context.Context, peer foundation.Hash, message i2np.Message) error {
 	if message.Header.Type == i2np.ShortTunnelBuild {
 		static, ok := s.statics[peer]
 		if !ok {
-			return fmt.Errorf("missing signed identity build key for %s", ivnp.EncodeI2PBase64(peer[:]))
+			return fmt.Errorf("missing signed identity build key for %s", foundation.EncodeI2PBase64(peer[:]))
 		}
 		request, err := inspectI2PDOutboundShortRecord(message, peer, static, s.random.snapshot())
 		s.mu.Lock()
@@ -554,7 +554,7 @@ func (s *i2pdBuildDiagnosticSender) inspection() (tunnel.ShortBuildRequest, erro
 	return s.request, s.err
 }
 
-func inspectI2PDOutboundShortRecord(message i2np.Message, peer ivnp.Hash, static [32]byte, randomStream []byte) (tunnel.ShortBuildRequest, error) {
+func inspectI2PDOutboundShortRecord(message i2np.Message, peer foundation.Hash, static [32]byte, randomStream []byte) (tunnel.ShortBuildRequest, error) {
 	records, err := i2np.ParseBuildRecords(i2np.ShortTunnelBuild, message.Payload)
 	if err != nil {
 		return tunnel.ShortBuildRequest{}, err

@@ -1,15 +1,15 @@
-package netdb
+package networkdatabase
 
 import (
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"testing"
 )
 
 func legacyIdentity() []byte {
-	identity := make([]byte, ivnp.IdentityBaseLength+ivnp.CertificateHeader)
-	identity[384] = byte(ivnp.CertificateNull)
+	identity := make([]byte, foundation.IdentityBaseLength+foundation.CertificateHeader)
+	identity[384] = byte(foundation.CertificateNull)
 	return identity
 }
 
@@ -83,7 +83,7 @@ func TestLeaseSet2ExactKeyAndLeaseBounds(t *testing.T) {
 	off += 2
 	payload[off] = 1
 	off++
-	binary.BigEndian.PutUint16(payload[off:off+2], uint16(ivnp.CryptoX25519))
+	binary.BigEndian.PutUint16(payload[off:off+2], uint16(foundation.CryptoX25519))
 	binary.BigEndian.PutUint16(payload[off+2:off+4], 32)
 	off += 4 + 32
 	payload[off] = 1
@@ -96,7 +96,7 @@ func TestLeaseSet2ExactKeyAndLeaseBounds(t *testing.T) {
 	}
 	keys := set.Keys()
 	key, ok, err := keys.Next()
-	if err != nil || !ok || key.Type != ivnp.CryptoX25519 || len(key.Data) != 32 {
+	if err != nil || !ok || key.Type != foundation.CryptoX25519 || len(key.Data) != 32 {
 		t.Fatalf("key = %#v, %t, %v", key, ok, err)
 	}
 	leases := set.Leases()
@@ -114,18 +114,18 @@ func TestLeaseSet2ExactKeyAndLeaseBounds(t *testing.T) {
 
 func TestLeaseSet2SelectsCallerPreferenceIndependentOfAdvertisementOrder(t *testing.T) {
 	keys := make([]byte, 3*(4+32))
-	binary.BigEndian.PutUint16(keys[:2], uint16(ivnp.CryptoX25519))
+	binary.BigEndian.PutUint16(keys[:2], uint16(foundation.CryptoX25519))
 	binary.BigEndian.PutUint16(keys[2:4], 32)
-	binary.BigEndian.PutUint16(keys[36:38], uint16(ivnp.CryptoMLKEM768X25519))
+	binary.BigEndian.PutUint16(keys[36:38], uint16(foundation.CryptoMLKEM768X25519))
 	binary.BigEndian.PutUint16(keys[38:40], 32)
-	binary.BigEndian.PutUint16(keys[72:74], uint16(ivnp.CryptoMLKEM1024X25519))
+	binary.BigEndian.PutUint16(keys[72:74], uint16(foundation.CryptoMLKEM1024X25519))
 	binary.BigEndian.PutUint16(keys[74:76], 32)
 	set := LeaseSet2{keyCount: 3, keys: keys}
-	key, err := set.SelectEncryptionKey(ivnp.CryptoMLKEM1024X25519, ivnp.CryptoMLKEM768X25519, ivnp.CryptoX25519)
-	if err != nil || key.Type != ivnp.CryptoMLKEM1024X25519 {
+	key, err := set.SelectEncryptionKey(foundation.CryptoMLKEM1024X25519, foundation.CryptoMLKEM768X25519, foundation.CryptoX25519)
+	if err != nil || key.Type != foundation.CryptoMLKEM1024X25519 {
 		t.Fatalf("selected key = %#v, %v", key, err)
 	}
-	if _, err := set.SelectEncryptionKey(ivnp.CryptoP256); !errors.Is(err, ErrNoSupportedEncryptionKey) {
+	if _, err := set.SelectEncryptionKey(foundation.CryptoP256); !errors.Is(err, ErrNoSupportedEncryptionKey) {
 		t.Fatalf("unsupported selection error = %v", err)
 	}
 }
@@ -136,7 +136,7 @@ func TestLeaseSet2RejectsExcessLeasesBeforeSlicing(t *testing.T) {
 	off := len(identity) + 8 + 2
 	payload[off] = 1
 	off++
-	binary.BigEndian.PutUint16(payload[off:off+2], uint16(ivnp.CryptoX25519))
+	binary.BigEndian.PutUint16(payload[off:off+2], uint16(foundation.CryptoX25519))
 	binary.BigEndian.PutUint16(payload[off+2:off+4], 32)
 	off += 4 + 32
 	payload[off] = MaxLeases + 1

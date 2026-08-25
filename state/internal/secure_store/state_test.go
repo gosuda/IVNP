@@ -1,9 +1,9 @@
-package state
+package securestore
 
 import (
 	"bytes"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,7 +15,7 @@ func TestLoadOrCreatePersistsRouterAndLegacyDestinationIdentityMaterial(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := ivnp.GenerateLocalAddress()
+	service, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,14 +31,14 @@ func TestLoadOrCreatePersistsRouterAndLegacyDestinationIdentityMaterial(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if routerIdentity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519 || routerIdentity.CryptoKeyType() != ivnp.CryptoX25519 {
+	if routerIdentity.SigningKeyType() != foundation.SigningEdDSASHA512Ed25519 || routerIdentity.CryptoKeyType() != foundation.CryptoX25519 {
 		t.Fatal("reloaded router identity is not Ed25519/X25519")
 	}
 	serviceIdentity, err := loaded.Destinations["service"].Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if serviceIdentity.SigningKeyType() != ivnp.SigningEdDSASHA512Ed25519 || serviceIdentity.CryptoKeyType() != ivnp.CryptoElGamal {
+	if serviceIdentity.SigningKeyType() != foundation.SigningEdDSASHA512Ed25519 || serviceIdentity.CryptoKeyType() != foundation.CryptoElGamal {
 		t.Fatal("reloaded destination is not legacy Ed25519/ElGamal")
 	}
 	if !sameBundle(first, loaded) {
@@ -177,11 +177,11 @@ func TestSaveRejectsBoundsAndMismatchedIdentityKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := ivnp.GenerateLocalAddress()
+	first, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := ivnp.GenerateLocalAddress()
+	second, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,10 +327,10 @@ func sameBundle(left, right Bundle) bool {
 	return true
 }
 
-func sameRouterAddress(left, right ivnp.LocalRouterAddress) bool {
+func sameRouterAddress(left, right foundation.LocalRouterAddress) bool {
 	return bytes.Equal(left.RouterIdentity, right.RouterIdentity) && left.Hash == right.Hash && bytes.Equal(left.SigningPublic, right.SigningPublic) && bytes.Equal(left.SigningPrivate, right.SigningPrivate) && left.X25519Public == right.X25519Public && left.X25519Private == right.X25519Private
 }
 
-func sameAddress(left, right ivnp.LocalAddress) bool {
+func sameAddress(left, right foundation.LocalAddress) bool {
 	return bytes.Equal(left.Destination, right.Destination) && left.Hash == right.Hash && bytes.Equal(left.SigningPublic, right.SigningPublic) && bytes.Equal(left.SigningPrivate, right.SigningPrivate) && left.EncryptionPublic == right.EncryptionPublic && left.EncryptionPrivate == right.EncryptionPrivate
 }

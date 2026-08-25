@@ -1,12 +1,12 @@
 package sam
 
-import networking "gosuda.org/ivnp/networking"
+import "gosuda.org/ivnp/networking"
 
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
-	clientapi "gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/ingress"
 
 	"net"
@@ -62,11 +62,11 @@ func (l *closeListener) Close() error {
 func (*closeListener) Addr() net.Addr { return testAddr("listener") }
 
 type panicSubscription struct {
-	message *clientapi.ReceivedMessage
+	message *destination.ReceivedMessage
 	once    bool
 }
 
-func (s *panicSubscription) Receive(context.Context) (*clientapi.ReceivedMessage, error) {
+func (s *panicSubscription) Receive(context.Context) (*destination.ReceivedMessage, error) {
 	if !s.once && s.message != nil {
 		s.once = true
 		return s.message, nil
@@ -96,7 +96,7 @@ func awaitPanicReport(t *testing.T, reports <-chan ingress.Panic, boundary ingre
 func TestSAMWorkerPanicContainmentAndCleanup(t *testing.T) {
 	t.Run("UDP read", func(t *testing.T) {
 		recorder := panicRecorder{reports: make(chan ingress.Panic, 4)}
-		controller := &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)}
+		controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 		server, err := NewServer(ServerConfig{
 			Address: "127.0.0.1:0", UDPAddress: "127.0.0.1:1", Controller: controller, PanicReporter: recorder,
 			ListenPacket: func(context.Context, string, string) (net.PacketConn, error) { return panicPacketConn{}, nil },
@@ -116,13 +116,13 @@ func TestSAMWorkerPanicContainmentAndCleanup(t *testing.T) {
 		recorder := panicRecorder{reports: make(chan ingress.Panic, 4)}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
-		local, err := ivnp.GenerateLocalDestination()
+		local, err := foundation.GenerateLocalDestination()
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer local.ReleaseSensitive()
-		controller := &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)}
-		base := &loopEndpoint{local: local, controller: controller, subscriptions: make(map[clientapi.DestinationRoute]*loopSubscription)}
+		controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
+		base := &loopEndpoint{local: local, controller: controller, subscriptions: make(map[destination.DestinationRoute]*loopSubscription)}
 		server := &Server{config: ServerConfig{PanicReporter: recorder}, queueBytes: newByteBudget(1024)}
 		session := &samSession{server: server, endpoint: &panicSendEndpoint{loopEndpoint: base}, ctx: ctx, style: styleRaw, queueBytes: newByteBudget(1024)}
 		if !session.reserve(8) {
@@ -142,7 +142,7 @@ func TestSAMWorkerPanicContainmentAndCleanup(t *testing.T) {
 		connection := newPanicConn()
 		server := &Server{config: ServerConfig{PanicReporter: recorder}}
 		session := &samSession{server: server, ctx: ctx, control: &serverConnection{Conn: connection}, style: styleRaw}
-		message := clientapi.NewReceivedMessage(networking.StreamingTunnelDelivery{Payload: []byte("owned")}, nil)
+		message := destination.NewReceivedMessage(networking.StreamingTunnelDelivery{Payload: []byte("owned")}, nil)
 		session.receiveLoop(&panicSubscription{message: message})
 		awaitPanicReport(t, recorder.reports, ingress.BoundarySAMWorker)
 		if message.Delivery.Payload != nil {

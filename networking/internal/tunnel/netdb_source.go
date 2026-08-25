@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/network_database"
 	"net/netip"
@@ -22,44 +22,44 @@ const preferredRecoveryProbeInterval uint64 = 4
 // NetDBOutboundBuildSourceConfig supplies deterministic control-plane inputs
 // for selecting an outbound build path from already verified netdb entries.
 type NetDBOutboundBuildSourceConfig struct {
-	Table          *netdb.Table
+	Table          *networkdatabase.Table
 	Profiles       *PeerProfiles
-	LocalRouter    ivnp.Hash
-	ReplyRouter    ivnp.Hash
+	LocalRouter    foundation.Hash
+	ReplyRouter    foundation.Hash
 	ReplyTunnelID  uint32
 	Hops           int
-	PreferredPeers []ivnp.Hash
+	PreferredPeers []foundation.Hash
 	CandidateLimit int
 	Lifetime       uint64
 	CircuitID      func() uint32
 	TunnelID       func() uint32
-	Target         func(nowMillis uint64) ivnp.Hash
-	Eligible       func(ivnp.Hash) bool
+	Target         func(nowMillis uint64) foundation.Hash
+	Eligible       func(foundation.Hash) bool
 }
 
 // NetDBOutboundBuildSource selects distinct ECIES-X25519 routers that were
 // verified during netdb admission. It deliberately has no network I/O and is
 // invoked only by Rotator maintenance.
 type NetDBOutboundBuildSource struct {
-	table            *netdb.Table
+	table            *networkdatabase.Table
 	profiles         *PeerProfiles
-	local            ivnp.Hash
-	replyRouter      ivnp.Hash
+	local            foundation.Hash
+	replyRouter      foundation.Hash
 	replyTunnelID    uint32
 	hops             int
 	candidateLimit   int
 	lifetime         uint64
-	preferred        []netdb.RouterRef
+	preferred        []networkdatabase.RouterRef
 	circuitID        func() uint32
 	tunnelID         func() uint32
-	target           func(uint64) ivnp.Hash
-	eligible         func(ivnp.Hash) bool
+	target           func(uint64) foundation.Hash
+	eligible         func(foundation.Hash) bool
 	sequence         atomic.Uint64
 	recoverySequence atomic.Uint64
 }
 
 func NewNetDBOutboundBuildSource(config NetDBOutboundBuildSourceConfig) (*NetDBOutboundBuildSource, error) {
-	newNetDBOutboundBuildSourceRejected := config.Table == nil || config.Profiles == nil || (config.ReplyRouter == (ivnp.Hash{})) != (config.ReplyTunnelID == 0) || config.Hops < 1 || config.Hops > i2np.MaxVariableBuildRecords || config.Lifetime == 0 || config.CircuitID == nil
+	newNetDBOutboundBuildSourceRejected := config.Table == nil || config.Profiles == nil || (config.ReplyRouter == (foundation.Hash{})) != (config.ReplyTunnelID == 0) || config.Hops < 1 || config.Hops > i2np.MaxVariableBuildRecords || config.Lifetime == 0 || config.CircuitID == nil
 	if !newNetDBOutboundBuildSourceRejected {
 		newNetDBOutboundBuildSourceRejected = config.TunnelID == nil
 	}
@@ -92,7 +92,7 @@ func (s *NetDBOutboundBuildSource) NextOutbound(ctx context.Context, nowMillis u
 // route. It is used by paired maintenance; callers cannot build an outbound
 // tunnel without a concrete inbound route for its encrypted reply.
 func (s *NetDBOutboundBuildSource) NextOutboundForReply(ctx context.Context, nowMillis uint64, route ReplyRoute) (OutboundBuild, error) {
-	if route.Gateway == (ivnp.Hash{}) || route.TunnelID == 0 {
+	if route.Gateway == (foundation.Hash{}) || route.TunnelID == 0 {
 		return OutboundBuild{}, ErrNetDBBuildSourceConfig
 	}
 	if ctx == nil {
@@ -103,7 +103,7 @@ func (s *NetDBOutboundBuildSource) NextOutboundForReply(ctx context.Context, now
 		return OutboundBuild{}, err
 	}
 	target := s.selectionTarget(nowMillis)
-	candidates := s.table.ClosestInto(make([]netdb.RouterRef, s.candidateLimit), target)
+	candidates := s.table.ClosestInto(make([]networkdatabase.RouterRef, s.candidateLimit), target)
 	if s.eligible != nil {
 		eligible := candidates[:0]
 		for _, candidate := range candidates {
@@ -156,12 +156,12 @@ func (s *NetDBOutboundBuildSource) NextOutboundForReply(ctx context.Context, now
 	}, nil
 }
 
-func (s *NetDBOutboundBuildSource) selectionTarget(nowMillis uint64) ivnp.Hash {
+func (s *NetDBOutboundBuildSource) selectionTarget(nowMillis uint64) foundation.Hash {
 	if s.target != nil {
 		return s.target(nowMillis)
 	}
 	sequence := s.sequence.Add(1)
-	var target ivnp.Hash
+	var target foundation.Hash
 	for index := range 8 {
 		target[24+index] = byte(sequence >> (56 - 8*index))
 		target[16+index] = byte(nowMillis >> (56 - 8*index))
@@ -179,39 +179,39 @@ type InboundBuildSource interface {
 // NetDBInboundBuildSourceConfig supplies deterministic control-plane inputs
 // for selecting a new inbound path from verified netdb entries.
 type NetDBInboundBuildSourceConfig struct {
-	Table          *netdb.Table
+	Table          *networkdatabase.Table
 	Profiles       *PeerProfiles
-	LocalRouter    ivnp.Hash
+	LocalRouter    foundation.Hash
 	Hops           int
-	PreferredPeers []ivnp.Hash
+	PreferredPeers []foundation.Hash
 	CandidateLimit int
 	Lifetime       uint64
 	CircuitID      func() uint32
 	TunnelID       func() uint32
-	Target         func(nowMillis uint64) ivnp.Hash
-	Eligible       func(ivnp.Hash) bool
+	Target         func(nowMillis uint64) foundation.Hash
+	Eligible       func(foundation.Hash) bool
 }
 
 // NetDBInboundBuildSource selects distinct ECIES-X25519 routers for an
 // inbound path. Selection is synchronous and has no transport side effects.
 type NetDBInboundBuildSource struct {
-	table            *netdb.Table
+	table            *networkdatabase.Table
 	profiles         *PeerProfiles
-	local            ivnp.Hash
+	local            foundation.Hash
 	hops             int
-	preferred        []netdb.RouterRef
+	preferred        []networkdatabase.RouterRef
 	candidateLimit   int
 	lifetime         uint64
 	circuitID        func() uint32
 	tunnelID         func() uint32
-	target           func(uint64) ivnp.Hash
-	eligible         func(ivnp.Hash) bool
+	target           func(uint64) foundation.Hash
+	eligible         func(foundation.Hash) bool
 	sequence         atomic.Uint64
 	recoverySequence atomic.Uint64
 }
 
 func NewNetDBInboundBuildSource(config NetDBInboundBuildSourceConfig) (*NetDBInboundBuildSource, error) {
-	newNetDBInboundBuildSourceRejected := config.Table == nil || config.Profiles == nil || config.LocalRouter == (ivnp.Hash{}) || config.Hops < 1 || config.Hops >= i2np.MaxVariableBuildRecords || config.Lifetime == 0 || config.CircuitID == nil
+	newNetDBInboundBuildSourceRejected := config.Table == nil || config.Profiles == nil || config.LocalRouter == (foundation.Hash{}) || config.Hops < 1 || config.Hops >= i2np.MaxVariableBuildRecords || config.Lifetime == 0 || config.CircuitID == nil
 	if !newNetDBInboundBuildSourceRejected {
 		newNetDBInboundBuildSourceRejected = config.TunnelID == nil
 	}
@@ -241,7 +241,7 @@ func (s *NetDBInboundBuildSource) NextInbound(ctx context.Context, nowMillis uin
 		return InboundBuild{}, err
 	}
 	target := s.selectionTarget(nowMillis)
-	candidates := s.table.ClosestInto(make([]netdb.RouterRef, s.candidateLimit), target)
+	candidates := s.table.ClosestInto(make([]networkdatabase.RouterRef, s.candidateLimit), target)
 	if s.eligible != nil {
 		eligible := candidates[:0]
 		for _, candidate := range candidates {
@@ -251,17 +251,17 @@ func (s *NetDBInboundBuildSource) NextInbound(ctx context.Context, nowMillis uin
 		}
 		candidates = eligible
 	}
-	hops := preferredHops(s.table, s.preferred, s.profiles, s.local, ivnp.Hash{}, s.hops, nowMillis)
+	hops := preferredHops(s.table, s.preferred, s.profiles, s.local, foundation.Hash{}, s.hops, nowMillis)
 	// Keep a full pool expiry recoverable without retrying a quarantined
 	// preferred peer on every maintenance tick.
 	if len(hops) < s.hops && s.recoverySequence.Add(1)%preferredRecoveryProbeInterval == 1 {
-		hops = preferredHops(s.table, s.preferred, nil, s.local, ivnp.Hash{}, s.hops, nowMillis)
+		hops = preferredHops(s.table, s.preferred, nil, s.local, foundation.Hash{}, s.hops, nowMillis)
 	}
 	if len(hops) < s.hops {
-		hops = selectDiverseHops(candidates, s.profiles, s.local, ivnp.Hash{}, s.hops, nowMillis)
+		hops = selectDiverseHops(candidates, s.profiles, s.local, foundation.Hash{}, s.hops, nowMillis)
 	}
 	if len(hops) < s.hops {
-		hops = selectDiverseHops(candidates, nil, s.local, ivnp.Hash{}, s.hops, nowMillis)
+		hops = selectDiverseHops(candidates, nil, s.local, foundation.Hash{}, s.hops, nowMillis)
 	}
 	if len(hops) < s.hops {
 		return InboundBuild{}, ErrNoEligiblePeers
@@ -291,12 +291,12 @@ func (s *NetDBInboundBuildSource) NextInbound(ctx context.Context, nowMillis uin
 	}, nil
 }
 
-func (s *NetDBInboundBuildSource) selectionTarget(nowMillis uint64) ivnp.Hash {
+func (s *NetDBInboundBuildSource) selectionTarget(nowMillis uint64) foundation.Hash {
 	if s.target != nil {
 		return s.target(nowMillis)
 	}
 	sequence := s.sequence.Add(1)
-	var target ivnp.Hash
+	var target foundation.Hash
 	for index := range 8 {
 		target[24+index] = byte(sequence >> (56 - 8*index))
 		target[16+index] = byte(nowMillis >> (56 - 8*index))
@@ -306,11 +306,11 @@ func (s *NetDBInboundBuildSource) selectionTarget(nowMillis uint64) ivnp.Hash {
 
 // NewNetDBBuildStaticKeyLookup binds BuildManager validation to retained,
 // signature-verified RouterInfo identity encryption keys.
-func NewNetDBBuildStaticKeyLookup(table *netdb.Table) BuildStaticKeyLookup {
+func NewNetDBBuildStaticKeyLookup(table *networkdatabase.Table) BuildStaticKeyLookup {
 	if table == nil {
 		return nil
 	}
-	return func(peer ivnp.Hash) ([32]byte, bool) {
+	return func(peer foundation.Hash) ([32]byte, bool) {
 		ref, ok := table.Get(peer)
 		if !ok {
 			return [32]byte{}, false
@@ -319,8 +319,8 @@ func NewNetDBBuildStaticKeyLookup(table *netdb.Table) BuildStaticKeyLookup {
 	}
 }
 
-func x25519StaticKey(info netdb.RouterInfo) ([32]byte, bool) {
-	if info.Identity.CryptoKeyType() != ivnp.CryptoX25519 {
+func x25519StaticKey(info networkdatabase.RouterInfo) ([32]byte, bool) {
+	if info.Identity.CryptoKeyType() != foundation.CryptoX25519 {
 		return [32]byte{}, false
 	}
 	first, rest := info.Identity.CryptoKeyParts()
@@ -340,11 +340,11 @@ type hopCandidate struct {
 	score  int64
 }
 
-func preferredHops(table *netdb.Table, preferred []netdb.RouterRef, profiles *PeerProfiles, local, excluded ivnp.Hash, wanted int, nowMillis uint64) []ShortBuildHop {
+func preferredHops(table *networkdatabase.Table, preferred []networkdatabase.RouterRef, profiles *PeerProfiles, local, excluded foundation.Hash, wanted int, nowMillis uint64) []ShortBuildHop {
 	if len(preferred) == 0 {
 		return nil
 	}
-	refs := make([]netdb.RouterRef, 0, len(preferred))
+	refs := make([]networkdatabase.RouterRef, 0, len(preferred))
 	for _, retained := range preferred {
 		ref := retained
 		if current, ok := table.Get(retained.Hash); ok && current.Info.Published >= retained.Info.Published {
@@ -363,8 +363,8 @@ func preferredHops(table *netdb.Table, preferred []netdb.RouterRef, profiles *Pe
 	return selectDiverseHops(refs, profiles, local, excluded, wanted, nowMillis)
 }
 
-func retainPreferred(table *netdb.Table, hashes []ivnp.Hash) []netdb.RouterRef {
-	refs := make([]netdb.RouterRef, 0, len(hashes))
+func retainPreferred(table *networkdatabase.Table, hashes []foundation.Hash) []networkdatabase.RouterRef {
+	refs := make([]networkdatabase.RouterRef, 0, len(hashes))
 	for _, hash := range hashes {
 		if ref, ok := table.Get(hash); ok {
 			refs = append(refs, ref)
@@ -376,10 +376,10 @@ func retainPreferred(table *netdb.Table, hashes []ivnp.Hash) []netdb.RouterRef {
 // selectDiverseHops makes strict correlation avoidance win over score. It
 // relaxes address-prefix conflicts first, then the signed router family only
 // when the bounded candidate set cannot fill the requested path.
-func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, excluded ivnp.Hash, wanted int, nowMillis uint64) []ShortBuildHop {
+func selectDiverseHops(refs []networkdatabase.RouterRef, profiles *PeerProfiles, local, excluded foundation.Hash, wanted int, nowMillis uint64) []ShortBuildHop {
 	candidates := make([]hopCandidate, 0, len(refs))
 	for _, ref := range refs {
-		if ref.Hash == local || ref.Hash == excluded || !profiles.Eligible(ref.Hash) || netdb.RouterInfoFresh(ref.Info, nowMillis) != nil {
+		if ref.Hash == local || ref.Hash == excluded || !profiles.Eligible(ref.Hash) || networkdatabase.RouterInfoFresh(ref.Info, nowMillis) != nil {
 			continue
 		}
 		key, ok := x25519StaticKey(ref.Info)
@@ -441,7 +441,7 @@ func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, ex
 	return hops
 }
 
-func selectedContains(selected []hopCandidate, hash ivnp.Hash) bool {
+func selectedContains(selected []hopCandidate, hash foundation.Hash) bool {
 	for _, candidate := range selected {
 		if candidate.hop.Router == hash {
 			return true
@@ -486,7 +486,7 @@ func selectedAddressFamilies(selected []hopCandidate) (hasV4, hasV6 bool) {
 	return hasV4, hasV6
 }
 
-func routerMetadata(info netdb.RouterInfo) (string, []uint16, [][6]byte) {
+func routerMetadata(info networkdatabase.RouterInfo) (string, []uint16, [][6]byte) {
 	var family string
 	options := info.Options.Iterator()
 	for {

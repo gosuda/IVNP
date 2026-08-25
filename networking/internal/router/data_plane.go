@@ -8,8 +8,8 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/networking/internal/datagram"
 	"gosuda.org/ivnp/networking/internal/garlic"
@@ -17,7 +17,7 @@ import (
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/network_database"
 	"gosuda.org/ivnp/networking/internal/streaming"
-	streamtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
+	"gosuda.org/ivnp/networking/internal/streaming/tunnel"
 	"gosuda.org/ivnp/networking/internal/tunnel"
 	"gosuda.org/ivnp/observability"
 	"hash/crc32"
@@ -51,15 +51,15 @@ type MessageIDSource func() (uint32, error)
 // LeaseSet lookup manager is used only when the target is absent from Database;
 // all messages and Delivery.Payload remain borrowed until SendTunnel returns.
 type StreamingTunnelSenderConfig struct {
-	Database *netdb.Database
-	Requests *netdb.RequestManager
+	Database *networkdatabase.Database
+	Requests *networkdatabase.RequestManager
 	// Garlic is retained solely for explicitly stored legacy remote LeaseSets.
 	// Local destinations use Ratchet and LS2/ELS2 by default.
 	Garlic  *garlic.SessionManager
 	Ratchet *garlic.RatchetManager
 	// RemoteELS authorizes ELS2 lookup and decryption for an unblinded remote
 	// destination. Presence forbids plaintext LS2 or legacy downgrade.
-	RemoteELS      map[ivnp.Hash]RemoteELSContext
+	RemoteELS      map[foundation.Hash]RemoteELSContext
 	Tunnels        *tunnel.Runtime
 	Pool           *tunnel.Pool
 	SeedRouterInfo tunnel.ReplyRouterInfoSeeder
@@ -72,17 +72,17 @@ type StreamingTunnelSenderConfig struct {
 // RemoteELSContext supplies the unblinded identity, blinding secret, and
 // optional DH or PSK credential for one remote encrypted LeaseSet.
 type RemoteELSContext struct {
-	Identity      ivnp.Identity
+	Identity      foundation.Identity
 	Secret        []byte
-	Authorization netdb.ELSClientAuthorization
+	Authorization networkdatabase.ELSClientAuthorization
 }
 
 // StreamingTunnelSender resolves LS2 destinations and sends authenticated
 // ECIES-X25519-AEAD Garlic cloves through its owning outbound tunnel pool.
 // Legacy ElGamal remains available only for explicit remote compatibility.
 type StreamingTunnelSender struct {
-	database       *netdb.Database
-	requests       *netdb.RequestManager
+	database       *networkdatabase.Database
+	requests       *networkdatabase.RequestManager
 	garlic         *garlic.SessionManager
 	ratchet        *garlic.RatchetManager
 	tunnels        *tunnel.Runtime
@@ -93,7 +93,7 @@ type StreamingTunnelSender struct {
 	lifecycleMu    sync.RWMutex
 	released       bool
 	remoteMu       sync.RWMutex
-	remoteELS      map[ivnp.Hash]RemoteELSContext
+	remoteELS      map[foundation.Hash]RemoteELSContext
 	limiter        *DestinationBandwidthLimiter
 	scratch        chan *streamingSenderScratch
 	scratchSlots   int
@@ -113,8 +113,8 @@ type streamingSenderScratch struct {
 }
 
 type streamingSeedCacheEntry struct {
-	endpoint   ivnp.Hash
-	gateway    ivnp.Hash
+	endpoint   foundation.Hash
+	gateway    foundation.Hash
 	expires    uint64
 	retryAfter uint64
 }
@@ -158,7 +158,7 @@ func (s *StreamingTunnelSender) BandwidthSnapshot() DestinationBandwidthSnapshot
 // UpdateRemoteELS atomically replaces the sender's remote ELS2 policy table.
 // Each entry remains an explicit encrypted-only policy, including entries with
 // no DH or PSK credential, so resolution can never downgrade to plaintext.
-func (s *StreamingTunnelSender) UpdateRemoteELS(policies map[ivnp.Hash]RemoteELSContext) error {
+func (s *StreamingTunnelSender) UpdateRemoteELS(policies map[foundation.Hash]RemoteELSContext) error {
 	if s == nil {
 		return ErrDataPlaneConfig
 	}
@@ -182,16 +182,16 @@ func (s *StreamingTunnelSender) UpdateRemoteELS(policies map[ivnp.Hash]RemoteELS
 // ValidateRemoteELSContexts applies the exact sender validation without
 // retaining any credentials. Daemon persistence uses it before committing a
 // durable address-policy update.
-func ValidateRemoteELSContexts(policies map[ivnp.Hash]RemoteELSContext) error {
+func ValidateRemoteELSContexts(policies map[foundation.Hash]RemoteELSContext) error {
 	validated, err := cloneValidatedRemoteELS(policies)
 	releaseRemoteELSPolicies(validated)
 	return err
 }
 
-func cloneValidatedRemoteELS(policies map[ivnp.Hash]RemoteELSContext) (map[ivnp.Hash]RemoteELSContext, error) {
-	updated := make(map[ivnp.Hash]RemoteELSContext, len(policies))
+func cloneValidatedRemoteELS(policies map[foundation.Hash]RemoteELSContext) (map[foundation.Hash]RemoteELSContext, error) {
+	updated := make(map[foundation.Hash]RemoteELSContext, len(policies))
 	for hash, policy := range policies {
-		cloneValidatedRemoteELSSelected := hash == (ivnp.Hash{}) || policy.Identity.Hash() != hash || len(policy.Identity.Bytes()) == 0 || len(policy.Secret) > 0xffff
+		cloneValidatedRemoteELSSelected := hash == (foundation.Hash{}) || policy.Identity.Hash() != hash || len(policy.Identity.Bytes()) == 0 || len(policy.Secret) > 0xffff
 		if !cloneValidatedRemoteELSSelected {
 			cloneValidatedRemoteELSSelected = (policy.Authorization.UseDH && policy.Authorization.UsePSK)
 		}
@@ -213,7 +213,7 @@ func cloneValidatedRemoteELS(policies map[ivnp.Hash]RemoteELSContext) (map[ivnp.
 	return updated, nil
 }
 
-func releaseRemoteELSPolicies(policies map[ivnp.Hash]RemoteELSContext) {
+func releaseRemoteELSPolicies(policies map[foundation.Hash]RemoteELSContext) {
 	for hash, policy := range policies {
 		clear(policy.Secret)
 		clear(policy.Authorization.DHPrivate[:])
@@ -256,9 +256,9 @@ func (s *StreamingTunnelSender) ReleaseSensitive() {
 // SendTunnel builds a destination Data clove and routes it through this
 // destination's outbound pool. LS2 takes precedence over a legacy record for
 // the same target; legacy encryption is used only when no LS2 exists.
-func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streamtunnel.Delivery) error {
+func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streamingtunnel.Delivery) error {
 	if s == nil || delivery.Protocol == 0 {
-		return streamtunnel.ErrTunnelProtocol
+		return streamingtunnel.ErrTunnelProtocol
 	}
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
@@ -290,13 +290,13 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streamt
 	defer s.releaseScratch(scratch)
 	var (
 		encrypted []byte
-		lease     netdb.Lease
+		lease     networkdatabase.Lease
 	)
 	if set2 != nil {
 		if s.ratchet == nil {
 			return ErrUnsupportedEncryption
 		}
-		key, keyErr := set2.SelectUsableEncryptionKey(now, ivnp.CryptoMLKEM1024X25519, ivnp.CryptoMLKEM768X25519, ivnp.CryptoX25519)
+		key, keyErr := set2.SelectUsableEncryptionKey(now, foundation.CryptoMLKEM1024X25519, foundation.CryptoMLKEM768X25519, foundation.CryptoX25519)
 		if keyErr != nil {
 			return keyErr
 		}
@@ -321,7 +321,7 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streamt
 		if s.garlic == nil {
 			return ErrUnsupportedEncryption
 		}
-		var recipient cryptx.ElGamalPublicKey
+		var recipient cryptography.ElGamalPublicKey
 		lease, recipient, err = selectLegacyLease(*legacy, now)
 		if err != nil {
 			return err
@@ -345,7 +345,7 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streamt
 // SendRatchetReply delivers an authenticated NSR packet through this
 // destination's own lease and outbound tunnel. It deliberately bypasses
 // encryption: packet is already a complete ratchet reply.
-func (s *StreamingTunnelSender) SendRatchetReply(ctx context.Context, target ivnp.Hash, packet []byte) error {
+func (s *StreamingTunnelSender) SendRatchetReply(ctx context.Context, target foundation.Hash, packet []byte) error {
 	if s == nil || len(packet) == 0 {
 		return ErrGarlicPacket
 	}
@@ -409,7 +409,7 @@ func clearStreamingSenderScratch(scratch *streamingSenderScratch) {
 	clear(scratch.frame[:])
 }
 
-func (s *StreamingTunnelSender) sendEncryptedTo(ctx context.Context, lease netdb.Lease, encrypted []byte, expires uint64, frame []byte) error {
+func (s *StreamingTunnelSender) sendEncryptedTo(ctx context.Context, lease networkdatabase.Lease, encrypted []byte, expires uint64, frame []byte) error {
 	outbound, ok := s.pool.Select(tunnel.Outbound, s.now())
 	if !ok {
 		return tunnel.ErrCircuitNotFound
@@ -436,12 +436,12 @@ func (s *StreamingTunnelSender) sendEncryptedTo(ctx context.Context, lease netdb
 	}
 	return s.tunnels.SendBlock(ctx, outbound.ID, tunnel.Block{Delivery: tunnel.DeliveryTunnel, Gateway: lease.Gateway, TunnelID: lease.TunnelID, Data: encoded})
 }
-func (s *StreamingTunnelSender) seedLeaseGateway(ctx context.Context, outbound tunnel.Entry, gateway ivnp.Hash) {
-	if s.seedRouterInfo == nil || outbound.HopCount == 0 || gateway == (ivnp.Hash{}) {
+func (s *StreamingTunnelSender) seedLeaseGateway(ctx context.Context, outbound tunnel.Entry, gateway foundation.Hash) {
+	if s.seedRouterInfo == nil || outbound.HopCount == 0 || gateway == (foundation.Hash{}) {
 		return
 	}
 	endpoint := outbound.Hops[outbound.HopCount-1]
-	if endpoint == (ivnp.Hash{}) {
+	if endpoint == (foundation.Hash{}) {
 		return
 	}
 	now := s.now()
@@ -478,7 +478,7 @@ func (s *StreamingTunnelSender) seedLeaseGateway(ctx context.Context, outbound t
 	s.seedMu.Unlock()
 }
 
-func (s *StreamingTunnelSender) destinationCloveSetTo(set, dataPayload []byte, delivery streamtunnel.Delivery, expires uint64) ([]byte, error) {
+func (s *StreamingTunnelSender) destinationCloveSetTo(set, dataPayload []byte, delivery streamingtunnel.Delivery, expires uint64) ([]byte, error) {
 	dataPayload, err := marshalDestinationDataTo(dataPayload, delivery)
 	if err != nil {
 		return nil, err
@@ -495,7 +495,7 @@ func (s *StreamingTunnelSender) destinationCloveSetTo(set, dataPayload []byte, d
 	cloveCount := 0
 	if shouldBundleLeaseSet(delivery) {
 		if storeType, stored, ok := s.database.StoredLeaseSet(delivery.From); ok {
-			storePayload, storeErr := netdb.MarshalDatabaseStore(delivery.From, storeType, stored, 0, ivnp.Hash{}, 0)
+			storePayload, storeErr := networkdatabase.MarshalDatabaseStore(delivery.From, storeType, stored, 0, foundation.Hash{}, 0)
 			if storeErr != nil {
 				return nil, storeErr
 			}
@@ -542,7 +542,7 @@ func (s *StreamingTunnelSender) destinationCloveSetTo(set, dataPayload []byte, d
 	return set[:length], nil
 }
 
-func (s *StreamingTunnelSender) destinationRatchetPayloadTo(dst, dataPayload []byte, delivery streamtunnel.Delivery, expires uint64) ([]byte, error) {
+func (s *StreamingTunnelSender) destinationRatchetPayloadTo(dst, dataPayload []byte, delivery streamingtunnel.Delivery, expires uint64) ([]byte, error) {
 	dataPayload, err := marshalDestinationDataTo(dataPayload, delivery)
 	if err != nil {
 		return nil, err
@@ -551,7 +551,7 @@ func (s *StreamingTunnelSender) destinationRatchetPayloadTo(dst, dataPayload []b
 	used := 0
 	if shouldBundleLeaseSet(delivery) {
 		if storeType, stored, ok := s.database.StoredLeaseSet(delivery.From); ok && storeType == i2np.StoreLeaseSet2 {
-			storePayload, storeErr := netdb.MarshalDatabaseStore(delivery.From, storeType, stored, 0, ivnp.Hash{}, 0)
+			storePayload, storeErr := networkdatabase.MarshalDatabaseStore(delivery.From, storeType, stored, 0, foundation.Hash{}, 0)
 			if storeErr != nil {
 				return nil, storeErr
 			}
@@ -585,25 +585,25 @@ func (s *StreamingTunnelSender) destinationRatchetPayloadTo(dst, dataPayload []b
 }
 func destinationProtocolRepliable(protocol uint8) bool {
 	switch protocol {
-	case streamtunnel.ProtocolStreaming, datagram.ProtocolDatagram1, datagram.ProtocolDatagram2, datagram.ProtocolDatagram3:
+	case streamingtunnel.ProtocolStreaming, datagram.ProtocolDatagram1, datagram.ProtocolDatagram2, datagram.ProtocolDatagram3:
 		return true
 	default:
 		return false
 	}
 }
 
-func shouldBundleLeaseSet(delivery streamtunnel.Delivery) bool {
-	if delivery.Protocol != streamtunnel.ProtocolStreaming {
+func shouldBundleLeaseSet(delivery streamingtunnel.Delivery) bool {
+	if delivery.Protocol != streamingtunnel.ProtocolStreaming {
 		return destinationProtocolRepliable(delivery.Protocol)
 	}
 	packet, err := streaming.Parse(delivery.Payload)
-	return err == nil && packet.SendStreamID == 0 && packet.Flags&streamtunnel.FlagSynchronize != 0
+	return err == nil && packet.SendStreamID == 0 && packet.Flags&streamingtunnel.FlagSynchronize != 0
 }
 
 func appendRatchetGarlicClove(dst []byte, delivery garlic.Delivery, message i2np.Message) ([]byte, error) {
 	deliveryLen := 1
 	if delivery.Type == garlic.DeliveryDestination {
-		deliveryLen += ivnp.HashLength
+		deliveryLen += foundation.HashLength
 	} else if delivery.Type != garlic.DeliveryLocal {
 		return nil, garlic.ErrDelivery
 	}
@@ -616,8 +616,8 @@ func appendRatchetGarlicClove(dst []byte, delivery garlic.Delivery, message i2np
 	off := 3
 	if delivery.Type == garlic.DeliveryDestination {
 		dst[off] = byte(garlic.DeliveryDestination << 5)
-		copy(dst[off+1:off+1+ivnp.HashLength], delivery.To[:])
-		off += 1 + ivnp.HashLength
+		copy(dst[off+1:off+1+foundation.HashLength], delivery.To[:])
+		off += 1 + foundation.HashLength
 	} else {
 		dst[off] = 0
 		off++
@@ -629,7 +629,7 @@ func appendRatchetGarlicClove(dst []byte, delivery garlic.Delivery, message i2np
 	return dst[:3+bodyLen], nil
 }
 
-func (s *StreamingTunnelSender) resolveLeaseSet(ctx context.Context, target ivnp.Hash) (*netdb.LeaseSet2, *netdb.LeaseSet, error) {
+func (s *StreamingTunnelSender) resolveLeaseSet(ctx context.Context, target foundation.Hash) (*networkdatabase.LeaseSet2, *networkdatabase.LeaseSet, error) {
 	s.remoteMu.RLock()
 	policy, encrypted := s.remoteELS[target]
 	if encrypted {
@@ -659,7 +659,7 @@ func (s *StreamingTunnelSender) resolveLeaseSet(ctx context.Context, target ivnp
 	return nil, nil, ErrLeaseSetUnavailable
 }
 
-func (s *StreamingTunnelSender) resolveEncryptedLeaseSet(ctx context.Context, policy RemoteELSContext) (*netdb.LeaseSet2, *netdb.LeaseSet, error) {
+func (s *StreamingTunnelSender) resolveEncryptedLeaseSet(ctx context.Context, policy RemoteELSContext) (*networkdatabase.LeaseSet2, *networkdatabase.LeaseSet, error) {
 	key, err := encryptedLeaseSetDHTKey(policy.Identity, policy.Secret, s.now())
 	if err != nil {
 		return nil, nil, err
@@ -674,14 +674,14 @@ func (s *StreamingTunnelSender) resolveEncryptedLeaseSet(ctx context.Context, po
 			return nil, nil, ErrLeaseSetUnavailable
 		}
 	}
-	inner, err := netdb.DecryptEncryptedLeaseSet(set, policy.Identity, policy.Secret, policy.Authorization, s.now())
+	inner, err := networkdatabase.DecryptEncryptedLeaseSet(set, policy.Identity, policy.Secret, policy.Authorization, s.now())
 	if err != nil {
 		return nil, nil, err
 	}
 	return &inner, nil, nil
 }
 
-func (s *StreamingTunnelSender) lookupLeaseSet(ctx context.Context, key ivnp.Hash) error {
+func (s *StreamingTunnelSender) lookupLeaseSet(ctx context.Context, key foundation.Hash) error {
 	result, err := s.requests.LookupLeaseSet(ctx, key)
 	if err != nil {
 		return err
@@ -697,56 +697,56 @@ func (s *StreamingTunnelSender) lookupLeaseSet(ctx context.Context, key ivnp.Has
 	}
 }
 
-func encryptedLeaseSetDHTKey(identity ivnp.Identity, secret []byte, now uint64) (ivnp.Hash, error) {
+func encryptedLeaseSetDHTKey(identity foundation.Identity, secret []byte, now uint64) (foundation.Hash, error) {
 	kind := identity.SigningKeyType()
 	public, rest := identity.SigningKeyParts()
 	if len(rest) != 0 {
-		return ivnp.Hash{}, netdb.ErrEncryptedLeaseSet
+		return foundation.Hash{}, networkdatabase.ErrEncryptedLeaseSet
 	}
-	blinded, err := ivnp.BlindEncryptedLeaseSetPublic(kind, public, time.UnixMilli(int64(now)), secret)
+	blinded, err := foundation.BlindEncryptedLeaseSetPublic(kind, public, time.UnixMilli(int64(now)), secret)
 	if err != nil {
-		return ivnp.Hash{}, err
+		return foundation.Hash{}, err
 	}
 	var input [34]byte
-	binary.BigEndian.PutUint16(input[:2], uint16(ivnp.SigningRedDSASHA512Ed25519))
+	binary.BigEndian.PutUint16(input[:2], uint16(foundation.SigningRedDSASHA512Ed25519))
 	copy(input[2:], blinded[:])
-	return ivnp.Sum(input[:]), nil
+	return foundation.Sum(input[:]), nil
 }
 
-func selectLease2(set netdb.LeaseSet2, now uint64) (netdb.Lease, error) {
-	var selected netdb.Lease
+func selectLease2(set networkdatabase.LeaseSet2, now uint64) (networkdatabase.Lease, error) {
+	var selected networkdatabase.Lease
 	iterator := set.Leases()
 	for {
 		lease, ok, err := iterator.Next()
 		if err != nil {
-			return netdb.Lease{}, err
+			return networkdatabase.Lease{}, err
 		}
 		if !ok {
 			break
 		}
 		end := uint64(lease.EndDate) * 1000
 		if end > now && (selected.TunnelID == 0 || end > selected.EndDate) {
-			selected = netdb.Lease{Gateway: lease.Gateway, TunnelID: lease.TunnelID, EndDate: end}
+			selected = networkdatabase.Lease{Gateway: lease.Gateway, TunnelID: lease.TunnelID, EndDate: end}
 		}
 	}
 	if selected.TunnelID == 0 {
-		return netdb.Lease{}, ErrLeaseSetExpired
+		return networkdatabase.Lease{}, ErrLeaseSetExpired
 	}
 	return selected, nil
 }
 
-func selectLegacyLease(set netdb.LeaseSet, now uint64) (netdb.Lease, cryptx.ElGamalPublicKey, error) {
-	if len(set.EncryptionKey) != cryptx.ElGamalPublicKeySize {
-		return netdb.Lease{}, cryptx.ElGamalPublicKey{}, ErrUnsupportedEncryption
+func selectLegacyLease(set networkdatabase.LeaseSet, now uint64) (networkdatabase.Lease, cryptography.ElGamalPublicKey, error) {
+	if len(set.EncryptionKey) != cryptography.ElGamalPublicKeySize {
+		return networkdatabase.Lease{}, cryptography.ElGamalPublicKey{}, ErrUnsupportedEncryption
 	}
-	var recipient cryptx.ElGamalPublicKey
+	var recipient cryptography.ElGamalPublicKey
 	copy(recipient[:], set.EncryptionKey)
-	var selected netdb.Lease
+	var selected networkdatabase.Lease
 	iterator := set.Leases()
 	for {
 		lease, ok, err := iterator.Next()
 		if err != nil {
-			return netdb.Lease{}, cryptx.ElGamalPublicKey{}, err
+			return networkdatabase.Lease{}, cryptography.ElGamalPublicKey{}, err
 		}
 		if !ok {
 			break
@@ -756,7 +756,7 @@ func selectLegacyLease(set netdb.LeaseSet, now uint64) (netdb.Lease, cryptx.ElGa
 		}
 	}
 	if selected.TunnelID == 0 {
-		return netdb.Lease{}, cryptx.ElGamalPublicKey{}, ErrLeaseSetExpired
+		return networkdatabase.Lease{}, cryptography.ElGamalPublicKey{}, ErrLeaseSetExpired
 	}
 	return selected, recipient, nil
 }
@@ -788,12 +788,12 @@ func randomMessageID() (uint32, error) {
 // GarlicDestination identifies one local Garlic endpoint. ECIES state is
 // destination-scoped; legacy session state is optional remote compatibility.
 type GarlicDestination struct {
-	Private  cryptx.ElGamalPrivateKey
+	Private  cryptography.ElGamalPrivateKey
 	Sessions *garlic.SessionManager
 	Ratchet  *garlic.RatchetManager
 	// SendRatchetReply transports an already-authenticated New Session Reply
 	// through this destination's own lease and outbound tunnel.
-	SendRatchetReply func(context.Context, ivnp.Hash, []byte) error
+	SendRatchetReply func(context.Context, foundation.Hash, []byte) error
 	Limiter          *DestinationBandwidthLimiter
 }
 
@@ -802,7 +802,7 @@ type GarlicDestination struct {
 // session state. ReplyKeys are reserved for short-build endpoint replies.
 type GarlicReceiverConfig struct {
 	Service       *Service
-	Destinations  map[ivnp.Hash]GarlicDestination
+	Destinations  map[foundation.Hash]GarlicDestination
 	ReplyKeys     *garlic.ReplyKeyRegistry
 	Now           func() uint64
 	Metrics       *observability.Registry
@@ -813,7 +813,7 @@ type GarlicReceiverConfig struct {
 // before dispatching parsed cloves to the existing Service sinks.
 type GarlicReceiver struct {
 	service        *Service
-	destinations   map[ivnp.Hash]*garlicDestinationState
+	destinations   map[foundation.Hash]*garlicDestinationState
 	lifecycleMu    sync.RWMutex
 	released       bool
 	destinationsMu sync.RWMutex
@@ -893,7 +893,7 @@ func NewGarlicReceiver(config GarlicReceiverConfig) (*GarlicReceiver, error) {
 	}
 	replySlots := parallelism.CPUs()
 	receiver := &GarlicReceiver{
-		service: config.Service, destinations: make(map[ivnp.Hash]*garlicDestinationState, len(config.Destinations)),
+		service: config.Service, destinations: make(map[foundation.Hash]*garlicDestinationState, len(config.Destinations)),
 		replyKeys: config.ReplyKeys, now: config.Now, metrics: config.Metrics, hasStatic: len(config.StaticPrivate) == 32,
 		replyScratch: make(chan *[i2np.I2PDMaxPayload]byte, replySlots),
 	}
@@ -913,8 +913,8 @@ func NewGarlicReceiver(config GarlicReceiverConfig) (*GarlicReceiver, error) {
 // RegisterDestination adds one destination-local authenticated Garlic state.
 // It returns an idempotent removal function which waits for in-flight receive
 // work before releasing the destination's sensitive state.
-func (r *GarlicReceiver) RegisterDestination(hash ivnp.Hash, destination GarlicDestination) (func(), error) {
-	registerDestinationRejected := r == nil || hash == (ivnp.Hash{})
+func (r *GarlicReceiver) RegisterDestination(hash foundation.Hash, destination GarlicDestination) (func(), error) {
+	registerDestinationRejected := r == nil || hash == (foundation.Hash{})
 	if !registerDestinationRejected {
 		registerDestinationRejected = (destination.Sessions == nil && destination.Ratchet == nil)
 	}
@@ -987,7 +987,7 @@ func (r *GarlicReceiver) ReleaseSensitive() {
 
 // BandwidthSnapshot returns one configured local destination's non-sensitive
 // pacing state.
-func (r *GarlicReceiver) BandwidthSnapshot(destination ivnp.Hash) (DestinationBandwidthSnapshot, bool) {
+func (r *GarlicReceiver) BandwidthSnapshot(destination foundation.Hash) (DestinationBandwidthSnapshot, bool) {
 	if r == nil {
 		return DestinationBandwidthSnapshot{}, false
 	}
@@ -1043,18 +1043,18 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message i2np.Messag
 		copy(tag[:], outer.Encrypted[:8])
 		if key, found := r.replyKeys.ConsumeGarlicReplyKey(tag, now); found {
 			if len(outer.Encrypted) < 8+16 {
-				return ecies.ErrOneTimeReplyExistingSession
+				return garlicecies.ErrOneTimeReplyExistingSession
 			}
 			plainLen := len(outer.Encrypted) - 8 - 16
 			if plainLen > i2np.I2PDMaxPayload {
 				return i2np.ErrPayloadTooLarge
 			}
 			scratch := <-r.replyScratch
-			reply, unwrapErr := ecies.OpenOneTimeReplyExistingSession(scratch[:plainLen], key.Key, key.Tag, outer.Encrypted)
+			reply, unwrapErr := garlicecies.OpenOneTimeReplyExistingSession(scratch[:plainLen], key.Key, key.Tag, outer.Encrypted)
 			if unwrapErr ==
 				nil {
 				unwrapErr = r.service.
-					dispatchClove(ivnp.
+					dispatchClove(foundation.
 						Hash{}, garlic.Delivery{Type: garlic.
 						DeliveryLocal}, reply, now, false)
 			}
@@ -1068,7 +1068,7 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message i2np.Messag
 		plainLen := len(outer.Encrypted) - 32 - 16
 		if plainLen > 0 && plainLen <= i2np.I2PDMaxPayload {
 			scratch := <-r.replyScratch
-			inner, openErr := ecies.OpenRouterMessage(scratch[:plainLen], r.staticPrivate[:], outer.Encrypted, now)
+			inner, openErr := garlicecies.OpenRouterMessage(scratch[:plainLen], r.staticPrivate[:], outer.Encrypted, now)
 			if openErr == nil {
 				openErr = r.service.
 					handleI2NP(inner, now, false, source)
@@ -1147,7 +1147,7 @@ func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState
 		remaining := cloves[:0]
 		for _, clove := range cloves {
 			if clove.Delivery.Type == garlic.DeliveryLocal && clove.Message.Header.Type == i2np.DatabaseStore {
-				if err = r.service.dispatchClove(ivnp.Hash{}, clove.Delivery, clove.Message, now, false); err != nil {
+				if err = r.service.dispatchClove(foundation.Hash{}, clove.Delivery, clove.Message, now, false); err != nil {
 					return err
 				}
 				continue
@@ -1223,7 +1223,7 @@ func parseRatchetGarlicClove(body []byte) (garlic.Clove, error) {
 // HandleDestinationData is the concrete Service destination sink. It accepts
 // only Data cloves addressed to a configured local Destination and forwards the
 // protocol, ports, and borrowed payload to its DestinationManager.
-func marshalDestinationDataTo(dst []byte, delivery streamtunnel.Delivery) ([]byte, error) {
+func marshalDestinationDataTo(dst []byte, delivery streamingtunnel.Delivery) ([]byte, error) {
 	if len(delivery.Payload) > int(^uint16(0)) {
 		return nil, i2np.ErrPayloadTooLarge
 	}
@@ -1276,7 +1276,7 @@ func parseDestinationData(payload []byte) (protocol uint8, fromPort, toPort uint
 	return gzip[9], binary.BigEndian.Uint16(gzip[4:6]), binary.BigEndian.Uint16(gzip[6:8]), decoded, nil
 }
 
-func (r *GarlicReceiver) HandleDestinationData(from, to ivnp.Hash, message i2np.Message, destinations *DestinationManager) error {
+func (r *GarlicReceiver) HandleDestinationData(from, to foundation.Hash, message i2np.Message, destinations *DestinationManager) error {
 	if r == nil || destinations == nil || message.Header.Type != i2np.Data {
 		return ErrGarlicPacket
 	}
@@ -1287,32 +1287,32 @@ func (r *GarlicReceiver) HandleDestinationData(from, to ivnp.Hash, message i2np.
 	if err != nil {
 		return err
 	}
-	if protocol == streamtunnel.ProtocolStreaming {
+	if protocol == streamingtunnel.ProtocolStreaming {
 		packet, parseErr := streaming.Parse(payload)
 		if parseErr != nil {
 			return parseErr
 		}
-		if packet.Flags&streamtunnel.FlagFromIncluded != 0 {
-			identity, _, identityErr := ivnp.ParseIdentity(packet.Options)
+		if packet.Flags&streamingtunnel.FlagFromIncluded != 0 {
+			identity, _, identityErr := foundation.ParseIdentity(packet.Options)
 			if identityErr != nil {
 				return identityErr
 			}
 			claimed := identity.Hash()
-			if from != (ivnp.Hash{}) && claimed != from {
-				return streamtunnel.ErrTunnelDestination
+			if from != (foundation.Hash{}) && claimed != from {
+				return streamingtunnel.ErrTunnelDestination
 			}
 			from = claimed
 		}
 	}
-	if from == (ivnp.Hash{}) && protocol == streamtunnel.ProtocolStreaming {
+	if from == (foundation.Hash{}) && protocol == streamingtunnel.ProtocolStreaming {
 		return ErrGarlicDestination
 	}
-	return destinations.HandleStreaming(context.Background(), streamtunnel.Delivery{
+	return destinations.HandleStreaming(context.Background(), streamingtunnel.Delivery{
 		From: from, To: to, Protocol: protocol, FromPort: fromPort, ToPort: toPort, Payload: payload,
 	})
 }
 
-func ratchetReplyTarget(cloves []garlic.Clove, observed ivnp.Hash) (ivnp.Hash, error) {
+func ratchetReplyTarget(cloves []garlic.Clove, observed foundation.Hash) (foundation.Hash, error) {
 	for _, clove := range cloves {
 		if clove.Delivery.Type != garlic.DeliveryLocal || clove.Message.Header.Type != i2np.DatabaseStore {
 			continue
@@ -1321,7 +1321,7 @@ func ratchetReplyTarget(cloves []garlic.Clove, observed ivnp.Hash) (ivnp.Hash, e
 		if err != nil || store.Type != i2np.StoreLeaseSet2 {
 			continue
 		}
-		set, err := netdb.ParseLeaseSet2(store.Data)
+		set, err := networkdatabase.ParseLeaseSet2(store.Data)
 		if err != nil || set.Hash() != store.Key {
 			continue
 		}
@@ -1336,18 +1336,18 @@ func ratchetReplyTarget(cloves []garlic.Clove, observed ivnp.Hash) (ivnp.Hash, e
 				break
 			}
 			if !ok {
-				return ivnp.Hash{}, ErrGarlicPacket
+				return foundation.Hash{}, ErrGarlicPacket
 			}
-			ratchetReplyTargetRejected := (key.Type == ivnp.CryptoX25519 || key.Type == ivnp.CryptoMLKEM768X25519 || key.Type == ivnp.CryptoMLKEM1024X25519)
+			ratchetReplyTargetRejected := (key.Type == foundation.CryptoX25519 || key.Type == foundation.CryptoMLKEM768X25519 || key.Type == foundation.CryptoMLKEM1024X25519)
 			if ratchetReplyTargetRejected {
-				ratchetReplyTargetRejected = ivnp.Sum(key.Data) == observed
+				ratchetReplyTargetRejected = foundation.Sum(key.Data) == observed
 			}
 			if ratchetReplyTargetRejected {
 				return store.Key, nil
 			}
 		}
 	}
-	return ivnp.Hash{}, ErrGarlicPacket
+	return foundation.Hash{}, ErrGarlicPacket
 }
 
 func saturatingAdd(value, increment uint64) uint64 {

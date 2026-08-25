@@ -10,7 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	ivnp "gosuda.org/ivnp"
+	"gosuda.org/ivnp/ivnp"
 )
 
 var version = "dev"

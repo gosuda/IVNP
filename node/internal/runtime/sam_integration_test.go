@@ -1,6 +1,6 @@
-package daemon
+package noderuntime
 
-import state "gosuda.org/ivnp/state"
+import "gosuda.org/ivnp/state"
 
 import (
 	"bufio"

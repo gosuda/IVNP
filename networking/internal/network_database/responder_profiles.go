@@ -1,7 +1,7 @@
-package netdb
+package networkdatabase
 
 import (
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"sync"
 )
 
@@ -15,8 +15,8 @@ const defaultResponderProfilePeers = 64
 type ResponderProfiles struct {
 	mu       sync.RWMutex
 	maxPeers int
-	peers    map[ivnp.Hash]struct{}
-	order    []ivnp.Hash
+	peers    map[foundation.Hash]struct{}
+	order    []foundation.Hash
 }
 
 func NewResponderProfiles(maxPeers int) *ResponderProfiles {
@@ -25,14 +25,14 @@ func NewResponderProfiles(maxPeers int) *ResponderProfiles {
 	}
 	return &ResponderProfiles{
 		maxPeers: maxPeers,
-		peers:    make(map[ivnp.Hash]struct{}, maxPeers),
-		order:    make([]ivnp.Hash, 0, maxPeers),
+		peers:    make(map[foundation.Hash]struct{}, maxPeers),
+		order:    make([]foundation.Hash, 0, maxPeers),
 	}
 }
 
 // Record marks peer as a preferred lookup seed and refreshes its recency entry.
-func (p *ResponderProfiles) Record(peer ivnp.Hash) {
-	if p == nil || peer == (ivnp.Hash{}) {
+func (p *ResponderProfiles) Record(peer foundation.Hash) {
+	if p == nil || peer == (foundation.Hash{}) {
 		return
 	}
 	p.mu.Lock()
@@ -57,7 +57,7 @@ func (p *ResponderProfiles) Record(peer ivnp.Hash) {
 }
 
 // Responsive reports whether peer is a preferred lookup seed.
-func (p *ResponderProfiles) Responsive(peer ivnp.Hash) bool {
+func (p *ResponderProfiles) Responsive(peer foundation.Hash) bool {
 	if p == nil {
 		return false
 	}
@@ -68,7 +68,7 @@ func (p *ResponderProfiles) Responsive(peer ivnp.Hash) bool {
 }
 
 // Candidates appends up to the free capacity in dst, newest seed first.
-func (p *ResponderProfiles) Candidates(dst []ivnp.Hash) []ivnp.Hash {
+func (p *ResponderProfiles) Candidates(dst []foundation.Hash) []foundation.Hash {
 	if p == nil || len(dst) == cap(dst) {
 		return dst
 	}

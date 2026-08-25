@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"io"
 	"os"
 	"strings"
@@ -47,11 +47,11 @@ func validNameCharacter(character byte) bool {
 
 func canonicalDestination(value string) (string, bool) {
 	value = strings.TrimSpace(value)
-	identity, err := ivnp.ParseDestination([]byte(value))
+	identity, err := foundation.ParseDestination([]byte(value))
 	if err != nil {
 		return "", false
 	}
-	canonical := ivnp.EncodeI2PBase64(identity.Bytes())
+	canonical := foundation.EncodeI2PBase64(identity.Bytes())
 	if value != canonical {
 		return "", false
 	}

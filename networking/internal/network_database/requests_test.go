@@ -1,9 +1,9 @@
-package netdb
+package networkdatabase
 
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"sync"
 	"testing"
@@ -11,12 +11,12 @@ import (
 )
 
 type requestTestRoute struct {
-	gateway   ivnp.Hash
+	gateway   foundation.Hash
 	tunnel    uint32
 	viaTunnel bool
 }
 
-func (r requestTestRoute) DatabaseLookupReplyRoute() (ivnp.Hash, uint32, bool) {
+func (r requestTestRoute) DatabaseLookupReplyRoute() (foundation.Hash, uint32, bool) {
 	return r.gateway, r.tunnel, r.viaTunnel
 }
 
@@ -72,7 +72,7 @@ func (s *failFirstRequestSender) count() int {
 
 type interleavingRequestTestSender struct {
 	requestTestSender
-	blockPeer ivnp.Hash
+	blockPeer foundation.Hash
 	entered   chan struct{}
 	release   chan struct{}
 	once      sync.Once
@@ -100,13 +100,13 @@ func (s *cancelingRequestTestSender) Send(ctx context.Context, _ RouterRef, _ i2
 	return ctx.Err()
 }
 
-func requestTestHash(value byte) ivnp.Hash {
-	var hash ivnp.Hash
+func requestTestHash(value byte) foundation.Hash {
+	var hash foundation.Hash
 	hash[0] = value
 	return hash
 }
 
-func addRequestTestFloodfill(database *Database, hash ivnp.Hash) {
+func addRequestTestFloodfill(database *Database, hash foundation.Hash) {
 	table := database.Routers()
 	table.mu.Lock()
 	table.routers[hash] = routerEntry{floodfill: true}
@@ -118,7 +118,7 @@ func TestBuildDatabaseLookupPayloads(t *testing.T) {
 	gateway := requestTestHash(2)
 	exclusion := requestTestHash(3)
 
-	routerPayload, err := BuildDatabaseLookup(key, RouterInfoLookup, requestTestRoute{gateway: gateway}, []ivnp.Hash{exclusion})
+	routerPayload, err := BuildDatabaseLookup(key, RouterInfoLookup, requestTestRoute{gateway: gateway}, []foundation.Hash{exclusion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestBuildDatabaseLookupPayloads(t *testing.T) {
 }
 
 func TestRequestManagerCoalescesFollowsSearchReplyAndCompletesStore(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	first, second, key := requestTestHash(1), requestTestHash(2), requestTestHash(9)
 	addRequestTestFloodfill(database, first)
 	addRequestTestFloodfill(database, second)
@@ -174,7 +174,7 @@ func TestRequestManagerCoalescesFollowsSearchReplyAndCompletesStore(t *testing.T
 		t.Fatalf("initial lookup = %#v, %v", initial, err)
 	}
 
-	peers := make([]byte, ivnp.HashLength)
+	peers := make([]byte, foundation.HashLength)
 	copy(peers, second[:])
 	manager.HandleDatabaseSearchReply(i2np.DatabaseSearchReplyMessage{Key: key, From: first, Peers: peers})
 	messages = sender.snapshot()
@@ -199,7 +199,7 @@ func TestRequestManagerCoalescesFollowsSearchReplyAndCompletesStore(t *testing.T
 }
 
 func TestRequestManagerRejectsUnsolicitedSearchReplyAndExpires(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	peer, key := requestTestHash(1), requestTestHash(9)
 	addRequestTestFloodfill(database, peer)
 	sender := &requestTestSender{}
@@ -228,7 +228,7 @@ func TestRequestManagerRejectsUnsolicitedSearchReplyAndExpires(t *testing.T) {
 }
 
 func TestRequestManagerRetriesAllInitialCandidatesAfterTransportFailures(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	for value := byte(1); value <= 4; value++ {
 		addRequestTestFloodfill(database, requestTestHash(value))
 	}
@@ -251,7 +251,7 @@ func TestRequestManagerRetriesAllInitialCandidatesAfterTransportFailures(t *test
 	}
 }
 func TestRequestManagerReservesCandidateCapacityForSearchReplyReferrals(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	for value := byte(1); value <= 8; value++ {
 		addRequestTestFloodfill(database, requestTestHash(value))
 	}
@@ -270,17 +270,17 @@ func TestRequestManagerReservesCandidateCapacityForSearchReplyReferrals(t *testi
 	if len(req.candidates) != javaIterativeSearchInitialPeers || len(req.fallbacks) != 3 {
 		t.Fatalf("initial candidates = %d, fallbacks = %d", len(req.candidates), len(req.fallbacks))
 	}
-	var responder ivnp.Hash
+	var responder foundation.Hash
 	for peer := range req.sent {
 		responder = peer
 	}
 	manager.mu.Unlock()
 
-	peers := make([]byte, 3*ivnp.HashLength)
+	peers := make([]byte, 3*foundation.HashLength)
 	for index, value := range []byte{9, 10, 11} {
 		peer := requestTestHash(value)
 		addRequestTestFloodfill(database, peer)
-		copy(peers[index*ivnp.HashLength:], peer[:])
+		copy(peers[index*foundation.HashLength:], peer[:])
 	}
 	manager.HandleDatabaseSearchReply(i2np.DatabaseSearchReplyMessage{Key: key, From: responder, Peers: peers})
 	manager.mu.Lock()
@@ -296,7 +296,7 @@ func TestRequestManagerReservesCandidateCapacityForSearchReplyReferrals(t *testi
 }
 
 func TestRequestManagerPrefersProvenResponder(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	for value := byte(1); value <= 4; value++ {
 		addRequestTestFloodfill(database, requestTestHash(value))
 	}
@@ -338,7 +338,7 @@ func TestResponderProfilesEvictsOldestPeer(t *testing.T) {
 }
 
 func TestRequestManagerTransportFailuresDoNotConsumeJavaQueryBudget(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	for value := byte(1); value <= 8; value++ {
 		addRequestTestFloodfill(database, requestTestHash(value))
 	}
@@ -367,7 +367,7 @@ func TestRequestManagerTransportFailuresDoNotConsumeJavaQueryBudget(t *testing.T
 }
 
 func TestRequestManagerUsesJavaFiveQueryBudget(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	for value := byte(1); value <= 8; value++ {
 		addRequestTestFloodfill(database, requestTestHash(value))
 	}
@@ -400,7 +400,7 @@ func TestRequestManagerUsesJavaFiveQueryBudget(t *testing.T) {
 }
 
 func TestRequestManagerRetriesSilentFloodfill(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	first, second, key := requestTestHash(1), requestTestHash(2), requestTestHash(9)
 	addRequestTestFloodfill(database, first)
 	addRequestTestFloodfill(database, second)
@@ -439,7 +439,7 @@ func TestRequestManagerRetriesSilentFloodfill(t *testing.T) {
 }
 
 func TestRequestManagerRetryOutlivesCanceledFirstWaiter(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	first, second, key := requestTestHash(1), requestTestHash(2), requestTestHash(9)
 	addRequestTestFloodfill(database, first)
 	addRequestTestFloodfill(database, second)
@@ -476,7 +476,7 @@ func TestRequestManagerRetryOutlivesCanceledFirstWaiter(t *testing.T) {
 }
 
 func TestRequestManagerCompletesLeaseSetStore(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	peer, key := requestTestHash(1), requestTestHash(9)
 	addRequestTestFloodfill(database, peer)
 	manager, err := NewRequestManager(database, &requestTestSender{}, requestTestRoute{gateway: requestTestHash(8)}, RequestManagerConfig{
@@ -497,7 +497,7 @@ func TestRequestManagerCompletesLeaseSetStore(t *testing.T) {
 }
 
 func TestRequestManagerBoundsDistinctRequests(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	addRequestTestFloodfill(database, requestTestHash(1))
 	manager, err := NewRequestManager(database, &requestTestSender{}, requestTestRoute{gateway: requestTestHash(8)}, RequestManagerConfig{
 		Capacity: 1, TimeoutMillis: 10, Now: func() uint64 { return 1 }, Rand: &fixedReader{bytes: []byte{0, 0, 0, 1}},
@@ -514,7 +514,7 @@ func TestRequestManagerBoundsDistinctRequests(t *testing.T) {
 }
 
 func TestRequestManagerFetchesUnknownCandidatesAndWakesDuringSend(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	source, firstDiscovered, secondDiscovered, next, key := requestTestHash(1), requestTestHash(2), requestTestHash(3), requestTestHash(4), requestTestHash(9)
 	addRequestTestFloodfill(database, source)
 	sender := &interleavingRequestTestSender{
@@ -534,15 +534,15 @@ func TestRequestManagerFetchesUnknownCandidatesAndWakesDuringSend(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	discoveredPeers := make([]byte, 2*ivnp.HashLength)
+	discoveredPeers := make([]byte, 2*foundation.HashLength)
 	copy(discoveredPeers, firstDiscovered[:])
-	copy(discoveredPeers[ivnp.HashLength:], secondDiscovered[:])
+	copy(discoveredPeers[foundation.HashLength:], secondDiscovered[:])
 	manager.HandleDatabaseSearchReply(i2np.DatabaseSearchReplyMessage{Key: key, From: source, Peers: discoveredPeers})
 	messages := sender.snapshot()
 	if len(messages) != 3 {
 		t.Fatalf("sends after unknown candidates = %#v", messages)
 	}
-	for index, expected := range []ivnp.Hash{firstDiscovered, secondDiscovered} {
+	for index, expected := range []foundation.Hash{firstDiscovered, secondDiscovered} {
 		lookup, err := i2np.ParseDatabaseLookup(messages[index+1].Payload)
 		if err != nil || lookup.Key != expected {
 			t.Fatalf("RouterInfo fetch %d = %#v, %v", index, lookup, err)
@@ -550,7 +550,7 @@ func TestRequestManagerFetchesUnknownCandidatesAndWakesDuringSend(t *testing.T) 
 	}
 
 	addRequestTestFloodfill(database, next)
-	nextPeers := make([]byte, ivnp.HashLength)
+	nextPeers := make([]byte, foundation.HashLength)
 	copy(nextPeers, next[:])
 	replyDone := make(chan struct{})
 	go func() {
@@ -578,7 +578,7 @@ func TestRequestManagerFetchesUnknownCandidatesAndWakesDuringSend(t *testing.T) 
 	if len(messages) != 6 {
 		t.Fatalf("sends after candidate admission = %#v", messages)
 	}
-	for index, expected := range []ivnp.Hash{key, firstDiscovered, secondDiscovered, key, key, key} {
+	for index, expected := range []foundation.Hash{key, firstDiscovered, secondDiscovered, key, key, key} {
 		lookup, err := i2np.ParseDatabaseLookup(messages[index].Payload)
 		if err != nil || lookup.Key != expected {
 			t.Fatalf("send %d lookup = %#v, %v", index, lookup, err)
@@ -591,7 +591,7 @@ func TestRequestManagerFetchesUnknownCandidatesAndWakesDuringSend(t *testing.T) 
 }
 
 func TestRequestManagerBoundsWireExpirationSeparately(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	first, second, key := requestTestHash(1), requestTestHash(2), requestTestHash(9)
 	addRequestTestFloodfill(database, first)
 	sender := &requestTestSender{}
@@ -613,7 +613,7 @@ func TestRequestManagerBoundsWireExpirationSeparately(t *testing.T) {
 
 	now = 500
 	addRequestTestFloodfill(database, second)
-	peers := make([]byte, ivnp.HashLength)
+	peers := make([]byte, foundation.HashLength)
 	copy(peers, second[:])
 	manager.HandleDatabaseSearchReply(i2np.DatabaseSearchReplyMessage{Key: key, From: first, Peers: peers})
 	messages = sender.snapshot()
@@ -623,7 +623,7 @@ func TestRequestManagerBoundsWireExpirationSeparately(t *testing.T) {
 }
 
 func TestRequestManagerCloseCancelsSendCompletesWaiterAndRejectsWork(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	peer, key := requestTestHash(1), requestTestHash(9)
 	addRequestTestFloodfill(database, peer)
 	sender := &cancelingRequestTestSender{entered: make(chan struct{})}
@@ -682,7 +682,7 @@ func (r *fixedReader) Read(dst []byte) (int, error) {
 }
 
 func TestExplorationCompletesAfterClosestFloodfillConverges(t *testing.T) {
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	peer, key := requestTestHash(1), requestTestHash(9)
 	addRequestTestFloodfill(database, peer)
 	sender := new(requestTestSender)

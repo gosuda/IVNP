@@ -2,7 +2,7 @@ package tunnel
 
 import (
 	"context"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"testing"
 	"time"
@@ -89,7 +89,7 @@ func newPairedMaintainer(t *testing.T, now uint64, target int, renewBefore uint6
 	pool := NewPool(8)
 	manager, err := NewBuildManager(BuildManagerConfig{
 		Runtime: runtime, Pool: pool, Sender: sender, ReplyKeys: newBuildReplyRegistry(),
-		LocalRouter: ivnp.Hash{1}, LocalDelivery: func(i2np.Message) error { return nil },
+		LocalRouter: foundation.Hash{1}, LocalDelivery: func(i2np.Message) error { return nil },
 		Now: func() uint64 { return now }, Random: new(buildCounterReader),
 	})
 	if err != nil {
@@ -130,7 +130,7 @@ func TestPairedMaintainerBootstrapsOnceThenUsesEstablishedCarrier(t *testing.T) 
 	}
 	discardPairedPending(manager)
 
-	gateway := ivnp.Hash{9}
+	gateway := foundation.Hash{9}
 	if err := pool.Add(Entry{ID: 101, Direction: Inbound, Expires: now + 10_000, Gateway: gateway, GatewayTunnelID: 701}, now); err != nil {
 		t.Fatal(err)
 	}
@@ -143,8 +143,8 @@ func TestPairedMaintainerBootstrapsOnceThenUsesEstablishedCarrier(t *testing.T) 
 	discardPairedPending(manager)
 	sender.take()
 
-	carrierHop := ivnp.Hash{2}
-	if err := pool.Add(Entry{ID: 201, Direction: Outbound, Expires: now + 10_000, HopCount: 1, Hops: [i2np.MaxVariableBuildRecords]ivnp.Hash{carrierHop}}, now); err != nil {
+	carrierHop := foundation.Hash{2}
+	if err := pool.Add(Entry{ID: 201, Direction: Outbound, Expires: now + 10_000, HopCount: 1, Hops: [i2np.MaxVariableBuildRecords]foundation.Hash{carrierHop}}, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := runtime.RegisterOutbound(OutboundCircuit{ID: 201, FirstHop: carrierHop, NextTunnelID: 202, ExpiresAt: now + 10_000}); err != nil {
@@ -195,16 +195,16 @@ func TestPairedMaintainerRenewsDirectionsWithOverlap(t *testing.T) {
 	inboundSource := &pairedInboundSource{builds: []InboundBuild{pairedInboundBuild(t, 101, now+10_000)}}
 	outboundSource := &pairedOutboundSource{builds: []OutboundBuild{rotationBuild(t, 201, now+10_000)}}
 	maintainer, pool, runtime, manager, _ := newPairedMaintainer(t, now, 1, 100, inboundSource, outboundSource)
-	gateway := ivnp.Hash{3}
+	gateway := foundation.Hash{3}
 	oldInbound := Entry{ID: 100, Direction: Inbound, Expires: now + 50, Gateway: gateway, GatewayTunnelID: 700}
-	oldOutbound := Entry{ID: 200, Direction: Outbound, Expires: now + 50, HopCount: 1, Hops: [i2np.MaxVariableBuildRecords]ivnp.Hash{{4}}}
+	oldOutbound := Entry{ID: 200, Direction: Outbound, Expires: now + 50, HopCount: 1, Hops: [i2np.MaxVariableBuildRecords]foundation.Hash{{4}}}
 	if err := pool.Add(oldInbound, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.Add(oldOutbound, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.RegisterOutbound(OutboundCircuit{ID: oldOutbound.ID, FirstHop: ivnp.Hash{4}, NextTunnelID: 201, ExpiresAt: oldOutbound.Expires}); err != nil {
+	if err := runtime.RegisterOutbound(OutboundCircuit{ID: oldOutbound.ID, FirstHop: foundation.Hash{4}, NextTunnelID: 201, ExpiresAt: oldOutbound.Expires}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -239,7 +239,7 @@ func TestPairedMaintainerCloseCancelsAndJoinsActiveTransition(t *testing.T) {
 	pool := NewPool(4)
 	manager, err := NewBuildManager(BuildManagerConfig{
 		Runtime: runtime, Pool: pool, Sender: sender, ReplyKeys: newBuildReplyRegistry(),
-		LocalRouter: ivnp.Hash{1}, LocalDelivery: func(i2np.Message) error { return nil },
+		LocalRouter: foundation.Hash{1}, LocalDelivery: func(i2np.Message) error { return nil },
 		Now: func() uint64 { return now }, Random: new(buildCounterReader),
 	})
 	if err != nil {

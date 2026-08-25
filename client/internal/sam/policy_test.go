@@ -1,7 +1,7 @@
 package sam
 
 import (
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"testing"
 )
 
@@ -14,7 +14,7 @@ func TestSessionPolicyPreservesCryptoOrderAndAuthorizationMode(t *testing.T) {
 		"I2CP.LEASESETTYPE":     "5",
 		"I2CP.LEASESETENCTYPE":  "6,4,7",
 		"I2CP.LEASESETAUTHTYPE": "1",
-		"I2CP.LEASESETCLIENT.0": string(ivnp.EncodeI2PBase64(client[:])),
+		"I2CP.LEASESETCLIENT.0": string(foundation.EncodeI2PBase64(client[:])),
 		"I2CP.LEASESETSECRET":   "not-returned-in-status",
 	})
 	if err != nil {

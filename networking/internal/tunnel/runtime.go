@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/packet"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/observability"
@@ -36,20 +36,20 @@ var (
 // This permits the tunnel hot path to return packet slabs to its pool after a
 // synchronous transport hand-off rather than allocate one heap object per hop.
 type Sender interface {
-	Send(context.Context, ivnp.Hash, i2np.Message) error
+	Send(context.Context, foundation.Hash, i2np.Message) error
 }
 
 // SessionEnsurer authenticates a bidirectional peer session without sending an
 // application message. Inbound tunnel builders use it for the terminal hop so
 // firewalled creators can receive the build reply over an existing session.
 type SessionEnsurer interface {
-	EnsureSession(context.Context, ivnp.Hash) error
+	EnsureSession(context.Context, foundation.Hash) error
 }
 
 // Forward identifies the next participant for a transit tunnel. The next
 // tunnel ID replaces the receive ID after the configured layer transform.
 type Forward struct {
-	Peer     ivnp.Hash
+	Peer     foundation.Hash
 	TunnelID uint32
 }
 
@@ -61,8 +61,8 @@ type OutboundCircuit struct {
 	ID uint32
 	// Owner is the creator-pool identity. Zero denotes the router's own
 	// exploratory circuits; transit circuits use no creator owner.
-	Owner        ivnp.Hash
-	FirstHop     ivnp.Hash
+	Owner        foundation.Hash
+	FirstHop     foundation.Hash
 	NextTunnelID uint32
 	Transforms   []LayerCipher
 	ExpiresAt    uint64
@@ -76,7 +76,7 @@ type InboundCircuit struct {
 	ID uint32
 	// Owner is the creator-pool identity for local endpoint circuits. It is
 	// zero for transit forwarding circuits.
-	Owner      ivnp.Hash
+	Owner      foundation.Hash
 	Transforms []LayerCipher
 	Forward    *Forward
 	Endpoint   *Endpoint
@@ -85,7 +85,7 @@ type InboundCircuit struct {
 }
 
 type inboundCircuit struct {
-	owner      ivnp.Hash
+	owner      foundation.Hash
 	transforms []LayerCipher
 	forward    *Forward
 	endpoint   *Endpoint
@@ -95,8 +95,8 @@ type inboundCircuit struct {
 }
 
 type outboundCircuit struct {
-	owner        ivnp.Hash
-	firstHop     ivnp.Hash
+	owner        foundation.Hash
+	firstHop     foundation.Hash
 	nextTunnelID uint32
 	transforms   []LayerCipher
 	expiresAt    uint64
@@ -267,9 +267,9 @@ func (r *Runtime) hasCircuit(id uint32) bool {
 // CircuitOwner reports the immutable creator owner for a currently installed
 // circuit. It is intentionally an inspection API; installation and removal
 // remain controlled by build/runtime owners.
-func (r *Runtime) CircuitOwner(id uint32) (ivnp.Hash, bool) {
+func (r *Runtime) CircuitOwner(id uint32) (foundation.Hash, bool) {
 	if r == nil || id == 0 {
-		return ivnp.Hash{}, false
+		return foundation.Hash{}, false
 	}
 	shard := r.shard(id)
 	shard.mu.RLock()
@@ -282,7 +282,7 @@ func (r *Runtime) CircuitOwner(id uint32) (ivnp.Hash, bool) {
 		return circuit.owner, true
 	}
 	shard.mu.RUnlock()
-	return ivnp.Hash{}, false
+	return foundation.Hash{}, false
 }
 
 // OutboundActivity returns the number of successfully handed-off blocks on a
@@ -334,8 +334,8 @@ func (r *Runtime) RemoveCircuit(id uint32) {
 // RemoveOwner removes all local endpoint and gateway circuits installed for
 // one Destination owner. Router exploratory and transit circuits use the zero
 // owner and are deliberately unaffected.
-func (r *Runtime) RemoveOwner(owner ivnp.Hash) {
-	if r == nil || owner == (ivnp.Hash{}) {
+func (r *Runtime) RemoveOwner(owner foundation.Hash) {
+	if r == nil || owner == (foundation.Hash{}) {
 		return
 	}
 	for index := range r.shards {
@@ -400,7 +400,7 @@ func (r *Runtime) ActiveTunnelCounts() (exploratoryInbound, exploratoryOutbound,
 			if circuit.forward != nil || r.expired(circuit.expiresAt) {
 				continue
 			}
-			if circuit.owner == (ivnp.Hash{}) {
+			if circuit.owner == (foundation.Hash{}) {
 				exploratoryInbound++
 			} else {
 				clientInbound++
@@ -410,7 +410,7 @@ func (r *Runtime) ActiveTunnelCounts() (exploratoryInbound, exploratoryOutbound,
 			if r.expired(circuit.expiresAt) {
 				continue
 			}
-			if circuit.owner == (ivnp.Hash{}) {
+			if circuit.owner == (foundation.Hash{}) {
 				exploratoryOutbound++
 			} else {
 				clientOutbound++
@@ -661,7 +661,7 @@ func (r *Runtime) deliver(ctx context.Context, sender Sender, local func(i2np.Me
 	}
 }
 
-func (r *Runtime) sendTunnelData(ctx context.Context, sender Sender, peer ivnp.Hash, transforms []LayerCipher, payload []byte) error {
+func (r *Runtime) sendTunnelData(ctx context.Context, sender Sender, peer foundation.Hash, transforms []LayerCipher, payload []byte) error {
 	if len(payload) != i2np.TunnelDataMessageLen {
 		return ErrGatewayPayload
 	}
@@ -673,7 +673,7 @@ func (r *Runtime) sendTunnelData(ctx context.Context, sender Sender, peer ivnp.H
 	return r.sendMessage(ctx, sender, peer, i2np.TunnelData, payload)
 }
 
-func (r *Runtime) sendMessage(ctx context.Context, sender Sender, peer ivnp.Hash, kind i2np.MessageType, payload []byte) error {
+func (r *Runtime) sendMessage(ctx context.Context, sender Sender, peer foundation.Hash, kind i2np.MessageType, payload []byte) error {
 	if sender == nil {
 		return ErrTunnelSender
 	}

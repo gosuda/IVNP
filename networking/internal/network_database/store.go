@@ -1,11 +1,11 @@
-package netdb
+package networkdatabase
 
 import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"time"
 )
@@ -15,8 +15,8 @@ var ErrInvalidDatabaseStore = errors.New("netdb: invalid database store")
 // MarshalDatabaseStore serializes the only DatabaseStore layout emitted by
 // NetDB control-plane producers. Data is copied so a published generation is
 // immutable while it is awaiting acknowledgements.
-func MarshalDatabaseStore(key ivnp.Hash, typeID i2np.StoreType, data []byte, token uint32, gateway ivnp.Hash, tunnelID uint32) ([]byte, error) {
-	if len(data) == 0 || token != 0 && gateway == (ivnp.Hash{}) {
+func MarshalDatabaseStore(key foundation.Hash, typeID i2np.StoreType, data []byte, token uint32, gateway foundation.Hash, tunnelID uint32) ([]byte, error) {
+	if len(data) == 0 || token != 0 && gateway == (foundation.Hash{}) {
 		return nil, ErrInvalidDatabaseStore
 	}
 	if typeID != i2np.StoreRouterInfo && typeID != i2np.StoreLeaseSet && typeID != i2np.StoreLeaseSet2 && typeID != i2np.StoreMetaLeaseSet && typeID != i2np.StoreEncryptedLeaseSet {
@@ -84,7 +84,7 @@ func CompressRouterInfo(raw []byte) ([]byte, error) {
 
 // StoredLeaseSet returns an immutable copy of the currently retained lease
 // object so responders never retain or expose mutable database storage.
-func (d *Database) StoredLeaseSet(key ivnp.Hash) (i2np.StoreType, []byte, bool) {
+func (d *Database) StoredLeaseSet(key foundation.Hash) (i2np.StoreType, []byte, bool) {
 	d.leasesMu.RLock()
 	entry, ok := d.leases[key]
 	if !ok {

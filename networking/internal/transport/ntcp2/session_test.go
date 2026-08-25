@@ -3,7 +3,7 @@ package ntcp2
 import (
 	"bytes"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"net"
 	"testing"
 )
@@ -46,9 +46,9 @@ func TestSessionCloseReleasesDirections(t *testing.T) {
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
 	}
-	sessionCloseReleasesDirectionsRejected := !send.released || !receive.released || send.sip != (SipState{}) || receive.sip != (SipState{}) || send.nonceBuf != [cryptx.ChaChaNonceSize]byte{}
+	sessionCloseReleasesDirectionsRejected := !send.released || !receive.released || send.sip != (SipState{}) || receive.sip != (SipState{}) || send.nonceBuf != [cryptography.ChaChaNonceSize]byte{}
 	if !sessionCloseReleasesDirectionsRejected {
-		sessionCloseReleasesDirectionsRejected = receive.nonceBuf != [cryptx.ChaChaNonceSize]byte{}
+		sessionCloseReleasesDirectionsRejected = receive.nonceBuf != [cryptography.ChaChaNonceSize]byte{}
 	}
 	if sessionCloseReleasesDirectionsRejected {
 		t.Fatal("session close retained directional state")

@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/garlic"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/network_database"
@@ -152,10 +152,10 @@ func TestServiceDoesNotReplayRejectPayloadOrRouteFailures(t *testing.T) {
 
 func TestServiceAcknowledgesSuccessfulDatabaseStoreOnce(t *testing.T) {
 	const now = uint64(1_000)
-	database := netdb.NewDatabase(ivnp.Hash{}, netdb.DefaultBucketCapacity)
+	database := networkdatabase.NewDatabase(foundation.Hash{}, networkdatabase.DefaultBucketCapacity)
 	payload, key := testEncryptedDatabaseStore(t, 77, 9)
 	replies := 0
-	service := NewWithSinks(database, Sinks{DatabaseStoreReply: func(gateway ivnp.Hash, tunnelID uint32, status i2np.DeliveryStatusMessage) error {
+	service := NewWithSinks(database, Sinks{DatabaseStoreReply: func(gateway foundation.Hash, tunnelID uint32, status i2np.DeliveryStatusMessage) error {
 		replies++
 		if gateway[0] != 1 || tunnelID != 9 {
 			t.Fatalf("reply route = %x/%d, want gateway 1/tunnel 9", gateway, tunnelID)
@@ -183,21 +183,21 @@ func TestServiceAcknowledgesSuccessfulDatabaseStoreOnce(t *testing.T) {
 	}
 }
 
-func testEncryptedDatabaseStore(t *testing.T, replyToken, replyTunnelID uint32) ([]byte, ivnp.Hash) {
+func testEncryptedDatabaseStore(t *testing.T, replyToken, replyTunnelID uint32) ([]byte, foundation.Hash) {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	unsigned := make([]byte, 2+len(public)+4+2+2+2+1)
-	binary.BigEndian.PutUint16(unsigned[:2], uint16(ivnp.SigningRedDSASHA512Ed25519))
+	binary.BigEndian.PutUint16(unsigned[:2], uint16(foundation.SigningRedDSASHA512Ed25519))
 	copy(unsigned[2:], public)
 	offset := 2 + len(public) + 4 + 2 + 2
 	binary.BigEndian.PutUint16(unsigned[offset:offset+2], 1)
 	unsigned[offset+2] = 7
 	signed := append([]byte{byte(i2np.StoreEncryptedLeaseSet)}, unsigned...)
 	leaseSet := append(unsigned, ed25519.Sign(private, signed)...)
-	parsed, err := netdb.ParseEncryptedLeaseSet(leaseSet)
+	parsed, err := networkdatabase.ParseEncryptedLeaseSet(leaseSet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestServiceTunnelBuildSetterRoutesShortBuild(t *testing.T) {
 		Payload: append([]byte{1}, make([]byte, i2np.ShortBuildRecordLen)...),
 	}
 	calls := 0
-	peer := ivnp.Hash{7}
+	peer := foundation.Hash{7}
 	service := NewService(nil)
 	service.SetTunnelBuildSink(func(source I2NPSource, records i2np.BuildRecords, got i2np.Message) error {
 		calls++

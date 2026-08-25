@@ -4,8 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	cryptx "gosuda.org/ivnp/cryptography"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"io"
 )
@@ -34,7 +34,7 @@ func (m *BuildManager) StartVariableOutbound(ctx context.Context, build Variable
 		return 0, err
 	}
 	now := m.now()
-	startVariableOutboundRejected := build.CircuitID == 0 || len(build.Hops) == 0 || len(build.Hops) > legacyBuildMaxRecords || build.ReplyRouter == (ivnp.Hash{}) || build.ReplyTunnelID == 0 || build.ExpiresAt <= now
+	startVariableOutboundRejected := build.CircuitID == 0 || len(build.Hops) == 0 || len(build.Hops) > legacyBuildMaxRecords || build.ReplyRouter == (foundation.Hash{}) || build.ReplyTunnelID == 0 || build.ExpiresAt <= now
 	if !startVariableOutboundRejected {
 		startVariableOutboundRejected = !validVariableHops(build.Hops)
 	}
@@ -96,7 +96,7 @@ func (m *BuildManager) StartVariableOutbound(ctx context.Context, build Variable
 	return replyID, nil
 }
 
-func fillVariableRequest(record []byte, hop VariableBuildHop, request VariableBuildRequest, local ivnp.Hash, random io.Reader, keys *VariableBuildKeys) error {
+func fillVariableRequest(record []byte, hop VariableBuildHop, request VariableBuildRequest, local foundation.Hash, random io.Reader, keys *VariableBuildKeys) error {
 	var err error
 	switch hop.Kind {
 	case VariableBuildElGamal:
@@ -120,7 +120,7 @@ func fillVariableRequest(record []byte, hop VariableBuildHop, request VariableBu
 }
 
 func (m *BuildManager) handleVariableTransit(message i2np.Message) error {
-	if m.local == (ivnp.Hash{}) {
+	if m.local == (foundation.Hash{}) {
 		return ErrBuildConfig
 	}
 	records, err := i2np.ParseBuildRecords(i2np.VariableTunnelBuild, message.Payload)
@@ -162,7 +162,7 @@ func (m *BuildManager) handleVariableTransit(message i2np.Message) error {
 		}
 	}
 	if request.Endpoint {
-		if request.NextRouter == (ivnp.Hash{}) || request.NextRouter == m.local || request.NextTunnelID == 0 {
+		if request.NextRouter == (foundation.Hash{}) || request.NextRouter == m.local || request.NextTunnelID == 0 {
 			if accept {
 				m.runtime.RemoveCircuit(request.ReceiveTunnelID)
 			}
@@ -309,7 +309,7 @@ func shortRequestFromVariable(request VariableBuildRequest) ShortBuildRequest {
 }
 func validVariableHops(hops []VariableBuildHop) bool {
 	for index, hop := range hops {
-		validVariableHopsRejected := hop.Router == (ivnp.Hash{}) || hop.ReceiveTunnelID == 0 || hop.Kind != VariableBuildElGamal && hop.Kind != VariableBuildLongECIES || hop.Kind == VariableBuildElGamal && hop.ElGamalKey == (cryptx.ElGamalPublicKey{})
+		validVariableHopsRejected := hop.Router == (foundation.Hash{}) || hop.ReceiveTunnelID == 0 || hop.Kind != VariableBuildElGamal && hop.Kind != VariableBuildLongECIES || hop.Kind == VariableBuildElGamal && hop.ElGamalKey == (cryptography.ElGamalPublicKey{})
 		if !validVariableHopsRejected {
 			validVariableHopsRejected = hop.Kind == VariableBuildLongECIES && hop.StaticKey == ([32]byte{})
 		}

@@ -1,14 +1,14 @@
-package clientapi
+package frontend
 
 import (
 	"io"
 	"net"
 
-	internalrelay "gosuda.org/ivnp/internal/relay"
+	"gosuda.org/ivnp/internal/relay"
 )
 
-func relay(left, right net.Conn, leftReader io.Reader) {
-	_ = internalrelay.Bidirectional(left, right, leftReader)
+func relayConnections(left, right net.Conn, leftReader io.Reader) {
+	_ = relay.Bidirectional(left, right, leftReader)
 	_ = left.Close()
 	_ = right.Close()
 }

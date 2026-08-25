@@ -1,8 +1,8 @@
-package netdb
+package networkdatabase
 
 import (
 	"encoding/binary"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
 	"sync"
 )
@@ -13,7 +13,7 @@ import (
 type LocalLeaseSet struct {
 	mu       sync.RWMutex
 	identity []byte
-	hash     ivnp.Hash
+	hash     foundation.Hash
 	leases   []Lease
 	version  uint64
 }
@@ -22,7 +22,7 @@ type LocalLeaseSet struct {
 // metadata. ExpiresAt is the earliest end date of the leases in Leases, or zero
 // when no lease is current at the requested time.
 type LocalLeaseSetSnapshot struct {
-	Identity  ivnp.Identity
+	Identity  foundation.Identity
 	Leases    []Lease
 	ExpiresAt uint64
 	Version   uint64
@@ -33,7 +33,7 @@ type LocalLeaseSetSnapshot struct {
 // prefix and must return a signature for Identity's signing key type.
 func (s LocalLeaseSetSnapshot) MarshalLegacy(dst, encryptionKey, signingKey []byte, sign func([]byte) ([]byte, error)) (int, error) {
 	identityBytes := s.Identity.Bytes()
-	identity, identityLen, err := ivnp.ParseIdentity(identityBytes)
+	identity, identityLen, err := foundation.ParseIdentity(identityBytes)
 	if err != nil {
 		return 0, err
 	}
@@ -45,14 +45,14 @@ func (s LocalLeaseSetSnapshot) MarshalLegacy(dst, encryptionKey, signingKey []by
 	}
 	signingKeyLen, ok := identity.SigningKeyType().PublicKeyLen()
 	if !ok {
-		return 0, ivnp.ErrUnknownKeyType
+		return 0, foundation.ErrUnknownKeyType
 	}
 	if len(signingKey) != signingKeyLen {
 		return 0, ErrInvalidKeyLength
 	}
 	signatureLen, ok := identity.SigningKeyType().SignatureLen()
 	if !ok {
-		return 0, ivnp.ErrUnknownKeyType
+		return 0, foundation.ErrUnknownKeyType
 	}
 	if len(s.Leases) > MaxLeases {
 		return 0, ErrTooManyItems
@@ -81,9 +81,9 @@ func (s LocalLeaseSetSnapshot) MarshalLegacy(dst, encryptionKey, signingKey []by
 	dst[offset] = byte(len(s.Leases))
 	offset++
 	for _, lease := range s.Leases {
-		copy(dst[offset:offset+ivnp.HashLength], lease.Gateway[:])
-		binary.BigEndian.PutUint32(dst[offset+ivnp.HashLength:offset+ivnp.HashLength+4], lease.TunnelID)
-		binary.BigEndian.PutUint64(dst[offset+ivnp.HashLength+4:offset+44], lease.EndDate)
+		copy(dst[offset:offset+foundation.HashLength], lease.Gateway[:])
+		binary.BigEndian.PutUint32(dst[offset+foundation.HashLength:offset+foundation.HashLength+4], lease.TunnelID)
+		binary.BigEndian.PutUint64(dst[offset+foundation.HashLength+4:offset+44], lease.EndDate)
 		offset += 44
 	}
 
@@ -92,7 +92,7 @@ func (s LocalLeaseSetSnapshot) MarshalLegacy(dst, encryptionKey, signingKey []by
 		return 0, err
 	}
 	if len(signature) != signatureLen {
-		return 0, ivnp.ErrMalformedSignature
+		return 0, foundation.ErrMalformedSignature
 	}
 	copy(dst[offset:], signature)
 	return totalLen, nil
@@ -101,9 +101,9 @@ func (s LocalLeaseSetSnapshot) MarshalLegacy(dst, encryptionKey, signingKey []by
 // NewLocalLeaseSet creates local publication metadata for identity. The
 // identity is copied so later mutation of identity's backing bytes cannot
 // change locally published metadata.
-func NewLocalLeaseSet(identity ivnp.Identity) (*LocalLeaseSet, error) {
+func NewLocalLeaseSet(identity foundation.Identity) (*LocalLeaseSet, error) {
 	encoded := append([]byte(nil), identity.Bytes()...)
-	owned, n, err := ivnp.ParseIdentity(encoded)
+	owned, n, err := foundation.ParseIdentity(encoded)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func NewLocalLeaseSet(identity ivnp.Identity) (*LocalLeaseSet, error) {
 }
 
 // Hash returns the local destination hash.
-func (s *LocalLeaseSet) Hash() ivnp.Hash { return s.hash }
+func (s *LocalLeaseSet) Hash() foundation.Hash { return s.hash }
 
 // ReplaceInboundLeases atomically replaces the locally published inbound
 // leases. The protocol's LeaseSet limit applies before state is modified.
@@ -179,7 +179,7 @@ func (s *LocalLeaseSet) Snapshot(nowMillis uint64) (LocalLeaseSetSnapshot, bool)
 	version := s.version
 	s.mu.RUnlock()
 
-	identityView, _, err := ivnp.ParseIdentity(identity)
+	identityView, _, err := foundation.ParseIdentity(identity)
 	if err != nil {
 		return LocalLeaseSetSnapshot{}, false
 	}

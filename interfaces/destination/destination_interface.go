@@ -2,7 +2,7 @@ package destination
 
 import (
 	"context"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"net"
 	"sync"
 )
@@ -29,7 +29,7 @@ type LeaseSetPolicy struct {
 // DestinationSpec describes one transient local Destination. The controller
 // takes its own sensitive clone; callers retain and must release Local.
 type DestinationSpec struct {
-	Local  *ivnp.LocalDestination
+	Local  *foundation.LocalDestination
 	Policy LeaseSetPolicy
 }
 
@@ -43,7 +43,7 @@ type DestinationRoute struct {
 // Delivery is one authenticated payload routed to a local destination.
 // Implementations which retain Payload must copy it before returning.
 type Delivery struct {
-	From, To         ivnp.Hash
+	From, To         foundation.Hash
 	FromPort, ToPort uint16
 	Protocol         uint8
 	Payload          []byte
@@ -91,7 +91,7 @@ type MessageSubscription interface {
 // DestinationEndpoint is the narrow client-facing view of one daemon-owned,
 // destination-isolated graph.
 type DestinationEndpoint interface {
-	Hash() ivnp.Hash
+	Hash() foundation.Hash
 	B32() string
 	Destination() []byte
 	DialI2P(context.Context, string) (net.Conn, error)

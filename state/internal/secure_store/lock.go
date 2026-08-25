@@ -1,4 +1,4 @@
-package state
+package securestore
 
 import (
 	"errors"
@@ -60,7 +60,7 @@ func (s *Store) AcquireLock() (*Lock, error) {
 		return nil, statErr
 	}
 	if created {
-		if err := fsstore.SyncDir(dir); err != nil {
+		if err := filesystemstore.SyncDir(dir); err != nil {
 			file.Close()
 			return nil, err
 		}

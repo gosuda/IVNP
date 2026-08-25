@@ -1,11 +1,11 @@
-package netdb
+package networkdatabase
 
 import "cmp"
 
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"log/slog"
 	"sync"
@@ -132,9 +132,9 @@ type confirmedPublication struct {
 	registry   *PublicationTokenRegistry
 	now        func() uint64
 	random     func() uint32
-	key        ivnp.Hash
+	key        foundation.Hash
 	typeID     i2np.StoreType
-	preferred  []ivnp.Hash
+	preferred  []foundation.Hash
 	data       []byte
 	generation uint64
 	targets    []RouterRef
@@ -146,14 +146,14 @@ type confirmedPublication struct {
 	mu         sync.Mutex
 }
 
-func newConfirmedPublication(database *Database, sender LeaseSetPublishSender, route ReplyPathSource, registry *PublicationTokenRegistry, now func() uint64, random func() uint32, key ivnp.Hash, typeID i2np.StoreType, preferred []ivnp.Hash, logger *slog.Logger) *confirmedPublication {
+func newConfirmedPublication(database *Database, sender LeaseSetPublishSender, route ReplyPathSource, registry *PublicationTokenRegistry, now func() uint64, random func() uint32, key foundation.Hash, typeID i2np.StoreType, preferred []foundation.Hash, logger *slog.Logger) *confirmedPublication {
 
 	if registry == nil {
 		registry = NewPublicationTokenRegistry(now,
 
 			random)
 	}
-	return &confirmedPublication{database: database, sender: sender, route: route, registry: registry, now: now, random: random, key: key, typeID: typeID, preferred: append([]ivnp.Hash(nil), preferred...), attempts: make(map[uint32]publicationAttempt), logger: logger}
+	return &confirmedPublication{database: database, sender: sender, route: route, registry: registry, now: now, random: random, key: key, typeID: typeID, preferred: append([]foundation.Hash(nil), preferred...), attempts: make(map[uint32]publicationAttempt), logger: logger}
 }
 
 func (p *confirmedPublication) replace(data []byte) {
@@ -212,7 +212,7 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 				p.database.metrics.IncPublicationTimeouts()
 			}
 			if p.logger != nil {
-				p.logger.Warn("netdb publication confirmation timeout", "store_type", uint8(p.typeID), "target", ivnp.EncodeI2PBase64(attempt.target.Hash[:]), "generation", p.generation, "elapsed_ms", now-attempt.sentAt)
+				p.logger.Warn("netdb publication confirmation timeout", "store_type", uint8(p.typeID), "target", foundation.EncodeI2PBase64(attempt.target.Hash[:]), "generation", p.generation, "elapsed_ms", now-attempt.sentAt)
 			}
 		}
 	}
@@ -301,7 +301,7 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 				p.database.metrics.IncPublicationAttempts()
 			}
 			if p.logger != nil {
-				p.logger.Info("netdb publication attempt", "store_type", uint8(p.typeID), "target", ivnp.EncodeI2PBase64(target.Hash[:]), "generation", generation, "reply_via_tunnel", tunnelID != 0)
+				p.logger.Info("netdb publication attempt", "store_type", uint8(p.typeID), "target", foundation.EncodeI2PBase64(target.Hash[:]), "generation", generation, "reply_via_tunnel", tunnelID != 0)
 			}
 			batch = append(batch, publicationSend{token: token, target: target, message: message, generation: generation})
 		}
@@ -336,7 +336,7 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 				p.database.metrics.IncPublicationSendFailures()
 			}
 			if p.logger != nil {
-				p.logger.Warn("netdb publication send failed", "store_type", uint8(p.typeID), "target", ivnp.EncodeI2PBase64(work.target.Hash[:]), "generation", work.generation, "error", err)
+				p.logger.Warn("netdb publication send failed", "store_type", uint8(p.typeID), "target", foundation.EncodeI2PBase64(work.target.Hash[:]), "generation", work.generation, "error", err)
 			}
 		}
 	}
@@ -390,13 +390,13 @@ func (p *confirmedPublication) confirm(token uint32, status i2np.DeliveryStatusM
 		}
 	}
 	if p.logger != nil {
-		p.logger.Info("netdb publication confirmed", "store_type", uint8(p.typeID), "target", ivnp.EncodeI2PBase64(attempt.target.Hash[:]), "generation", generation, "latency_ms", status.Timestamp-attempt.sentAt)
+		p.logger.Info("netdb publication confirmed", "store_type", uint8(p.typeID), "target", foundation.EncodeI2PBase64(attempt.target.Hash[:]), "generation", generation, "latency_ms", status.Timestamp-attempt.sentAt)
 	}
 	return true
 }
-func (p *confirmedPublication) replyPath() (ivnp.Hash, uint32, bool) {
+func (p *confirmedPublication) replyPath() (foundation.Hash, uint32, bool) {
 	if p.route == nil {
-		return ivnp.Hash{}, 0, false
+		return foundation.Hash{}, 0, false
 	}
 	return p.route.NetDBReplyPath()
 }

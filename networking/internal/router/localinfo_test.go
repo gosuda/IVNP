@@ -3,7 +3,7 @@ package router
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/network_database"
 	"gosuda.org/ivnp/observability"
 	"testing"
@@ -11,11 +11,11 @@ import (
 )
 
 func TestLocalRouterInfoPublishesRouterLifecycleState(t *testing.T) {
-	local, err := ivnp.GenerateLocalAddress()
+	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := netdb.NewDatabase(ivnp.Hash{}, 4)
+	database := networkdatabase.NewDatabase(foundation.Hash{}, 4)
 	clock := fixedClock{now: time.UnixMilli(123456789)}
 	metrics := observability.NewRegistry()
 	database.SetMetrics(metrics)
@@ -93,7 +93,7 @@ func TestLocalRouterInfoPublishesRouterLifecycleState(t *testing.T) {
 }
 
 func TestLocalRouterInfoRejectsMalformedOptionsAndCanceledPublication(t *testing.T) {
-	local, err := ivnp.GenerateLocalAddress()
+	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestLocalRouterInfoRejectsMalformedOptionsAndCanceledPublication(t *testing
 	}
 }
 
-func mappingValue(t *testing.T, mapping ivnp.Mapping, key string) string {
+func mappingValue(t *testing.T, mapping foundation.Mapping, key string) string {
 	t.Helper()
 	iterator := mapping.Iterator()
 	for {

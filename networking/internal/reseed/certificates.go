@@ -7,7 +7,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"io/fs"
 	"time"
 )
@@ -67,7 +67,7 @@ func loadSU3Signers(source fs.FS, now time.Time) (map[string]SU3Signer, error) {
 			return nil, fmt.Errorf("%w: duplicate embedded signer %q", ErrDefaultSigners, certificate.Subject.CommonName)
 		}
 		signers[certificate.Subject.CommonName] = SU3Signer{
-			SigningType: ivnp.SigningRSASHA512_4096,
+			SigningType: foundation.SigningRSASHA512_4096,
 			PublicKey:   publicKey.N.FillBytes(make([]byte, 512)),
 		}
 	}

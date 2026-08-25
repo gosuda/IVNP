@@ -3,7 +3,7 @@ package router
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/garlic"
 	"gosuda.org/ivnp/networking/internal/garlic/ecies"
 	"gosuda.org/ivnp/networking/internal/i2np"
@@ -12,12 +12,12 @@ import (
 )
 
 type buildReplyCaptureSender struct {
-	peer    ivnp.Hash
+	peer    foundation.Hash
 	message i2np.Message
 	handle  func(i2np.Message) error
 }
 
-func (s *buildReplyCaptureSender) Send(_ context.Context, peer ivnp.Hash, message i2np.Message) error {
+func (s *buildReplyCaptureSender) Send(_ context.Context, peer foundation.Hash, message i2np.Message) error {
 	s.peer = peer
 	s.message = i2np.Message{Header: message.Header, Payload: append([]byte(nil), message.Payload...)}
 	if s.handle != nil {
@@ -28,7 +28,7 @@ func (s *buildReplyCaptureSender) Send(_ context.Context, peer ivnp.Hash, messag
 
 func TestBuildReplySenderSendsTunnelGatewayDirectlyToIBGW(t *testing.T) {
 	const now = uint64(1_000)
-	local, gateway := ivnp.Hash{1}, ivnp.Hash{2}
+	local, gateway := foundation.Hash{1}, foundation.Hash{2}
 	var received i2np.Message
 	destinationSender := &buildReplyCaptureSender{}
 	service := NewWithSinks(nil, Sinks{OutboundTunnelBuildReply: func(message i2np.Message) error {
@@ -64,7 +64,7 @@ func TestBuildReplySenderSendsTunnelGatewayDirectlyToIBGW(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opened, err := ecies.OpenOneTimeReplyExistingSession(make([]byte, len(garlicMessage.Encrypted)-8-16), key.Key, key.Tag, garlicMessage.Encrypted)
+	opened, err := garlicecies.OpenOneTimeReplyExistingSession(make([]byte, len(garlicMessage.Encrypted)-8-16), key.Key, key.Tag, garlicMessage.Encrypted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestBuildReplySenderSendsTunnelGatewayDirectlyToIBGW(t *testing.T) {
 
 func TestBuildReplySenderInjectsRawReplyForSameRouterGateway(t *testing.T) {
 	const now = uint64(1_000)
-	local := ivnp.Hash{1}
+	local := foundation.Hash{1}
 	calls := 0
 	var tunnelID uint32
 	var received i2np.Message
@@ -110,7 +110,7 @@ func TestBuildReplySenderInjectsRawReplyForSameRouterGateway(t *testing.T) {
 
 func TestBuildReplySenderGarlicSurvivesServiceAdmissionWithoutReplayCollision(t *testing.T) {
 	const now = uint64(1_000)
-	local, gateway := ivnp.Hash{1}, ivnp.Hash{2}
+	local, gateway := foundation.Hash{1}, foundation.Hash{2}
 	var received i2np.Message
 	service := NewWithSinks(nil, Sinks{OutboundTunnelBuildReply: func(message i2np.Message) error {
 		received = i2np.Message{Header: message.Header, Payload: append([]byte(nil), message.Payload...)}
@@ -167,7 +167,7 @@ func TestGarlicReceiverConsumesShortBuildReplyTagBeforeAuthentication(t *testing
 	}
 	reply := testRouterBuildReply()
 	ciphertext := make([]byte, 8+13+len(reply.Payload)+16)
-	ciphertext, err = ecies.SealOneTimeReplyExistingSession(ciphertext, key.Key, key.Tag, reply, nil)
+	ciphertext, err = garlicecies.SealOneTimeReplyExistingSession(ciphertext, key.Key, key.Tag, reply, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestGarlicReceiverConsumesShortBuildReplyTagBeforeAuthentication(t *testing
 		t.Fatal(err)
 	}
 	outer.Payload[len(outer.Payload)-1] ^= 1
-	if err = receiver.HandleGarlic(outer); !errors.Is(err, ecies.ErrOneTimeReplyExistingSession) || registry.Len() != 0 {
+	if err = receiver.HandleGarlic(outer); !errors.Is(err, garlicecies.ErrOneTimeReplyExistingSession) || registry.Len() != 0 {
 		t.Fatalf("tampered one-use reply error = %v, retained keys = %d", err, registry.Len())
 	}
 }

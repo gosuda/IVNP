@@ -1,23 +1,23 @@
-package clientapi
+package frontend
 
-import destinationapi "gosuda.org/ivnp/interfaces/destination"
+import "gosuda.org/ivnp/interfaces/destination"
 
 type (
-	DestinationResolver           = destinationapi.DestinationResolver
-	LeaseSetPolicy                = destinationapi.LeaseSetPolicy
-	DestinationSpec               = destinationapi.DestinationSpec
-	DestinationRoute              = destinationapi.DestinationRoute
-	Delivery                      = destinationapi.Delivery
-	ReceivedMessage               = destinationapi.ReceivedMessage
-	ByteBudget                    = destinationapi.ByteBudget
-	MessageSubscription           = destinationapi.MessageSubscription
-	DestinationEndpoint           = destinationapi.DestinationEndpoint
-	SourcePortDestinationEndpoint = destinationapi.SourcePortDestinationEndpoint
-	BoundedDestinationEndpoint    = destinationapi.BoundedDestinationEndpoint
-	ReadyDestinationEndpoint      = destinationapi.ReadyDestinationEndpoint
-	DestinationController         = destinationapi.DestinationController
+	DestinationResolver           = destination.DestinationResolver
+	LeaseSetPolicy                = destination.LeaseSetPolicy
+	DestinationSpec               = destination.DestinationSpec
+	DestinationRoute              = destination.DestinationRoute
+	Delivery                      = destination.Delivery
+	ReceivedMessage               = destination.ReceivedMessage
+	ByteBudget                    = destination.ByteBudget
+	MessageSubscription           = destination.MessageSubscription
+	DestinationEndpoint           = destination.DestinationEndpoint
+	SourcePortDestinationEndpoint = destination.SourcePortDestinationEndpoint
+	BoundedDestinationEndpoint    = destination.BoundedDestinationEndpoint
+	ReadyDestinationEndpoint      = destination.ReadyDestinationEndpoint
+	DestinationController         = destination.DestinationController
 )
 
-func NewReceivedMessage(delivery destinationapi.Delivery, release func(int)) *ReceivedMessage {
-	return destinationapi.NewReceivedMessage(delivery, release)
+func NewReceivedMessage(delivery destination.Delivery, release func(int)) *ReceivedMessage {
+	return destination.NewReceivedMessage(delivery, release)
 }

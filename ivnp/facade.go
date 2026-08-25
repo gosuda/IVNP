@@ -1,10 +1,10 @@
 package ivnp
 
-import state "gosuda.org/ivnp/state"
+import "gosuda.org/ivnp/state"
 
-import client "gosuda.org/ivnp/client"
+import "gosuda.org/ivnp/client"
 
-import networking "gosuda.org/ivnp/networking"
+import "gosuda.org/ivnp/networking"
 
 import (
 	"gosuda.org/ivnp/interfaces/destination"

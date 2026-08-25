@@ -1,4 +1,4 @@
-package config
+package configuration
 
 import (
 	"errors"
@@ -214,7 +214,7 @@ func LoadOrCreateOperating(path string) (Operating, error) {
 	if closeErr := file.Close(); closeErr != nil {
 		return Operating{}, errors.New("config: cannot persist operating configuration")
 	}
-	if syncErr := fsstore.SyncDir(filepath.Dir(absolute)); syncErr != nil {
+	if syncErr := filesystemstore.SyncDir(filepath.Dir(absolute)); syncErr != nil {
 		return Operating{}, errors.New("config: cannot persist operating configuration")
 	}
 	return LoadOperating(absolute)
@@ -226,7 +226,7 @@ func LoadOperating(path string) (Operating, error) {
 	if err != nil {
 		return Operating{}, errors.New("config: cannot resolve operating configuration")
 	}
-	file, info, err := fsstore.OpenRegular(absolute)
+	file, info, err := filesystemstore.OpenRegular(absolute)
 	if err != nil {
 		return Operating{}, errors.New("config: cannot open operating configuration")
 	}
@@ -234,9 +234,9 @@ func LoadOperating(path string) (Operating, error) {
 	if !ownedUnlinkedRegularFile(info) {
 		return Operating{}, errors.New("config: unsafe operating configuration")
 	}
-	contents, err := fsstore.ReadBoundedFile(file, maxConfigBytes)
+	contents, err := filesystemstore.ReadBoundedFile(file, maxConfigBytes)
 	if err != nil {
-		if errors.Is(err, fsstore.ErrTooLarge) {
+		if errors.Is(err, filesystemstore.ErrTooLarge) {
 			return Operating{}, ErrMalformed
 		}
 		return Operating{}, errors.New("config: cannot read operating configuration")

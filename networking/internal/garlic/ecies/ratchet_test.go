@@ -1,26 +1,26 @@
-package ecies
+package garlicecies
 
 import (
 	"crypto/ecdh"
 	"encoding/binary"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/observability"
 	"testing"
 )
 
-func ratchetPair(t testing.TB) (*RatchetManager, *RatchetManager, ivnp.Hash, ivnp.Hash, uint64) {
+func ratchetPair(t testing.TB) (*RatchetManager, *RatchetManager, foundation.Hash, foundation.Hash, uint64) {
 	return ratchetPairWithMetrics(t, nil)
 }
 
-func ratchetPairWithMetrics(t testing.TB, metrics *observability.Registry) (*RatchetManager, *RatchetManager, ivnp.Hash, ivnp.Hash, uint64) {
+func ratchetPairWithMetrics(t testing.TB, metrics *observability.Registry) (*RatchetManager, *RatchetManager, foundation.Hash, foundation.Hash, uint64) {
 	t.Helper()
-	a, err := ivnp.GenerateLocalDestination()
+	a, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := ivnp.GenerateLocalDestination()
+	b, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func clove(data string) []byte {
 	return append([]byte{ratchetGarlicClove, 0, byte(len(data))}, []byte(data)...)
 }
 
-func establishRatchet(t testing.TB, a, b *RatchetManager, aPeer, bPeer ivnp.Hash, now uint64) ivnp.Hash {
+func establishRatchet(t testing.TB, a, b *RatchetManager, aPeer, bPeer foundation.Hash, now uint64) foundation.Hash {
 	t.Helper()
 	bPub := make([]byte, 32)
 	copy(bPub, b.private[:]) // public is derived below; this test must not use private material as a public key.
@@ -79,7 +79,7 @@ func TestRatchetUnboundNewSessionDeliversWithoutReplyState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.NewSession || len(result.Reply) != 0 || result.Peer != (ivnp.Hash{}) || string(result.Payload) != string(payload) {
+	if !result.NewSession || len(result.Reply) != 0 || result.Peer != (foundation.Hash{}) || string(result.Payload) != string(payload) {
 		t.Fatalf("unbound result = %#v", result)
 	}
 	if stats := b.Stats(); stats.Sessions != 0 || stats.Pending != 0 {
@@ -128,10 +128,10 @@ func TestRatchetExistingSessionUsesNoiseLittleEndianNonce(t *testing.T) {
 	if !ok || entry.n == 0 {
 		t.Fatalf("second message tag entry = %#v, found %t", entry, ok)
 	}
-	var nonce [cryptx.ChaChaNonceSize]byte
+	var nonce [cryptography.ChaChaNonceSize]byte
 	binary.LittleEndian.PutUint64(nonce[4:], uint64(entry.n))
-	plain := make([]byte, len(second)-ratchetTagLen-cryptx.ChaChaTagSize)
-	if _, err = cryptx.OpenChaCha20Poly1305To(plain, entry.key[:], nonce[:], second[ratchetTagLen:], second[:ratchetTagLen]); err != nil {
+	plain := make([]byte, len(second)-ratchetTagLen-cryptography.ChaChaTagSize)
+	if _, err = cryptography.OpenChaCha20Poly1305To(plain, entry.key[:], nonce[:], second[ratchetTagLen:], second[:ratchetTagLen]); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -609,8 +609,8 @@ func BenchmarkRatchetExistingWithScratch(b *testing.B) {
 type ratchetBenchmarkState struct {
 	sender       *RatchetManager
 	receiver     *RatchetManager
-	senderPeer   ivnp.Hash
-	receiverPeer ivnp.Hash
+	senderPeer   foundation.Hash
+	receiverPeer foundation.Hash
 	payload      []byte
 	encrypted    *[256]byte
 	plain        *[256]byte
@@ -678,7 +678,7 @@ func TestRatchetRejectsNewSessionReplayAndClockSkew(t *testing.T) {
 }
 
 func TestRatchetRejectsRemovedCryptoType5(t *testing.T) {
-	local, err := ivnp.GenerateLocalDestination()
+	local, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -691,7 +691,7 @@ func TestRatchetRejectsRemovedCryptoType5(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manager.ReleaseSensitive()
-	if _, err = manager.Encrypt(make([]byte, 4096), ivnp.Sum([]byte("peer")), make([]byte, 32), 5, []byte{1, 2, 3}, 1_700_000_000_000); !errors.Is(err, ErrRatchet) {
+	if _, err = manager.Encrypt(make([]byte, 4096), foundation.Sum([]byte("peer")), make([]byte, 32), 5, []byte{1, 2, 3}, 1_700_000_000_000); !errors.Is(err, ErrRatchet) {
 		t.Fatalf("Encrypt(type 5) = %v", err)
 	}
 }
@@ -748,12 +748,12 @@ func TestRatchetNewSessionCommitIsAtomicAfterReplyFailure(t *testing.T) {
 
 func TestReleaseSensitiveClearsPendingDHSecret(t *testing.T) {
 	manager := &RatchetManager{
-		sessions: map[ivnp.Hash]*session{{1}: {dhSecret: [32]byte{1}, pendingDH: true, replyDH: true}},
+		sessions: map[foundation.Hash]*session{{1}: {dhSecret: [32]byte{1}, pendingDH: true, replyDH: true}},
 		inbound:  make(map[[ratchetTagLen]byte]tagEntry),
 		pending:  make(map[[ratchetTagLen]byte]pendingInitiator),
 		replays:  make(map[[32]byte]uint64),
 	}
-	retained := manager.sessions[ivnp.Hash{1}]
+	retained := manager.sessions[foundation.Hash{1}]
 	manager.ReleaseSensitive()
 	if retained.dhSecret != ([32]byte{}) || retained.pendingDH || retained.replyDH {
 		t.Fatal("pending DH material survived ReleaseSensitive")

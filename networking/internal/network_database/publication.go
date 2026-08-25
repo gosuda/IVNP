@@ -1,11 +1,11 @@
-package netdb
+package networkdatabase
 
 import "cmp"
 
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"log/slog"
@@ -73,7 +73,7 @@ type LeaseSetPublisherConfig struct {
 	Random           func() uint32
 	FloodfillLimit   int
 	RepublishBefore  uint64
-	PreferredTargets []ivnp.Hash
+	PreferredTargets []foundation.Hash
 	// Registry and ReplyPath enable DeliveryStatus-confirmed publication. They
 	// are supplied once by the daemon and shared with RouterInfo publication.
 	Registry  *PublicationTokenRegistry
@@ -101,7 +101,7 @@ type LeaseSetPublisher struct {
 	republishBefore uint64
 	confirmed       *confirmedPublication
 	storeType       i2np.StoreType
-	hash            ivnp.Hash
+	hash            foundation.Hash
 
 	mu               sync.Mutex
 	leases           []Lease
@@ -109,9 +109,9 @@ type LeaseSetPublisher struct {
 	expiresAt        uint64
 	nextPublication  uint64
 	discoveryResult  <-chan LookupResult
-	discoveryTargets []ivnp.Hash
+	discoveryTargets []foundation.Hash
 	discoveryDay     uint64
-	discoveryHash    ivnp.Hash
+	discoveryHash    foundation.Hash
 	discoveryRetryAt uint64
 	closed           bool
 }
@@ -127,7 +127,7 @@ func NewLeaseSetPublisher(config LeaseSetPublisherConfig) (*LeaseSetPublisher, e
 		return nil, ErrLeaseSetPublisherConfig
 	}
 	storeType := i2np.StoreLeaseSet
-	var hash ivnp.Hash
+	var hash foundation.Hash
 	if config.Local != nil {
 		if len(config.EncryptionKey) != 256 {
 			return nil, ErrInvalidKeyLength
@@ -326,7 +326,7 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 		}
 		p.leases = append(p.leases[:0], leases...)
 		p.storePayload = store
-		localStore, err := MarshalDatabaseStore(p.hash, p.storeType, store, 0, ivnp.Hash{}, 0)
+		localStore, err := MarshalDatabaseStore(p.hash, p.storeType, store, 0, foundation.Hash{}, 0)
 		if err != nil {
 			return 0, err
 		}
@@ -362,7 +362,7 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 	message := i2np.Message{
 		Header: i2np.Header{Type: i2np.DatabaseStore, ID: messageID, Expiration: saturatingAdd(now, leaseSetPublicationEnvelopeLifetime)},
 	}
-	payload, err := MarshalDatabaseStore(p.hash, p.storeType, p.storePayload, 0, ivnp.Hash{}, 0)
+	payload, err := MarshalDatabaseStore(p.hash, p.storeType, p.storePayload, 0, foundation.Hash{}, 0)
 	if err != nil {
 		return 0, err
 	}
@@ -454,16 +454,16 @@ func (p *LeaseSetPublisher) maintainDiscovery(ctx context.Context, now uint64) b
 	return false
 }
 
-func (p *LeaseSetPublisher) discoveryTargetHashes(now uint64) []ivnp.Hash {
+func (p *LeaseSetPublisher) discoveryTargetHashes(now uint64) []foundation.Hash {
 	targets := p.database.FloodTargetsAt(make([]RouterRef, p.floodfillLimit), p.hash, now)
-	hashes := make([]ivnp.Hash, len(targets))
+	hashes := make([]foundation.Hash, len(targets))
 	for index := range targets {
 		hashes[index] = targets[index].Hash
 	}
 	return hashes
 }
 
-func sameHashes(left, right []ivnp.Hash) bool {
+func sameHashes(left, right []foundation.Hash) bool {
 	if len(left) != len(right) {
 		return false
 	}

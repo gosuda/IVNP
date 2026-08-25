@@ -3,7 +3,7 @@ package sam
 import (
 	"context"
 	"errors"
-	clientapi "gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/interfaces/destination"
 	"net"
 	"net/netip"
 	"sync"
@@ -24,7 +24,7 @@ type samSession struct {
 	root           *samSession
 	id             string
 	style          sessionStyle
-	endpoint       clientapi.DestinationEndpoint
+	endpoint       destination.DestinationEndpoint
 	control        *serverConnection
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -40,7 +40,7 @@ type samSession struct {
 	forward             bool
 	mu                  sync.Mutex
 	listener            net.Listener
-	subscription        clientapi.MessageSubscription
+	subscription        destination.MessageSubscription
 	children            map[string]*samSession
 	attachments         map[net.Conn]struct{}
 	queueBytes          *byteBudget
@@ -53,7 +53,7 @@ type samSession struct {
 	wg                  sync.WaitGroup
 }
 
-func newRootSession(server *Server, id string, style sessionStyle, endpoint clientapi.DestinationEndpoint, control *serverConnection, fromPort, toPort, listenPort uint16, protocol, listenProtocol uint8, rawHeader bool, udpTarget *net.UDPAddr) *samSession {
+func newRootSession(server *Server, id string, style sessionStyle, endpoint destination.DestinationEndpoint, control *serverConnection, fromPort, toPort, listenPort uint16, protocol, listenProtocol uint8, rawHeader bool, udpTarget *net.UDPAddr) *samSession {
 	ctx, cancel := context.WithCancel(server.ctx)
 	s := &samSession{server: server, id: id, style: style, endpoint: endpoint, control: control, ctx: ctx, cancel: cancel, sourceIP: connectionIP(control.Conn), fromPort: fromPort, toPort: toPort, listenPort: listenPort, protocol: protocol, listenProtocol: listenProtocol, rawHeader: rawHeader, udpTarget: udpTarget, children: make(map[string]*samSession), attachments: make(map[net.Conn]struct{}), queueBytes: newByteBudget(server.config.MaxSessionQueueBytes), acceptRequests: make(chan acceptRequest, server.config.SessionQueue)}
 	s.root = s
@@ -169,10 +169,10 @@ func (s *samSession) ensureListener() (net.Listener, error) {
 	return listener, nil
 }
 
-func (s *samSession) startReceiver(route clientapi.DestinationRoute, capacity int) error {
-	var subscription clientapi.MessageSubscription
+func (s *samSession) startReceiver(route destination.DestinationRoute, capacity int) error {
+	var subscription destination.MessageSubscription
 	var err error
-	if bounded, ok := s.endpoint.(clientapi.BoundedDestinationEndpoint); ok {
+	if bounded, ok := s.endpoint.(destination.BoundedDestinationEndpoint); ok {
 		subscription, err = bounded.SubscribeBounded(route, capacity, s.server.config.MaxSessionQueueBytes, s.server.queueBytes)
 	} else {
 		subscription, err = s.endpoint.Subscribe(route, capacity)

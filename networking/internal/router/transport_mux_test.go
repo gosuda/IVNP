@@ -3,7 +3,7 @@ package router
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/network_database"
 	"sync"
@@ -47,7 +47,7 @@ func (m *muxTestTransport) Wait() error {
 	return m.waitErr
 }
 
-func (m *muxTestTransport) Send(context.Context, ivnp.Hash, i2np.Message) error {
+func (m *muxTestTransport) Send(context.Context, foundation.Hash, i2np.Message) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sends++
@@ -127,11 +127,11 @@ func TestTransportMuxRoutesFirewalledSSU2PeerThroughManager(t *testing.T) {
 }
 
 func TestTransportMuxRequiresAdmittedPeerAndWorksWithOneManager(t *testing.T) {
-	local, err := ivnp.GenerateLocalAddress()
+	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := netdb.NewDatabase(local.Hash, 8)
+	database := networkdatabase.NewDatabase(local.Hash, 8)
 	ntcp2 := &muxTestTransport{}
 	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2})
 	if err != nil {
@@ -238,20 +238,20 @@ func TestTransportMuxClosesStartedManagerWhenLaterStartFails(t *testing.T) {
 
 func TestTransportMuxUsableCountRejectsExpiredAddress(t *testing.T) {
 	const now = uint64(1_700_000_000_000)
-	local, err := ivnp.GenerateLocalAddress()
+	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner, err := netdb.NewLocalRouterInfo(netdb.LocalRouterInfoConfig{
+	owner, err := networkdatabase.NewLocalRouterInfo(networkdatabase.LocalRouterInfoConfig{
 		Local: local,
-		Contacts: netdb.RouterInfoContacts{Addresses: []netdb.LocalRouterAddress{{
+		Contacts: networkdatabase.RouterInfoContacts{Addresses: []networkdatabase.LocalRouterAddress{{
 			Expiration:     now - 1,
 			TransportStyle: []byte("NTCP2"),
-			Options: []ivnp.MappingEntry{
+			Options: []foundation.MappingEntry{
 				{Key: []byte("host"), Value: []byte("127.0.0.1")},
-				{Key: []byte("i"), Value: []byte(ivnp.EncodeI2PBase64(make([]byte, 16)))},
+				{Key: []byte("i"), Value: []byte(foundation.EncodeI2PBase64(make([]byte, 16)))},
 				{Key: []byte("port"), Value: []byte("12345")},
-				{Key: []byte("s"), Value: []byte(ivnp.EncodeI2PBase64(make([]byte, 32)))},
+				{Key: []byte("s"), Value: []byte(foundation.EncodeI2PBase64(make([]byte, 32)))},
 				{Key: []byte("v"), Value: []byte("2")},
 			},
 		}}},
@@ -263,7 +263,7 @@ func TestTransportMuxUsableCountRejectsExpiredAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := netdb.NewDatabase(ivnp.Hash{}, 8)
+	database := networkdatabase.NewDatabase(foundation.Hash{}, 8)
 	if err = database.AdmitRouterInfo(info, false, now); err != nil {
 		t.Fatal(err)
 	}
@@ -276,9 +276,9 @@ func TestTransportMuxUsableCountRejectsExpiredAddress(t *testing.T) {
 	}
 }
 
-func muxTestPeer(t *testing.T, ntcp2, ssu2 bool) (*netdb.Database, ivnp.Hash) {
+func muxTestPeer(t *testing.T, ntcp2, ssu2 bool) (*networkdatabase.Database, foundation.Hash) {
 	t.Helper()
-	local, err := ivnp.GenerateLocalAddress()
+	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,18 +290,18 @@ func muxTestPeer(t *testing.T, ntcp2, ssu2 bool) (*netdb.Database, ivnp.Hash) {
 	if ntcp2 {
 		addresses = append(addresses, PublishedAddress{Transport: "NTCP2", Options: []MappingOption{
 			{Key: "host", Value: "127.0.0.1"},
-			{Key: "i", Value: ivnp.EncodeI2PBase64(make([]byte, 16))},
+			{Key: "i", Value: foundation.EncodeI2PBase64(make([]byte, 16))},
 			{Key: "port", Value: "12345"},
-			{Key: "s", Value: ivnp.EncodeI2PBase64(make([]byte, 32))},
+			{Key: "s", Value: foundation.EncodeI2PBase64(make([]byte, 32))},
 			{Key: "v", Value: "2"},
 		}})
 	}
 	if ssu2 {
 		addresses = append(addresses, PublishedAddress{Transport: "SSU", Options: []MappingOption{
 			{Key: "host", Value: "127.0.0.1"},
-			{Key: "i", Value: ivnp.EncodeI2PBase64(make([]byte, 32))},
+			{Key: "i", Value: foundation.EncodeI2PBase64(make([]byte, 32))},
 			{Key: "port", Value: "12346"},
-			{Key: "s", Value: ivnp.EncodeI2PBase64(make([]byte, 32))},
+			{Key: "s", Value: foundation.EncodeI2PBase64(make([]byte, 32))},
 			{Key: "v", Value: "2"},
 		}})
 	}
@@ -312,7 +312,7 @@ func muxTestPeer(t *testing.T, ntcp2, ssu2 bool) (*netdb.Database, ivnp.Hash) {
 	if err = owner.Publish(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	database := netdb.NewDatabase(ivnp.Hash{}, 8)
+	database := networkdatabase.NewDatabase(foundation.Hash{}, 8)
 	info := owner.Snapshot()
 	if err = database.AdmitRouterInfo(info, false, info.Published); err != nil {
 		t.Fatal(err)
@@ -320,13 +320,13 @@ func muxTestPeer(t *testing.T, ntcp2, ssu2 bool) (*netdb.Database, ivnp.Hash) {
 	return database, owner.Hash()
 }
 
-func muxTestFirewalledSSU2Peer(t *testing.T) (*netdb.Database, ivnp.Hash) {
+func muxTestFirewalledSSU2Peer(t *testing.T) (*networkdatabase.Database, foundation.Hash) {
 	t.Helper()
-	local, err := ivnp.GenerateLocalAddress()
+	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
-	introducer, err := ivnp.GenerateLocalAddress()
+	introducer, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,10 +339,10 @@ func muxTestFirewalledSSU2Peer(t *testing.T) (*netdb.Database, ivnp.Hash) {
 		Transport: "SSU",
 		Cost:      3,
 		Options: []MappingOption{
-			{Key: "i", Value: ivnp.EncodeI2PBase64(make([]byte, 32))},
-			{Key: "ih0", Value: ivnp.EncodeI2PBase64(introducerHash[:])},
+			{Key: "i", Value: foundation.EncodeI2PBase64(make([]byte, 32))},
+			{Key: "ih0", Value: foundation.EncodeI2PBase64(introducerHash[:])},
 			{Key: "itag0", Value: "1"},
-			{Key: "s", Value: ivnp.EncodeI2PBase64(make([]byte, 32))},
+			{Key: "s", Value: foundation.EncodeI2PBase64(make([]byte, 32))},
 			{Key: "v", Value: "2"},
 		},
 	}}); err != nil {
@@ -352,7 +352,7 @@ func muxTestFirewalledSSU2Peer(t *testing.T) (*netdb.Database, ivnp.Hash) {
 	if err = owner.Publish(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	database := netdb.NewDatabase(ivnp.Hash{}, 8)
+	database := networkdatabase.NewDatabase(foundation.Hash{}, 8)
 	info := owner.Snapshot()
 	if err = database.AdmitRouterInfo(info, false, info.Published); err != nil {
 		t.Fatal(err)

@@ -1,8 +1,8 @@
-package netdb
+package networkdatabase
 
 import (
 	"context"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/observability"
 	"sync"
@@ -12,7 +12,7 @@ import (
 type publicationTestSender struct {
 	mu       sync.Mutex
 	messages []i2np.Message
-	targets  []ivnp.Hash
+	targets  []foundation.Hash
 }
 
 func (s *publicationTestSender) Send(_ context.Context, target RouterRef, message i2np.Message) error {
@@ -23,12 +23,14 @@ func (s *publicationTestSender) Send(_ context.Context, target RouterRef, messag
 	return nil
 }
 
-type publicationTestRoute struct{ gateway ivnp.Hash }
+type publicationTestRoute struct{ gateway foundation.Hash }
 
-func (r publicationTestRoute) NetDBReplyPath() (ivnp.Hash, uint32, bool) { return r.gateway, 0, true }
+func (r publicationTestRoute) NetDBReplyPath() (foundation.Hash, uint32, bool) {
+	return r.gateway, 0, true
+}
 
 func TestConfirmedPublicationUsesDistinctTokensAndAcknowledgements(t *testing.T) {
-	var local, gateway, key ivnp.Hash
+	var local, gateway, key foundation.Hash
 	local[0], gateway[0], key[0] = 1, 2, 9
 	database := NewDatabase(local, DefaultBucketCapacity)
 	metrics := observability.NewRegistry()
@@ -71,13 +73,13 @@ func TestConfirmedPublicationUsesDistinctTokensAndAcknowledgements(t *testing.T)
 }
 
 func TestConfirmedPublicationPrefersConfiguredVerifiedFloodfills(t *testing.T) {
-	var local, gateway, key ivnp.Hash
+	var local, gateway, key foundation.Hash
 	local[0], gateway[0], key[0] = 1, 2, 9
 	database := NewDatabase(local, DefaultBucketCapacity)
 	for _, value := range []byte{3, 4, 5, 6, 7, 8, 10, 11, 12} {
 		addRequestTestFloodfill(database, requestTestHash(value))
 	}
-	preferred := []ivnp.Hash{requestTestHash(12), requestTestHash(3)}
+	preferred := []foundation.Hash{requestTestHash(12), requestTestHash(3)}
 	now := uint64(1_000)
 	sender := &publicationTestSender{}
 	publication := newConfirmedPublication(database, sender, publicationTestRoute{gateway: gateway}, nil, func() uint64 { return now }, func() uint32 { return 23 }, key, i2np.StoreLeaseSet2, preferred, nil)
@@ -88,7 +90,7 @@ func TestConfirmedPublicationPrefersConfiguredVerifiedFloodfills(t *testing.T) {
 	if len(sender.targets) != PublicationFloodfillK {
 		t.Fatalf("publication targets = %v, want %d", sender.targets, PublicationFloodfillK)
 	}
-	seen := make(map[ivnp.Hash]struct{}, len(sender.targets))
+	seen := make(map[foundation.Hash]struct{}, len(sender.targets))
 	for _, target := range sender.targets {
 		if _, duplicate := seen[target]; duplicate {
 			t.Fatalf("duplicate publication target %x", target)

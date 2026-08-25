@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"testing"
 )
@@ -41,7 +41,7 @@ type rotationFailingSender struct {
 	calls int
 }
 
-func (s *rotationFailingSender) Send(context.Context, ivnp.Hash, i2np.Message) error {
+func (s *rotationFailingSender) Send(context.Context, foundation.Hash, i2np.Message) error {
 	s.calls++
 	return s.err
 }
@@ -60,11 +60,11 @@ func rotationBuild(t *testing.T, id uint32, expires uint64) OutboundBuild {
 	return OutboundBuild{
 		CircuitID: id,
 		Hops: []ShortBuildHop{{
-			Router:          ivnp.Hash{byte(id), 1},
+			Router:          foundation.Hash{byte(id), 1},
 			StaticKey:       static,
 			ReceiveTunnelID: id + 100,
 		}},
-		ReplyRouter:   ivnp.Hash{byte(id), 2},
+		ReplyRouter:   foundation.Hash{byte(id), 2},
 		ReplyTunnelID: id + 200,
 		ExpiresAt:     expires,
 	}

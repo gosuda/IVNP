@@ -3,7 +3,7 @@ package datagram
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"testing"
 )
 
@@ -12,19 +12,19 @@ func TestV2AndV3(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := make([]byte, ivnp.IdentityBaseLength+7)
+	identity := make([]byte, foundation.IdentityBaseLength+7)
 	copy(identity[352:384], public)
-	identity[384] = byte(ivnp.CertificateKey)
+	identity[384] = byte(foundation.CertificateKey)
 	identity[385], identity[386] = 0, 4
-	identity[387], identity[388] = 0, byte(ivnp.SigningEdDSASHA512Ed25519)
+	identity[387], identity[388] = 0, byte(foundation.SigningEdDSASHA512Ed25519)
 	payload := []byte("v2")
-	ident, _, err := ivnp.ParseIdentity(identity)
+	ident, _, err := foundation.ParseIdentity(identity)
 	if err != nil {
 		t.Fatal(err)
 	}
 	hash := ident.Hash()
 	wire := make([]byte, ident.EncodedLen()+2+len(payload)+ed25519.SignatureSize)
-	n, err := MarshalV2To(wire, hash, ident, 2, ivnp.Mapping{}, OfflineSignature{}, payload, func(input []byte) ([]byte, error) {
+	n, err := MarshalV2To(wire, hash, ident, 2, foundation.Mapping{}, OfflineSignature{}, payload, func(input []byte) ([]byte, error) {
 		return ed25519.Sign(private, input), nil
 	})
 	if err != nil {
@@ -39,7 +39,7 @@ func TestV2AndV3(t *testing.T) {
 		t.Fatalf("V2 verify=%t err=%v", valid, err)
 	}
 	v3wire := make([]byte, len(hash)+2+len("v3"))
-	if _, err := MarshalV3To(v3wire, hash, 3, ivnp.Mapping{}, []byte("v3")); err != nil {
+	if _, err := MarshalV3To(v3wire, hash, 3, foundation.Mapping{}, []byte("v3")); err != nil {
 		t.Fatal(err)
 	}
 	v3, err := ParseV3(v3wire)

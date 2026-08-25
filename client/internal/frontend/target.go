@@ -1,7 +1,7 @@
-package clientapi
+package frontend
 
 import (
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"net"
 	"strconv"
 	"strings"
@@ -28,7 +28,7 @@ func targetAddress(host string, port uint16) (string, error) {
 				return "", ErrI2PTarget
 			}
 		}
-	} else if _, err := ivnp.ParseDestination([]byte(host)); err != nil {
+	} else if _, err := foundation.ParseDestination([]byte(host)); err != nil {
 		return "", ErrI2PTarget
 	}
 	return net.JoinHostPort(host, strconv.FormatUint(uint64(port), 10)), nil

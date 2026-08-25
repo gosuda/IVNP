@@ -6,7 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
 	"math"
 )
@@ -18,13 +18,13 @@ var ErrNonceExhausted = errors.New("noise: ChaCha nonce exhausted")
 type SymmetricState struct {
 	chainingKey [32]byte
 	hash        [32]byte
-	cipher      *cryptx.ChaCha20Poly1305
+	cipher      *cryptography.ChaCha20Poly1305
 	hasKey      bool
 	nonce       uint64
 	released    bool
 }
 
-var _ cryptx.Sensitive = (*SymmetricState)(nil)
+var _ cryptography.Sensitive = (*SymmetricState)(nil)
 
 func Initialize(protocolName string) *SymmetricState {
 	state := new(SymmetricState)
@@ -54,7 +54,7 @@ func (s *SymmetricState) ChainingKey() [32]byte {
 // MixHash binds data to the transcript.
 func (s *SymmetricState) MixHash(data []byte) error {
 	if s == nil || s.released {
-		return cryptx.ErrSensitiveReleased
+		return cryptography.ErrSensitiveReleased
 	}
 	h := sha256.New()
 	_, _ = h.Write(s.hash[:])
@@ -66,12 +66,12 @@ func (s *SymmetricState) MixHash(data []byte) error {
 // MixKey derives a new chaining key and transport cipher per Noise HKDF.
 func (s *SymmetricState) MixKey(input []byte) error {
 	if s == nil || s.released {
-		return cryptx.ErrSensitiveReleased
+		return cryptography.ErrSensitiveReleased
 	}
 	chain, key := kdf2(s.chainingKey[:], input)
 	defer clear(chain[:])
 	defer clear(key[:])
-	next, err := cryptx.NewChaCha20Poly1305(key[:])
+	next, err := cryptography.NewChaCha20Poly1305(key[:])
 	if err != nil {
 		return err
 	}
@@ -86,7 +86,7 @@ func (s *SymmetricState) MixKey(input []byte) error {
 // EncryptAndHash writes ciphertext into dst and advances the Noise nonce.
 func (s *SymmetricState) EncryptAndHash(dst, plaintext []byte) ([]byte, error) {
 	if s == nil || s.released {
-		return nil, cryptx.ErrSensitiveReleased
+		return nil, cryptography.ErrSensitiveReleased
 	}
 	if !s.hasKey {
 		if len(dst) < len(plaintext) {
@@ -101,7 +101,7 @@ func (s *SymmetricState) EncryptAndHash(dst, plaintext []byte) ([]byte, error) {
 	if s.nonce >= math.MaxUint64-1 {
 		return nil, ErrNonceExhausted
 	}
-	var nonce [cryptx.ChaChaNonceSize]byte
+	var nonce [cryptography.ChaChaNonceSize]byte
 	defer clear(nonce[:])
 	putNonce(nonce[:], s.nonce)
 	ciphertext, err := s.cipher.SealTo(dst, nonce[:], plaintext, s.hash[:])
@@ -118,7 +118,7 @@ func (s *SymmetricState) EncryptAndHash(dst, plaintext []byte) ([]byte, error) {
 // DecryptAndHash authenticates ciphertext from the current transcript state.
 func (s *SymmetricState) DecryptAndHash(dst, ciphertext []byte) ([]byte, error) {
 	if s == nil || s.released {
-		return nil, cryptx.ErrSensitiveReleased
+		return nil, cryptography.ErrSensitiveReleased
 	}
 	if !s.hasKey {
 		if len(dst) < len(ciphertext) {
@@ -133,7 +133,7 @@ func (s *SymmetricState) DecryptAndHash(dst, ciphertext []byte) ([]byte, error) 
 	if s.nonce >= math.MaxUint64-1 {
 		return nil, ErrNonceExhausted
 	}
-	var nonce [cryptx.ChaChaNonceSize]byte
+	var nonce [cryptography.ChaChaNonceSize]byte
 	defer clear(nonce[:])
 	putNonce(nonce[:], s.nonce)
 	plaintext, err := s.cipher.OpenTo(dst, nonce[:], ciphertext, s.hash[:])
@@ -149,18 +149,18 @@ func (s *SymmetricState) DecryptAndHash(dst, ciphertext []byte) ([]byte, error) 
 
 // Split derives directional Noise data-phase ciphers in initiator order and
 // consumes the handshake state on success.
-func (s *SymmetricState) Split() (*cryptx.ChaCha20Poly1305, *cryptx.ChaCha20Poly1305, error) {
+func (s *SymmetricState) Split() (*cryptography.ChaCha20Poly1305, *cryptography.ChaCha20Poly1305, error) {
 	if s == nil || s.released {
-		return nil, nil, cryptx.ErrSensitiveReleased
+		return nil, nil, cryptography.ErrSensitiveReleased
 	}
 	firstKey, secondKey := kdf2(s.chainingKey[:], nil)
 	defer clear(firstKey[:])
 	defer clear(secondKey[:])
-	first, err := cryptx.NewChaCha20Poly1305(firstKey[:])
+	first, err := cryptography.NewChaCha20Poly1305(firstKey[:])
 	if err != nil {
 		return nil, nil, err
 	}
-	second, err := cryptx.NewChaCha20Poly1305(secondKey[:])
+	second, err := cryptography.NewChaCha20Poly1305(secondKey[:])
 	if err != nil {
 		first.ReleaseSensitive()
 		return nil, nil, err

@@ -2,8 +2,8 @@ package sam
 
 import (
 	"context"
-	ivnp "gosuda.org/ivnp/foundation"
-	clientapi "gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
 	"io"
 	"net"
 	"sync"
@@ -16,7 +16,7 @@ type fifoController struct {
 	endpoint chan *fifoEndpoint
 }
 
-func (c *fifoController) CreateDestination(ctx context.Context, spec clientapi.DestinationSpec) (clientapi.DestinationEndpoint, error) {
+func (c *fifoController) CreateDestination(ctx context.Context, spec destination.DestinationSpec) (destination.DestinationEndpoint, error) {
 	base, err := c.loop.CreateDestination(ctx, spec)
 	if err != nil {
 		return nil, err
@@ -25,7 +25,7 @@ func (c *fifoController) CreateDestination(ctx context.Context, spec clientapi.D
 	c.endpoint <- endpoint
 	return endpoint, nil
 }
-func (c *fifoController) DestroyDestination(_ context.Context, endpoint clientapi.DestinationEndpoint) error {
+func (c *fifoController) DestroyDestination(_ context.Context, endpoint destination.DestinationEndpoint) error {
 	return endpoint.Close()
 }
 
@@ -79,7 +79,7 @@ func (c *metadataConn) LocalI2PPort() uint16      { return c.to }
 func (c *metadataConn) RemoteI2PPort() uint16     { return c.from }
 
 func TestStreamAcceptAttachmentsAreFIFO(t *testing.T) {
-	loop := &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)}
+	loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 	controller := &fifoController{loop: loop, endpoint: make(chan *fifoEndpoint, 1)}
 	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, SessionQueue: 4})
 	if err != nil {
@@ -137,7 +137,7 @@ func TestStreamAcceptAttachmentsAreFIFO(t *testing.T) {
 }
 
 func TestStreamAcceptDeadFirstAttachmentDoesNotConsumeInbound(t *testing.T) {
-	loop := &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)}
+	loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 	controller := &fifoController{loop: loop, endpoint: make(chan *fifoEndpoint, 1)}
 	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, SessionQueue: 4})
 	if err != nil {

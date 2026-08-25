@@ -4,7 +4,7 @@ package garlic
 import (
 	"encoding/binary"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
 	"gosuda.org/ivnp/networking/internal/i2np"
 )
@@ -28,7 +28,7 @@ type Delivery struct {
 	Type       DeliveryType
 	Encrypted  bool
 	SessionKey []byte
-	To         ivnp.Hash
+	To         foundation.Hash
 	TunnelID   uint32
 	Delay      uint32
 }
@@ -100,11 +100,11 @@ func ParseClove(src []byte) (Clove, int, error) {
 	}
 	id := binary.BigEndian.Uint32(src[off : off+4])
 	expiration := binary.BigEndian.Uint64(src[off+4 : off+12])
-	certificate, certLen, err := ivnp.ParseCertificate(src[off+12:])
+	certificate, certLen, err := foundation.ParseCertificate(src[off+12:])
 	if err != nil {
 		return Clove{}, 0, err
 	}
-	if certificate.Type != ivnp.CertificateNull {
+	if certificate.Type != foundation.CertificateNull {
 		return Clove{}, 0, ErrClove
 	}
 	return Clove{Delivery: delivery, Message: message, ID: id, Expiration: expiration}, off + 12 + certLen, nil
@@ -155,8 +155,8 @@ func ParseCloveSet(src []byte) (CloveSet, error) {
 	if len(src)-off != 15 {
 		return CloveSet{}, ErrClove
 	}
-	certificate, n, err := ivnp.ParseCertificate(src[off:])
-	if err != nil || certificate.Type != ivnp.CertificateNull || n != 3 {
+	certificate, n, err := foundation.ParseCertificate(src[off:])
+	if err != nil || certificate.Type != foundation.CertificateNull || n != 3 {
 		return CloveSet{}, ErrClove
 	}
 	return CloveSet{count: count, cloves: src[1:off], MessageID: binary.BigEndian.Uint32(src[off+3 : off+7]), Expiration: binary.BigEndian.Uint64(src[off+7 : off+15])}, nil

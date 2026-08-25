@@ -3,7 +3,7 @@ package ssu2
 import (
 	"bytes"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"sync"
 	"testing"
 )
@@ -130,10 +130,10 @@ func TestDataCipherReleaseZeroizesAndRejectsUse(t *testing.T) {
 	if aead == nil {
 		t.Fatal("released data cipher lost its child reference")
 	}
-	if _, err := aead.SealTo(make([]byte, cryptx.ChaChaTagSize), make([]byte, cryptx.ChaChaNonceSize), nil, nil); !errors.Is(err, cryptx.ErrSensitiveReleased) {
+	if _, err := aead.SealTo(make([]byte, cryptography.ChaChaTagSize), make([]byte, cryptography.ChaChaNonceSize), nil, nil); !errors.Is(err, cryptography.ErrSensitiveReleased) {
 		t.Fatalf("released data cipher AEAD remained usable: %v", err)
 	}
-	if _, err := cipher.SealDataTo(make([]byte, MinPacketLen), ShortHeader{Type: Data}, make([]byte, 8)); !errors.Is(err, cryptx.ErrSensitiveReleased) {
+	if _, err := cipher.SealDataTo(make([]byte, MinPacketLen), ShortHeader{Type: Data}, make([]byte, 8)); !errors.Is(err, cryptography.ErrSensitiveReleased) {
 		t.Fatalf("SealDataTo after release = %v", err)
 	}
 }

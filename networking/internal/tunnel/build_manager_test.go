@@ -6,9 +6,9 @@ import (
 	"crypto/ecdh"
 	"crypto/sha256"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
-	ivnp "gosuda.org/ivnp/foundation"
-	eciesgarlic "gosuda.org/ivnp/networking/internal/garlic/ecies"
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/garlic/ecies"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"sync"
 	"testing"
@@ -54,13 +54,13 @@ func (r *buildReplyRegistry) consume(tag [8]byte) (GarlicReplyKey, error) {
 }
 
 type captureBuildReplySender struct {
-	peer   ivnp.Hash
+	peer   foundation.Hash
 	tunnel uint32
 	key    GarlicReplyKey
 	reply  i2np.Message
 }
 
-func (s *captureBuildReplySender) SendBuildReply(_ context.Context, peer ivnp.Hash, tunnelID uint32, key GarlicReplyKey, reply i2np.Message) error {
+func (s *captureBuildReplySender) SendBuildReply(_ context.Context, peer foundation.Hash, tunnelID uint32, key GarlicReplyKey, reply i2np.Message) error {
 	s.peer, s.tunnel, s.key, s.reply = peer, tunnelID, key, reply
 	s.reply.Payload = append([]byte(nil), reply.Payload...)
 	return nil
@@ -71,7 +71,7 @@ type cancelingBuildSender struct {
 	once    sync.Once
 }
 
-func (s *cancelingBuildSender) Send(ctx context.Context, _ ivnp.Hash, _ i2np.Message) error {
+func (s *cancelingBuildSender) Send(ctx context.Context, _ foundation.Hash, _ i2np.Message) error {
 	s.once.Do(func() { close(s.entered) })
 	<-ctx.Done()
 	return ctx.Err()
@@ -82,10 +82,10 @@ func TestBuildManagerCreatesAndInstallsOutboundTunnel(t *testing.T) {
 	sender := new(captureTunnelSender)
 	runtime := NewRuntime(RuntimeConfig{Sender: sender, Now: func() uint64 { return now }})
 	replyKeys := newBuildReplyRegistry()
-	var seededEndpoint, seededReply ivnp.Hash
+	var seededEndpoint, seededReply foundation.Hash
 	manager, err := NewBuildManager(BuildManagerConfig{
 		Runtime: runtime, Sender: sender, ReplyKeys: replyKeys, Now: func() uint64 { return now }, Random: new(buildCounterReader),
-		SeedReplyRouterInfo: func(_ context.Context, endpoint, reply ivnp.Hash) error {
+		SeedReplyRouterInfo: func(_ context.Context, endpoint, reply foundation.Hash) error {
 			seededEndpoint, seededReply = endpoint, reply
 			return nil
 		},
@@ -221,7 +221,7 @@ func TestBuildManagerRejectsExpiredAndUnknownReplies(t *testing.T) {
 	if err = manager.HandleReply(i2np.Message{Header: i2np.Header{Type: i2np.OutboundTunnelBuildReply, ID: 1}, Payload: append([]byte{1}, make([]byte, ShortBuildRecordSize)...)}); err != ErrBuildPending {
 		t.Fatalf("unknown reply error = %v, want %v", err, ErrBuildPending)
 	}
-	if _, err = manager.StartOutbound(context.Background(), OutboundBuild{CircuitID: 1, ReplyTunnelID: 2, ExpiresAt: now - 1, Hops: []ShortBuildHop{{Router: ivnp.Hash{1}, StaticKey: [32]byte{1}, ReceiveTunnelID: 3}}}); err != ErrBuildConfig {
+	if _, err = manager.StartOutbound(context.Background(), OutboundBuild{CircuitID: 1, ReplyTunnelID: 2, ExpiresAt: now - 1, Hops: []ShortBuildHop{{Router: foundation.Hash{1}, StaticKey: [32]byte{1}, ReceiveTunnelID: 3}}}); err != ErrBuildConfig {
 		t.Fatalf("expired build error = %v, want %v", err, ErrBuildConfig)
 	}
 }
@@ -240,7 +240,7 @@ func TestBuildManagerClearsReplyRegistryAfterReplyErrorAndExpiry(t *testing.T) {
 	if err = replyKeys.RegisterGarlicReplyKey(GarlicReplyKey{Tag: errorTag, ExpiresAt: 2}); err != nil {
 		t.Fatal(err)
 	}
-	failedPeer := ivnp.Hash{9}
+	failedPeer := foundation.Hash{9}
 	manager.pending[1] = &pendingOutboundBuild{replyTag: errorTag, deadline: 2, build: OutboundBuild{Hops: []ShortBuildHop{{Router: failedPeer}}}}
 	if err = manager.HandleReply(i2np.Message{Header: i2np.Header{Type: i2np.OutboundTunnelBuildReply, ID: 1}}); err == nil {
 		t.Fatal("accepted malformed reply")
@@ -292,7 +292,7 @@ func TestBuildManagerRollsBackPoolWhenRuntimeInstallFails(t *testing.T) {
 	}
 	var keys ShortBuildKeys
 	manager.pending[replyID] = &pendingOutboundBuild{
-		build:       OutboundBuild{CircuitID: circuitID, Hops: []ShortBuildHop{{Router: ivnp.Hash{1}, ReceiveTunnelID: 9}}, ExpiresAt: expiresAt},
+		build:       OutboundBuild{CircuitID: circuitID, Hops: []ShortBuildHop{{Router: foundation.Hash{1}, ReceiveTunnelID: 9}}, ExpiresAt: expiresAt},
 		keys:        []ShortBuildKeys{keys},
 		positions:   []uint8{0},
 		recordCount: 1,
@@ -340,7 +340,7 @@ func TestBuildManagerRestoresRetiredTunnelWhenRuntimeInstallFails(t *testing.T) 
 	}
 	var keys ShortBuildKeys
 	manager.pending[replyID] = &pendingOutboundBuild{
-		build:       OutboundBuild{CircuitID: newID, Hops: []ShortBuildHop{{Router: ivnp.Hash{1}, ReceiveTunnelID: 11}}, ExpiresAt: runtimeNow, retireID: old.ID},
+		build:       OutboundBuild{CircuitID: newID, Hops: []ShortBuildHop{{Router: foundation.Hash{1}, ReceiveTunnelID: 11}}, ExpiresAt: runtimeNow, retireID: old.ID},
 		keys:        []ShortBuildKeys{keys},
 		positions:   []uint8{0},
 		recordCount: 1,
@@ -457,7 +457,7 @@ func TestBuildManagerBuildsInboundAcrossTransitAndRejectsStaleRequests(t *testin
 	}
 	producerSender := new(captureTunnelSender)
 	producer := NewRuntime(RuntimeConfig{Sender: producerSender, Now: func() uint64 { return now }})
-	if err = producer.RegisterOutbound(OutboundCircuit{ID: 1, FirstHop: ivnp.Hash{1}, NextTunnelID: build.CircuitID}); err != nil {
+	if err = producer.RegisterOutbound(OutboundCircuit{ID: 1, FirstHop: foundation.Hash{1}, NextTunnelID: build.CircuitID}); err != nil {
 		t.Fatal(err)
 	}
 	if err = producer.SendBlock(context.Background(), 1, Block{Delivery: DeliveryLocal, Last: true, Data: deliveryStatusFrame(t, 55)}); err != nil {
@@ -511,7 +511,7 @@ func TestBuildManagerBuildsInboundAcrossTransitAndRejectsStaleRequests(t *testin
 		t.Fatal(err)
 	}
 	stale := i2np.Message{Header: i2np.Header{Type: i2np.ShortTunnelBuild, ID: 903, Expiration: now + buildMessageLifetime}, Payload: append([]byte{1}, record[:]...)}
-	if err = staleManager.HandleBuildFrom(ivnp.Hash{9}, stale); err != ErrBuildRejected {
+	if err = staleManager.HandleBuildFrom(foundation.Hash{9}, stale); err != ErrBuildRejected {
 		t.Fatalf("stale request error = %v, want %v", err, ErrBuildRejected)
 	}
 	if err = staleRuntime.RegisterInbound(InboundCircuit{ID: request.ReceiveTunnelID, Endpoint: NewEndpoint(1, 1)}); err != nil {
@@ -561,7 +561,7 @@ func TestBuildManagerRoutesOBEPReplyWithDerivedGarlicKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = obep.HandleBuildFrom(ivnp.Hash{7}, requests[0].message); err != nil {
+	if err = obep.HandleBuildFrom(foundation.Hash{7}, requests[0].message); err != nil {
 		t.Fatal(err)
 	}
 	if replies.peer != replyRouter || replies.tunnel != 42 || replies.reply.Header.Type != i2np.OutboundTunnelBuildReply || replies.reply.Header.ID != replyID {
@@ -594,11 +594,11 @@ func TestBuildManagerAllowsLocalEndpointTransitOnly(t *testing.T) {
 		ReceiveTunnelID: 1, NextTunnelID: 2, NextRouter: local, Endpoint: true,
 		RequestMinutes: uint32(now / 60_000), LifetimeSeconds: shortBuildLifetime, NextMessageID: 3,
 	}
-	if !manager.validTransitRequest(request, ShortBuildKeys{HasGarlicKeys: true}, now, BuildSource{Router: ivnp.Hash{1}, Direct: true}) {
+	if !manager.validTransitRequest(request, ShortBuildKeys{HasGarlicKeys: true}, now, BuildSource{Router: foundation.Hash{1}, Direct: true}) {
 		t.Fatal("endpoint request to local router rejected")
 	}
 	request.Endpoint = false
-	if manager.validTransitRequest(request, ShortBuildKeys{}, now, BuildSource{Router: ivnp.Hash{1}, Direct: true}) {
+	if manager.validTransitRequest(request, ShortBuildKeys{}, now, BuildSource{Router: foundation.Hash{1}, Direct: true}) {
 		t.Fatal("non-endpoint loop request accepted")
 	}
 }
@@ -690,7 +690,7 @@ func TestBuildManagerAuthenticatesTransitBeforeReservation(t *testing.T) {
 	}
 	malformed := record
 	malformed[len(malformed)-1] ^= 1
-	if err = manager.HandleBuildFrom(ivnp.Hash{7}, i2np.Message{Header: i2np.Header{Type: i2np.ShortTunnelBuild, ID: 201}, Payload: append([]byte{1}, malformed[:]...)}); err == nil {
+	if err = manager.HandleBuildFrom(foundation.Hash{7}, i2np.Message{Header: i2np.Header{Type: i2np.ShortTunnelBuild, ID: 201}, Payload: append([]byte{1}, malformed[:]...)}); err == nil {
 		t.Fatal("malformed transit accepted")
 	}
 	if len(manager.transit) != 0 {
@@ -700,7 +700,7 @@ func TestBuildManagerAuthenticatesTransitBeforeReservation(t *testing.T) {
 	if err = runtime.RegisterInbound(InboundCircuit{ID: request.ReceiveTunnelID, Endpoint: NewEndpoint(1, 1)}); err != nil {
 		t.Fatal(err)
 	}
-	if err = manager.HandleBuildFrom(ivnp.Hash{7}, i2np.Message{Header: i2np.Header{Type: i2np.ShortTunnelBuild, ID: 203}, Payload: append([]byte(nil), message.Payload...)}); err != ErrBuildRejected {
+	if err = manager.HandleBuildFrom(foundation.Hash{7}, i2np.Message{Header: i2np.Header{Type: i2np.ShortTunnelBuild, ID: 203}, Payload: append([]byte(nil), message.Payload...)}); err != ErrBuildRejected {
 		t.Fatalf("colliding transit error = %v, want %v", err, ErrBuildRejected)
 	}
 	if len(manager.transit) != 0 {
@@ -713,7 +713,7 @@ func TestBuildManagerAuthenticatesTransitBeforeReservation(t *testing.T) {
 		group.Go(func() {
 			duplicate := message
 			duplicate.Payload = append([]byte(nil), message.Payload...)
-			results <- manager.HandleBuildFrom(ivnp.Hash{7}, duplicate)
+			results <- manager.HandleBuildFrom(foundation.Hash{7}, duplicate)
 		})
 	}
 	group.Wait()
@@ -837,7 +837,7 @@ func TestInboundCreatorFakeRecordIsRealAndTamperChecked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = participant.HandleBuildFrom(ivnp.Hash{9}, request); err != nil {
+	if err = participant.HandleBuildFrom(foundation.Hash{9}, request); err != nil {
 		t.Fatal(err)
 	}
 	reply := next.take()[0].message
@@ -890,7 +890,7 @@ func TestInboundBuildGarlicWrapsAcrossDifferentCarrierEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inner, err := eciesgarlic.OpenRouterMessage(make([]byte, len(garlicMessage.Encrypted)), private, garlicMessage.Encrypted, now)
+	inner, err := garlicecies.OpenRouterMessage(make([]byte, len(garlicMessage.Encrypted)), private, garlicMessage.Encrypted, now)
 	if err != nil || inner.Header.Type != i2np.ShortTunnelBuild {
 		t.Fatalf("wrapped inner = %#v, %v", inner, err)
 	}
@@ -935,12 +935,12 @@ func TestTransitBandwidthOptionsReplyAndReceiptLifetime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !manager.validTransitRequest(parsedRequest, keys, now, BuildSource{Router: ivnp.Hash{8}, Direct: true}) {
+	if !manager.validTransitRequest(parsedRequest, keys, now, BuildSource{Router: foundation.Hash{8}, Direct: true}) {
 		t.Fatalf("bandwidth transit request rejected before admission: %+v", parsedRequest)
 	}
 	message := i2np.Message{Header: i2np.Header{Type: i2np.ShortTunnelBuild, ID: 304}, Payload: append([]byte{1}, record[:]...)}
 	originalPayload := append([]byte(nil), message.Payload...)
-	if err = manager.HandleBuildFrom(ivnp.Hash{8}, message); err != nil {
+	if err = manager.HandleBuildFrom(foundation.Hash{8}, message); err != nil {
 		t.Fatal(err)
 	}
 	forwarded := sender.take()[0].message
@@ -948,7 +948,7 @@ func TestTransitBandwidthOptionsReplyAndReceiptLifetime(t *testing.T) {
 	if _, err = OpenShortBuildReply(reply[:], forwarded.Payload[1:], keys, 0); err != nil {
 		t.Fatal(err)
 	}
-	mapping, _, err := ivnp.ParseMapping(reply[:])
+	mapping, _, err := foundation.ParseMapping(reply[:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -977,12 +977,12 @@ func TestBuildManagerRejectsInvalidOptionsCoalescingAndStaticKeyMisuse(t *testin
 	manager, err := NewBuildManager(BuildManagerConfig{
 		Runtime: NewRuntime(RuntimeConfig{Now: func() uint64 { return now }}), Sender: discardTunnelSender{},
 		ReplyKeys: newBuildReplyRegistry(), Now: func() uint64 { return now },
-		StaticKeyLookup: func(ivnp.Hash) ([32]byte, bool) { return identityKey, true },
+		StaticKeyLookup: func(foundation.Hash) ([32]byte, bool) { return identityKey, true },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	build := OutboundBuild{CircuitID: 402, Hops: []ShortBuildHop{hop}, ReplyRouter: ivnp.Hash{4}, ReplyTunnelID: 403, ExpiresAt: now + 600_000}
+	build := OutboundBuild{CircuitID: 402, Hops: []ShortBuildHop{hop}, ReplyRouter: foundation.Hash{4}, ReplyTunnelID: 403, ExpiresAt: now + 600_000}
 	build.Hops[0].StaticKey[0] ^= 1
 	if _, err = manager.StartOutbound(context.Background(), build); !errors.Is(err, ErrBuildConfig) {
 		t.Fatalf("transport/static key misuse error = %v", err)
@@ -1014,8 +1014,8 @@ func TestTransitTimestampWindowMatchesJavaBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := BuildSource{Router: ivnp.Hash{9}, Direct: true}
-	request := ShortBuildRequest{ReceiveTunnelID: 1, NextTunnelID: 2, NextRouter: ivnp.Hash{8}, LifetimeSeconds: shortBuildLifetime, NextMessageID: 3}
+	source := BuildSource{Router: foundation.Hash{9}, Direct: true}
+	request := ShortBuildRequest{ReceiveTunnelID: 1, NextTunnelID: 2, NextRouter: foundation.Hash{8}, LifetimeSeconds: shortBuildLifetime, NextMessageID: 3}
 	rounded := now / 60_000
 	for _, vector := range []struct {
 		minutes uint32
@@ -1085,7 +1085,7 @@ func TestBuildManagerCloseCancelsActiveSendAndClearsPending(t *testing.T) {
 func TestBuildManagerReleaseSensitiveClearsOwnedKeys(t *testing.T) {
 	static := make([]byte, 32)
 	static[0] = 1
-	legacy := bytes.Repeat([]byte{0x5a}, cryptx.ElGamalPrivateKeySize)
+	legacy := bytes.Repeat([]byte{0x5a}, cryptography.ElGamalPrivateKeySize)
 	sender := new(captureTunnelSender)
 	manager, err := NewBuildManager(BuildManagerConfig{
 		Runtime: NewRuntime(RuntimeConfig{Sender: sender, Now: func() uint64 { return 1 }}),
@@ -1103,7 +1103,7 @@ func TestBuildManagerReleaseSensitiveClearsOwnedKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager.ReleaseSensitive()
-	if !manager.released || manager.staticPrivateKey != nil || manager.legacyEnabled || manager.legacyPrivate != (cryptx.ElGamalPrivateKey{}) || manager.random != nil {
+	if !manager.released || manager.staticPrivateKey != nil || manager.legacyEnabled || manager.legacyPrivate != (cryptography.ElGamalPrivateKey{}) || manager.random != nil {
 		t.Fatal("build manager retained static private state")
 	}
 	if len(manager.pending) != 0 || len(manager.pendingInbound) != 0 || len(manager.pendingVariable) != 0 || len(manager.transit) != 0 || len(manager.transitRecords) != 0 {

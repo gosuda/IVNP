@@ -1,7 +1,7 @@
 package tunnel
 
 import (
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"sync"
 )
 
@@ -67,7 +67,7 @@ type PeerProfiles struct {
 	mu       sync.RWMutex
 	maxPeers int
 	window   int
-	peers    map[ivnp.Hash]peerProfileState
+	peers    map[foundation.Hash]peerProfileState
 }
 
 func NewPeerProfiles(config PeerProfilesConfig) *PeerProfiles {
@@ -80,12 +80,12 @@ func NewPeerProfiles(config PeerProfilesConfig) *PeerProfiles {
 	if config.Window > maxProfileWindow {
 		config.Window = maxProfileWindow
 	}
-	return &PeerProfiles{maxPeers: config.MaxPeers, window: config.Window, peers: make(map[ivnp.Hash]peerProfileState)}
+	return &PeerProfiles{maxPeers: config.MaxPeers, window: config.Window, peers: make(map[foundation.Hash]peerProfileState)}
 }
 
 // Record stores one terminal authenticated build or delivery observation.
-func (p *PeerProfiles) Record(peer ivnp.Hash, observation Observation) {
-	recordRejected := p == nil || peer == (ivnp.Hash{})
+func (p *PeerProfiles) Record(peer foundation.Hash, observation Observation) {
+	recordRejected := p == nil || peer == (foundation.Hash{})
 	if !recordRejected {
 		recordRejected = (observation.Kind != BuildObservation && observation.Kind != DeliveryObservation)
 	}
@@ -97,17 +97,17 @@ func (p *PeerProfiles) Record(peer ivnp.Hash, observation Observation) {
 
 // RecordSuccess preserves the pre-observation API for callers outside the
 // tunnel control plane.
-func (p *PeerProfiles) RecordSuccess(peer ivnp.Hash, latency uint64) {
+func (p *PeerProfiles) RecordSuccess(peer foundation.Hash, latency uint64) {
 	p.Record(peer, Observation{Kind: DeliveryObservation, Success: true, LatencyMillis: latency})
 }
 
 // RecordFailure preserves the pre-observation API for callers outside the
 // tunnel control plane.
-func (p *PeerProfiles) RecordFailure(peer ivnp.Hash) {
+func (p *PeerProfiles) RecordFailure(peer foundation.Hash) {
 	p.Record(peer, Observation{Kind: DeliveryObservation})
 }
 
-func (p *PeerProfiles) record(peer ivnp.Hash, sample profileSample) {
+func (p *PeerProfiles) record(peer foundation.Hash, sample profileSample) {
 	p.mu.Lock()
 	state, exists := p.peers[peer]
 	if !exists && len(p.peers) >= p.maxPeers {
@@ -123,7 +123,7 @@ func (p *PeerProfiles) record(peer ivnp.Hash, sample profileSample) {
 }
 
 // Snapshot returns the recent outcome summary for peer.
-func (p *PeerProfiles) Snapshot(peer ivnp.Hash) (PeerProfile, bool) {
+func (p *PeerProfiles) Snapshot(peer foundation.Hash) (PeerProfile, bool) {
 	if p == nil {
 		return PeerProfile{}, false
 	}
@@ -143,7 +143,7 @@ func (p *PeerProfiles) Snapshot(peer ivnp.Hash) (PeerProfile, bool) {
 // build outcomes decide build compatibility when present; an end-to-end
 // delivery timeout is retained for scoring but cannot identify which peer in a
 // multi-hop pair failed and therefore cannot override successful build proof.
-func (p *PeerProfiles) Eligible(peer ivnp.Hash) bool {
+func (p *PeerProfiles) Eligible(peer foundation.Hash) bool {
 	if p == nil {
 		return true
 	}
@@ -175,7 +175,7 @@ func (p *PeerProfiles) Eligible(peer ivnp.Hash) bool {
 // Score returns peer's deterministic build preference. Higher values are
 // preferred; hash order is the required tie-breaker for callers selecting a
 // path. Unknown peers score zero.
-func (p *PeerProfiles) Score(peer ivnp.Hash) int64 {
+func (p *PeerProfiles) Score(peer foundation.Hash) int64 {
 	profile, ok := p.Snapshot(peer)
 	if !ok {
 		return 0
@@ -185,7 +185,7 @@ func (p *PeerProfiles) Score(peer ivnp.Hash) int64 {
 }
 
 func (p *PeerProfiles) evictLocked() {
-	var victim ivnp.Hash
+	var victim foundation.Hash
 	var victimScore int64
 	first := true
 	for peer, state := range p.peers {
@@ -227,7 +227,7 @@ func scoreProfile(profile PeerProfile) int64 {
 	return int64(profile.Successes*profileSuccessWeight-profile.Failures*profileFailurePenalty) - int64(latency)
 }
 
-func hashLess(left, right ivnp.Hash) bool {
+func hashLess(left, right foundation.Hash) bool {
 	for index := range left {
 		if left[index] != right[index] {
 			return left[index] < right[index]

@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"filippo.io/edwards25519"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 )
 
 const i2pBase64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~"
@@ -39,7 +39,7 @@ type LocalDestination struct {
 	x25519Public       [32]byte
 	x25519Private      [32]byte
 	identityCryptoType CryptoKeyType
-	elgamalPrivate     cryptx.ElGamalPrivateKey
+	elgamalPrivate     cryptography.ElGamalPrivateKey
 	cryptoCapabilities byte
 	released           bool
 }
@@ -189,12 +189,12 @@ func (d *LocalDestination) CopyX25519Private(dst []byte) error {
 		return ErrDestinationSmall
 	}
 	if d == nil {
-		return cryptx.ErrSensitiveReleased
+		return cryptography.ErrSensitiveReleased
 	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.released {
-		return cryptx.ErrSensitiveReleased
+		return cryptography.ErrSensitiveReleased
 	}
 	copy(dst, d.x25519Private[:])
 	return nil
@@ -204,16 +204,16 @@ func (d *LocalDestination) CopyX25519Private(dst []byte) error {
 // sessions retain this key for standard SAM private-Destination round trips;
 // their garlic receive key remains the independent X25519 key.
 func (d *LocalDestination) CopyElGamalPrivate(dst []byte) error {
-	if len(dst) != cryptx.ElGamalPrivateKeySize {
+	if len(dst) != cryptography.ElGamalPrivateKeySize {
 		return ErrDestinationSmall
 	}
 	if d == nil {
-		return cryptx.ErrSensitiveReleased
+		return cryptography.ErrSensitiveReleased
 	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.released {
-		return cryptx.ErrSensitiveReleased
+		return cryptography.ErrSensitiveReleased
 	}
 	if d.identityCryptoType != CryptoElGamal {
 		return ErrInvalidIdentity
@@ -263,7 +263,7 @@ func (d *LocalDestination) CopyCryptoPrivate(cryptoType CryptoKeyType, dst []byt
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.released {
-		return cryptx.ErrSensitiveReleased
+		return cryptography.ErrSensitiveReleased
 	}
 	copyCryptoPrivateRejected := d.cryptoCapabilities != localDestinationCryptoCapabilities
 	if !copyCryptoPrivateRejected {
@@ -278,12 +278,12 @@ func (d *LocalDestination) CopyCryptoPrivate(cryptoType CryptoKeyType, dst []byt
 
 func (d *LocalDestination) Sign(message []byte) ([]byte, error) {
 	if d == nil {
-		return nil, cryptx.ErrSensitiveReleased
+		return nil, cryptography.ErrSensitiveReleased
 	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.released {
-		return nil, cryptx.ErrSensitiveReleased
+		return nil, cryptography.ErrSensitiveReleased
 	}
 	switch d.signingType {
 	case SigningEdDSASHA512Ed25519:
@@ -320,12 +320,12 @@ func (d *LocalDestination) SigningKeyType() SigningKeyType {
 // exposing this Destination's long-lived private key.
 func (d *LocalDestination) EncryptedLeaseSetBlinding(date time.Time, secret []byte) (private, public [32]byte, err error) {
 	if d == nil {
-		return private, public, cryptx.ErrSensitiveReleased
+		return private, public, cryptography.ErrSensitiveReleased
 	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.released {
-		return private, public, cryptx.ErrSensitiveReleased
+		return private, public, cryptography.ErrSensitiveReleased
 	}
 	private, err = BlindEncryptedLeaseSetPrivate(d.signingType, d.signingPrivate, d.signingPublic, date, secret)
 	if err != nil {
@@ -348,7 +348,7 @@ func (d *LocalDestination) Clone() (*LocalDestination, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.released {
-		return nil, cryptx.ErrSensitiveReleased
+		return nil, cryptography.ErrSensitiveReleased
 	}
 	clone := &LocalDestination{
 		destination:        append([]byte(nil), d.destination...),
@@ -389,7 +389,7 @@ func (d *LocalDestination) PrivateEncodedLen() int {
 	defer d.mu.RUnlock()
 	n := 2 + len(d.destination) + len(d.signingPrivate) + 32 + 1
 	if d.identityCryptoType == CryptoElGamal {
-		n += cryptx.ElGamalPrivateKeySize
+		n += cryptography.ElGamalPrivateKeySize
 	}
 	return n
 }
@@ -398,16 +398,16 @@ func (d *LocalDestination) PrivateEncodedLen() int {
 // is intended only for the encrypted state store.
 func (d *LocalDestination) MarshalPrivateTo(dst []byte) (int, error) {
 	if d == nil {
-		return 0, cryptx.ErrSensitiveReleased
+		return 0, cryptography.ErrSensitiveReleased
 	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.released {
-		return 0, cryptx.ErrSensitiveReleased
+		return 0, cryptography.ErrSensitiveReleased
 	}
 	n := 2 + len(d.destination) + len(d.signingPrivate) + 32 + 1
 	if d.identityCryptoType == CryptoElGamal {
-		n += cryptx.ElGamalPrivateKeySize
+		n += cryptography.ElGamalPrivateKeySize
 	}
 	if len(dst) < n || len(d.destination) > 0xffff || d.cryptoCapabilities != localDestinationCryptoCapabilities {
 		return 0, ErrDestinationSmall
@@ -453,7 +453,7 @@ func ImportLocalDestination(src []byte) (*LocalDestination, error) {
 	}
 	elgamalLen := 0
 	if identity.CryptoKeyType() == CryptoElGamal {
-		elgamalLen = cryptx.ElGamalPrivateKeySize
+		elgamalLen = cryptography.ElGamalPrivateKeySize
 	}
 	privateEnd := 2 + n + privateLen + 32 + elgamalLen
 	if len(src) != privateEnd && len(src) != privateEnd+1 {
@@ -489,7 +489,7 @@ func ImportLocalDestination(src []byte) (*LocalDestination, error) {
 		return nil, ErrInvalidIdentity
 	}
 	off += 32
-	var elgamalPrivate cryptx.ElGamalPrivateKey
+	var elgamalPrivate cryptography.ElGamalPrivateKey
 	crypto, rest := identity.CryptoKeyParts()
 	switch identity.CryptoKeyType() {
 	case CryptoX25519:
@@ -498,8 +498,8 @@ func ImportLocalDestination(src []byte) (*LocalDestination, error) {
 			return nil, ErrInvalidIdentity
 		}
 	case CryptoElGamal:
-		copy(elgamalPrivate[:], src[off:off+cryptx.ElGamalPrivateKeySize])
-		derived, deriveErr := cryptx.ElGamalPublicFromPrivate(elgamalPrivate)
+		copy(elgamalPrivate[:], src[off:off+cryptography.ElGamalPrivateKeySize])
+		derived, deriveErr := cryptography.ElGamalPublicFromPrivate(elgamalPrivate)
 		if deriveErr != nil || len(rest) != 0 || !bytes.Equal(crypto, derived[:]) {
 			clear(private)
 			clear(elgamalPrivate[:])
@@ -528,8 +528,8 @@ type LocalAddress struct {
 	Hash              Hash
 	SigningPublic     ed25519.PublicKey
 	SigningPrivate    ed25519.PrivateKey
-	EncryptionPublic  cryptx.ElGamalPublicKey
-	EncryptionPrivate cryptx.ElGamalPrivateKey
+	EncryptionPublic  cryptography.ElGamalPublicKey
+	EncryptionPrivate cryptography.ElGamalPrivateKey
 }
 
 // LocalIdentityOwner supplies the private signing material for one locally
@@ -658,7 +658,7 @@ func GenerateLocalAddress() (address LocalAddress, err error) {
 	if err != nil {
 		return LocalAddress{}, err
 	}
-	address.EncryptionPublic, address.EncryptionPrivate, err = cryptx.GenerateElGamalKeyPair()
+	address.EncryptionPublic, address.EncryptionPrivate, err = cryptography.GenerateElGamalKeyPair()
 	if err != nil {
 		return LocalAddress{}, err
 	}
@@ -670,7 +670,7 @@ func GenerateLocalAddress() (address LocalAddress, err error) {
 	if _, err = io.ReadFull(rand.Reader, raw[:IdentityBaseLength]); err != nil {
 		return LocalAddress{}, err
 	}
-	copy(raw[:cryptx.ElGamalPublicKeySize], address.EncryptionPublic[:])
+	copy(raw[:cryptography.ElGamalPublicKeySize], address.EncryptionPublic[:])
 	copy(raw[IdentityBaseLength-ed25519.PublicKeySize:IdentityBaseLength], address.SigningPublic)
 	raw[IdentityBaseLength] = byte(CertificateKey)
 	binary.BigEndian.PutUint16(raw[IdentityBaseLength+1:IdentityBaseLength+3], 4)

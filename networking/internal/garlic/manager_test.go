@@ -3,8 +3,8 @@ package garlic
 import (
 	"bytes"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
 	"testing"
 )
 
@@ -19,11 +19,11 @@ func (r *countingReader) Read(dst []byte) (int, error) {
 }
 
 func TestSessionManagerNewThenExistingAndOneUseInboundTag(t *testing.T) {
-	public, private, err := cryptx.GenerateElGamalKeyPair()
+	public, private, err := cryptography.GenerateElGamalKeyPair()
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer := ivnp.Hash{1}
+	peer := foundation.Hash{1}
 	sender := NewSessionManager(SessionManagerConfig{
 		TagsPerMessage: 1,
 		Random:         &countingReader{},
@@ -50,7 +50,7 @@ func TestSessionManagerNewThenExistingAndOneUseInboundTag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second) >= cryptx.ElGamalCiphertextSize {
+	if len(second) >= cryptography.ElGamalCiphertextSize {
 		t.Fatalf("second packet length = %d, want legacy existing-session packet", len(second))
 	}
 	got, delivered, isNew, err = receiver.Receive(make([]byte, len(second)), second, private, 101)
@@ -71,11 +71,11 @@ func TestSessionManagerNewThenExistingAndOneUseInboundTag(t *testing.T) {
 }
 
 func TestSessionManagerFailedExistingSealRetainsTag(t *testing.T) {
-	public, private, err := cryptx.GenerateElGamalKeyPair()
+	public, private, err := cryptography.GenerateElGamalKeyPair()
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer := ivnp.Hash{2}
+	peer := foundation.Hash{2}
 	sender := NewSessionManager(SessionManagerConfig{TagsPerMessage: 1, Random: &countingReader{}})
 	receiver := NewSessionManager(SessionManagerConfig{})
 	first, err := sender.Encrypt(make([]byte, 1024), peer, public, []byte("first"), 1)
@@ -95,7 +95,7 @@ func TestSessionManagerFailedExistingSealRetainsTag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second) >= cryptx.ElGamalCiphertextSize {
+	if len(second) >= cryptography.ElGamalCiphertextSize {
 		t.Fatal("failed existing-session seal consumed the selected outbound tag")
 	}
 	got, _, isNew, err := receiver.Receive(make([]byte, len(second)), second, private, 2)
@@ -105,11 +105,11 @@ func TestSessionManagerFailedExistingSealRetainsTag(t *testing.T) {
 }
 
 func TestSessionManagerDefersOutboundTagsUntilConfirmed(t *testing.T) {
-	public, _, err := cryptx.GenerateElGamalKeyPair()
+	public, _, err := cryptography.GenerateElGamalKeyPair()
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer := ivnp.Hash{9}
+	peer := foundation.Hash{9}
 	manager := NewSessionManager(SessionManagerConfig{
 		MaxTagsPerPeer: 2,
 		TagsPerMessage: 1,
@@ -122,7 +122,7 @@ func TestSessionManagerDefersOutboundTagsUntilConfirmed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second) < cryptx.ElGamalCiphertextSize {
+	if len(second) < cryptography.ElGamalCiphertextSize {
 		t.Fatal("used an unconfirmed outbound tag")
 	}
 	if confirmed := manager.ConfirmOutboundTags(peer, 2); confirmed != 2 {
@@ -132,7 +132,7 @@ func TestSessionManagerDefersOutboundTagsUntilConfirmed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(third) >= cryptx.ElGamalCiphertextSize {
+	if len(third) >= cryptography.ElGamalCiphertextSize {
 		t.Fatal("did not use a confirmed outbound tag")
 	}
 	shard := manager.peerShard(peer)
@@ -156,7 +156,7 @@ func TestSessionManagerAppliesLegacyReplacementKey(t *testing.T) {
 	if !manager.InboundTags().Put(tag, key, 10) {
 		t.Fatal("inbound tag setup failed")
 	}
-	payload, gotTags, isNew, err := manager.Receive(make([]byte, len(packet)-32), packet, cryptx.ElGamalPrivateKey{}, 1)
+	payload, gotTags, isNew, err := manager.Receive(make([]byte, len(packet)-32), packet, cryptography.ElGamalPrivateKey{}, 1)
 	if err != nil || isNew || !bytes.Equal(payload, []byte("rekey")) || !bytes.Equal(gotTags, delivered) {
 		t.Fatalf("receive = payload %q, tags %x, new %t, err %v", payload, gotTags, isNew, err)
 	}
@@ -167,11 +167,11 @@ func TestSessionManagerAppliesLegacyReplacementKey(t *testing.T) {
 }
 
 func TestSessionManagerExpiryCapacityAndClose(t *testing.T) {
-	public, private, err := cryptx.GenerateElGamalKeyPair()
+	public, private, err := cryptography.GenerateElGamalKeyPair()
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstPeer, secondPeer := ivnp.Hash{3}, ivnp.Hash{4}
+	firstPeer, secondPeer := foundation.Hash{3}, foundation.Hash{4}
 	manager := NewSessionManager(SessionManagerConfig{
 		MaxPeers:       1,
 		MaxTagsPerPeer: 1,
@@ -196,7 +196,7 @@ func TestSessionManagerExpiryCapacityAndClose(t *testing.T) {
 	// The only first-peer state was evicted by the one-peer cap, so it must
 	// create a new session rather than retaining unbounded peer state.
 	replaced, err := manager.Encrypt(make([]byte, 1024), firstPeer, public, []byte("replacement"), 108)
-	if err != nil || len(replaced) < cryptx.ElGamalCiphertextSize {
+	if err != nil || len(replaced) < cryptography.ElGamalCiphertextSize {
 		t.Fatalf("capacity replacement = %d bytes, %v", len(replaced), err)
 	}
 	if _, _, _, err := NewSessionManager(SessionManagerConfig{}).Receive(make([]byte, len(first)), first, private, 100); err != nil {

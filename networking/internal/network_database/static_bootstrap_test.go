@@ -1,8 +1,8 @@
-package netdb
+package networkdatabase
 
 import (
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,7 +21,7 @@ func TestLoadStaticRouterInfosRequiresSignedFreshExactFiles(t *testing.T) {
 	if err := os.WriteFile(secondPath, second.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	database := NewDatabase(ivnp.Hash{}, 2)
+	database := NewDatabase(foundation.Hash{}, 2)
 	loaded, err := LoadStaticRouterInfos([]string{firstPath, secondPath}, database, now)
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +36,7 @@ func TestLoadStaticRouterInfosRequiresSignedFreshExactFiles(t *testing.T) {
 	if err = os.WriteFile(corruptPath, corrupt, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = LoadStaticRouterInfos([]string{corruptPath}, NewDatabase(ivnp.Hash{}, 1), now); !errors.Is(err, ErrInvalidSignature) {
+	if _, err = LoadStaticRouterInfos([]string{corruptPath}, NewDatabase(foundation.Hash{}, 1), now); !errors.Is(err, ErrInvalidSignature) {
 		t.Fatalf("corrupt signature error = %v", err)
 	}
 }
@@ -48,7 +48,7 @@ func TestLoadStaticRouterInfosRejectsTransportStaleRecord(t *testing.T) {
 	if err := os.WriteFile(path, stale.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadStaticRouterInfos([]string{path}, NewDatabase(ivnp.Hash{}, 1), now); !errors.Is(err, ErrRouterInfoStale) {
+	if _, err := LoadStaticRouterInfos([]string{path}, NewDatabase(foundation.Hash{}, 1), now); !errors.Is(err, ErrRouterInfoStale) {
 		t.Fatalf("stale RouterInfo error = %v", err)
 	}
 }

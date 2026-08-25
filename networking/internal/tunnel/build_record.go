@@ -7,8 +7,8 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/transport/noise"
 	"io"
 )
@@ -55,13 +55,13 @@ type ShortBuildKeys struct {
 type ShortBuildRequest struct {
 	ReceiveTunnelID uint32
 	NextTunnelID    uint32
-	NextRouter      ivnp.Hash
+	NextRouter      foundation.Hash
 	Gateway         bool
 	Endpoint        bool
 	RequestMinutes  uint32
 	LifetimeSeconds uint32
 	NextMessageID   uint32
-	Options         ivnp.Mapping
+	Options         foundation.Mapping
 	Bandwidth       ShortBuildOptions
 }
 
@@ -84,7 +84,7 @@ func marshalShortBuildRequest(dst []byte, request ShortBuildRequest, options []b
 		options = []byte{0, 0}
 	}
 
-	mapping, used, err := ivnp.ParseMapping(options)
+	mapping, used, err := foundation.ParseMapping(options)
 	if err != nil || used != len(options) || mapping.EncodedLen() > shortBuildMaxOptionsSize {
 		return ErrShortBuildRecord
 	}
@@ -133,7 +133,7 @@ func ParseShortBuildRequest(plaintext []byte) (ShortBuildRequest, error) {
 		return ShortBuildRequest{}, ErrShortBuildRecord
 	}
 	copy(request.NextRouter[:], plaintext[8:40])
-	mapping, used, err := ivnp.ParseMapping(plaintext[shortBuildOptionsOffset:])
+	mapping, used, err := foundation.ParseMapping(plaintext[shortBuildOptionsOffset:])
 	if err != nil || used > shortBuildMaxOptionsSize {
 		return ShortBuildRequest{}, ErrShortBuildRecord
 	}
@@ -178,7 +178,7 @@ func PreprocessShortBuildRecords(records []byte, keys []ShortBuildKeys, position
 // ProcessShortBuildRecords processes the record addressed to local, replaces
 // it with an authenticated reply, and applies this hop's reply layer to every
 // other record. The returned request aliases plaintextDst.
-func ProcessShortBuildRecords(records, plaintextDst []byte, local ivnp.Hash, staticPrivate []byte, accept bool, random io.Reader) (ShortBuildRequest, ShortBuildKeys, uint8, error) {
+func ProcessShortBuildRecords(records, plaintextDst []byte, local foundation.Hash, staticPrivate []byte, accept bool, random io.Reader) (ShortBuildRequest, ShortBuildKeys, uint8, error) {
 	var keys ShortBuildKeys
 	if len(staticPrivate) != shortBuildEphemeralSize {
 		return ShortBuildRequest{}, keys, 0, ErrShortBuildRecord
@@ -193,7 +193,7 @@ func ProcessShortBuildRecords(records, plaintextDst []byte, local ivnp.Hash, sta
 // processShortBuildRecordsWithPrivate is the manager hot-path variant. A
 // BuildManager owns this immutable X25519 key for its lifetime, avoiding a
 // private-key parse for every admitted transit request.
-func processShortBuildRecordsWithPrivate(records, plaintextDst []byte, local ivnp.Hash, private *ecdh.PrivateKey, accept bool, random io.Reader) (ShortBuildRequest, ShortBuildKeys, uint8, error) {
+func processShortBuildRecordsWithPrivate(records, plaintextDst []byte, local foundation.Hash, private *ecdh.PrivateKey, accept bool, random io.Reader) (ShortBuildRequest, ShortBuildKeys, uint8, error) {
 	var keys ShortBuildKeys
 	if len(records)%ShortBuildRecordSize != 0 || len(plaintextDst) < ShortBuildRequestPlainSize || private == nil || random == nil {
 		return ShortBuildRequest{}, keys, 0, ErrShortBuildRecord
@@ -275,7 +275,7 @@ func OpenShortBuildReplies(replies []byte, keys []ShortBuildKeys, positions []ui
 			clear(dst[:len(keys)*ShortBuildReplyPlainSize])
 			return err
 		}
-		if mapping, used, err := ivnp.ParseMapping(plaintext); err != nil || used > ShortBuildReplyPlainSize-1 || mapping.EncodedLen() > ShortBuildReplyPlainSize-1 {
+		if mapping, used, err := foundation.ParseMapping(plaintext); err != nil || used > ShortBuildReplyPlainSize-1 || mapping.EncodedLen() > ShortBuildReplyPlainSize-1 {
 			clear(dst[:len(keys)*ShortBuildReplyPlainSize])
 			return ErrShortBuildRecord
 		}
@@ -291,11 +291,11 @@ func OpenShortBuildReplies(replies []byte, keys []ShortBuildKeys, positions []ui
 // EncryptShortBuildRequest creates one 218-byte ECIES short build record using
 // a fresh X25519 ephemeral key. plaintext is the exact 154-byte request layout
 // from the tunnel-creation-ecies specification.
-func EncryptShortBuildRequest(dst []byte, hop ivnp.Hash, hopStatic []byte, plaintext []byte) (ShortBuildKeys, error) {
+func EncryptShortBuildRequest(dst []byte, hop foundation.Hash, hopStatic []byte, plaintext []byte) (ShortBuildKeys, error) {
 	return encryptShortBuildRequest(dst, hop, hopStatic, plaintext, rand.Reader)
 }
 
-func encryptShortBuildRequest(dst []byte, hop ivnp.Hash, hopStatic, plaintext []byte, random io.Reader) (ShortBuildKeys, error) {
+func encryptShortBuildRequest(dst []byte, hop foundation.Hash, hopStatic, plaintext []byte, random io.Reader) (ShortBuildKeys, error) {
 	var keys ShortBuildKeys
 	if len(dst) < ShortBuildRecordSize || len(hopStatic) != shortBuildEphemeralSize || len(plaintext) != ShortBuildRequestPlainSize || random == nil {
 		return keys, ErrShortBuildRecord
@@ -322,14 +322,14 @@ func encryptShortBuildRequest(dst []byte, hop ivnp.Hash, hopStatic, plaintext []
 		return keys, err
 	}
 	ciphertext, err := state.EncryptAndHash(dst[shortBuildCipherOffset:ShortBuildRecordSize], plaintext)
-	if err != nil || len(ciphertext) != ShortBuildRequestPlainSize+cryptx.ChaChaTagSize {
+	if err != nil || len(ciphertext) != ShortBuildRequestPlainSize+cryptography.ChaChaTagSize {
 		return keys, ErrShortBuildRecord
 	}
 	keys = deriveShortBuildKeys(state.ChainingKey(), state.Hash(), plaintext[shortBuildFlagOffset]&shortBuildEndpointFlag != 0)
 	return keys, nil
 }
 
-func DecryptShortBuildRequest(dst, record []byte, local ivnp.Hash, staticPrivate []byte) ([]byte, ShortBuildKeys, error) {
+func DecryptShortBuildRequest(dst, record []byte, local foundation.Hash, staticPrivate []byte) ([]byte, ShortBuildKeys, error) {
 	var keys ShortBuildKeys
 	if len(staticPrivate) != shortBuildEphemeralSize {
 		return nil, keys, ErrShortBuildRecord
@@ -341,7 +341,7 @@ func DecryptShortBuildRequest(dst, record []byte, local ivnp.Hash, staticPrivate
 	return decryptShortBuildRequestWithPrivate(dst, record, local, private)
 }
 
-func decryptShortBuildRequestWithPrivate(dst, record []byte, local ivnp.Hash, private *ecdh.PrivateKey) ([]byte, ShortBuildKeys, error) {
+func decryptShortBuildRequestWithPrivate(dst, record []byte, local foundation.Hash, private *ecdh.PrivateKey) ([]byte, ShortBuildKeys, error) {
 	var keys ShortBuildKeys
 	if len(dst) < ShortBuildRequestPlainSize || len(record) != ShortBuildRecordSize || private == nil || subtle.ConstantTimeCompare(record[:shortBuildPeerSize], local[:shortBuildPeerSize]) != 1 {
 		return nil, keys, ErrShortBuildRecord
@@ -374,7 +374,7 @@ func SealShortBuildReply(dst, plaintext []byte, keys ShortBuildKeys, recordIndex
 	if recordIndex >= 8 || len(dst) < ShortBuildRecordSize || len(plaintext) != ShortBuildReplyPlainSize {
 		return nil, ErrShortBuildRecord
 	}
-	cipher, err := cryptx.NewChaCha20Poly1305(keys.ReplyKey[:])
+	cipher, err := cryptography.NewChaCha20Poly1305(keys.ReplyKey[:])
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +388,7 @@ func OpenShortBuildReply(dst, ciphertext []byte, keys ShortBuildKeys, recordInde
 	if recordIndex >= 8 || len(dst) < ShortBuildReplyPlainSize || len(ciphertext) != ShortBuildRecordSize {
 		return nil, ErrShortBuildRecord
 	}
-	cipher, err := cryptx.NewChaCha20Poly1305(keys.ReplyKey[:])
+	cipher, err := cryptography.NewChaCha20Poly1305(keys.ReplyKey[:])
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +410,7 @@ func TransformShortBuildRecord(dst, src []byte, replyKey [32]byte, recordIndex u
 		return ErrShortBuildRecord
 	}
 	nonce := shortBuildNonce(recordIndex)
-	stream, err := cryptx.NewChaCha20Stream(replyKey[:], nonce[:])
+	stream, err := cryptography.NewChaCha20Stream(replyKey[:], nonce[:])
 	if err != nil {
 		return err
 	}
@@ -486,8 +486,8 @@ func shortBuildHMAC(key [32]byte, prefix *[32]byte, info string, counter byte) [
 	return sha256.Sum256(outer[:])
 }
 
-func shortBuildNonce(index uint8) [cryptx.ChaChaNonceSize]byte {
-	var nonce [cryptx.ChaChaNonceSize]byte
+func shortBuildNonce(index uint8) [cryptography.ChaChaNonceSize]byte {
+	var nonce [cryptography.ChaChaNonceSize]byte
 	binary.LittleEndian.PutUint64(nonce[4:], uint64(index))
 	return nonce
 }

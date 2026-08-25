@@ -1,8 +1,8 @@
-package netdb
+package networkdatabase
 
 import (
 	"encoding/binary"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
 )
 
@@ -13,7 +13,7 @@ const (
 
 // MetaLease is the 40-byte encrypted-lease routing reference.
 type MetaLease struct {
-	Gateway ivnp.Hash
+	Gateway foundation.Hash
 	Type    uint8
 	Cost    uint8
 	EndDate uint32
@@ -53,7 +53,7 @@ func (it *MetaLeaseIterator) Next() (MetaLease, bool, error) {
 // MetaLeaseSet is DatabaseStore type 7.
 type MetaLeaseSet struct {
 	Header      LeaseSet2Header
-	Options     ivnp.Mapping
+	Options     foundation.Mapping
 	leaseCount  uint8
 	leases      []byte
 	Revocations []byte
@@ -63,10 +63,10 @@ type MetaLeaseSet struct {
 }
 
 func (s MetaLeaseSet) Bytes() []byte             { return s.raw }
-func (s MetaLeaseSet) Hash() ivnp.Hash           { return s.Header.Destination.Hash() }
+func (s MetaLeaseSet) Hash() foundation.Hash     { return s.Header.Destination.Hash() }
 func (s MetaLeaseSet) LeaseCount() int           { return int(s.leaseCount) }
 func (s MetaLeaseSet) Leases() MetaLeaseIterator { return MetaLeaseIterator{rest: s.leases} }
-func (s MetaLeaseSet) RevocationCount() int      { return len(s.Revocations) / ivnp.HashLength }
+func (s MetaLeaseSet) RevocationCount() int      { return len(s.Revocations) / foundation.HashLength }
 
 func (s MetaLeaseSet) Verify() (bool, error) {
 	signingType := s.Header.Destination.SigningKeyType()
@@ -78,7 +78,7 @@ func (s MetaLeaseSet) Verify() (bool, error) {
 		}
 		signingType, first, rest = s.Header.Offline.Type, s.Header.Offline.PublicKey, nil
 	}
-	return ivnp.VerifySignaturePrefixed(byte(7), signingType, first, rest, s.Unsigned, s.Signature)
+	return foundation.VerifySignaturePrefixed(byte(7), signingType, first, rest, s.Unsigned, s.Signature)
 }
 
 func ParseMetaLeaseSet(src []byte) (MetaLeaseSet, error) {
@@ -90,7 +90,7 @@ func ParseMetaLeaseSet(src []byte) (MetaLeaseSet, error) {
 		return MetaLeaseSet{}, err
 	}
 	cursor := wire.NewCursor(src[n:])
-	options, used, err := ivnp.ParseMapping(cursor.Bytes())
+	options, used, err := foundation.ParseMapping(cursor.Bytes())
 	if err != nil {
 		return MetaLeaseSet{}, err
 	}
@@ -120,7 +120,7 @@ func ParseMetaLeaseSet(src []byte) (MetaLeaseSet, error) {
 	if err != nil {
 		return MetaLeaseSet{}, err
 	}
-	revocations, err := cursor.ReadBytes(int(revocationCount) * ivnp.HashLength)
+	revocations, err := cursor.ReadBytes(int(revocationCount) * foundation.HashLength)
 	if err != nil {
 		return MetaLeaseSet{}, err
 	}
@@ -131,7 +131,7 @@ func ParseMetaLeaseSet(src []byte) (MetaLeaseSet, error) {
 	}
 	signatureLen, ok := signingType.SignatureLen()
 	if !ok {
-		return MetaLeaseSet{}, ivnp.ErrUnknownKeyType
+		return MetaLeaseSet{}, foundation.ErrUnknownKeyType
 	}
 	signature, err := cursor.ReadBytes(signatureLen)
 	if err != nil {
@@ -146,7 +146,7 @@ func ParseMetaLeaseSet(src []byte) (MetaLeaseSet, error) {
 // EncryptedLeaseSet is DatabaseStore type 5. Its inner data remains opaque
 // until encrypted-lease-set decryption has established the client context.
 type EncryptedLeaseSet struct {
-	SigningType      ivnp.SigningKeyType
+	SigningType      foundation.SigningKeyType
 	BlindedPublicKey []byte
 	Published        uint32
 	Expires          uint16
@@ -161,23 +161,23 @@ type EncryptedLeaseSet struct {
 func (s EncryptedLeaseSet) Bytes() []byte { return s.raw }
 
 // Hash is the encrypted LeaseSet DHT key: SHA-256(sigtype || blinded key).
-func (s EncryptedLeaseSet) Hash() ivnp.Hash {
+func (s EncryptedLeaseSet) Hash() foundation.Hash {
 	var input [2 + 512]byte
 	binary.BigEndian.PutUint16(input[:2], uint16(s.SigningType))
 	copy(input[2:], s.BlindedPublicKey)
-	return ivnp.Sum(input[:2+len(s.BlindedPublicKey)])
+	return foundation.Sum(input[:2+len(s.BlindedPublicKey)])
 }
 
 func (s EncryptedLeaseSet) Verify() (bool, error) {
 	signingType, public := s.SigningType, s.BlindedPublicKey
 	if s.Offline.Present() {
-		valid, err := ivnp.VerifySignature(s.SigningType, s.BlindedPublicKey, nil, s.Offline.Signed, s.Offline.Signature)
+		valid, err := foundation.VerifySignature(s.SigningType, s.BlindedPublicKey, nil, s.Offline.Signed, s.Offline.Signature)
 		if err != nil || !valid {
 			return valid, err
 		}
 		signingType, public = s.Offline.Type, s.Offline.PublicKey
 	}
-	return ivnp.VerifySignaturePrefixed(byte(5), signingType, public, nil, s.Unsigned, s.Signature)
+	return foundation.VerifySignaturePrefixed(byte(5), signingType, public, nil, s.Unsigned, s.Signature)
 }
 
 func ParseEncryptedLeaseSet(src []byte) (EncryptedLeaseSet, error) {
@@ -189,10 +189,10 @@ func ParseEncryptedLeaseSet(src []byte) (EncryptedLeaseSet, error) {
 	if err != nil {
 		return EncryptedLeaseSet{}, err
 	}
-	signingType := ivnp.SigningKeyType(typeID)
+	signingType := foundation.SigningKeyType(typeID)
 	keyLen, ok := signingType.PublicKeyLen()
 	if !ok {
-		return EncryptedLeaseSet{}, ivnp.ErrUnknownKeyType
+		return EncryptedLeaseSet{}, foundation.ErrUnknownKeyType
 	}
 	publicKey, err := cursor.ReadBytes(keyLen)
 	if err != nil {
@@ -221,10 +221,10 @@ func ParseEncryptedLeaseSet(src []byte) (EncryptedLeaseSet, error) {
 		if err != nil {
 			return EncryptedLeaseSet{}, err
 		}
-		offlineType := ivnp.SigningKeyType(offlineTypeID)
+		offlineType := foundation.SigningKeyType(offlineTypeID)
 		offlineKeyLen, ok := offlineType.PublicKeyLen()
 		if !ok {
-			return EncryptedLeaseSet{}, ivnp.ErrUnknownKeyType
+			return EncryptedLeaseSet{}, foundation.ErrUnknownKeyType
 		}
 		offlineKey, err := cursor.ReadBytes(offlineKeyLen)
 		if err != nil {
@@ -232,7 +232,7 @@ func ParseEncryptedLeaseSet(src []byte) (EncryptedLeaseSet, error) {
 		}
 		signatureLen, ok := signingType.SignatureLen()
 		if !ok {
-			return EncryptedLeaseSet{}, ivnp.ErrUnknownKeyType
+			return EncryptedLeaseSet{}, foundation.ErrUnknownKeyType
 		}
 		offlineSignature, err := cursor.ReadBytes(signatureLen)
 		if err != nil {
@@ -258,7 +258,7 @@ func ParseEncryptedLeaseSet(src []byte) (EncryptedLeaseSet, error) {
 	}
 	signatureLen, ok := signingForPayload.SignatureLen()
 	if !ok {
-		return EncryptedLeaseSet{}, ivnp.ErrUnknownKeyType
+		return EncryptedLeaseSet{}, foundation.ErrUnknownKeyType
 	}
 	signature, err := cursor.ReadBytes(signatureLen)
 	if err != nil {

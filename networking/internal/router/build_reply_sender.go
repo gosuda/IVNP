@@ -3,7 +3,7 @@ package router
 import (
 	"context"
 	"encoding/binary"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/garlic/ecies"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/tunnel"
@@ -15,7 +15,7 @@ import (
 type BuildReplySenderConfig struct {
 	Sender      tunnel.Sender
 	Service     *Service
-	LocalRouter ivnp.Hash
+	LocalRouter foundation.Hash
 	Now         func() uint64
 	NextID      MessageIDSource
 }
@@ -28,13 +28,13 @@ type BuildReplySenderConfig struct {
 type BuildReplySender struct {
 	sender  tunnel.Sender
 	service *Service
-	local   ivnp.Hash
+	local   foundation.Hash
 	now     func() uint64
 	nextID  MessageIDSource
 }
 
 func NewBuildReplySender(config BuildReplySenderConfig) (*BuildReplySender, error) {
-	if config.Sender == nil || config.Service == nil || config.LocalRouter == (ivnp.Hash{}) || config.Now == nil {
+	if config.Sender == nil || config.Service == nil || config.LocalRouter == (foundation.Hash{}) || config.Now == nil {
 		return nil, ErrDataPlaneConfig
 	}
 	if config.NextID == nil {
@@ -48,8 +48,8 @@ func NewBuildReplySender(config BuildReplySenderConfig) (*BuildReplySender, erro
 // SendBuildReply implements tunnel.BuildReplySender. Remote replies go
 // directly to the IBGW as TunnelGateway messages; they do not require or use a
 // local outbound tunnel.
-func (s *BuildReplySender) SendBuildReply(ctx context.Context, gateway ivnp.Hash, gatewayTunnelID uint32, key tunnel.GarlicReplyKey, reply i2np.Message) error {
-	sendBuildReplyRejected := s == nil || s.sender == nil || s.service == nil || s.now == nil || s.nextID == nil || gateway == (ivnp.Hash{}) || gatewayTunnelID == 0
+func (s *BuildReplySender) SendBuildReply(ctx context.Context, gateway foundation.Hash, gatewayTunnelID uint32, key tunnel.GarlicReplyKey, reply i2np.Message) error {
+	sendBuildReplyRejected := s == nil || s.sender == nil || s.service == nil || s.now == nil || s.nextID == nil || gateway == (foundation.Hash{}) || gatewayTunnelID == 0
 	if !sendBuildReplyRejected {
 		sendBuildReplyRejected = reply.Header.Type != i2np.OutboundTunnelBuildReply
 	}
@@ -77,7 +77,7 @@ func (s *BuildReplySender) SendBuildReply(ctx context.Context, gateway ivnp.Hash
 			return ErrGarlicPacket
 		}
 		payload := make([]byte, payloadLen)
-		sealed, err := ecies.SealOneTimeReplyExistingSession(payload[4:], key.Key, key.Tag, reply, nil)
+		sealed, err := garlicecies.SealOneTimeReplyExistingSession(payload[4:], key.Key, key.Tag, reply, nil)
 		if err != nil {
 			return err
 		}

@@ -1,15 +1,15 @@
-package netdb
+package networkdatabase
 
 import (
 	"crypto/subtle"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 	"math/bits"
 	"sync"
 )
 
-const BucketCount = ivnp.HashLength * 8
+const BucketCount = foundation.HashLength * 8
 
 var ErrInvalidSignature = errors.New("netdb: signature verification failed")
 
@@ -22,7 +22,7 @@ type routerEntry struct {
 // RouterRef is a borrowed snapshot. Its RouterInfo aliases the bytes supplied
 // when the entry was admitted, so callers must not mutate those bytes.
 type RouterRef struct {
-	Hash      ivnp.Hash
+	Hash      foundation.Hash
 	Info      RouterInfo
 	Floodfill bool
 	LastSeen  uint64
@@ -35,20 +35,20 @@ type routerSelectionBuffer struct {
 // RouterInfo, while routing is the bounded KBucketSet used by DHT traversal.
 type Table struct {
 	mu            sync.RWMutex
-	local         ivnp.Hash
-	routers       map[ivnp.Hash]routerEntry
+	local         foundation.Hash
+	routers       map[foundation.Hash]routerEntry
 	routing       kBucketSet
 	generation    uint64
 	selectionPool chan *routerSelectionBuffer
 }
 
-func NewTable(local ivnp.Hash, bucketCapacity int) *Table {
+func NewTable(local foundation.Hash, bucketCapacity int) *Table {
 	if bucketCapacity <= 0 {
 		bucketCapacity = DefaultBucketCapacity
 	}
 	selectionWorkers := parallelism.CPUs()
 	table := &Table{
-		local: local, routers: make(map[ivnp.Hash]routerEntry), routing: newKBucketSet(bucketCapacity),
+		local: local, routers: make(map[foundation.Hash]routerEntry), routing: newKBucketSet(bucketCapacity),
 		selectionPool: make(chan *routerSelectionBuffer, selectionWorkers),
 	}
 	for range selectionWorkers {
@@ -65,7 +65,7 @@ func (t *Table) Len() int {
 }
 
 // Local returns the routing table's local identity hash.
-func (t *Table) Local() ivnp.Hash {
+func (t *Table) Local() foundation.Hash {
 	t.mu.RLock()
 	local := t.local
 	t.mu.RUnlock()
@@ -144,7 +144,7 @@ func (t *Table) BucketOccupancy(dst *[BucketCount]uint16) {
 	t.mu.RUnlock()
 }
 
-func (t *Table) ClosestNonFloodfillsInto(dst []RouterRef, target ivnp.Hash) []RouterRef {
+func (t *Table) ClosestNonFloodfillsInto(dst []RouterRef, target foundation.Hash) []RouterRef {
 	dst = dst[:0]
 	if cap(dst) == 0 {
 		return dst
@@ -174,7 +174,7 @@ func (t *Table) ClosestNonFloodfillsInto(dst []RouterRef, target ivnp.Hash) []Ro
 
 // Get returns an exact borrowed RouterInfo snapshot for hash. Its wire bytes
 // remain owned by the table and must not be modified by the caller.
-func (t *Table) Get(hash ivnp.Hash) (RouterRef, bool) {
+func (t *Table) Get(hash foundation.Hash) (RouterRef, bool) {
 	t.mu.RLock()
 	entry, ok := t.routers[hash]
 	t.mu.RUnlock()
@@ -228,7 +228,7 @@ func (t *Table) StoreVerified(info RouterInfo, floodfill bool, seenAt uint64) {
 	t.generation++
 }
 
-func (t *Table) Remove(hash ivnp.Hash) bool {
+func (t *Table) Remove(hash foundation.Hash) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, exists := t.routers[hash]; !exists {
@@ -274,29 +274,29 @@ func (t *Table) Expire(cutoff uint64) int {
 
 // ClosestInto writes up to len(dst) closest peers by XOR metric and returns
 // the populated prefix. A zero-length dst is valid and never allocates.
-func (t *Table) ClosestInto(dst []RouterRef, target ivnp.Hash) []RouterRef {
+func (t *Table) ClosestInto(dst []RouterRef, target foundation.Hash) []RouterRef {
 	return t.closestInto(dst, target, false, nil)
 }
 
 // ClosestRoutingInto searches only hashes admitted by the Java-compatible
 // KBucketSet and orders the result by strict XOR distance.
-func (t *Table) ClosestRoutingInto(dst []RouterRef, target ivnp.Hash) []RouterRef {
+func (t *Table) ClosestRoutingInto(dst []RouterRef, target foundation.Hash) []RouterRef {
 	return t.closestRoutingInto(dst, target, false, nil)
 }
 
 // ClosestRoutingNonFloodfillsInto implements Java's EXPL response: strict XOR
 // order over KBucketSet members after excluding every floodfill.
-func (t *Table) ClosestRoutingNonFloodfillsInto(dst []RouterRef, target ivnp.Hash) []RouterRef {
+func (t *Table) ClosestRoutingNonFloodfillsInto(dst []RouterRef, target foundation.Hash) []RouterRef {
 	return t.closestRoutingInto(dst, target, true, nil)
 }
 
 // ClosestRoutingNonFloodfillsExcludingInto applies Java's peersToIgnore set
 // while scanning, before the result limit is enforced.
-func (t *Table) ClosestRoutingNonFloodfillsExcludingInto(dst []RouterRef, target ivnp.Hash, excluded map[ivnp.Hash]struct{}) []RouterRef {
+func (t *Table) ClosestRoutingNonFloodfillsExcludingInto(dst []RouterRef, target foundation.Hash, excluded map[foundation.Hash]struct{}) []RouterRef {
 	return t.closestRoutingInto(dst, target, true, excluded)
 }
 
-func (t *Table) closestRoutingInto(dst []RouterRef, target ivnp.Hash, excludeFloodfills bool, excluded map[ivnp.Hash]struct{}) []RouterRef {
+func (t *Table) closestRoutingInto(dst []RouterRef, target foundation.Hash, excludeFloodfills bool, excluded map[foundation.Hash]struct{}) []RouterRef {
 	dst = dst[:0]
 	if cap(dst) == 0 {
 		return dst
@@ -326,16 +326,16 @@ func (t *Table) closestRoutingInto(dst []RouterRef, target ivnp.Hash, excludeFlo
 }
 
 // ClosestFloodfillsInto is ClosestInto restricted to floodfill routers.
-func (t *Table) ClosestFloodfillsInto(dst []RouterRef, target ivnp.Hash) []RouterRef {
+func (t *Table) ClosestFloodfillsInto(dst []RouterRef, target foundation.Hash) []RouterRef {
 	return t.closestInto(dst, target, true, nil)
 }
 
 // ClosestFloodfillsExcludingInto applies exclusions before limiting results.
-func (t *Table) ClosestFloodfillsExcludingInto(dst []RouterRef, target ivnp.Hash, excluded map[ivnp.Hash]struct{}) []RouterRef {
+func (t *Table) ClosestFloodfillsExcludingInto(dst []RouterRef, target foundation.Hash, excluded map[foundation.Hash]struct{}) []RouterRef {
 	return t.closestInto(dst, target, true, excluded)
 }
 
-func (t *Table) closestInto(dst []RouterRef, target ivnp.Hash, floodfillOnly bool, excluded map[ivnp.Hash]struct{}) []RouterRef {
+func (t *Table) closestInto(dst []RouterRef, target foundation.Hash, floodfillOnly bool, excluded map[foundation.Hash]struct{}) []RouterRef {
 	dst = dst[:0]
 	if cap(dst) == 0 {
 		return dst
@@ -367,7 +367,7 @@ func (t *Table) closestInto(dst []RouterRef, target ivnp.Hash, floodfillOnly boo
 // distanceBucket returns the first differing bit from the most-significant
 // end. Equal hashes do not have a DHT bucket and map to the final bucket only
 // for defensive callers; Store excludes them before this function is used.
-func distanceBucket(local, remote ivnp.Hash) int {
+func distanceBucket(local, remote foundation.Hash) int {
 	for i := range local {
 		delta := local[i] ^ remote[i]
 		if delta != 0 {
@@ -379,7 +379,7 @@ func distanceBucket(local, remote ivnp.Hash) int {
 
 // distanceLess compares XOR(target, left) and XOR(target, right) without
 // allocating a temporary distance array.
-func distanceLess(target, left, right ivnp.Hash) bool {
+func distanceLess(target, left, right foundation.Hash) bool {
 	for i := range target {
 		leftByte := target[i] ^ left[i]
 		rightByte := target[i] ^ right[i]

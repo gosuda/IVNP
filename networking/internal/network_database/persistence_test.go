@@ -1,10 +1,10 @@
-package netdb
+package networkdatabase
 
 import (
 	"crypto/ed25519"
 	cryptorand "crypto/rand"
 	"encoding/binary"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,12 +16,12 @@ func signedPersistenceRouter(t *testing.T, published uint64) RouterInfo {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := make([]byte, ivnp.IdentityBaseLength+7)
+	identity := make([]byte, foundation.IdentityBaseLength+7)
 	copy(identity[352:384], public)
-	identity[384] = byte(ivnp.CertificateKey)
+	identity[384] = byte(foundation.CertificateKey)
 	identity[385], identity[386] = 0, 4
-	identity[387], identity[388] = 0, byte(ivnp.SigningEdDSASHA512Ed25519)
-	identity[389], identity[390] = 0, byte(ivnp.CryptoElGamal)
+	identity[387], identity[388] = 0, byte(foundation.SigningEdDSASHA512Ed25519)
+	identity[389], identity[390] = 0, byte(foundation.CryptoElGamal)
 	unsigned := append(identity, make([]byte, 12)...)
 	binary.BigEndian.PutUint64(unsigned[len(identity):len(identity)+8], published)
 	info, err := ParseRouterInfo(append(unsigned, ed25519.Sign(private, unsigned)...))
@@ -34,7 +34,7 @@ func signedPersistenceRouter(t *testing.T, published uint64) RouterInfo {
 func TestRouterInfoStoreRestoresVerifiedSnapshotAndRejectsCorruption(t *testing.T) {
 	const now = uint64(1_000_000)
 	path := filepath.Join(t.TempDir(), "netdb.routers")
-	first := NewDatabase(ivnp.Hash{}, 2)
+	first := NewDatabase(foundation.Hash{}, 2)
 	info := signedPersistenceRouter(t, now)
 	if err := first.AdmitRouterInfo(info, false, now); err != nil {
 		t.Fatal(err)
@@ -54,7 +54,7 @@ func TestRouterInfoStoreRestoresVerifiedSnapshotAndRejectsCorruption(t *testing.
 		t.Fatalf("snapshot permissions = %o, want 0600", stat.Mode().Perm())
 	}
 
-	restored := NewDatabase(ivnp.Hash{}, 2)
+	restored := NewDatabase(foundation.Hash{}, 2)
 	reader, err := NewRouterInfoStore(RouterInfoStoreConfig{Path: path, Database: restored, NetworkID: 2})
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +72,7 @@ func TestRouterInfoStoreRestoresVerifiedSnapshotAndRejectsCorruption(t *testing.
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	corrupt := NewDatabase(ivnp.Hash{}, 2)
+	corrupt := NewDatabase(foundation.Hash{}, 2)
 	corruptStore, err := NewRouterInfoStore(RouterInfoStoreConfig{Path: path, Database: corrupt, NetworkID: 2})
 	if err != nil {
 		t.Fatal(err)

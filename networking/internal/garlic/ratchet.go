@@ -2,24 +2,24 @@ package garlic
 
 import (
 	"encoding/binary"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/networking/internal/garlic/ecies"
 	"sync"
 )
 
-type RatchetConfig = ecies.RatchetConfig
-type RatchetOptions = ecies.RatchetOptions
-type RatchetResult = ecies.RatchetResult
-type RatchetACK = ecies.ACK
-type RatchetStats = ecies.RatchetStats
+type RatchetConfig = garlicecies.RatchetConfig
+type RatchetOptions = garlicecies.RatchetOptions
+type RatchetResult = garlicecies.RatchetResult
+type RatchetACK = garlicecies.ACK
+type RatchetStats = garlicecies.RatchetStats
 
 var (
-	ErrRatchet          = ecies.ErrRatchet
-	ErrRatchetClosed    = ecies.ErrRatchetClosed
-	ErrRatchetReplay    = ecies.ErrRatchetReplay
-	ErrRatchetExpired   = ecies.ErrRatchetExpired
-	ErrRatchetNoSession = ecies.ErrRatchetNoSession
+	ErrRatchet          = garlicecies.ErrRatchet
+	ErrRatchetClosed    = garlicecies.ErrRatchetClosed
+	ErrRatchetReplay    = garlicecies.ErrRatchetReplay
+	ErrRatchetExpired   = garlicecies.ErrRatchetExpired
+	ErrRatchetNoSession = garlicecies.ErrRatchetNoSession
 )
 
 // RatchetManager shards independent peer sessions across CPU-scaled ECIES
@@ -27,12 +27,12 @@ var (
 // its owner; deterministic packet hashing routes new sessions and replays.
 type RatchetManager struct {
 	routeMu sync.RWMutex
-	shards  []*ecies.RatchetManager
+	shards  []*garlicecies.RatchetManager
 	once    sync.Once
 }
 
 // NewRatchetManager binds sharded ECIES garlic state to one LocalDestination.
-func NewRatchetManager(local *ivnp.LocalDestination, config RatchetConfig) (*RatchetManager, error) {
+func NewRatchetManager(local *foundation.LocalDestination, config RatchetConfig) (*RatchetManager, error) {
 	maxSessions := config.MaxSessions
 	if maxSessions <= 0 {
 		maxSessions = 256
@@ -48,9 +48,9 @@ func NewRatchetManager(local *ivnp.LocalDestination, config RatchetConfig) (*Rat
 	shardCount := min(parallelism.Workers(maxSessions), max(1, maxTags/lookahead))
 	config.MaxSessions = (maxSessions + shardCount - 1) / shardCount
 	config.MaxInboundTags = (maxTags + shardCount - 1) / shardCount
-	manager := &RatchetManager{shards: make([]*ecies.RatchetManager, 0, shardCount)}
+	manager := &RatchetManager{shards: make([]*garlicecies.RatchetManager, 0, shardCount)}
 	for range shardCount {
-		shard, err := ecies.NewRatchetManager(local, config)
+		shard, err := garlicecies.NewRatchetManager(local, config)
 		if err != nil {
 			manager.ReleaseSensitive()
 			return nil, err
@@ -60,7 +60,7 @@ func NewRatchetManager(local *ivnp.LocalDestination, config RatchetConfig) (*Rat
 	return manager, nil
 }
 
-func (m *RatchetManager) locatePeerLocked(peer ivnp.Hash) (int, bool) {
+func (m *RatchetManager) locatePeerLocked(peer foundation.Hash) (int, bool) {
 	for index, shard := range m.shards {
 		if shard.HasPeer(peer) {
 			return index, true
@@ -68,7 +68,7 @@ func (m *RatchetManager) locatePeerLocked(peer ivnp.Hash) (int, bool) {
 	}
 	return 0, false
 }
-func (m *RatchetManager) ownsPeerOutsideLocked(peer ivnp.Hash, owner int) bool {
+func (m *RatchetManager) ownsPeerOutsideLocked(peer foundation.Hash, owner int) bool {
 	for index, shard := range m.shards {
 		if index != owner && shard.HasPeer(peer) {
 			return true
@@ -77,7 +77,7 @@ func (m *RatchetManager) ownsPeerOutsideLocked(peer ivnp.Hash, owner int) bool {
 	return false
 }
 
-func (m *RatchetManager) peerShardLocked(peer ivnp.Hash) (int, *ecies.RatchetManager) {
+func (m *RatchetManager) peerShardLocked(peer foundation.Hash) (int, *garlicecies.RatchetManager) {
 	if index, ok := m.locatePeerLocked(peer); ok {
 		return index, m.shards[index]
 	}
@@ -85,7 +85,7 @@ func (m *RatchetManager) peerShardLocked(peer ivnp.Hash) (int, *ecies.RatchetMan
 	return index, m.shards[index]
 }
 
-func (m *RatchetManager) packetShardLocked(packet []byte) (int, *ecies.RatchetManager) {
+func (m *RatchetManager) packetShardLocked(packet []byte) (int, *garlicecies.RatchetManager) {
 	for index, shard := range m.shards {
 		if shard.OwnsTag(packet) {
 			return index, shard
@@ -99,8 +99,8 @@ func (m *RatchetManager) packetShardLocked(packet []byte) (int, *ecies.RatchetMa
 	return shardIndex, m.shards[shardIndex]
 }
 
-func (m *RatchetManager) BindPeer(observed, peer ivnp.Hash) error {
-	if m == nil || observed == (ivnp.Hash{}) || peer == (ivnp.Hash{}) {
+func (m *RatchetManager) BindPeer(observed, peer foundation.Hash) error {
+	if m == nil || observed == (foundation.Hash{}) || peer == (foundation.Hash{}) {
 		return ErrRatchet
 	}
 	m.routeMu.Lock()
@@ -137,7 +137,7 @@ func (m *RatchetManager) Stats() RatchetStats {
 	return stats
 }
 
-func (m *RatchetManager) Encrypt(dst []byte, peer ivnp.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
+func (m *RatchetManager) Encrypt(dst []byte, peer foundation.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
 	if m == nil {
 		return nil, ErrRatchetClosed
 	}
@@ -147,7 +147,7 @@ func (m *RatchetManager) Encrypt(dst []byte, peer ivnp.Hash, remotePublic []byte
 	return shard.Encrypt(dst, peer, remotePublic, cryptoType, payload, now)
 }
 
-func (m *RatchetManager) EncryptWithScratch(dst, plain []byte, peer ivnp.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
+func (m *RatchetManager) EncryptWithScratch(dst, plain []byte, peer foundation.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
 	if m == nil {
 		return nil, ErrRatchetClosed
 	}
@@ -170,7 +170,7 @@ func (m *RatchetManager) EncryptUnbound(dst []byte, remotePublic []byte, cryptoT
 	return m.shards[index%uint64(len(m.shards))].EncryptUnbound(dst, remotePublic, cryptoType, payload, now)
 }
 
-func (m *RatchetManager) EncryptExisting(dst []byte, peer ivnp.Hash, payload []byte, options RatchetOptions, now uint64) ([]byte, error) {
+func (m *RatchetManager) EncryptExisting(dst []byte, peer foundation.Hash, payload []byte, options RatchetOptions, now uint64) ([]byte, error) {
 	if m == nil {
 		return nil, ErrRatchetClosed
 	}
@@ -180,7 +180,7 @@ func (m *RatchetManager) EncryptExisting(dst []byte, peer ivnp.Hash, payload []b
 	return shard.EncryptExisting(dst, peer, payload, options, now)
 }
 
-func (m *RatchetManager) EncryptExistingWithScratch(dst, plain []byte, peer ivnp.Hash, payload []byte, options RatchetOptions, now uint64) ([]byte, error) {
+func (m *RatchetManager) EncryptExistingWithScratch(dst, plain []byte, peer foundation.Hash, payload []byte, options RatchetOptions, now uint64) ([]byte, error) {
 	if m == nil {
 		return nil, ErrRatchetClosed
 	}
@@ -198,7 +198,7 @@ func (m *RatchetManager) Receive(dst, replyDst, packet []byte, now uint64) (Ratc
 	index, shard := m.packetShardLocked(packet)
 	result, err := shard.Receive(dst, replyDst, packet, now)
 	m.routeMu.RUnlock()
-	if err != nil || result.Peer == (ivnp.Hash{}) {
+	if err != nil || result.Peer == (foundation.Hash{}) {
 		return result, err
 	}
 	m.routeMu.Lock()

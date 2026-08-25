@@ -1,12 +1,12 @@
-package ecies
+package garlicecies
 
 import (
 	"crypto/ecdh"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/observability"
 	"sync"
 )
@@ -70,7 +70,7 @@ type RatchetOptions struct {
 type RatchetResult struct {
 	Payload     []byte
 	Reply       []byte
-	Peer        ivnp.Hash
+	Peer        foundation.Hash
 	NewSession  bool
 	Terminated  bool
 	ACKs        []ACK
@@ -101,7 +101,7 @@ type tagSet struct {
 }
 
 type session struct {
-	peer               ivnp.Hash
+	peer               foundation.Hash
 	outbound           *tagSet
 	inbound            *tagSet
 	localKey           *ecdh.PrivateKey
@@ -121,7 +121,7 @@ type session struct {
 
 type pendingInitiator struct {
 	handshake *Initiator
-	peer      ivnp.Hash
+	peer      foundation.Hash
 	expires   uint64
 }
 
@@ -147,7 +147,7 @@ type RatchetManager struct {
 	cryptoCount int
 	config      RatchetConfig
 	closed      bool
-	sessions    map[ivnp.Hash]*session
+	sessions    map[foundation.Hash]*session
 	inbound     map[[ratchetTagLen]byte]tagEntry
 	pending     map[[ratchetTagLen]byte]pendingInitiator
 	replays     map[[32]byte]uint64
@@ -160,7 +160,7 @@ type RatchetManager struct {
 
 // NewRatchetManager creates destination-scoped ECIES state. The local private
 // key is copied from LocalDestination and never retained by reference.
-func NewRatchetManager(local *ivnp.LocalDestination, config RatchetConfig) (*RatchetManager, error) {
+func NewRatchetManager(local *foundation.LocalDestination, config RatchetConfig) (*RatchetManager, error) {
 	if local == nil {
 		return nil, ErrRatchet
 	}
@@ -201,19 +201,19 @@ func NewRatchetManager(local *ivnp.LocalDestination, config RatchetConfig) (*Rat
 		config.ReplayLifetime = defaultReplayLife
 	}
 	var private [32]byte
-	if err := local.CopyCryptoPrivate(ivnp.CryptoX25519, private[:]); err != nil {
+	if err := local.CopyCryptoPrivate(foundation.CryptoX25519, private[:]); err != nil {
 		return nil, err
 	}
 	cryptoCount := len(config.CryptoTypes)
 	config.CryptoTypes = nil
-	return &RatchetManager{private: private, cryptoTypes: cryptoTypes, cryptoCount: cryptoCount, config: config, metrics: config.Metrics, sessions: make(map[ivnp.Hash]*session), inbound: make(map[[ratchetTagLen]byte]tagEntry), pending: make(map[[ratchetTagLen]byte]pendingInitiator), replays: make(map[[32]byte]uint64)}, nil
+	return &RatchetManager{private: private, cryptoTypes: cryptoTypes, cryptoCount: cryptoCount, config: config, metrics: config.Metrics, sessions: make(map[foundation.Hash]*session), inbound: make(map[[ratchetTagLen]byte]tagEntry), pending: make(map[[ratchetTagLen]byte]pendingInitiator), replays: make(map[[32]byte]uint64)}, nil
 }
 
 // BindPeer replaces the encryption-key-derived responder identifier with the
 // authenticated Destination hash carried by the first routed clove. This lets
 // responder state be reused by callers that address peers by Destination hash.
-func (m *RatchetManager) BindPeer(observed, peer ivnp.Hash) error {
-	if m == nil || observed == (ivnp.Hash{}) || peer == (ivnp.Hash{}) {
+func (m *RatchetManager) BindPeer(observed, peer foundation.Hash) error {
+	if m == nil || observed == (foundation.Hash{}) || peer == (foundation.Hash{}) {
 		return ErrRatchet
 	}
 	m.mu.Lock()
@@ -254,7 +254,7 @@ func (m *RatchetManager) OwnsTag(tag []byte) bool {
 }
 
 // HasPeer reports whether this shard owns an established peer session.
-func (m *RatchetManager) HasPeer(peer ivnp.Hash) bool {
+func (m *RatchetManager) HasPeer(peer foundation.Hash) bool {
 	if m == nil {
 		return false
 	}
@@ -266,7 +266,7 @@ func (m *RatchetManager) HasPeer(peer ivnp.Hash) bool {
 }
 
 // DiscardPeer removes and clears one established peer session.
-func (m *RatchetManager) DiscardPeer(peer ivnp.Hash) {
+func (m *RatchetManager) DiscardPeer(peer foundation.Hash) {
 	if m == nil {
 		return
 	}
@@ -297,7 +297,7 @@ func (m *RatchetManager) Stats() RatchetStats {
 // Encrypt starts a bound New Session when no established session exists for
 // peer, otherwise emits an Existing Session. remotePublic is the selected LS2
 // encryption key and cryptoType must be 4, 6, or 7.
-func (m *RatchetManager) Encrypt(dst []byte, peer ivnp.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
+func (m *RatchetManager) Encrypt(dst []byte, peer foundation.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.checkLocked(now); err != nil {
@@ -309,7 +309,7 @@ func (m *RatchetManager) Encrypt(dst []byte, peer ivnp.Hash, remotePublic []byte
 // EncryptWithScratch is Encrypt with caller-owned steady-state plaintext
 // storage. New Session handshakes may still use their handshake workspace;
 // established sessions do not allocate a per-message block buffer.
-func (m *RatchetManager) EncryptWithScratch(dst, plain []byte, peer ivnp.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
+func (m *RatchetManager) EncryptWithScratch(dst, plain []byte, peer foundation.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.checkLocked(now); err != nil {
@@ -318,7 +318,7 @@ func (m *RatchetManager) EncryptWithScratch(dst, plain []byte, peer ivnp.Hash, r
 	return m.encryptLocked(dst, plain, peer, remotePublic, cryptoType, payload, now)
 }
 
-func (m *RatchetManager) encryptLocked(dst, scratch []byte, peer ivnp.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
+func (m *RatchetManager) encryptLocked(dst, scratch []byte, peer foundation.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
 	if established := m.sessions[peer]; established != nil && !established.terminated && established.expires >= now {
 		options := RatchetOptions{}
 		if established.outbound != nil && established.outbound.next >= automaticDHRatchetMessages && !established.pendingDH {
@@ -336,7 +336,7 @@ func (m *RatchetManager) encryptLocked(dst, scratch []byte, peer ivnp.Hash, remo
 	return m.encryptNewLocked(dst, peer, remotePublic, cryptoType, payload, now)
 }
 
-func (m *RatchetManager) encryptNewLocked(dst []byte, peer ivnp.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
+func (m *RatchetManager) encryptNewLocked(dst []byte, peer foundation.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
 	encryptNewLockedRejected := len(remotePublic) != 32
 	if !encryptNewLockedRejected {
 		encryptNewLockedRejected = (cryptoType != 4 && cryptoType != 6 && cryptoType != 7)
@@ -414,7 +414,7 @@ func (m *RatchetManager) EncryptUnbound(dst []byte, remotePublic []byte, cryptoT
 // EncryptExisting emits a one-time-tag Existing Session message. A peer is the
 // exact identifier used to create the session (for a responder, RatchetResult's
 // Peer); no state is ever shared between destination managers.
-func (m *RatchetManager) EncryptExisting(dst []byte, peer ivnp.Hash, payload []byte, options RatchetOptions, now uint64) ([]byte, error) {
+func (m *RatchetManager) EncryptExisting(dst []byte, peer foundation.Hash, payload []byte, options RatchetOptions, now uint64) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.checkLocked(now); err != nil {
@@ -430,7 +430,7 @@ func (m *RatchetManager) EncryptExisting(dst []byte, peer ivnp.Hash, payload []b
 // EncryptExistingWithScratch is the allocation-free steady-state send path.
 // plain must have capacity for the authenticated ratchet blocks and remains
 // caller-owned. Its used portion is cleared before return.
-func (m *RatchetManager) EncryptExistingWithScratch(dst, plain []byte, peer ivnp.Hash, payload []byte, options RatchetOptions, now uint64) ([]byte, error) {
+func (m *RatchetManager) EncryptExistingWithScratch(dst, plain []byte, peer foundation.Hash, payload []byte, options RatchetOptions, now uint64) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.checkLocked(now); err != nil {
@@ -528,14 +528,14 @@ func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, 
 		clear(plain)
 		return nil, err
 	}
-	if len(dst) < ratchetTagLen+len(plain)+cryptx.ChaChaTagSize {
+	if len(dst) < ratchetTagLen+len(plain)+cryptography.ChaChaTagSize {
 		clear(plain)
-		return nil, cryptx.ErrDestination
+		return nil, cryptography.ErrDestination
 	}
 	copy(dst[:ratchetTagLen], entry.tag[:])
-	var nonce [cryptx.ChaChaNonceSize]byte
+	var nonce [cryptography.ChaChaNonceSize]byte
 	binary.LittleEndian.PutUint64(nonce[4:], uint64(entry.n))
-	_, err = cryptx.SealChaCha20Poly1305To(dst[ratchetTagLen:], entry.key[:], nonce[:], plain, dst[:ratchetTagLen])
+	_, err = cryptography.SealChaCha20Poly1305To(dst[ratchetTagLen:], entry.key[:], nonce[:], plain, dst[:ratchetTagLen])
 	clear(plain)
 	if err != nil {
 		return nil, err
@@ -563,7 +563,7 @@ func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, 
 			m.metrics.IncGarlicECIESDHStepsSent()
 		}
 	}
-	return dst[:ratchetTagLen+blocksLen+cryptx.ChaChaTagSize], nil
+	return dst[:ratchetTagLen+blocksLen+cryptography.ChaChaTagSize], nil
 }
 
 // Receive authenticates New Session, New Session Reply, or Existing Session.
@@ -575,7 +575,7 @@ func (m *RatchetManager) Receive(dst, replyDst, packet []byte, now uint64) (Ratc
 	if err := m.checkLocked(now); err != nil {
 		return RatchetResult{}, err
 	}
-	if len(packet) < ratchetTagLen+cryptx.ChaChaTagSize {
+	if len(packet) < ratchetTagLen+cryptography.ChaChaTagSize {
 		return RatchetResult{}, ErrRatchet
 	}
 	var tag [ratchetTagLen]byte
@@ -685,7 +685,7 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 	if err != nil {
 		return RatchetResult{}, err
 	}
-	peer := ivnp.Sum(responderPeerID(responder))
+	peer := foundation.Sum(responderPeerID(responder))
 	n, err := responder.CreateReply(replyDst, tag, nil)
 	if err != nil {
 		return RatchetResult{}, err
@@ -722,12 +722,12 @@ func (m *RatchetManager) receiveExistingLocked(dst, packet []byte, tag [ratchetT
 		return RatchetResult{}, err
 	}
 
-	if len(packet) < ratchetTagLen+cryptx.ChaChaTagSize || len(dst) < len(packet)-ratchetTagLen-cryptx.ChaChaTagSize {
+	if len(packet) < ratchetTagLen+cryptography.ChaChaTagSize || len(dst) < len(packet)-ratchetTagLen-cryptography.ChaChaTagSize {
 		return RatchetResult{}, ErrRatchet
 	}
-	var nonce [cryptx.ChaChaNonceSize]byte
+	var nonce [cryptography.ChaChaNonceSize]byte
 	binary.LittleEndian.PutUint64(nonce[4:], uint64(entry.n))
-	plain, err := cryptx.OpenChaCha20Poly1305To(dst, entry.key[:], nonce[:], packet[ratchetTagLen:], packet[:ratchetTagLen])
+	plain, err := cryptography.OpenChaCha20Poly1305To(dst, entry.key[:], nonce[:], packet[ratchetTagLen:], packet[:ratchetTagLen])
 	if err != nil {
 		return RatchetResult{}, ErrRatchet
 	}
@@ -956,7 +956,7 @@ func clearTagEntries(entries []tagEntry) {
 	}
 }
 
-func (m *RatchetManager) sessionFromCiphers(peer ivnp.Hash, root [32]byte, send, recv *cryptx.ChaCha20Poly1305, now uint64) (*session, error) {
+func (m *RatchetManager) sessionFromCiphers(peer foundation.Hash, root [32]byte, send, recv *cryptography.ChaCha20Poly1305, now uint64) (*session, error) {
 	if send == nil || recv == nil {
 		return nil, ErrRatchet
 	}
@@ -1116,7 +1116,7 @@ func (m *RatchetManager) sessionVictimLocked() *session {
 	return victim
 }
 
-func (m *RatchetManager) discardSessionLocked(peer ivnp.Hash, s *session) {
+func (m *RatchetManager) discardSessionLocked(peer foundation.Hash, s *session) {
 	if s == nil {
 		return
 	}
@@ -1304,15 +1304,15 @@ func responderPeerID(h *Responder) []byte {
 	}
 	return h.aliceStatic.Bytes()
 }
-func sessionForSet(set *tagSet, _ map[ivnp.Hash]*session) *session {
+func sessionForSet(set *tagSet, _ map[foundation.Hash]*session) *session {
 	if set == nil {
 		return nil
 	}
 	return set.owner
 }
-func sessionPeer(set *tagSet, sessions map[ivnp.Hash]*session) ivnp.Hash {
+func sessionPeer(set *tagSet, sessions map[foundation.Hash]*session) foundation.Hash {
 	if s := sessionForSet(set, sessions); s != nil {
 		return s.peer
 	}
-	return ivnp.Hash{}
+	return foundation.Hash{}
 }

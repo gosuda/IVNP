@@ -1,9 +1,9 @@
-package netdb
+package networkdatabase
 
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"testing"
 )
 
@@ -12,14 +12,14 @@ func TestSignedRouterInfoCapsControlsFloodfillAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := make([]byte, ivnp.IdentityBaseLength+7)
+	identity := make([]byte, foundation.IdentityBaseLength+7)
 	copy(identity[352:384], public)
-	identity[384] = byte(ivnp.CertificateKey)
+	identity[384] = byte(foundation.CertificateKey)
 	identity[385], identity[386] = 0, 4
-	identity[387], identity[388] = 0, byte(ivnp.SigningEdDSASHA512Ed25519)
-	identity[389], identity[390] = 0, byte(ivnp.CryptoElGamal)
+	identity[387], identity[388] = 0, byte(foundation.SigningEdDSASHA512Ed25519)
+	identity[389], identity[390] = 0, byte(foundation.CryptoElGamal)
 	options := make([]byte, 16)
-	optionLen, err := ivnp.MarshalMappingTo(options, []ivnp.MappingEntry{{Key: []byte("caps"), Value: []byte("f")}})
+	optionLen, err := foundation.MarshalMappingTo(options, []foundation.MappingEntry{{Key: []byte("caps"), Value: []byte("f")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestSignedRouterInfoCapsControlsFloodfillAdmission(t *testing.T) {
 	if valid, err := info.Verify(); err != nil || !valid {
 		t.Fatalf("RouterInfo signature = %t, %v", valid, err)
 	}
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	if err := database.AdmitRouterInfo(info, false, 1); err != nil {
 		t.Fatal(err)
 	}

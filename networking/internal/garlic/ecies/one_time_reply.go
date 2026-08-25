@@ -1,10 +1,10 @@
-package ecies
+package garlicecies
 
 import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
 	"gosuda.org/ivnp/networking/internal/i2np"
 )
@@ -15,7 +15,7 @@ const (
 	oneTimeReplyPaddingBlock = 0xfe
 	oneTimeReplyCloveHeader  = 10 // LOCAL instruction and ECIES transport I2NP header
 	oneTimeReplyBlockHeader  = 3
-	oneTimeReplyAEADOverhead = cryptx.ChaChaTagSize
+	oneTimeReplyAEADOverhead = cryptography.ChaChaTagSize
 	// An I2NP Garlic payload has a four-byte encrypted-data length before the
 	// tag-prefixed Existing Session ciphertext.
 	maxOneTimeReplyPlaintext = i2np.I2PDMaxPayload - 4 - oneTimeReplyTagLen - oneTimeReplyAEADOverhead
@@ -28,7 +28,7 @@ var ErrOneTimeReplyExistingSession = errors.New("garlic/ecies: invalid one-time 
 // builder or encrypted DatabaseLookup requester. dst receives the clear tag,
 // ChaCha20-Poly1305 ciphertext, and authenticator. The zero nonce and clear tag
 // as associated data are the I2P one-time reply-key wire contract.
-func SealOneTimeReplyExistingSession(dst []byte, key [cryptx.ChaChaKeySize]byte, tag [oneTimeReplyTagLen]byte, reply i2np.Message, padding []byte) ([]byte, error) {
+func SealOneTimeReplyExistingSession(dst []byte, key [cryptography.ChaChaKeySize]byte, tag [oneTimeReplyTagLen]byte, reply i2np.Message, padding []byte) ([]byte, error) {
 	if err := validateOneTimeReply(reply); err != nil {
 		return nil, err
 	}
@@ -65,13 +65,13 @@ func SealOneTimeReplyExistingSession(dst []byte, key [cryptx.ChaChaKeySize]byte,
 		copy(plaintext[off+3:], padding)
 	}
 
-	cipher, err := cryptx.NewChaCha20Poly1305(key[:])
+	cipher, err := cryptography.NewChaCha20Poly1305(key[:])
 	if err != nil {
 		return nil, err
 	}
 	defer cipher.ReleaseSensitive()
 	copy(dst[:oneTimeReplyTagLen], tag[:])
-	var nonce [cryptx.ChaChaNonceSize]byte
+	var nonce [cryptography.ChaChaNonceSize]byte
 	sealed, err := cipher.SealTo(dst[oneTimeReplyTagLen:oneTimeReplyTagLen+plainLen+oneTimeReplyAEADOverhead], nonce[:], plaintext, tag[:])
 	if err != nil {
 		return nil, err
@@ -83,7 +83,7 @@ func SealOneTimeReplyExistingSession(dst []byte, key [cryptx.ChaChaKeySize]byte,
 // one-time ECIES reply. The caller must consume the supplied tag before calling
 // so an authentication failure cannot make it reusable. The returned payload
 // aliases dst.
-func OpenOneTimeReplyExistingSession(dst []byte, key [cryptx.ChaChaKeySize]byte, tag [oneTimeReplyTagLen]byte, encrypted []byte) (i2np.Message, error) {
+func OpenOneTimeReplyExistingSession(dst []byte, key [cryptography.ChaChaKeySize]byte, tag [oneTimeReplyTagLen]byte, encrypted []byte) (i2np.Message, error) {
 	if len(encrypted) < oneTimeReplyTagLen+oneTimeReplyAEADOverhead || len(encrypted) > oneTimeReplyTagLen+maxOneTimeReplyPlaintext+oneTimeReplyAEADOverhead {
 		return i2np.Message{}, ErrOneTimeReplyExistingSession
 	}
@@ -94,12 +94,12 @@ func OpenOneTimeReplyExistingSession(dst []byte, key [cryptx.ChaChaKeySize]byte,
 	if len(dst) < len(ciphertext)-oneTimeReplyAEADOverhead {
 		return i2np.Message{}, wire.ErrShortBuffer
 	}
-	cipher, err := cryptx.NewChaCha20Poly1305(key[:])
+	cipher, err := cryptography.NewChaCha20Poly1305(key[:])
 	if err != nil {
 		return i2np.Message{}, err
 	}
 	defer cipher.ReleaseSensitive()
-	var nonce [cryptx.ChaChaNonceSize]byte
+	var nonce [cryptography.ChaChaNonceSize]byte
 	plaintext, err := cipher.OpenTo(dst[:len(ciphertext)-oneTimeReplyAEADOverhead], nonce[:], ciphertext, tag[:])
 	if err != nil {
 		return i2np.Message{}, ErrOneTimeReplyExistingSession

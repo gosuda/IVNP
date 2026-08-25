@@ -1,4 +1,4 @@
-package clientapi
+package frontend
 
 import (
 	"net/http"

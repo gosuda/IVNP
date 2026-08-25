@@ -3,7 +3,7 @@ package tunnel
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"sync"
 )
 
@@ -15,7 +15,7 @@ var (
 // ReplyRoute identifies a live inbound tunnel through which an outbound build
 // reply is returned. Gateway is that inbound tunnel's gateway router.
 type ReplyRoute struct {
-	Gateway  ivnp.Hash
+	Gateway  foundation.Hash
 	TunnelID uint32
 }
 
@@ -143,7 +143,7 @@ func (m *PairedPoolMaintainer) Maintain(ctx context.Context) (int, error) {
 		if pendingOutbound != 0 {
 			return 0, nil
 		}
-		if inbound.Gateway == (ivnp.Hash{}) || inbound.GatewayTunnelID == 0 {
+		if inbound.Gateway == (foundation.Hash{}) || inbound.GatewayTunnelID == 0 {
 			return 0, nil
 		}
 		build, err := m.outboundSource.NextOutboundForReply(ctx, now, ReplyRoute{Gateway: inbound.Gateway, TunnelID: inbound.GatewayTunnelID})
@@ -243,7 +243,7 @@ func (m *PairedPoolMaintainer) Pair(now uint64) (CircuitPair, bool) {
 	}
 	outbound, haveOutbound := m.pool.Select(Outbound, now)
 	inbound, haveInbound := m.pool.Select(Inbound, now)
-	if !haveOutbound || !haveInbound || inbound.Gateway == (ivnp.Hash{}) || inbound.GatewayTunnelID == 0 {
+	if !haveOutbound || !haveInbound || inbound.Gateway == (foundation.Hash{}) || inbound.GatewayTunnelID == 0 {
 		return CircuitPair{}, false
 	}
 	pair := CircuitPair{OutboundID: outbound.ID, InboundID: inbound.GatewayTunnelID, InboundLocalID: inbound.ID, ReplyRouter: inbound.Gateway}
@@ -256,7 +256,7 @@ func (m *PairedPoolMaintainer) Pair(now uint64) (CircuitPair, bool) {
 				break
 			}
 			peer := entry.Hops[index]
-			if peer == (ivnp.Hash{}) {
+			if peer == (foundation.Hash{}) {
 				continue
 			}
 			duplicate := false

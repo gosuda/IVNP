@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"golang.org/x/crypto/chacha20"
-	cryptx "gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
 )
 
@@ -20,7 +20,7 @@ const (
 	MinPacketLen     = 40
 	MaxIPv4PacketLen = 1472
 	MaxIPv6PacketLen = 1452
-	PacketTagLen     = cryptx.ChaChaTagSize
+	PacketTagLen     = cryptography.ChaChaTagSize
 )
 
 var (
@@ -140,7 +140,7 @@ func (h ShortHeader) MarshalTo(dst []byte) error {
 // Request/Created set extra to 48 (long-header tail plus ephemeral key); for
 // other long headers set it to 16; data and SessionConfirmed use zero.
 func ProtectHeader(packet, headerKey1, headerKey2 []byte, extra int) error {
-	if len(headerKey1) != cryptx.ChaChaKeySize || len(headerKey2) != cryptx.ChaChaKeySize || len(packet) < MinPacketLen || len(packet) > MaxIPv4PacketLen {
+	if len(headerKey1) != cryptography.ChaChaKeySize || len(headerKey2) != cryptography.ChaChaKeySize || len(packet) < MinPacketLen || len(packet) > MaxIPv4PacketLen {
 		return ErrHeaderProtection
 	}
 	if extra != 0 && (extra != 16 && extra != 48) {
@@ -156,7 +156,7 @@ func ProtectHeader(packet, headerKey1, headerKey2 []byte, extra int) error {
 		return err
 	}
 	if extra != 0 {
-		var zeroNonce [cryptx.ChaChaNonceSize]byte
+		var zeroNonce [cryptography.ChaChaNonceSize]byte
 		stream, err := chacha20.NewUnauthenticatedCipher(headerKey2, zeroNonce[:])
 		if err != nil {
 			return err
@@ -185,24 +185,24 @@ func xorHeaderMask(dst, key, nonce []byte) error {
 // methods serialize callers so the reusable nonce buffer never escapes to the
 // generic AEAD interface.
 type DataCipher struct {
-	aead       *cryptx.ChaCha20Poly1305
-	headerKey1 [cryptx.ChaChaKeySize]byte
-	headerKey2 [cryptx.ChaChaKeySize]byte
+	aead       *cryptography.ChaCha20Poly1305
+	headerKey1 [cryptography.ChaChaKeySize]byte
+	headerKey2 [cryptography.ChaChaKeySize]byte
 	mu         sync.Mutex
-	nonce      [cryptx.ChaChaNonceSize]byte
+	nonce      [cryptography.ChaChaNonceSize]byte
 	released   bool
 }
 
-var _ cryptx.Sensitive = (*DataCipher)(nil)
+var _ cryptography.Sensitive = (*DataCipher)(nil)
 
 func NewDataCipher(dataKey, headerKey1, headerKey2 []byte) (*DataCipher, error) {
-	aead, err := cryptx.NewChaCha20Poly1305(dataKey)
+	aead, err := cryptography.NewChaCha20Poly1305(dataKey)
 	if err != nil {
 		return nil, err
 	}
-	if len(headerKey1) != cryptx.ChaChaKeySize || len(headerKey2) != cryptx.ChaChaKeySize {
+	if len(headerKey1) != cryptography.ChaChaKeySize || len(headerKey2) != cryptography.ChaChaKeySize {
 		aead.ReleaseSensitive()
-		return nil, cryptx.ErrKeyLength
+		return nil, cryptography.ErrKeyLength
 	}
 	result := &DataCipher{aead: aead}
 	copy(result.headerKey1[:], headerKey1)
@@ -235,12 +235,12 @@ func (c *DataCipher) ReleaseSensitive() {
 // caller supplies the packet number; retransmissions must use a new number.
 func (c *DataCipher) SealDataTo(dst []byte, header ShortHeader, plaintext []byte) ([]byte, error) {
 	if c == nil {
-		return nil, cryptx.ErrSensitiveReleased
+		return nil, cryptography.ErrSensitiveReleased
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.released {
-		return nil, cryptx.ErrSensitiveReleased
+		return nil, cryptography.ErrSensitiveReleased
 	}
 	if header.Type != Data || header.Fragment&0xfe != 0 || header.Flags != 0 || len(plaintext) < 8 {
 		return nil, ErrPacketLength
@@ -270,12 +270,12 @@ func (c *DataCipher) SealDataTo(dst []byte, header ShortHeader, plaintext []byte
 // and authenticates the encrypted data packet into dst.
 func (c *DataCipher) OpenDataTo(dst, packet []byte) (ShortHeader, []byte, error) {
 	if c == nil {
-		return ShortHeader{}, nil, cryptx.ErrSensitiveReleased
+		return ShortHeader{}, nil, cryptography.ErrSensitiveReleased
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.released {
-		return ShortHeader{}, nil, cryptx.ErrSensitiveReleased
+		return ShortHeader{}, nil, cryptography.ErrSensitiveReleased
 	}
 	if len(packet) < MinPacketLen || len(packet) > MaxIPv4PacketLen {
 		return ShortHeader{}, nil, ErrPacketLength

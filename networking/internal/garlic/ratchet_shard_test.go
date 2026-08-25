@@ -3,14 +3,14 @@ package garlic
 import (
 	"errors"
 	"fmt"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/garlic/ecies"
 	"runtime"
 	"testing"
 )
 
-func establishRatchetShard(shard *ecies.RatchetManager, peer ivnp.Hash, remote *ivnp.LocalDestination, now uint64) error {
-	remoteManager, err := ecies.NewRatchetManager(remote, ecies.RatchetConfig{TagLookahead: 4, MaxInboundTags: 64})
+func establishRatchetShard(shard *garlicecies.RatchetManager, peer foundation.Hash, remote *foundation.LocalDestination, now uint64) error {
+	remoteManager, err := garlicecies.NewRatchetManager(remote, garlicecies.RatchetConfig{TagLookahead: 4, MaxInboundTags: 64})
 	if err != nil {
 		return err
 	}
@@ -40,7 +40,7 @@ func TestRatchetManagerRejectsCrossShardBindDuplicate(t *testing.T) {
 	previous := runtime.GOMAXPROCS(2)
 	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
 
-	local, err := ivnp.GenerateLocalDestination()
+	local, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,15 +54,15 @@ func TestRatchetManagerRejectsCrossShardBindDuplicate(t *testing.T) {
 		t.Fatalf("ratchet shards = %d, want 2", len(manager.shards))
 	}
 
-	remotes := make([]*ivnp.LocalDestination, 2)
+	remotes := make([]*foundation.LocalDestination, 2)
 	for index := range remotes {
-		remotes[index], err = ivnp.GenerateLocalDestination()
+		remotes[index], err = foundation.GenerateLocalDestination()
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer remotes[index].ReleaseSensitive()
 	}
-	observed, peer := ivnp.Hash{0xa1}, ivnp.Hash{0xb2}
+	observed, peer := foundation.Hash{0xa1}, foundation.Hash{0xb2}
 	results := make(chan error, 2)
 	go func() { results <- establishRatchetShard(manager.shards[0], observed, remotes[0], 1_000) }()
 	go func() { results <- establishRatchetShard(manager.shards[1], peer, remotes[1], 1_000) }()
@@ -83,12 +83,12 @@ func TestRatchetManagerPeerChurnRemainsBounded(t *testing.T) {
 	previous := runtime.GOMAXPROCS(2)
 	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
 
-	local, err := ivnp.GenerateLocalDestination()
+	local, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer local.ReleaseSensitive()
-	remote, err := ivnp.GenerateLocalDestination()
+	remote, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestRatchetManagerPeerChurnRemainsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manager.ReleaseSensitive()
-	remoteManager, err := ecies.NewRatchetManager(remote, ecies.RatchetConfig{
+	remoteManager, err := garlicecies.NewRatchetManager(remote, garlicecies.RatchetConfig{
 		MaxSessions: maxSessions, MaxInboundTags: 128, TagLookahead: 4,
 		SessionLifetime: 2, ReplayLifetime: 2,
 	})
@@ -112,7 +112,7 @@ func TestRatchetManagerPeerChurnRemainsBounded(t *testing.T) {
 	defer remoteManager.ReleaseSensitive()
 	remotePublic := remote.X25519Public()
 	for index := range 64 {
-		peer := ivnp.Hash{byte(index + 1)}
+		peer := foundation.Hash{byte(index + 1)}
 		now := uint64(1_000 + 10*index)
 		packet, encryptErr := manager.Encrypt(make([]byte, 2048), peer, remotePublic[:], 4, nil, now)
 		if encryptErr != nil {

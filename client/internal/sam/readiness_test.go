@@ -2,8 +2,8 @@ package sam
 
 import (
 	"context"
-	ivnp "gosuda.org/ivnp/foundation"
-	clientapi "gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
 	"strings"
 	"testing"
 	"time"
@@ -14,19 +14,19 @@ type readinessController struct {
 	ready <-chan struct{}
 }
 
-func (c readinessController) CreateDestination(ctx context.Context, spec clientapi.DestinationSpec) (clientapi.DestinationEndpoint, error) {
+func (c readinessController) CreateDestination(ctx context.Context, spec destination.DestinationSpec) (destination.DestinationEndpoint, error) {
 	endpoint, err := c.loop.CreateDestination(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
 	return &readinessEndpoint{DestinationEndpoint: endpoint, ready: c.ready}, nil
 }
-func (c readinessController) DestroyDestination(ctx context.Context, endpoint clientapi.DestinationEndpoint) error {
+func (c readinessController) DestroyDestination(ctx context.Context, endpoint destination.DestinationEndpoint) error {
 	return endpoint.Close()
 }
 
 type readinessEndpoint struct {
-	clientapi.DestinationEndpoint
+	destination.DestinationEndpoint
 	ready <-chan struct{}
 }
 
@@ -42,7 +42,7 @@ func (e *readinessEndpoint) WaitReady(ctx context.Context) error {
 func TestSessionStatusWaitsForReadinessAndTimesOut(t *testing.T) {
 	t.Run("waits", func(t *testing.T) {
 		ready := make(chan struct{})
-		loop := &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)}
+		loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 		server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: readinessController{loop: loop, ready: ready}, ReadinessTimeout: time.Second})
 		if err != nil {
 			t.Fatal(err)
@@ -79,7 +79,7 @@ func TestSessionStatusWaitsForReadinessAndTimesOut(t *testing.T) {
 
 	t.Run("timeout", func(t *testing.T) {
 		ready := make(chan struct{})
-		loop := &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)}
+		loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 		server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: readinessController{loop: loop, ready: ready}, ReadinessTimeout: 30 * time.Millisecond})
 		if err != nil {
 			t.Fatal(err)
@@ -109,7 +109,7 @@ func TestSessionStatusWaitsForReadinessAndTimesOut(t *testing.T) {
 
 	t.Run("disconnect", func(t *testing.T) {
 		ready := make(chan struct{})
-		loop := &loopController{endpoints: make(map[ivnp.Hash]*loopEndpoint)}
+		loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 		server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: readinessController{loop: loop, ready: ready}, ReadinessTimeout: time.Minute})
 		if err != nil {
 			t.Fatal(err)

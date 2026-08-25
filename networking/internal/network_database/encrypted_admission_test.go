@@ -1,10 +1,10 @@
-package netdb
+package networkdatabase
 
 import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"testing"
 )
@@ -15,7 +15,7 @@ func TestEncryptedLeaseSetRedDSAAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	unsigned := make([]byte, 2+len(public)+4+2+2+2+1)
-	binary.BigEndian.PutUint16(unsigned[:2], uint16(ivnp.SigningRedDSASHA512Ed25519))
+	binary.BigEndian.PutUint16(unsigned[:2], uint16(foundation.SigningRedDSASHA512Ed25519))
 	copy(unsigned[2:], public)
 	offset := 2 + len(public) + 4 + 2 + 2
 	binary.BigEndian.PutUint16(unsigned[offset:offset+2], 1)
@@ -29,7 +29,7 @@ func TestEncryptedLeaseSetRedDSAAdmission(t *testing.T) {
 	if valid, err := set.Verify(); err != nil || !valid {
 		t.Fatalf("Verify() = %t, %v", valid, err)
 	}
-	database := NewDatabase(ivnp.Hash{}, DefaultBucketCapacity)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	store := i2np.DatabaseStoreMessage{Key: set.Hash(), Type: i2np.StoreEncryptedLeaseSet, Data: payload}
 	if err := database.HandleDatabaseStore(store, false, 1); err != nil {
 		t.Fatal(err)

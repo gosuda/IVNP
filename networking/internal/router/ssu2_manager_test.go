@@ -7,7 +7,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/network_database"
 	"gosuda.org/ivnp/networking/internal/transport/ssu2"
@@ -40,7 +40,7 @@ func TestSSU2RouterInfoStoreUsesDeterministicGzipAndServiceAdmission(t *testing.
 	if len(store.Data) < 2 || store.Data[0] != 0x1f || store.Data[1] != 0x8b {
 		t.Fatalf("RouterInfo store is not gzip: %x", store.Data[:min(2, len(store.Data))])
 	}
-	database := netdb.NewDatabase(ivnp.Hash{}, 16)
+	database := networkdatabase.NewDatabase(foundation.Hash{}, 16)
 	service := NewService(database)
 	if err = service.HandleI2NP(first, uint64(now.UnixMilli()), false); err != nil {
 		t.Fatalf("Service rejected SSU2 RouterInfo store: %v", err)
@@ -53,7 +53,7 @@ func TestSSU2RouterInfoStoreUsesDeterministicGzipAndServiceAdmission(t *testing.
 func TestSSU2RelayRouterInfoStoreCacheReusesAndRefreshesLocalSnapshot(t *testing.T) {
 	local, static, intro := newSSU2TestLocal(t, "127.0.0.1:23456")
 	now := time.UnixMilli(1_700_000_000_000)
-	manager := &SSU2Manager{routerInfoStores: make(map[ivnp.Hash]ssu2RouterInfoStoreSnapshot)}
+	manager := &SSU2Manager{routerInfoStores: make(map[foundation.Hash]ssu2RouterInfoStoreSnapshot)}
 
 	info := local.Snapshot()
 	if _, err := manager.cachedSSU2RouterInfoStore(info, now); err != nil {
@@ -83,9 +83,9 @@ func TestSSU2RelayRouterInfoStoreCacheReusesAndRefreshesLocalSnapshot(t *testing
 		Cost:      3,
 		Options: []MappingOption{
 			{Key: "host", Value: "127.0.0.1"},
-			{Key: "i", Value: ivnp.EncodeI2PBase64(intro)},
+			{Key: "i", Value: foundation.EncodeI2PBase64(intro)},
 			{Key: "port", Value: "23457"},
-			{Key: "s", Value: ivnp.EncodeI2PBase64(private.PublicKey().Bytes())},
+			{Key: "s", Value: foundation.EncodeI2PBase64(private.PublicKey().Bytes())},
 			{Key: "v", Value: "2"},
 		},
 	}}); err != nil {
@@ -112,7 +112,7 @@ func TestSSU2DispatchI2NPUsesClockAndRejectsExpired(t *testing.T) {
 	var deliveredAt uint64
 	manager := &SSU2Manager{ctx: context.Background(), bindings: TransportBindings{
 		Clock: fixedClock{now: now},
-		HandleI2NPContext: func(_ context.Context, _ ivnp.Hash, _ i2np.Message, nowMillis uint64, _ bool) error {
+		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, _ i2np.Message, nowMillis uint64, _ bool) error {
 			deliveredAt = nowMillis
 			return nil
 		},
@@ -121,23 +121,23 @@ func TestSSU2DispatchI2NPUsesClockAndRejectsExpired(t *testing.T) {
 		Header:  i2np.Header{Type: i2np.DeliveryStatus, ID: 1, Expiration: uint64(now.Add(time.Minute).UnixMilli())},
 		Payload: make([]byte, 12),
 	}
-	if err := manager.dispatchI2NP(ivnp.Hash{1}, message); err != nil {
+	if err := manager.dispatchI2NP(foundation.Hash{1}, message); err != nil {
 		t.Fatalf("dispatch current I2NP: %v", err)
 	}
 	if deliveredAt != uint64(now.UnixMilli()) {
 		t.Fatalf("dispatch now = %d, want %d", deliveredAt, now.UnixMilli())
 	}
 
-	service := NewService(netdb.NewDatabase(ivnp.Hash{}, 16))
+	service := NewService(networkdatabase.NewDatabase(foundation.Hash{}, 16))
 	manager = &SSU2Manager{ctx: context.Background(), bindings: TransportBindings{
 		Clock: fixedClock{now: now},
-		HandleI2NPContext: func(_ context.Context, _ ivnp.Hash, message i2np.Message, nowMillis uint64, floodfill bool) error {
+		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message i2np.Message, nowMillis uint64, floodfill bool) error {
 			return service.HandleI2NP(message, nowMillis, floodfill)
 		},
 	}}
 	message.Header.ID++
 	message.Header.Expiration = uint64(now.Add(-time.Duration(i2npMessageClockSkewMillis+1) * time.Millisecond).UnixMilli())
-	if err := manager.dispatchI2NP(ivnp.Hash{1}, message); err != ErrExpired {
+	if err := manager.dispatchI2NP(foundation.Hash{1}, message); err != ErrExpired {
 		t.Fatalf("expired SSU2 I2NP error = %v, want %v", err, ErrExpired)
 	}
 }
@@ -156,8 +156,8 @@ func TestSSU2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
-	aliceDB := netdb.NewDatabase(alice.Hash(), 16)
-	bobDB := netdb.NewDatabase(bob.Hash(), 16)
+	aliceDB := networkdatabase.NewDatabase(alice.Hash(), 16)
+	bobDB := networkdatabase.NewDatabase(bob.Hash(), 16)
 	if err = aliceDB.AdmitRouterInfo(bob.Snapshot(), false, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatalf("admit Bob RouterInfo: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestSSU2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 		SSU2:      bobConn,
 		LocalInfo: bob,
 		Clock:     WallClock{},
-		HandleI2NPContext: func(_ context.Context, _ ivnp.Hash, message i2np.Message, nowMillis uint64, _ bool) error {
+		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message i2np.Message, nowMillis uint64, _ bool) error {
 			deliveredAt.Store(nowMillis)
 			received <- message
 			return nil
@@ -188,7 +188,7 @@ func TestSSU2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 		SSU2:      aliceConn,
 		LocalInfo: alice,
 		Clock:     WallClock{},
-		HandleI2NPContext: func(context.Context, ivnp.Hash, i2np.Message, uint64, bool) error {
+		HandleI2NPContext: func(context.Context, foundation.Hash, i2np.Message, uint64, bool) error {
 			return nil
 		},
 	}); err != nil {
@@ -306,13 +306,13 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	aliceDB := netdb.NewDatabase(alice.Hash(), 16)
-	bobDB := netdb.NewDatabase(bob.Hash(), 16)
-	charlieDB := netdb.NewDatabase(charlie.Hash(), 16)
+	aliceDB := networkdatabase.NewDatabase(alice.Hash(), 16)
+	bobDB := networkdatabase.NewDatabase(bob.Hash(), 16)
+	charlieDB := networkdatabase.NewDatabase(charlie.Hash(), 16)
 	now := uint64(time.Now().UnixMilli())
 	for _, admission := range []struct {
-		database *netdb.Database
-		info     netdb.RouterInfo
+		database *networkdatabase.Database
+		info     networkdatabase.RouterInfo
 	}{
 		{aliceDB, bob.Snapshot()},
 		{aliceDB, charlie.Snapshot()},
@@ -378,7 +378,7 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 	} {
 		if err = start.manager.Start(ctx, TransportBindings{
 			SSU2: start.conn, LocalInfo: start.local, Clock: WallClock{},
-			HandleI2NPContext: func(_ context.Context, _ ivnp.Hash, message i2np.Message, now uint64, floodfill bool) error {
+			HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message i2np.Message, now uint64, floodfill bool) error {
 				return start.handler(message, now, floodfill)
 			},
 		}); err != nil {
@@ -418,8 +418,8 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 		Transport: "SSU",
 		Cost:      3,
 		Options: []MappingOption{
-			{Key: "i", Value: ivnp.EncodeI2PBase64(aliceIntro)},
-			{Key: "s", Value: ivnp.EncodeI2PBase64(testECDHPublic(t, aliceStatic))},
+			{Key: "i", Value: foundation.EncodeI2PBase64(aliceIntro)},
+			{Key: "s", Value: foundation.EncodeI2PBase64(testECDHPublic(t, aliceStatic))},
 			{Key: "v", Value: "2"},
 		},
 	}}); err != nil {
@@ -436,10 +436,10 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 		Transport: "SSU",
 		Cost:      3,
 		Options: []MappingOption{
-			{Key: "i", Value: ivnp.EncodeI2PBase64(charlieIntro)},
-			{Key: "ih0", Value: ivnp.EncodeI2PBase64(bobHash[:])},
+			{Key: "i", Value: foundation.EncodeI2PBase64(charlieIntro)},
+			{Key: "ih0", Value: foundation.EncodeI2PBase64(bobHash[:])},
 			{Key: "itag0", Value: "270544960"},
-			{Key: "s", Value: ivnp.EncodeI2PBase64(testECDHPublic(t, charlieStatic))},
+			{Key: "s", Value: foundation.EncodeI2PBase64(testECDHPublic(t, charlieStatic))},
 			{Key: "v", Value: "2"},
 		},
 	}}); err != nil {
@@ -482,7 +482,7 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 	}
 }
 
-func waitForSSU2SentPackets(manager *SSU2Manager, peer ivnp.Hash, timeout time.Duration) bool {
+func waitForSSU2SentPackets(manager *SSU2Manager, peer foundation.Hash, timeout time.Duration) bool {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	tick := time.NewTicker(10 * time.Millisecond)
@@ -532,7 +532,7 @@ func TestSSU2SessionEvictionRemovesBothIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var peer ivnp.Hash
+	var peer foundation.Hash
 	peer[0] = 1
 	now := time.Now()
 	session := &ssu2TransportSession{
@@ -614,14 +614,14 @@ func TestSSU2SessionReleaseSynchronizesWithReceive(t *testing.T) {
 	}
 	remote := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}
 	sendSession := &ssu2TransportSession{
-		peer: ivnp.Hash{1}, sendID: 9, receiveID: 10, remote: remote,
+		peer: foundation.Hash{1}, sendID: 9, receiveID: 10, remote: remote,
 		send: send, receive: receive, nextPacket: 2,
 		sent:      map[uint32]*ssu2SentPacket{1: {payload: append([]byte(nil), payload...), sentAt: time.Time{}}},
 		fragments: make(map[uint32]*ssu2FragmentAssembly),
 	}
 	activeManager := &SSU2Manager{
 		started: true, ctx: context.Background(),
-		sessionsByPeer: map[ivnp.Hash]*ssu2TransportSession{sendSession.peer: sendSession},
+		sessionsByPeer: map[foundation.Hash]*ssu2TransportSession{sendSession.peer: sendSession},
 		sessionsByID:   map[uint64]*ssu2TransportSession{sendSession.receiveID: sendSession},
 		bindings:       TransportBindings{Clock: WallClock{}},
 	}
@@ -674,7 +674,7 @@ func TestSSU2SessionReleaseWaitsForAuthenticatedDispatch(t *testing.T) {
 		ctx: context.Background(),
 		bindings: TransportBindings{
 			Clock: WallClock{},
-			HandleI2NPContext: func(context.Context, ivnp.Hash, i2np.Message, uint64, bool) error {
+			HandleI2NPContext: func(context.Context, foundation.Hash, i2np.Message, uint64, bool) error {
 				close(entered)
 				<-resume
 				return nil
@@ -727,7 +727,7 @@ func TestSSU2EstablishReleasesEvictedIdleSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer := ivnp.Hash{3}
+	peer := foundation.Hash{3}
 	stale := &ssu2TransportSession{
 		peer: peer, sendID: 1, receiveID: 2, send: send, receive: receive,
 		lastActivity: time.Now().Add(-time.Hour), sent: make(map[uint32]*ssu2SentPacket),
@@ -736,9 +736,9 @@ func TestSSU2EstablishReleasesEvictedIdleSession(t *testing.T) {
 	manager := &SSU2Manager{
 		started: true, ctx: context.Background(), idleTimeout: time.Second,
 		bindings:       TransportBindings{Clock: WallClock{}},
-		sessionsByPeer: map[ivnp.Hash]*ssu2TransportSession{peer: stale},
+		sessionsByPeer: map[foundation.Hash]*ssu2TransportSession{peer: stale},
 		sessionsByID:   map[uint64]*ssu2TransportSession{stale.receiveID: stale},
-		outbound:       make(map[ivnp.Hash]*ssu2OutboundPending),
+		outbound:       make(map[foundation.Hash]*ssu2OutboundPending),
 		outboundAddr:   make(map[netip.AddrPort]*ssu2OutboundPending),
 	}
 	if _, err = manager.establish(context.Background(), peer); !errors.Is(err, ErrSSU2Session) {
@@ -763,7 +763,7 @@ func TestSSU2OutboundInitiatorCannotBeSupersededOrReleasedDuringParse(t *testing
 		t.Fatal(err)
 	}
 	remote := net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:32001"))
-	peer := ivnp.Hash{7}
+	peer := foundation.Hash{7}
 	pending := &ssu2OutboundPending{
 		peer: peer, remote: remote, initiator: initiator,
 		destinationID: 11, sourceID: 12, ready: make(chan struct{}),
@@ -771,7 +771,7 @@ func TestSSU2OutboundInitiatorCannotBeSupersededOrReleasedDuringParse(t *testing
 	endpoint, _ := addrPortKey(remote)
 	manager := &SSU2Manager{
 		started: true, ctx: context.Background(),
-		outbound:     map[ivnp.Hash]*ssu2OutboundPending{peer: pending},
+		outbound:     map[foundation.Hash]*ssu2OutboundPending{peer: pending},
 		outboundAddr: map[netip.AddrPort]*ssu2OutboundPending{endpoint: pending},
 		bindings:     TransportBindings{Clock: WallClock{}},
 	}
@@ -858,7 +858,7 @@ func TestValidateSSU2ConfirmedPayloadInflatesGzipRouterInfo(t *testing.T) {
 		t.Fatalf("gzip RouterInfo = %s, %x, %v", info.Hash(), gotIntro, err)
 	}
 
-	oversized := append([]byte{2, 1}, gzipSSU2TestBytes(t, make([]byte, netdb.MaxRouterInfoBytes+1))...)
+	oversized := append([]byte{2, 1}, gzipSSU2TestBytes(t, make([]byte, networkdatabase.MaxRouterInfoBytes+1))...)
 	payload, err = ssu2.MarshalBlock(nil, ssu2.BlockRouterInfo, oversized)
 	if err != nil {
 		t.Fatal(err)
@@ -883,7 +883,7 @@ func gzipSSU2TestBytes(t *testing.T, raw []byte) []byte {
 
 func newSSU2TestLocal(t *testing.T, endpoint string) (*LocalRouterInfo, []byte, []byte) {
 	t.Helper()
-	local, err := ivnp.GenerateLocalAddress()
+	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -908,9 +908,9 @@ func newSSU2TestLocal(t *testing.T, endpoint string) (*LocalRouterInfo, []byte, 
 		Cost:      3,
 		Options: []MappingOption{
 			{Key: "host", Value: host},
-			{Key: "i", Value: ivnp.EncodeI2PBase64(intro)},
+			{Key: "i", Value: foundation.EncodeI2PBase64(intro)},
 			{Key: "port", Value: port},
-			{Key: "s", Value: ivnp.EncodeI2PBase64(static.PublicKey().Bytes())},
+			{Key: "s", Value: foundation.EncodeI2PBase64(static.PublicKey().Bytes())},
 			{Key: "v", Value: "2"},
 		},
 	}}); err != nil {

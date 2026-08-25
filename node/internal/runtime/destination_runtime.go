@@ -1,17 +1,17 @@
-package daemon
+package noderuntime
 
-import state "gosuda.org/ivnp/state"
+import "gosuda.org/ivnp/state"
 
-import client "gosuda.org/ivnp/client"
+import "gosuda.org/ivnp/client"
 
-import networking "gosuda.org/ivnp/networking"
+import "gosuda.org/ivnp/networking"
 
 import "cmp"
 
 import (
 	"context"
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 
 	"gosuda.org/ivnp/observability"
@@ -314,9 +314,9 @@ type destinationRuntimeFactory struct {
 	replyKeys         *networking.GarlicReplyKeyRegistry
 	replySender       *networking.RouterBuildReplySender
 	transport         networking.TunnelSender
-	localRouter       ivnp.Hash
+	localRouter       foundation.Hash
 	staticPrivate     []byte
-	preferredPeers    []ivnp.Hash
+	preferredPeers    []foundation.Hash
 	responders        *networking.NetworkDatabaseResponderProfiles
 	now               func() uint64
 	clockNow          func() time.Time
@@ -330,7 +330,7 @@ type destinationRuntimeFactory struct {
 	logger            *slog.Logger
 }
 
-func (f *destinationRuntimeFactory) create(name string, destination *ivnp.LocalDestination, policy *state.SecureStateEncryptedLeaseSetPolicy, remotePolicies []state.SecureStateRemoteELSAuthorization, requestedCrypto []uint16) (*destinationRuntime, error) {
+func (f *destinationRuntimeFactory) create(name string, destination *foundation.LocalDestination, policy *state.SecureStateEncryptedLeaseSetPolicy, remotePolicies []state.SecureStateRemoteELSAuthorization, requestedCrypto []uint16) (*destinationRuntime, error) {
 	createSelected := f == nil || destination == nil || f.database == nil || f.service == nil || f.tunnels == nil || f.destinations == nil || f.replyKeys == nil || f.replySender == nil || f.transport == nil || f.now == nil || f.clockNow == nil || f.garlicReceiver == nil || f.status == nil || f.buildReplies == nil || f.requests == nil
 	if !createSelected {
 		createSelected = f.publishers == nil
@@ -360,7 +360,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *ivnp.LocalD
 	}()
 
 	owner := destination.Hash()
-	preferredPeers := append([]ivnp.Hash(nil), f.preferredPeers...)
+	preferredPeers := append([]foundation.Hash(nil), f.preferredPeers...)
 	if len(preferredPeers) > 1 {
 		// Keep destination-owned pool maintenance from racing the router's
 		// exploratory pool for the same first bootstrap peer. Concurrent NTCP2
@@ -482,9 +482,9 @@ func (f *destinationRuntimeFactory) create(name string, destination *ivnp.LocalD
 			sender.ReleaseSensitive()
 		}
 	}()
-	cryptoTypes := make([]ivnp.CryptoKeyType, len(requestedCrypto))
+	cryptoTypes := make([]foundation.CryptoKeyType, len(requestedCrypto))
 	for index, cryptoType := range requestedCrypto {
-		cryptoTypes[index] = ivnp.CryptoKeyType(cryptoType)
+		cryptoTypes[index] = foundation.CryptoKeyType(cryptoType)
 	}
 	localLeaseSet, err := networking.NetworkDatabaseNewLocalLeaseSet2WithTypes(destination, cryptoTypes)
 	if err != nil {
@@ -583,12 +583,12 @@ func (d *Daemon) CreateDestination(ctx context.Context, name string, policy Dest
 	}
 	d.mu.Unlock()
 
-	var destination *ivnp.LocalDestination
+	var destination *foundation.LocalDestination
 	var err error
 	if policy.Kind == DestinationPublicLS2 {
-		destination, err = ivnp.GenerateLocalDestination()
+		destination, err = foundation.GenerateLocalDestination()
 	} else {
-		destination, err = ivnp.GenerateEncryptedLocalDestination()
+		destination, err = foundation.GenerateEncryptedLocalDestination()
 	}
 	if err != nil {
 		return client.ClientDestination{}, err

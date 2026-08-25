@@ -2,7 +2,7 @@ package datagram
 
 import (
 	"encoding/binary"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/internal/wire"
 	"time"
@@ -21,7 +21,7 @@ const (
 // transient key is trusted.
 type OfflineSignature struct {
 	Expires   uint32
-	Type      ivnp.SigningKeyType
+	Type      foundation.SigningKeyType
 	PublicKey []byte
 	Signature []byte
 	Signed    []byte
@@ -30,9 +30,9 @@ type OfflineSignature struct {
 func (o OfflineSignature) Present() bool { return o.PublicKey != nil }
 
 type V2 struct {
-	From               ivnp.Identity
+	From               foundation.Identity
 	Flags              [2]byte
-	Options            ivnp.Mapping
+	Options            foundation.Mapping
 	Offline            OfflineSignature
 	Payload, Signature []byte
 	signedRest         []byte
@@ -45,7 +45,7 @@ func ParseV2(src []byte) (V2, error) {
 	if len(src) > MaxWireSize {
 		return V2{}, ErrDatagram
 	}
-	identity, n, err := ivnp.ParseIdentity(src)
+	identity, n, err := foundation.ParseIdentity(src)
 	if err != nil {
 		return V2{}, err
 	}
@@ -60,7 +60,7 @@ func ParseV2(src []byte) (V2, error) {
 	off := n + 2
 	out := V2{From: identity, Flags: flags}
 	if word&flagOptions != 0 {
-		mapping, used, err := ivnp.ParseMapping(src[off:])
+		mapping, used, err := foundation.ParseMapping(src[off:])
 		if err != nil {
 			return V2{}, err
 		}
@@ -77,14 +77,14 @@ func ParseV2(src []byte) (V2, error) {
 		}
 		offlineStart := off
 		expires := binary.BigEndian.Uint32(src[off : off+4])
-		offlineType := ivnp.SigningKeyType(binary.BigEndian.Uint16(src[off+4 : off+6]))
+		offlineType := foundation.SigningKeyType(binary.BigEndian.Uint16(src[off+4 : off+6]))
 		offlineKeyLen, ok := offlineType.PublicKeyLen()
 		if !ok {
-			return V2{}, ivnp.ErrUnknownKeyType
+			return V2{}, foundation.ErrUnknownKeyType
 		}
 		originSignatureLen, ok := signingType.SignatureLen()
 		if !ok {
-			return V2{}, ivnp.ErrUnknownKeyType
+			return V2{}, foundation.ErrUnknownKeyType
 		}
 		off += 6
 		if len(src)-off < offlineKeyLen+originSignatureLen {
@@ -102,7 +102,7 @@ func ParseV2(src []byte) (V2, error) {
 	}
 	signatureLen, ok := signingType.SignatureLen()
 	if !ok {
-		return V2{}, ivnp.ErrUnknownKeyType
+		return V2{}, foundation.ErrUnknownKeyType
 	}
 	if len(src)-off < signatureLen {
 		return V2{}, wire.ErrShortBuffer
@@ -115,13 +115,13 @@ func ParseV2(src []byte) (V2, error) {
 
 // VerifyTarget verifies the Datagram2 target-binding and, where present, the
 // offline-key authorization against the current Unix-second clock.
-func (d V2) VerifyTarget(target ivnp.Hash) (bool, error) {
+func (d V2) VerifyTarget(target foundation.Hash) (bool, error) {
 	return d.VerifyTargetAt(target, uint32(time.Now().Unix()))
 }
 
 // VerifyTargetAt is VerifyTarget with an injected Unix-second clock. It is
 // useful to callers that already own a protocol clock and deterministic tests.
-func (d V2) VerifyTargetAt(target ivnp.Hash, now uint32) (bool, error) {
+func (d V2) VerifyTargetAt(target foundation.Hash, now uint32) (bool, error) {
 	if d.Offline.Present() {
 		if now > d.Offline.Expires {
 			return false, ErrDatagram
@@ -139,7 +139,7 @@ func (d V2) VerifyTargetAt(target ivnp.Hash, now uint32) (bool, error) {
 	copy(signed[len(target):], d.signedRest)
 	defer pool.Release(signed)
 	if d.Offline.Present() {
-		return ivnp.VerifySignature(d.Offline.Type, d.Offline.PublicKey, nil, signed, d.Signature)
+		return foundation.VerifySignature(d.Offline.Type, d.Offline.PublicKey, nil, signed, d.Signature)
 	}
 	return d.From.Verify(signed, d.Signature)
 }
@@ -147,7 +147,7 @@ func (d V2) VerifyTargetAt(target ivnp.Hash, now uint32) (bool, error) {
 // MarshalV2To writes a protocol-19 Datagram2 and signs the target-bound
 // fields. If flagOffline is set, offline must contain a valid authorization by
 // from and signer must sign using the authorized transient private key.
-func MarshalV2To(dst []byte, target ivnp.Hash, from ivnp.Identity, flags uint16, options ivnp.Mapping, offline OfflineSignature, payload []byte, signer Signer) (int, error) {
+func MarshalV2To(dst []byte, target foundation.Hash, from foundation.Identity, flags uint16, options foundation.Mapping, offline OfflineSignature, payload []byte, signer Signer) (int, error) {
 	if signer == nil || len(payload) > MaxSize || flags&flagVersionMask != 2 || flags&^v2AllowedFlags != 0 {
 		return 0, ErrDatagram
 	}
@@ -181,7 +181,7 @@ func MarshalV2To(dst []byte, target ivnp.Hash, from ivnp.Identity, flags uint16,
 	}
 	signatureLen, ok := signingType.SignatureLen()
 	if !ok {
-		return 0, ivnp.ErrUnknownKeyType
+		return 0, foundation.ErrUnknownKeyType
 	}
 	total := from.EncodedLen() + 2 + options.EncodedLen() + offlineLen + len(payload) + signatureLen
 	if total > MaxSize {
@@ -229,7 +229,7 @@ func MarshalV2To(dst []byte, target ivnp.Hash, from ivnp.Identity, flags uint16,
 
 // MarshalV3To writes a protocol-20 Datagram3. The sender hash is metadata,
 // not an authentication claim.
-func MarshalV3To(dst []byte, from ivnp.Hash, flags uint16, options ivnp.Mapping, payload []byte) (int, error) {
+func MarshalV3To(dst []byte, from foundation.Hash, flags uint16, options foundation.Mapping, payload []byte) (int, error) {
 	if len(payload) > MaxSize || flags&flagVersionMask != 3 || flags&^v3AllowedFlags != 0 {
 		return 0, ErrDatagram
 	}
@@ -258,9 +258,9 @@ func MarshalV3To(dst []byte, from ivnp.Hash, flags uint16, options ivnp.Mapping,
 }
 
 type V3 struct {
-	From    ivnp.Hash
+	From    foundation.Hash
 	Flags   [2]byte
-	Options ivnp.Mapping
+	Options foundation.Mapping
 	Payload []byte
 }
 
@@ -282,7 +282,7 @@ func ParseV3(src []byte) (V3, error) {
 	}
 	off := 34
 	if word&flagOptions != 0 {
-		mapping, used, err := ivnp.ParseMapping(src[off:])
+		mapping, used, err := foundation.ParseMapping(src[off:])
 		if err != nil {
 			return V3{}, err
 		}

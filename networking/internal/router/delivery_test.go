@@ -2,7 +2,7 @@ package router
 
 import (
 	"errors"
-	ivnp "gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/garlic"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"testing"
@@ -11,21 +11,21 @@ import (
 func TestCloveDeliveryModesRouteToExplicitSinks(t *testing.T) {
 	var routerCalls, destinationCalls, tunnelCalls int
 	service := NewWithSinks(nil, Sinks{
-		Router:      func(ivnp.Hash, i2np.Message) error { routerCalls++; return nil },
-		Destination: func(ivnp.Hash, ivnp.Hash, i2np.Message) error { destinationCalls++; return nil },
-		Tunnel:      func(ivnp.Hash, uint32, i2np.Message) error { tunnelCalls++; return nil },
+		Router:      func(foundation.Hash, i2np.Message) error { routerCalls++; return nil },
+		Destination: func(foundation.Hash, foundation.Hash, i2np.Message) error { destinationCalls++; return nil },
+		Tunnel:      func(foundation.Hash, uint32, i2np.Message) error { tunnelCalls++; return nil },
 	})
 	message := i2np.Message{Header: i2np.Header{Type: i2np.DeliveryStatus, ID: 1, Expiration: 100}, Payload: make([]byte, 12)}
-	var target ivnp.Hash
-	if err := service.dispatchClove(ivnp.Hash{}, garlic.Delivery{Type: garlic.DeliveryRouter, To: target}, message, 1, false); err != nil {
+	var target foundation.Hash
+	if err := service.dispatchClove(foundation.Hash{}, garlic.Delivery{Type: garlic.DeliveryRouter, To: target}, message, 1, false); err != nil {
 		t.Fatal(err)
 	}
 	message.Header.ID++
-	if err := service.dispatchClove(ivnp.Hash{}, garlic.Delivery{Type: garlic.DeliveryDestination, To: target}, message, 1, false); err != nil {
+	if err := service.dispatchClove(foundation.Hash{}, garlic.Delivery{Type: garlic.DeliveryDestination, To: target}, message, 1, false); err != nil {
 		t.Fatal(err)
 	}
 	message.Header.ID++
-	if err := service.dispatchClove(ivnp.Hash{}, garlic.Delivery{Type: garlic.DeliveryTunnel, To: target, TunnelID: 7}, message, 1, false); err != nil {
+	if err := service.dispatchClove(foundation.Hash{}, garlic.Delivery{Type: garlic.DeliveryTunnel, To: target, TunnelID: 7}, message, 1, false); err != nil {
 		t.Fatal(err)
 	}
 	if routerCalls != 1 || destinationCalls != 1 || tunnelCalls != 1 {
@@ -36,13 +36,13 @@ func TestCloveDeliveryModesRouteToExplicitSinks(t *testing.T) {
 func TestCloveDeliveryWithoutSinkIsRejected(t *testing.T) {
 	service := NewService(nil)
 	message := i2np.Message{Header: i2np.Header{Type: i2np.DeliveryStatus, ID: 1, Expiration: 100}, Payload: make([]byte, 12)}
-	if err := service.dispatchClove(ivnp.Hash{}, garlic.Delivery{Type: garlic.DeliveryRouter}, message, 1, false); err != ErrUnhandledI2NP {
+	if err := service.dispatchClove(foundation.Hash{}, garlic.Delivery{Type: garlic.DeliveryRouter}, message, 1, false); err != ErrUnhandledI2NP {
 		t.Fatalf("router delivery error = %v, want ErrUnhandledI2NP", err)
 	}
-	if err := service.dispatchClove(ivnp.Hash{}, garlic.Delivery{Type: garlic.DeliveryDestination}, message, 1, false); err != ErrUnhandledI2NP {
+	if err := service.dispatchClove(foundation.Hash{}, garlic.Delivery{Type: garlic.DeliveryDestination}, message, 1, false); err != ErrUnhandledI2NP {
 		t.Fatalf("destination delivery error = %v, want ErrUnhandledI2NP", err)
 	}
-	if err := service.dispatchClove(ivnp.Hash{}, garlic.Delivery{Type: garlic.DeliveryTunnel}, message, 1, false); err != ErrUnhandledI2NP {
+	if err := service.dispatchClove(foundation.Hash{}, garlic.Delivery{Type: garlic.DeliveryTunnel}, message, 1, false); err != ErrUnhandledI2NP {
 		t.Fatalf("tunnel delivery error = %v, want ErrUnhandledI2NP", err)
 	}
 }
@@ -72,9 +72,9 @@ func TestGarlicCloveSetAdmitsEveryDeliveryRouteOnce(t *testing.T) {
 	var localCalls, routerCalls, destinationCalls, tunnelCalls int
 	service := NewWithSinks(nil, Sinks{
 		DeliveryStatus: func(i2np.DeliveryStatusMessage) error { localCalls++; return nil },
-		Router:         func(ivnp.Hash, i2np.Message) error { routerCalls++; return nil },
-		Destination:    func(ivnp.Hash, ivnp.Hash, i2np.Message) error { destinationCalls++; return nil },
-		Tunnel:         func(ivnp.Hash, uint32, i2np.Message) error { tunnelCalls++; return nil },
+		Router:         func(foundation.Hash, i2np.Message) error { routerCalls++; return nil },
+		Destination:    func(foundation.Hash, foundation.Hash, i2np.Message) error { destinationCalls++; return nil },
+		Tunnel:         func(foundation.Hash, uint32, i2np.Message) error { tunnelCalls++; return nil },
 	})
 	cloves := []garlic.Clove{
 		testClove(garlic.Delivery{Type: garlic.DeliveryLocal}, 10, 20, now),
@@ -102,8 +102,8 @@ func TestGarlicCloveSetContinuesAfterInvalidClove(t *testing.T) {
 	destinationCalls := 0
 	service := NewWithSinks(nil, Sinks{
 		DeliveryStatus: func(i2np.DeliveryStatusMessage) error { return nil },
-		Router:         func(ivnp.Hash, i2np.Message) error { t.Fatal("invalid clove was routed"); return nil },
-		Destination:    func(ivnp.Hash, ivnp.Hash, i2np.Message) error { destinationCalls++; return nil },
+		Router:         func(foundation.Hash, i2np.Message) error { t.Fatal("invalid clove was routed"); return nil },
+		Destination:    func(foundation.Hash, foundation.Hash, i2np.Message) error { destinationCalls++; return nil },
 	})
 	invalid := testClove(garlic.Delivery{Type: garlic.DeliveryRouter}, 10, 20, now)
 	invalid.Message.Payload = make([]byte, 11)
@@ -125,7 +125,7 @@ func TestGarlicCloveReplaySeparatesSetCloveAndI2NPIdentities(t *testing.T) {
 	routerCalls := 0
 	service := NewWithSinks(nil, Sinks{
 		DeliveryStatus: func(i2np.DeliveryStatusMessage) error { return nil },
-		Router:         func(ivnp.Hash, i2np.Message) error { routerCalls++; return nil },
+		Router:         func(foundation.Hash, i2np.Message) error { routerCalls++; return nil },
 	})
 	first := testClove(garlic.Delivery{Type: garlic.DeliveryRouter}, 10, 20, now)
 	if err := service.HandleGarlicCloveSet(testCloveSet(t, []garlic.Clove{first}, 1, now), now, false); err != nil {
