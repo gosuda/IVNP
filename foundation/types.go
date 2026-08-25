@@ -1,5 +1,3 @@
-// Package ivnp implements the binary structures shared by I2P router protocols.
-// Parsers are views over caller-owned input and do not allocate.
 package foundation
 
 import (

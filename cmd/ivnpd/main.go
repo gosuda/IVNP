@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -16,31 +17,31 @@ import (
 var version = "dev"
 
 func main() {
-	os.Exit(run(os.Args[1:]))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func run(args []string) int {
+func run(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("ivnpd", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
+	flags.SetOutput(stderr)
 	configPath := flags.String("config", "ivnp.conf", "operating configuration path")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "ivnpd: unexpected positional arguments")
+		fmt.Fprintln(stderr, "ivnpd: unexpected positional arguments")
 		return 2
 	}
 	if *showVersion {
-		fmt.Fprintln(os.Stdout, version)
+		fmt.Fprintln(stdout, version)
 		return 0
 	}
 	cfg, err := ivnp.LoadOrCreateConfig(*configPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ivnpd: configuration error:", err)
+		fmt.Fprintln(stderr, "ivnpd: configuration error:", err)
 		return 1
 	}
-	logger := newLogger(cfg.Log)
+	logger := newLogger(cfg.Log, stderr)
 	d, err := ivnp.New(cfg, ivnp.Options{Logger: logger})
 	if err != nil {
 		logger.Error("daemon initialization failed", "error", err)
@@ -60,7 +61,7 @@ func run(args []string) int {
 	return 0
 }
 
-func newLogger(cfg ivnp.LogConfig) *slog.Logger {
+func newLogger(cfg ivnp.LogConfig, output io.Writer) *slog.Logger {
 	level := new(slog.LevelVar)
 	switch cfg.Level {
 	case "debug":
@@ -74,7 +75,7 @@ func newLogger(cfg ivnp.LogConfig) *slog.Logger {
 	}
 	options := &slog.HandlerOptions{Level: level}
 	if cfg.Format == "json" {
-		return slog.New(slog.NewJSONHandler(os.Stderr, options))
+		return slog.New(slog.NewJSONHandler(output, options))
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, options))
+	return slog.New(slog.NewTextHandler(output, options))
 }

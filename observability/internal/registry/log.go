@@ -1,5 +1,5 @@
-// Package observability provides bounded, secret-safe logging, metrics, and
-// status endpoints for IVNP processes.
+// Package registry provides bounded, secret-safe logging, metrics, and status
+// endpoints for IVNP processes.
 package registry
 
 import (

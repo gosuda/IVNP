@@ -1,4 +1,4 @@
-// Package httpx provides bounded HTTP response parsing for router utilities.
+// Package httphelper provides bounded HTTP response parsing for router utilities.
 package httphelper
 
 import (

@@ -1,4 +1,4 @@
-// Package config parses bounded i2pd-style INI configuration files.
+// Package configuration parses bounded i2pd-style INI configuration files.
 package configuration
 
 import (

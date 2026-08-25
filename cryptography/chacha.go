@@ -1,4 +1,4 @@
-// Package cryptx contains cryptographic state wrappers shared by I2P transports.
+// ChaCha state wrappers provide allocation-bounded encryption for I2P transports.
 package cryptography
 
 import (

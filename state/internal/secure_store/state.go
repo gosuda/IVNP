@@ -1,4 +1,4 @@
-// Package state persists the long-lived private identity material of an I2P router.
+// Package securestore persists the long-lived private identity material of an I2P router.
 package securestore
 
 import (

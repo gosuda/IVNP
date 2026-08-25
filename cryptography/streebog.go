@@ -1,5 +1,5 @@
-// Package gost implements the GOST R 34.11-2012 (Streebog) hash used by
-// i2pd GOST signatures. It is a direct Go port of libi2pd's reference core.
+// This file implements the GOST R 34.11-2012 (Streebog) hash used by
+// i2pd GOST signatures as a direct Go port of libi2pd's reference core.
 package cryptography
 
 type block [64]byte

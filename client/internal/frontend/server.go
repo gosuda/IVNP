@@ -1,4 +1,4 @@
-// Package clientapi provides local client-facing I2P proxies and an authenticated control server.
+// Package frontend provides local client-facing I2P proxies and an authenticated control server.
 package frontend
 
 import (

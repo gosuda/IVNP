@@ -1,4 +1,4 @@
-// Package fsstore provides crash-safe bounded state-file updates.
+// Package filesystemstore provides crash-safe bounded state-file updates.
 package filesystemstore
 
 import (

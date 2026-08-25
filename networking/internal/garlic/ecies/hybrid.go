@@ -1,5 +1,5 @@
-// Package ecies implements the ECIES-X25519 garlic handshake building blocks.
-// It is separate from the legacy ElGamal/AES garlic codec.
+// Package garlicecies implements the ECIES-X25519 garlic handshake building
+// blocks separately from the legacy ElGamal/AES garlic codec.
 package garlicecies
 
 import (
