@@ -1,6 +1,8 @@
 package tunnel
 
-import "gosuda.org/ivnp/networking/internal/garlic"
+import (
+	"gosuda.org/ivnp/networking/internal/garlic"
+)
 
 type (
 	GarlicReplyKey         = garlic.GarlicReplyKey

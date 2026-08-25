@@ -1,8 +1,6 @@
 package noderuntime
 
 import (
-	"gosuda.org/ivnp/state"
-
 	"bufio"
 	"context"
 	"io"
@@ -11,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/state"
 )
 
 func TestDaemonEmbeddedSAMReadinessTimeoutDestroysOwnerGraph(t *testing.T) {

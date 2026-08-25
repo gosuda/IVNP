@@ -4,7 +4,6 @@ package registry
 
 import (
 	"cmp"
-
 	"errors"
 	"io"
 	"log/slog"

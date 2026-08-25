@@ -1,11 +1,11 @@
 package ivnp
 
 import (
-	"gosuda.org/ivnp/networking"
-
 	"bytes"
 	"context"
 	"testing"
+
+	"gosuda.org/ivnp/networking"
 )
 
 func TestLocalZeroHopDialerListenerE2E(t *testing.T) {

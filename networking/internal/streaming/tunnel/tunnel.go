@@ -1,11 +1,7 @@
 package streamingtunnel
 
 import (
-	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/interfaces/stream"
-
 	"cmp"
-
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -21,6 +17,8 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/interfaces/stream"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/networking/internal/streaming"
 )

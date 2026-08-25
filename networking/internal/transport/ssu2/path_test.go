@@ -1,6 +1,8 @@
 package ssu2
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestPathValidatorRequiresMatchingUnexpiredResponse(t *testing.T) {
 	var validator PathValidator

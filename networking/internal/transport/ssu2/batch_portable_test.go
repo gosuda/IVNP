@@ -2,7 +2,9 @@
 
 package ssu2
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestPortableDoesNotRequireKernelVectorBatching(t *testing.T) {
 	if usesKernelVector() {

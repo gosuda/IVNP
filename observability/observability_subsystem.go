@@ -1,7 +1,9 @@
 // Package observability is the only public entry point for IVNP metrics and logging.
 package observability
 
-import "gosuda.org/ivnp/observability/internal/registry"
+import (
+	"gosuda.org/ivnp/observability/internal/registry"
+)
 
 type (
 	HealthStatus = registry.HealthStatus

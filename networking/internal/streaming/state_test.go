@@ -1,6 +1,8 @@
 package streaming
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestStateTransitionsWindowAndAck(t *testing.T) {
 	state := NewState(1, 2)

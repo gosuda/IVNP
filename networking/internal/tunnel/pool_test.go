@@ -1,6 +1,8 @@
 package tunnel
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestPoolSelectAndExpire(t *testing.T) {
 	p := NewPool(2)

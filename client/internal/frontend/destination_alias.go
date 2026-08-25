@@ -1,6 +1,8 @@
 package frontend
 
-import "gosuda.org/ivnp/interfaces/destination"
+import (
+	"gosuda.org/ivnp/interfaces/destination"
+)
 
 type (
 	DestinationResolver           = destination.DestinationResolver

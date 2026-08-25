@@ -1,6 +1,8 @@
 package ssu2
 
-import "crypto/subtle"
+import (
+	"crypto/subtle"
+)
 
 // PathValidator tracks one in-flight authenticated SSU2 migration challenge.
 type PathValidator struct {

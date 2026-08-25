@@ -1,6 +1,8 @@
 package parallelism
 
-import "runtime"
+import (
+	"runtime"
+)
 
 // Workers returns a CPU-scaled worker count bounded by the currently available
 func Workers(work int) int {

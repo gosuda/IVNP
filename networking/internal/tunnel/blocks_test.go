@@ -1,6 +1,8 @@
 package tunnel
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestBlockIteratorFirstAndFollowOn(t *testing.T) {
 	first := []byte{0x08, 0, 0, 0, 9, 0, 3, 1, 2, 3}

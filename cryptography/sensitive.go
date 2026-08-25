@@ -1,6 +1,8 @@
 package cryptography
 
-import "errors"
+import (
+	"errors"
+)
 
 // Sensitive is implemented by pointer-owned IVNP cryptographic state. ReleaseSensitive
 // synchronously overwrites IVNP-owned secret buffers and is safe to call repeatedly.

@@ -1,14 +1,13 @@
 package sam
 
 import (
-	"gosuda.org/ivnp/networking"
-
 	"bytes"
 	"net"
 	"strconv"
 	"strings"
 
 	"gosuda.org/ivnp/internal/ingress"
+	"gosuda.org/ivnp/networking"
 )
 
 type udpPacket struct {

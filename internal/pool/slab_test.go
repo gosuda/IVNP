@@ -1,6 +1,8 @@
 package pool
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestAcquireClassSizing(t *testing.T) {
 	for _, size := range []int{1, 256, 257, 1024, 65536} {

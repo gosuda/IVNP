@@ -1,6 +1,8 @@
 package ivnp
 
-import "gosuda.org/ivnp/interfaces/stream"
+import (
+	"gosuda.org/ivnp/interfaces/stream"
+)
 
 var (
 	ErrUnsupportedNetwork    = stream.ErrUnsupportedNetwork

@@ -1,19 +1,17 @@
 package sam
 
 import (
-	"gosuda.org/ivnp/networking"
-
 	"context"
 	"errors"
-
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/internal/ingress"
-
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/internal/ingress"
+	"gosuda.org/ivnp/networking"
 )
 
 type panicRecorder struct{ reports chan ingress.Panic }

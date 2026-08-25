@@ -1,21 +1,12 @@
 package noderuntime
 
 import (
-	"gosuda.org/ivnp/state"
-
-	"gosuda.org/ivnp/client"
-
-	"gosuda.org/ivnp/networking"
-
 	"context"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	cryptorand "crypto/rand"
 	"encoding/binary"
 	"errors"
-
-	"gosuda.org/ivnp/foundation"
-
 	"io"
 	"net"
 	"net/http"
@@ -23,6 +14,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/client"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking"
+	"gosuda.org/ivnp/state"
 )
 
 type recordingSockets struct{ calls int }

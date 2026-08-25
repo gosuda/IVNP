@@ -2,7 +2,6 @@ package garlic
 
 import (
 	"cmp"
-
 	"encoding/binary"
 	"errors"
 

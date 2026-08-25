@@ -1,23 +1,20 @@
 package sam
 
 import (
-	"gosuda.org/ivnp/networking"
-
 	"cmp"
-
 	"context"
 	"errors"
 	"fmt"
-
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/interfaces/destination"
-
 	"net"
 	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/networking"
 )
 
 func (s *Server) dispatch(connection *serverConnection, cmd command) (bool, error) {

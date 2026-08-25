@@ -2,9 +2,8 @@
 package upnp
 
 import (
-	"cmp"
-
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"

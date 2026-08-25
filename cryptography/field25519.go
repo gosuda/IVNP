@@ -1,6 +1,8 @@
 package cryptography
 
-import "math/bits"
+import (
+	"math/bits"
+)
 
 // field25519 is GF(2^255-19) in little-endian radix 2^64. Every operation
 // returns its canonical representative and is safe when its inputs alias.

@@ -1,6 +1,8 @@
 package garlic
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestTagStoreConsumesAndExpiresTags(t *testing.T) {
 	store := NewTagStore(1)

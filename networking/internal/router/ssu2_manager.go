@@ -1,9 +1,8 @@
 package router
 
 import (
-	"cmp"
-
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"crypto/ecdh"

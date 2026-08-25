@@ -1,10 +1,7 @@
 package noderuntime
 
 import (
-	"gosuda.org/ivnp/networking"
-
 	"cmp"
-
 	"context"
 	"encoding/binary"
 	"errors"
@@ -18,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gosuda.org/ivnp/networking"
 )
 
 const (

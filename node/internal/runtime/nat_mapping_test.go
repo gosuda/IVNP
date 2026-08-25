@@ -1,17 +1,9 @@
 package noderuntime
 
 import (
-	"gosuda.org/ivnp/state"
-
-	"gosuda.org/ivnp/networking"
-
 	"cmp"
-
 	"context"
 	"errors"
-
-	"gosuda.org/ivnp/foundation"
-
 	"io"
 	"log/slog"
 	"net"
@@ -20,6 +12,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking"
+	"gosuda.org/ivnp/state"
 )
 
 type fakeNATPMPClient struct {

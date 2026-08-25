@@ -1,6 +1,8 @@
 package cryptography
 
-import "math/big"
+import (
+	"math/big"
+)
 
 type curve struct{ a, b, p, q, gx, gy *big.Int }
 type point struct {

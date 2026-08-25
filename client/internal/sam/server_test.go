@@ -1,20 +1,18 @@
 package sam
 
 import (
-	"gosuda.org/ivnp/networking"
-
 	"bufio"
 	"context"
-
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/interfaces/destination"
-
 	"io"
 	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/networking"
 )
 
 type loopController struct {

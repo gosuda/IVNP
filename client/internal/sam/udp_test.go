@@ -1,21 +1,18 @@
 package sam
 
 import (
-	"gosuda.org/ivnp/networking"
-
 	"bufio"
 	"context"
 	"fmt"
-
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/interfaces/destination"
-
 	"io"
 	"net"
 	"strings"
 	"testing"
 	"time"
 
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/networking"
 	"gosuda.org/ivnp/observability"
 )
 

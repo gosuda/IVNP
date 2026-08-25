@@ -1,17 +1,15 @@
 package sam
 
 import (
-	"gosuda.org/ivnp/networking"
-
 	"encoding/base32"
 	"fmt"
+	"io"
+	"strings"
 
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/ingress"
-
-	"io"
-	"strings"
+	"gosuda.org/ivnp/networking"
 )
 
 func (s *Server) handleSend(connection *serverConnection, cmd command) error {

@@ -1,6 +1,8 @@
 package configuration
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestParseI2PDStyleINI(t *testing.T) {
 	entries, err := Parse("ipv4 = true\n[ntcp2]\nenabled = true\nport = 4567 # inherited override\n[ssu2]\nenabled = false\n[http]\nhost = \"127.0.0.1\"\n")

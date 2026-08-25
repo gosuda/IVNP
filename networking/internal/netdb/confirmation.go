@@ -2,7 +2,6 @@ package netdb
 
 import (
 	"cmp"
-
 	"context"
 	"errors"
 	"log/slog"

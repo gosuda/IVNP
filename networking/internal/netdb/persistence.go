@@ -1,17 +1,15 @@
 package netdb
 
 import (
-	"gosuda.org/ivnp/state"
-
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-
-	"gosuda.org/ivnp/foundation"
-
 	"os"
 	"sync"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/state"
 )
 
 const (

@@ -1,15 +1,11 @@
 package ivnp
 
 import (
-	"gosuda.org/ivnp/state"
-
 	"gosuda.org/ivnp/client"
-
-	"gosuda.org/ivnp/networking"
-
 	"gosuda.org/ivnp/interfaces/destination"
-
+	"gosuda.org/ivnp/networking"
 	"gosuda.org/ivnp/node"
+	"gosuda.org/ivnp/state"
 )
 
 // Config is the complete embedded-node operating configuration.

@@ -1,12 +1,12 @@
 package addressbook
 
 import (
-	"gosuda.org/ivnp/state"
-
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
+
+	"gosuda.org/ivnp/state"
 )
 
 type persistedState struct {

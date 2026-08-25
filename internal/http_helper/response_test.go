@@ -1,6 +1,8 @@
 package httphelper
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestParseResponse(t *testing.T) {
 	response, err := ParseResponse([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody"), 8)

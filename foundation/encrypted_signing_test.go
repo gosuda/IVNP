@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"testing"
-
 	"time"
 
 	"filippo.io/edwards25519"

@@ -3,7 +3,6 @@ package natpmp
 
 import (
 	"cmp"
-
 	"context"
 	"encoding/binary"
 	"errors"

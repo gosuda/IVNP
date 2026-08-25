@@ -1,11 +1,10 @@
 package netdb
 
 import (
-	"gosuda.org/ivnp/state"
-
 	"fmt"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/state"
 )
 
 // LoadStaticRouterInfos loads exact signed RouterInfo files into database. Every

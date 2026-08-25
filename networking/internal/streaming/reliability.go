@@ -1,6 +1,8 @@
 package streaming
 
-import "time"
+import (
+	"time"
+)
 
 const (
 	InitialRTO = 9 * time.Second
