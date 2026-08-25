@@ -68,7 +68,7 @@ func NewLocalEncryptedLeaseSet(destination *foundation.LocalDestination, inner *
 		return nil, ErrEncryptedLeaseSet
 	}
 	clientCount := len(authorization.DHClients) + len(authorization.PSKClients)
-	if clientCount > 0xffff || 1+32+2+40*clientCount+33 >= MaxEncryptedLeaseSetDataBytes {
+	if clientCount > 0xffff || 1+32+2+40*clientCount+33 >= MaxLeaseSetBytes {
 		return nil, ErrEncryptedLeaseSet
 	}
 	identity, err := destination.Identity()

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"testing"
 	"time"
@@ -153,6 +154,30 @@ func TestEncryptedLeaseSetClientAuthorization(t *testing.T) {
 	psk[0] ^= 1
 	if _, err = DecryptEncryptedLeaseSet(set, pskIdentity, nil, ELSClientAuthorization{UsePSK: true, PSK: psk}, pskNow+1); err == nil {
 		t.Fatal("wrong PSK decrypted ELS2")
+	}
+}
+
+func TestLocalEncryptedLeaseSetWriterDoesNotApplyReaderCap(t *testing.T) {
+	const clientCount = 101
+	clients := make([][32]byte, clientCount)
+	for index := range clients {
+		clients[index][0] = byte(index)
+	}
+	destination, _, encrypted, now := encryptedTestSet(t, EncryptedLeaseSetAuthorization{PSKClients: clients})
+	defer destination.ReleaseSensitive()
+	encrypted.random = bytes.NewReader(bytes.Repeat([]byte{0x42}, 128))
+	payload := make([]byte, MaxLeaseSetBytes)
+	n, err := encrypted.MarshalTo(payload, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const encryptedLengthOffset = 2 + 32 + 4 + 2 + 2
+	encryptedLength := int(binary.BigEndian.Uint16(payload[encryptedLengthOffset : encryptedLengthOffset+2]))
+	if encryptedLength <= MaxEncryptedLeaseSetDataBytes {
+		t.Fatalf("Java-compatible writer encrypted data = %d bytes, want over reader cap %d", encryptedLength, MaxEncryptedLeaseSetDataBytes)
+	}
+	if _, err = ParseEncryptedLeaseSet(payload[:n]); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("reader accepted writer output above Java reader cap: %v", err)
 	}
 }
 
