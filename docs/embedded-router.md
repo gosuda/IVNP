@@ -1,6 +1,6 @@
 # Embedded Router Architecture
 
-`router.Router` is an embedded owner, not a daemon singleton. Construction has no I/O; `Start(context.Context)` owns socket binds, address publication, transport start, reseed work, cancellation, and shutdown ordering. `Close` is idempotent and closes listeners/packet sockets before canceling workers so blocking native calls are released. `Wait` returns the first terminal runtime error.
+`ivnp.Router` is an embedded owner, not a daemon singleton. Construction has no I/O; `Start(context.Context)` owns socket binds, address publication, transport start, reseed work, cancellation, and shutdown ordering. `Close` is idempotent and closes listeners/packet sockets before canceling workers so blocking native calls are released. `Wait` returns the first terminal runtime error.
 
 ## Network boundary
 
@@ -46,11 +46,12 @@ embedded `ivnp.Node`; construction has no I/O, while `Start`, `Close`, and
 `ivnp.NewRouter` for callers assembling router dependencies themselves.
 
 `ivnp.Dialer` and `ivnp.ListenerConfig` call an `ivnp.StreamNetwork`; they never
-map an `.i2p` address to native TCP. `router.DestinationManager` is the embedded
-implementation: it owns one or more isolated `DestinationSession` instances,
-each backed by the bounded tunnel Streaming runtime. A manager or session may
-be passed directly to the public API after its tunnel sender and inbound
-delivery path have been wired.
+map an `.i2p` address to native TCP. `networking.RouterDestinationManager` is
+the subsystem implementation exposed through the `networking` facade: it owns
+one or more isolated `RouterDestinationSession` instances, each backed by the
+bounded tunnel Streaming runtime. A manager or session may be passed directly
+to the public API after its tunnel sender and inbound delivery path have been
+wired.
 
 Before an outbound tunnel build, the builder sends the selected inbound
 reply-gateway RouterInfo to the outbound endpoint. The same rule applies to a

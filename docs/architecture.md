@@ -1,33 +1,34 @@
 # Architecture
 
-## Packages and import direction
+## Subsystems and import direction
 
-IVNP library imports point from composition toward foundations. `cmd` and
-`integration` are applications above the public facade; no library package
-imports `gosuda.org/ivnp`.
+IVNP exposes one package root per subsystem. Every subsystem root contains a
+`<name>_subsystem.go` facade; concrete implementations live below that
+subsystem's `internal` directory. Cross-subsystem code imports only the facade.
 
 ```text
 gosuda.org/ivnp              Stable public facade
-service/daemon               Complete node composition and durable ownership
-service/*                    SAM, proxies, address book, and client services
-network/router               Authenticated routing and transport composition
-network/tunnel               Tunnel build, gateway, pool, and maintenance
-api/destination              Destination-facing contracts shared by router/services
-protocol/*                   I2NP, netdb, garlic, datagram, and streaming codecs
-network/transport/*          Noise, NTCP2, and SSU2 framing
-api/stream                   Minimal stream dialing/listening contract
-i2p                          Hashes, identities, mappings, keys, and signatures
-crypto/*, internal/*         Cryptographic and allocation/wire foundations
+node                         Complete node composition and durable ownership
+client                       SAM, proxies, address book, and client services
+networking                   Router, tunnels, network database, transports
+state                        Configuration and durable encrypted state
+observability                Metrics and logging contracts
+contracts/destination        Destination-facing shared contracts
+contracts/stream             Stream dialing and listening contract
+foundation                   Identities, mappings, hashes, and signatures
+cryptography                 Cryptographic primitives and key types
+internal                     Allocation, wire, relay, and recovery helpers
 ```
 
-`architecture_test.go` loads production and test imports with `go list` and
-rejects upward edges. The root facade re-exports stable aliases and constructors;
-specialized packages remain available to advanced callers.
+`architecture_test.go` loads production and test imports with `go list`,
+rejects upward edges, rejects cross-subsystem `internal` imports, and verifies
+every subsystem facade file. Only subsystem roots and `gosuda.org/ivnp` are
+stable public import paths.
 
-`i2p` owns common wire structures: certificates, key certificates, identities,
-mappings, hashes, local Destinations, and signatures. `internal/wire` is the
-only byte cursor/writer implementation. It returns aliases into caller input and
-never grows a destination.
+`foundation` owns common wire structures: certificates, key certificates,
+identities, mappings, hashes, local Destinations, and signatures.
+`internal/wire` is the only byte cursor/writer implementation. It returns
+aliases into caller input and never grows a destination.
 
 ## Ownership and GC policy
 

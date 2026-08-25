@@ -12,7 +12,7 @@ COPY . .
 
 FROM go-build AS soak-build
 RUN mkdir -p /out && \
-    CGO_ENABLED=0 go build -trimpath -o /out/ivnp ./cmd/ivnp && \
+    CGO_ENABLED=0 go build -trimpath -o /out/ivnp ./command/ivnp && \
     CGO_ENABLED=0 go build -trimpath -o /out/ivnp-soak ./integration/soak
 
 # Export-only image used by scripts/live-interop-soak.sh. The script copies both

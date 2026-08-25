@@ -20,8 +20,10 @@ routerInfo, err := ivnp.ParseRouterInfo(rawRouterInfo)
 message, consumed, err := ivnp.ParseI2NP(wire)
 ```
 
-Advanced callers may still import the specialized `i2p`, `protocol`, `network`,
-`api`, and `service` packages directly.
+Advanced callers may import the full-name subsystem roots: `foundation`,
+`cryptography`, `networking`, `client`, `state`, `observability`, `node`, and
+`contracts`. Concrete implementations below a subsystem's `internal` directory
+are not public import paths.
 
 ```sh
 go test ./...

@@ -3,6 +3,7 @@ package ivnp_test
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -45,12 +46,40 @@ func TestImportLayersAreAcyclic(t *testing.T) {
 			if internalImport && importedLayer > importerLayer {
 				violations = append(violations, fmt.Sprintf("%s (L%d) imports %s (L%d)", importer, importerLayer, imported, importedLayer))
 			}
+			if owner := subsystemInternalOwner(imported); owner != "" && !strings.HasPrefix(importer, modulePath+"/"+owner) {
+				violations = append(violations, fmt.Sprintf("%s bypasses %s subsystem root via %s", importer, owner, imported))
+			}
 		}
 	}
 	if len(violations) != 0 {
 		sort.Strings(violations)
 		t.Fatalf("upward IVNP imports:\n%s", strings.Join(violations, "\n"))
 	}
+}
+
+func TestSubsystemFacadeFilesExist(t *testing.T) {
+	for _, path := range []string{
+		"foundation/foundation_subsystem.go",
+		"cryptography/cryptography_subsystem.go",
+		"networking/networking_subsystem.go",
+		"client/client_subsystem.go",
+		"state/state_subsystem.go",
+		"observability/observability_subsystem.go",
+		"node/node_subsystem.go",
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("missing subsystem facade %s: %v", path, err)
+		}
+	}
+}
+
+func subsystemInternalOwner(path string) string {
+	for _, subsystem := range []string{"cryptography", "foundation", "networking", "client", "state", "observability", "node"} {
+		if strings.HasPrefix(path, modulePath+"/"+subsystem+"/internal/") {
+			return subsystem
+		}
+	}
+	return ""
 }
 
 func canonicalPackage(path string) string {
@@ -64,25 +93,27 @@ func packageLayer(path string) (int, bool) {
 	}
 	relative := strings.TrimPrefix(path, modulePath+"/")
 	switch {
+	case strings.HasPrefix(relative, "command/"), strings.HasPrefix(relative, "integration/"):
+		return 9, true
 	case path == modulePath:
-		return 7, true
-	case strings.HasPrefix(relative, "cmd/"), strings.HasPrefix(relative, "integration/"):
 		return 8, true
-	case relative == "service/daemon":
+	case relative == "node", strings.HasPrefix(relative, "node/"):
+		return 7, true
+	case relative == "client", strings.HasPrefix(relative, "client/"):
 		return 6, true
-	case strings.HasPrefix(relative, "service/"):
+	case relative == "networking":
 		return 5, true
-	case relative == "network/router":
+	case strings.HasPrefix(relative, "networking/"):
 		return 4, true
-	case strings.HasPrefix(relative, "network/transport/"), relative == "api/stream":
-		return 1, true
-	case strings.HasPrefix(relative, "network/"), strings.HasPrefix(relative, "api/"):
+	case relative == "contracts", strings.HasPrefix(relative, "contracts/"),
+		relative == "state", strings.HasPrefix(relative, "state/"):
 		return 3, true
-	case strings.HasPrefix(relative, "protocol/"):
+	case relative == "foundation", strings.HasPrefix(relative, "foundation/"),
+		relative == "observability", strings.HasPrefix(relative, "observability/"):
 		return 2, true
-	case relative == "i2p", strings.HasPrefix(relative, "support/"):
+	case relative == "cryptography", strings.HasPrefix(relative, "cryptography/"):
 		return 1, true
-	case strings.HasPrefix(relative, "crypto/"), strings.HasPrefix(relative, "internal/"):
+	case strings.HasPrefix(relative, "internal/"):
 		return 0, true
 	default:
 		return 0, true
