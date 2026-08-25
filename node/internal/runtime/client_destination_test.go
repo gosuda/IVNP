@@ -1,12 +1,13 @@
 package noderuntime
 
-import "gosuda.org/ivnp/client"
-
-import "gosuda.org/ivnp/networking"
-
 import (
+	"gosuda.org/ivnp/client"
+
+	"gosuda.org/ivnp/networking"
+
 	"context"
 	"errors"
+
 	"gosuda.org/ivnp/foundation"
 
 	"path/filepath"

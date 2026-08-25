@@ -1,10 +1,11 @@
 package frontend
 
 import (
-	"gosuda.org/ivnp/foundation"
 	"net"
 	"strconv"
 	"strings"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 const maxDestinationHost = 4096

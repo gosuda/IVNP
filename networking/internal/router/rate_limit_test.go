@@ -2,11 +2,12 @@ package router
 
 import (
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/i2np"
 	"net"
 	"runtime"
 	"testing"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/i2np"
 )
 
 func TestRateLimiterBoundaryAndRefill(t *testing.T) {

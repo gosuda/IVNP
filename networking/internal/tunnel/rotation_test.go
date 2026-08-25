@@ -4,9 +4,10 @@ import (
 	"context"
 	"crypto/ecdh"
 	"errors"
+	"testing"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
-	"testing"
 )
 
 var errRotationSource = errors.New("rotation source failed")

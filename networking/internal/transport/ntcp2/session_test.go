@@ -3,9 +3,10 @@ package ntcp2
 import (
 	"bytes"
 	"errors"
-	"gosuda.org/ivnp/cryptography"
 	"net"
 	"testing"
+
+	"gosuda.org/ivnp/cryptography"
 )
 
 func TestSessionBidirectionalFrames(t *testing.T) {

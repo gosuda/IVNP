@@ -4,8 +4,9 @@ package ivnp
 
 import (
 	"crypto/ed25519"
-	"gosuda.org/ivnp/foundation"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 const (

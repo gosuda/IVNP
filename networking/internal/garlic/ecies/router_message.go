@@ -4,11 +4,12 @@ import (
 	"crypto/ecdh"
 	"encoding/binary"
 	"errors"
+	"io"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/transport/noise"
-	"io"
 )
 
 const (

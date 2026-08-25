@@ -8,11 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"io"
+	"net"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
 	"gosuda.org/ivnp/networking/internal/transport/noise"
-	"io"
-	"net"
 )
 
 const (

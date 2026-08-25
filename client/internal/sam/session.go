@@ -3,11 +3,12 @@ package sam
 import (
 	"context"
 	"errors"
-	"gosuda.org/ivnp/interfaces/destination"
 	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
+
+	"gosuda.org/ivnp/interfaces/destination"
 )
 
 type sessionStyle string

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+
 	"gosuda.org/ivnp/foundation"
 )
 

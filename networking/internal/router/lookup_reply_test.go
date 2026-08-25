@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/garlic"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"gosuda.org/ivnp/networking/internal/tunnel"
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/garlic"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/networking/internal/tunnel"
 )
 
 type encryptedLookupReplyCapture struct {
@@ -46,7 +47,7 @@ func TestLookupResponderEncryptsECIESReplyEndToEnd(t *testing.T) {
 	wireLookup := make([]byte, 32+32+1+2+32+1+8)
 	copy(wireLookup[:32], key[:])
 	copy(wireLookup[32:64], from[:])
-	wireLookup[64] = uint8(networkdatabase.RouterInfoLookup<<2) | 1<<4
+	wireLookup[64] = uint8(netdb.RouterInfoLookup<<2) | 1<<4
 	binary.BigEndian.PutUint16(wireLookup[65:67], 0)
 	copy(wireLookup[67:99], replyKey[:])
 	wireLookup[99] = 1
@@ -57,8 +58,8 @@ func TestLookupResponderEncryptsECIESReplyEndToEnd(t *testing.T) {
 	}
 
 	capture := &encryptedLookupReplyCapture{ready: make(chan struct{}, 1)}
-	responder, err := networkdatabase.NewLookupResponder(networkdatabase.LookupResponderConfig{
-		Database: networkdatabase.NewDatabase(local, networkdatabase.DefaultBucketCapacity),
+	responder, err := netdb.NewLookupResponder(netdb.LookupResponderConfig{
+		Database: netdb.NewDatabase(local, netdb.DefaultBucketCapacity),
 		Sender:   capture,
 		Local:    local,
 		Now:      func() uint64 { return now },
@@ -121,8 +122,8 @@ func TestLookupResponderEncryptsECIESReplyEndToEnd(t *testing.T) {
 func TestLookupResponderRejectsIncompleteEncryptedMetadataAtIngress(t *testing.T) {
 	local := foundation.Hash{1}
 	capture := &encryptedLookupReplyCapture{ready: make(chan struct{}, 1)}
-	responder, err := networkdatabase.NewLookupResponder(networkdatabase.LookupResponderConfig{
-		Database: networkdatabase.NewDatabase(local, networkdatabase.DefaultBucketCapacity),
+	responder, err := netdb.NewLookupResponder(netdb.LookupResponderConfig{
+		Database: netdb.NewDatabase(local, netdb.DefaultBucketCapacity),
 		Sender:   capture,
 		Local:    local,
 		Now:      func() uint64 { return 1_700_000_000_000 },

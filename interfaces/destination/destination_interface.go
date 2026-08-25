@@ -2,9 +2,10 @@ package destination
 
 import (
 	"context"
-	"gosuda.org/ivnp/foundation"
 	"net"
 	"sync"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 // DestinationResolver resolves an ASCII I2P name or validates a literal full

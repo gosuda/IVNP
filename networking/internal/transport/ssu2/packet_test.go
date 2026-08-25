@@ -3,9 +3,10 @@ package ssu2
 import (
 	"bytes"
 	"errors"
-	"gosuda.org/ivnp/cryptography"
 	"sync"
 	"testing"
+
+	"gosuda.org/ivnp/cryptography"
 )
 
 func TestHeaderRoundTrips(t *testing.T) {

@@ -3,8 +3,9 @@ package foundation
 import (
 	"bytes"
 	"errors"
-	"gosuda.org/ivnp/cryptography"
 	"testing"
+
+	"gosuda.org/ivnp/cryptography"
 )
 
 func TestLocalDestinationUsesX25519AndClearsPrivateState(t *testing.T) {

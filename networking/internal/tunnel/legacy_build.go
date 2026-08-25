@@ -8,9 +8,10 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
+	"io"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/foundation"
-	"io"
 )
 
 // The variable build format is retained for interoperability with routers that

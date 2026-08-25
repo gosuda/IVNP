@@ -3,11 +3,12 @@ package router
 import (
 	"context"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"gosuda.org/ivnp/observability"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/observability"
 )
 
 func TestLocalRouterInfoPublishesRouterLifecycleState(t *testing.T) {
@@ -15,7 +16,7 @@ func TestLocalRouterInfoPublishesRouterLifecycleState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := networkdatabase.NewDatabase(foundation.Hash{}, 4)
+	database := netdb.NewDatabase(foundation.Hash{}, 4)
 	clock := fixedClock{now: time.UnixMilli(123456789)}
 	metrics := observability.NewRegistry()
 	database.SetMetrics(metrics)

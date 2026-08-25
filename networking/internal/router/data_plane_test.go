@@ -9,18 +9,19 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/garlic"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"gosuda.org/ivnp/networking/internal/streaming"
-	"gosuda.org/ivnp/networking/internal/streaming/tunnel"
-	"gosuda.org/ivnp/networking/internal/tunnel"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/garlic"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/networking/internal/streaming"
+	streamingtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
+	"gosuda.org/ivnp/networking/internal/tunnel"
 )
 
 type dataPlaneTunnelSender struct {
@@ -43,7 +44,7 @@ func (s *dataPlaneTunnelSender) Send(ctx context.Context, _ foundation.Hash, mes
 
 type dataPlaneRequestSender struct{}
 
-func (dataPlaneRequestSender) Send(context.Context, networkdatabase.RouterRef, i2np.Message) error {
+func (dataPlaneRequestSender) Send(context.Context, netdb.RouterRef, i2np.Message) error {
 	return errors.New("unexpected LeaseSet lookup")
 }
 
@@ -173,7 +174,7 @@ func TestStreamingTunnelSenderLeaseSetGarlicTunnelDestination(t *testing.T) {
 		_ = serverDestinations.Close()
 		_ = clientDestinations.Close()
 	})
-	serverService := NewService(networkdatabase.NewDatabase(foundation.Hash{}, networkdatabase.DefaultBucketCapacity))
+	serverService := NewService(netdb.NewDatabase(foundation.Hash{}, netdb.DefaultBucketCapacity))
 	serverGarlic := garlic.NewSessionManager(garlic.SessionManagerConfig{})
 	receiver, err := NewGarlicReceiver(GarlicReceiverConfig{
 		Service: serverService,
@@ -250,9 +251,9 @@ func TestStreamingTunnelSenderLeaseSetGarlicTunnelDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	database := networkdatabase.NewDatabase(clientAddress.Hash, networkdatabase.DefaultBucketCapacity)
-	storeLegacyLeaseSet(t, database, serverAddress, networkdatabase.Lease{Gateway: foundation.Hash{1}, TunnelID: leaseID, EndDate: now + 120_000})
-	requests, err := networkdatabase.NewRequestManager(database, dataPlaneRequestSender{}, dataPlaneReplyRoute{}, networkdatabase.RequestManagerConfig{Capacity: 16, TimeoutMillis: 60_000, Now: func() uint64 { return now }})
+	database := netdb.NewDatabase(clientAddress.Hash, netdb.DefaultBucketCapacity)
+	storeLegacyLeaseSet(t, database, serverAddress, netdb.Lease{Gateway: foundation.Hash{1}, TunnelID: leaseID, EndDate: now + 120_000})
+	requests, err := netdb.NewRequestManager(database, dataPlaneRequestSender{}, dataPlaneReplyRoute{}, netdb.RequestManagerConfig{Capacity: 16, TimeoutMillis: 60_000, Now: func() uint64 { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,19 +325,19 @@ func TestGarlicReceiverDeliversNewSessionReplyAndEstablishesExistingSession(t *t
 		t.Fatal(err)
 	}
 	message := i2np.Message{Header: i2np.Header{Type: i2np.Data, ID: 1, Expiration: now + 1_000}, Payload: data}
-	local, err := networkdatabase.NewLocalLeaseSet2(initiator)
+	local, err := netdb.NewLocalLeaseSet2(initiator)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = local.ReplaceInboundLeases([]networkdatabase.Lease{{Gateway: foundation.Hash{1}, TunnelID: 1, EndDate: now + 60_000}}); err != nil {
+	if err = local.ReplaceInboundLeases([]netdb.Lease{{Gateway: foundation.Hash{1}, TunnelID: 1, EndDate: now + 60_000}}); err != nil {
 		t.Fatal(err)
 	}
-	set := make([]byte, networkdatabase.MaxLeaseSetBytes)
+	set := make([]byte, netdb.MaxLeaseSetBytes)
 	setLen, err := local.MarshalTo(set, now, initiator.Sign)
 	if err != nil {
 		t.Fatal(err)
 	}
-	storePayload, err := networkdatabase.MarshalDatabaseStore(initiatorHash, i2np.StoreLeaseSet2, set[:setLen], 0, foundation.Hash{}, 0)
+	storePayload, err := netdb.MarshalDatabaseStore(initiatorHash, i2np.StoreLeaseSet2, set[:setLen], 0, foundation.Hash{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +354,7 @@ func TestGarlicReceiverDeliversNewSessionReplyAndEstablishesExistingSession(t *t
 	if _, targetErr := ratchetReplyTarget([]garlic.Clove{{Delivery: garlic.Delivery{Type: garlic.DeliveryLocal}, Message: forged}}, observed); !errors.Is(targetErr, ErrGarlicPacket) {
 		t.Fatalf("forged LS2 binding error = %v, want %v", targetErr, ErrGarlicPacket)
 	}
-	payload := make([]byte, 2*networkdatabase.MaxLeaseSetBytes)
+	payload := make([]byte, 2*netdb.MaxLeaseSetBytes)
 	first, err := appendRatchetGarlicClove(payload, garlic.Delivery{Type: garlic.DeliveryLocal}, store)
 	if err != nil {
 		t.Fatal(err)
@@ -371,7 +372,7 @@ func TestGarlicReceiverDeliversNewSessionReplyAndEstablishesExistingSession(t *t
 	outer := make([]byte, 4+len(packet))
 	binary.BigEndian.PutUint32(outer[:4], uint32(len(packet)))
 	copy(outer[4:], packet)
-	service := NewService(networkdatabase.NewDatabase(foundation.Hash{}, networkdatabase.DefaultBucketCapacity))
+	service := NewService(netdb.NewDatabase(foundation.Hash{}, netdb.DefaultBucketCapacity))
 	service.SetDestinationSink(func(foundation.Hash, foundation.Hash, i2np.Message) error { return nil })
 	var replyTarget foundation.Hash
 	var reply []byte
@@ -405,7 +406,7 @@ func TestGarlicReceiverDeliversNewSessionReplyAndEstablishesExistingSession(t *t
 		t.Fatalf("responder rejected Existing Session: %v", err)
 	}
 }
-func storeLegacyLeaseSet(t *testing.T, database *networkdatabase.Database, address foundation.LocalAddress, lease networkdatabase.Lease) {
+func storeLegacyLeaseSet(t *testing.T, database *netdb.Database, address foundation.LocalAddress, lease netdb.Lease) {
 	t.Helper()
 	raw, err := foundation.DecodeI2PBase64(address.Destination)
 	if err != nil {
@@ -415,11 +416,11 @@ func storeLegacyLeaseSet(t *testing.T, database *networkdatabase.Database, addre
 	if err != nil || used != len(raw) {
 		t.Fatalf("parse destination identity = %v, used %d", err, used)
 	}
-	local, err := networkdatabase.NewLocalLeaseSet(identity)
+	local, err := netdb.NewLocalLeaseSet(identity)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = local.ReplaceInboundLeases([]networkdatabase.Lease{lease}); err != nil {
+	if err = local.ReplaceInboundLeases([]netdb.Lease{lease}); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, ok := local.Snapshot(0)
@@ -430,7 +431,7 @@ func storeLegacyLeaseSet(t *testing.T, database *networkdatabase.Database, addre
 	if len(rest) != 0 {
 		t.Fatal("legacy LeaseSet test identity has split signing key")
 	}
-	payload := make([]byte, networkdatabase.MaxLeaseSetBytes)
+	payload := make([]byte, netdb.MaxLeaseSetBytes)
 	n, err := snapshot.MarshalLegacy(payload, address.EncryptionPublic[:], signingKey, func(unsigned []byte) ([]byte, error) {
 		return ed25519.Sign(address.SigningPrivate, unsigned), nil
 	})
@@ -449,8 +450,8 @@ func TestLegacyGarlicSYNTeachesReceiverSenderLeaseSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	senderDatabase := networkdatabase.NewDatabase(foundation.Hash{}, networkdatabase.DefaultBucketCapacity)
-	storeLegacyLeaseSet(t, senderDatabase, senderAddress, networkdatabase.Lease{
+	senderDatabase := netdb.NewDatabase(foundation.Hash{}, netdb.DefaultBucketCapacity)
+	storeLegacyLeaseSet(t, senderDatabase, senderAddress, netdb.Lease{
 		Gateway: foundation.Hash{1}, TunnelID: 7, EndDate: now + 120_000,
 	})
 	var nextID uint32
@@ -479,7 +480,7 @@ func TestLegacyGarlicSYNTeachesReceiverSenderLeaseSet(t *testing.T) {
 		t.Fatalf("first legacy SYN clove = %#v, %t, %v", first, ok, err)
 	}
 
-	receiverDatabase := networkdatabase.NewDatabase(foundation.Hash{}, networkdatabase.DefaultBucketCapacity)
+	receiverDatabase := netdb.NewDatabase(foundation.Hash{}, netdb.DefaultBucketCapacity)
 	service := NewService(receiverDatabase)
 	service.SetDestinationSink(func(foundation.Hash, foundation.Hash, i2np.Message) error { return nil })
 	if err = service.HandleGarlicCloveSet(set, now, false); err != nil {
@@ -503,13 +504,13 @@ func (r *dataPlaneSenderRef) SendTunnel(ctx context.Context, delivery streamingt
 
 type dataPlanePublicationLoop struct {
 	mu       sync.Mutex
-	database *networkdatabase.Database
+	database *netdb.Database
 	now      uint64
-	owner    *networkdatabase.LeaseSetPublisher
+	owner    *netdb.LeaseSetPublisher
 	stores   []i2np.DatabaseStoreMessage
 }
 
-func (l *dataPlanePublicationLoop) Send(_ context.Context, _ networkdatabase.RouterRef, message i2np.Message) error {
+func (l *dataPlanePublicationLoop) Send(_ context.Context, _ netdb.RouterRef, message i2np.Message) error {
 	store, err := i2np.ParseDatabaseStore(message.Payload)
 	if err != nil {
 		return err
@@ -569,8 +570,8 @@ func TestProductionDestinationDataPlaneOverConfirmedLS2(t *testing.T) {
 		_ = aDestinations.Close()
 		_ = bDestinations.Close()
 	})
-	aService := NewService(networkdatabase.NewDatabase(aHash, networkdatabase.DefaultBucketCapacity))
-	bService := NewService(networkdatabase.NewDatabase(bHash, networkdatabase.DefaultBucketCapacity))
+	aService := NewService(netdb.NewDatabase(aHash, netdb.DefaultBucketCapacity))
+	bService := NewService(netdb.NewDatabase(bHash, netdb.DefaultBucketCapacity))
 	var aReceiver, bReceiver *GarlicReceiver
 	aService.SetGarlicSink(func(_ I2NPSource, message i2np.Message) error { return aReceiver.HandleGarlic(message) })
 	bService.SetGarlicSink(func(_ I2NPSource, message i2np.Message) error { return bReceiver.HandleGarlic(message) })
@@ -688,9 +689,9 @@ func TestProductionDestinationDataPlaneOverConfirmedLS2(t *testing.T) {
 		}
 	}
 
-	aDatabase := networkdatabase.NewDatabase(aHash, networkdatabase.DefaultBucketCapacity)
-	bDatabase := networkdatabase.NewDatabase(bHash, networkdatabase.DefaultBucketCapacity)
-	for range networkdatabase.PublicationFloodfillK {
+	aDatabase := netdb.NewDatabase(aHash, netdb.DefaultBucketCapacity)
+	bDatabase := netdb.NewDatabase(bHash, netdb.DefaultBucketCapacity)
+	for range netdb.PublicationFloodfillK {
 		if err := aDatabase.AdmitRouterInfo(dataPlaneFloodfill(t), true, now); err != nil {
 			t.Fatal(err)
 		}
@@ -699,30 +700,30 @@ func TestProductionDestinationDataPlaneOverConfirmedLS2(t *testing.T) {
 		}
 	}
 
-	aLocal, err := networkdatabase.NewLocalLeaseSet2(aDestination)
+	aLocal, err := netdb.NewLocalLeaseSet2(aDestination)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bLocal, err := networkdatabase.NewLocalLeaseSet2(bDestination)
+	bLocal, err := netdb.NewLocalLeaseSet2(bDestination)
 	if err != nil {
 		t.Fatal(err)
 	}
 	aPublication := &dataPlanePublicationLoop{database: bDatabase, now: now}
 	bPublication := &dataPlanePublicationLoop{database: aDatabase, now: now}
-	aPublisher, err := networkdatabase.NewLeaseSetPublisher(networkdatabase.LeaseSetPublisherConfig{
-		Local2: aLocal, Database: aDatabase, InboundLeases: networkdatabase.InboundLeaseSourceFunc(func(uint64) []networkdatabase.Lease {
-			return []networkdatabase.Lease{{Gateway: foundation.Hash{2}, TunnelID: aLease, EndDate: now + 60_000}}
+	aPublisher, err := netdb.NewLeaseSetPublisher(netdb.LeaseSetPublisherConfig{
+		Local2: aLocal, Database: aDatabase, InboundLeases: netdb.InboundLeaseSourceFunc(func(uint64) []netdb.Lease {
+			return []netdb.Lease{{Gateway: foundation.Hash{2}, TunnelID: aLease, EndDate: now + 60_000}}
 		}), Sender: aPublication, Sign: aDestination.Sign, Now: func() uint64 { return now }, Random: func() uint32 { return 11 },
-		FloodfillLimit: networkdatabase.PublicationFloodfillK, ReplyPath: dataPlaneReplyPath{gateway: aHash, tunnel: aLease},
+		FloodfillLimit: netdb.PublicationFloodfillK, ReplyPath: dataPlaneReplyPath{gateway: aHash, tunnel: aLease},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bPublisher, err := networkdatabase.NewLeaseSetPublisher(networkdatabase.LeaseSetPublisherConfig{
-		Local2: bLocal, Database: bDatabase, InboundLeases: networkdatabase.InboundLeaseSourceFunc(func(uint64) []networkdatabase.Lease {
-			return []networkdatabase.Lease{{Gateway: foundation.Hash{4}, TunnelID: bLease, EndDate: now + 60_000}}
+	bPublisher, err := netdb.NewLeaseSetPublisher(netdb.LeaseSetPublisherConfig{
+		Local2: bLocal, Database: bDatabase, InboundLeases: netdb.InboundLeaseSourceFunc(func(uint64) []netdb.Lease {
+			return []netdb.Lease{{Gateway: foundation.Hash{4}, TunnelID: bLease, EndDate: now + 60_000}}
 		}), Sender: bPublication, Sign: bDestination.Sign, Now: func() uint64 { return now }, Random: func() uint32 { return 21 },
-		FloodfillLimit: networkdatabase.PublicationFloodfillK, ReplyPath: dataPlaneReplyPath{gateway: bHash, tunnel: bLease},
+		FloodfillLimit: netdb.PublicationFloodfillK, ReplyPath: dataPlaneReplyPath{gateway: bHash, tunnel: bLease},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -732,17 +733,17 @@ func TestProductionDestinationDataPlaneOverConfirmedLS2(t *testing.T) {
 		aPublisher.Close()
 		bPublisher.Close()
 	})
-	if sent, err := aPublisher.Publish(context.Background()); err != nil || sent != networkdatabase.PublicationFloodfillK {
+	if sent, err := aPublisher.Publish(context.Background()); err != nil || sent != netdb.PublicationFloodfillK {
 		t.Fatalf("publish A = %d, %v", sent, err)
 	}
-	if sent, err := bPublisher.Publish(context.Background()); err != nil || sent != networkdatabase.PublicationFloodfillK {
+	if sent, err := bPublisher.Publish(context.Background()); err != nil || sent != netdb.PublicationFloodfillK {
 		t.Fatalf("publish B = %d, %v", sent, err)
 	}
 	for _, publication := range []struct {
 		hash   foundation.Hash
 		stores []i2np.DatabaseStoreMessage
 	}{{aHash, aPublication.stores}, {bHash, bPublication.stores}} {
-		if len(publication.stores) != networkdatabase.PublicationFloodfillK {
+		if len(publication.stores) != netdb.PublicationFloodfillK {
 			t.Fatalf("publication count = %d", len(publication.stores))
 		}
 		for _, store := range publication.stores {
@@ -758,11 +759,11 @@ func TestProductionDestinationDataPlaneOverConfirmedLS2(t *testing.T) {
 		t.Fatal("B NetDB did not resolve A signed LS2")
 	}
 
-	aRequests, err := networkdatabase.NewRequestManager(aDatabase, dataPlaneRequestSender{}, dataPlaneReplyRoute{}, networkdatabase.RequestManagerConfig{Capacity: 4, TimeoutMillis: 60_000, Now: func() uint64 { return now }})
+	aRequests, err := netdb.NewRequestManager(aDatabase, dataPlaneRequestSender{}, dataPlaneReplyRoute{}, netdb.RequestManagerConfig{Capacity: 4, TimeoutMillis: 60_000, Now: func() uint64 { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bRequests, err := networkdatabase.NewRequestManager(bDatabase, dataPlaneRequestSender{}, dataPlaneReplyRoute{}, networkdatabase.RequestManagerConfig{Capacity: 4, TimeoutMillis: 60_000, Now: func() uint64 { return now }})
+	bRequests, err := netdb.NewRequestManager(bDatabase, dataPlaneRequestSender{}, dataPlaneReplyRoute{}, netdb.RequestManagerConfig{Capacity: 4, TimeoutMillis: 60_000, Now: func() uint64 { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -893,7 +894,7 @@ func TestProductionDestinationDataPlaneOverConfirmedLS2(t *testing.T) {
 	}
 }
 
-func dataPlaneFloodfill(t *testing.T) networkdatabase.RouterInfo {
+func dataPlaneFloodfill(t *testing.T) netdb.RouterInfo {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -912,7 +913,7 @@ func dataPlaneFloodfill(t *testing.T) networkdatabase.RouterInfo {
 	}
 	unsigned := append(identity, make([]byte, 10)...)
 	unsigned = append(unsigned, options[:optionLen]...)
-	info, err := networkdatabase.ParseRouterInfo(append(unsigned, ed25519.Sign(private, unsigned)...))
+	info, err := netdb.ParseRouterInfo(append(unsigned, ed25519.Sign(private, unsigned)...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1035,7 +1036,7 @@ func TestStreamingTunnelSenderReleaseClearsRemoteELSContext(t *testing.T) {
 	psk[0] = 7
 	sender := new(StreamingTunnelSender)
 	if err = sender.UpdateRemoteELS(map[foundation.Hash]RemoteELSContext{
-		hash: {Identity: identity, Secret: []byte("remote-secret"), Authorization: networkdatabase.ELSClientAuthorization{UsePSK: true, PSK: psk}},
+		hash: {Identity: identity, Secret: []byte("remote-secret"), Authorization: netdb.ELSClientAuthorization{UsePSK: true, PSK: psk}},
 	}); err != nil {
 		t.Fatal(err)
 	}

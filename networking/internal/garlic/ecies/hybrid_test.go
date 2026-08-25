@@ -2,9 +2,10 @@ package garlicecies
 
 import (
 	"bytes"
+	"testing"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/networking/internal/transport/noise"
-	"testing"
 )
 
 func TestHybridE1EKEMTranscriptAndMixKey(t *testing.T) {

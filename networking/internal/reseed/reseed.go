@@ -17,7 +17,7 @@ import (
 
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/internal/pool"
-	"gosuda.org/ivnp/networking/internal/network_database"
+	"gosuda.org/ivnp/networking/internal/netdb"
 )
 
 const (
@@ -134,7 +134,7 @@ func (c Client) httpClientFor(endpoint *url.URL) *http.Client {
 // FetchInto downloads endpoint, verifies each RouterInfo, and retains valid
 // entries in database. Invalid peers are skipped; archive-level violations fail
 // the whole fetch because they indicate a malformed or hostile source.
-func (c Client) FetchInto(ctx context.Context, endpoint string, database *networkdatabase.Database, seenAt uint64) (int, error) {
+func (c Client) FetchInto(ctx context.Context, endpoint string, database *netdb.Database, seenAt uint64) (int, error) {
 	if database == nil {
 		return 0, errors.New("reseed: nil database")
 	}
@@ -205,7 +205,7 @@ func (c Client) FetchInto(ctx context.Context, endpoint string, database *networ
 			return 0, ErrTooManyEntries
 		}
 		candidates = append(candidates, file)
-		if file.UncompressedSize64 == 0 || file.UncompressedSize64 > uint64(networkdatabase.MaxRouterInfoBytes) {
+		if file.UncompressedSize64 == 0 || file.UncompressedSize64 > uint64(netdb.MaxRouterInfoBytes) {
 			continue
 		}
 		total += file.UncompressedSize64
@@ -223,14 +223,14 @@ func (c Client) FetchInto(ctx context.Context, endpoint string, database *networ
 			defer group.Done()
 			for index := range jobs {
 				file := candidates[index]
-				if file.UncompressedSize64 == 0 || file.UncompressedSize64 > uint64(networkdatabase.MaxRouterInfoBytes) {
+				if file.UncompressedSize64 == 0 || file.UncompressedSize64 > uint64(netdb.MaxRouterInfoBytes) {
 					continue
 				}
 				data, readErr := readRouterInfo(file)
 				if readErr != nil {
 					continue
 				}
-				info, parseErr := networkdatabase.ParseRouterInfo(data)
+				info, parseErr := netdb.ParseRouterInfo(data)
 				if parseErr == nil {
 					parseErr = database.AdmitReseedRouterInfo(info,
 						seenAt)
@@ -268,7 +268,7 @@ type fetchAnyState struct {
 	client    Client
 	ctx       context.Context
 	endpoints []string
-	database  *networkdatabase.Database
+	database  *netdb.Database
 	seenAt    uint64
 	results   chan fetchResult
 	failures  []error
@@ -311,7 +311,7 @@ func (state *fetchAnyState) launchNext(timer *time.Timer, delay time.Duration) {
 // FetchAny hedges slow reseed endpoints while bounding active requests by the
 // current CPU budget and endpoint backpressure. The first success cancels the
 // remaining HTTP work.
-func (c Client) FetchAny(ctx context.Context, endpoints []string, database *networkdatabase.Database, seenAt uint64) (int, error) {
+func (c Client) FetchAny(ctx context.Context, endpoints []string, database *netdb.Database, seenAt uint64) (int, error) {
 	if len(endpoints) == 0 {
 		return 0, ErrNoRouterInfos
 	}

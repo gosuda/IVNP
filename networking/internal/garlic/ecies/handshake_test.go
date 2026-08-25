@@ -7,9 +7,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"gosuda.org/ivnp/cryptography"
 	"io"
 	"testing"
+
+	"gosuda.org/ivnp/cryptography"
 )
 
 func TestAttachPayloadKDFMatchesJavaVector(t *testing.T) {

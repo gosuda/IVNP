@@ -3,12 +3,13 @@ package router
 import (
 	"context"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/networking/internal/netdb"
 )
 
 type muxTestTransport struct {
@@ -131,7 +132,7 @@ func TestTransportMuxRequiresAdmittedPeerAndWorksWithOneManager(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := networkdatabase.NewDatabase(local.Hash, 8)
+	database := netdb.NewDatabase(local.Hash, 8)
 	ntcp2 := &muxTestTransport{}
 	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2})
 	if err != nil {
@@ -242,9 +243,9 @@ func TestTransportMuxUsableCountRejectsExpiredAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner, err := networkdatabase.NewLocalRouterInfo(networkdatabase.LocalRouterInfoConfig{
+	owner, err := netdb.NewLocalRouterInfo(netdb.LocalRouterInfoConfig{
 		Local: local,
-		Contacts: networkdatabase.RouterInfoContacts{Addresses: []networkdatabase.LocalRouterAddress{{
+		Contacts: netdb.RouterInfoContacts{Addresses: []netdb.LocalRouterAddress{{
 			Expiration:     now - 1,
 			TransportStyle: []byte("NTCP2"),
 			Options: []foundation.MappingEntry{
@@ -263,7 +264,7 @@ func TestTransportMuxUsableCountRejectsExpiredAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := networkdatabase.NewDatabase(foundation.Hash{}, 8)
+	database := netdb.NewDatabase(foundation.Hash{}, 8)
 	if err = database.AdmitRouterInfo(info, false, now); err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +277,7 @@ func TestTransportMuxUsableCountRejectsExpiredAddress(t *testing.T) {
 	}
 }
 
-func muxTestPeer(t *testing.T, ntcp2, ssu2 bool) (*networkdatabase.Database, foundation.Hash) {
+func muxTestPeer(t *testing.T, ntcp2, ssu2 bool) (*netdb.Database, foundation.Hash) {
 	t.Helper()
 	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
@@ -312,7 +313,7 @@ func muxTestPeer(t *testing.T, ntcp2, ssu2 bool) (*networkdatabase.Database, fou
 	if err = owner.Publish(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	database := networkdatabase.NewDatabase(foundation.Hash{}, 8)
+	database := netdb.NewDatabase(foundation.Hash{}, 8)
 	info := owner.Snapshot()
 	if err = database.AdmitRouterInfo(info, false, info.Published); err != nil {
 		t.Fatal(err)
@@ -320,7 +321,7 @@ func muxTestPeer(t *testing.T, ntcp2, ssu2 bool) (*networkdatabase.Database, fou
 	return database, owner.Hash()
 }
 
-func muxTestFirewalledSSU2Peer(t *testing.T) (*networkdatabase.Database, foundation.Hash) {
+func muxTestFirewalledSSU2Peer(t *testing.T) (*netdb.Database, foundation.Hash) {
 	t.Helper()
 	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
@@ -352,7 +353,7 @@ func muxTestFirewalledSSU2Peer(t *testing.T) (*networkdatabase.Database, foundat
 	if err = owner.Publish(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	database := networkdatabase.NewDatabase(foundation.Hash{}, 8)
+	database := netdb.NewDatabase(foundation.Hash{}, 8)
 	info := owner.Snapshot()
 	if err = database.AdmitRouterInfo(info, false, info.Published); err != nil {
 		t.Fatal(err)

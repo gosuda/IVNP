@@ -1,9 +1,10 @@
 package router
 
 import (
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/streaming/tunnel"
 	"testing"
+
+	"gosuda.org/ivnp/foundation"
+	streamingtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
 )
 
 func TestStreamingDestinationFramingHasZeroAllocations(t *testing.T) {

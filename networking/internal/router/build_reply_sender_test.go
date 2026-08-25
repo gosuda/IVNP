@@ -3,12 +3,13 @@ package router
 import (
 	"context"
 	"errors"
+	"testing"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/garlic"
-	"gosuda.org/ivnp/networking/internal/garlic/ecies"
+	garlicecies "gosuda.org/ivnp/networking/internal/garlic/ecies"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/tunnel"
-	"testing"
 )
 
 type buildReplyCaptureSender struct {

@@ -3,7 +3,6 @@ package addressbook
 import (
 	"context"
 	"fmt"
-	"gosuda.org/ivnp/foundation"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 func newDestinationString(t *testing.T) string {

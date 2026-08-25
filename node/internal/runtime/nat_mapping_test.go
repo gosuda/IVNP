@@ -1,14 +1,15 @@
 package noderuntime
 
-import "gosuda.org/ivnp/state"
-
-import "gosuda.org/ivnp/networking"
-
-import "cmp"
-
 import (
+	"gosuda.org/ivnp/state"
+
+	"gosuda.org/ivnp/networking"
+
+	"cmp"
+
 	"context"
 	"errors"
+
 	"gosuda.org/ivnp/foundation"
 
 	"io"

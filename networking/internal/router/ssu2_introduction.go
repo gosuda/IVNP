@@ -5,14 +5,15 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/binary"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"gosuda.org/ivnp/networking/internal/transport/ssu2"
 	"net"
 	"net/netip"
 	"strconv"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/networking/internal/transport/ssu2"
 )
 
 const (
@@ -68,13 +69,13 @@ func (m *SSU2Manager) ssu2KeysForPeer(peer foundation.Hash) (ssu2PeerAddress, er
 	return selectSSU2Keys(ref.Info)
 }
 
-func (m *SSU2Manager) routerInfo(peer foundation.Hash) (networkdatabase.RouterInfo, bool) {
+func (m *SSU2Manager) routerInfo(peer foundation.Hash) (netdb.RouterInfo, bool) {
 	if m.database == nil {
-		return networkdatabase.RouterInfo{}, false
+		return netdb.RouterInfo{}, false
 	}
 	ref, ok := m.database.Routers().Get(peer)
 	if !ok {
-		return networkdatabase.RouterInfo{}, false
+		return netdb.RouterInfo{}, false
 	}
 	return ref.Info, true
 }
@@ -276,7 +277,7 @@ func (m *SSU2Manager) handleRelayIntroAttempt(bob *ssu2TransportSession, intro s
 	m.sendRelayResponse(bob, bob.peer, response)
 }
 
-func (m *SSU2Manager) processRelayIntro(bob *ssu2TransportSession, intro ssu2.RelayIntro, localHash foundation.Hash, aliceInfo networkdatabase.RouterInfo) (ssu2.RelayResponse, bool) {
+func (m *SSU2Manager) processRelayIntro(bob *ssu2TransportSession, intro ssu2.RelayIntro, localHash foundation.Hash, aliceInfo netdb.RouterInfo) (ssu2.RelayResponse, bool) {
 	response := ssu2.RelayResponse{Code: ssu2RelayRejectSignature, Nonce: intro.Request.Nonce, Timestamp: uint32(m.now().Unix())}
 	input, err := ssu2.RelayRequestSignatureInput(nil, bob.peer[:], localHash[:], intro.Request)
 	if err != nil {
@@ -524,7 +525,7 @@ func (m *SSU2Manager) handleHolePunch(header ssu2.LongHeader, payload []byte, _ 
 
 // ssu2RouterInfoStore constructs a one-off deterministic store. Relay
 // forwarding uses cachedSSU2RouterInfoStore from its control-plane worker.
-func ssu2RouterInfoStore(info networkdatabase.RouterInfo, now time.Time) (i2np.Message, error) {
+func ssu2RouterInfoStore(info netdb.RouterInfo, now time.Time) (i2np.Message, error) {
 	snapshot, err := newSSU2RouterInfoStoreSnapshot(info)
 	if err != nil {
 		return i2np.Message{}, err
@@ -534,7 +535,7 @@ func ssu2RouterInfoStore(info networkdatabase.RouterInfo, now time.Time) (i2np.M
 
 // cachedSSU2RouterInfoStore refreshes an entry when the immutable RouterInfo
 // bytes change. Compression runs outside the cache lock.
-func (m *SSU2Manager) cachedSSU2RouterInfoStore(info networkdatabase.RouterInfo, now time.Time) (i2np.Message, error) {
+func (m *SSU2Manager) cachedSSU2RouterInfoStore(info netdb.RouterInfo, now time.Time) (i2np.Message, error) {
 	hash := info.Hash()
 	raw := info.Bytes()
 	m.routerInfoStoresMu.RLock()
@@ -560,9 +561,9 @@ func (m *SSU2Manager) cachedSSU2RouterInfoStore(info networkdatabase.RouterInfo,
 	return snapshot.message(now)
 }
 
-func newSSU2RouterInfoStoreSnapshot(info networkdatabase.RouterInfo) (ssu2RouterInfoStoreSnapshot, error) {
+func newSSU2RouterInfoStoreSnapshot(info netdb.RouterInfo) (ssu2RouterInfoStoreSnapshot, error) {
 	raw := info.Bytes()
-	if len(raw) == 0 || len(raw) > networkdatabase.MaxRouterInfoBytes {
+	if len(raw) == 0 || len(raw) > netdb.MaxRouterInfoBytes {
 		return ssu2RouterInfoStoreSnapshot{}, ErrSSU2Peer
 	}
 	var compressed bytes.Buffer
@@ -578,7 +579,7 @@ func newSSU2RouterInfoStoreSnapshot(info networkdatabase.RouterInfo) (ssu2Router
 	if err != nil {
 		return ssu2RouterInfoStoreSnapshot{}, err
 	}
-	if compressed.Len() == 0 || compressed.Len() > networkdatabase.MaxRouterInfoBytes || compressed.Len() > 0xffff {
+	if compressed.Len() == 0 || compressed.Len() > netdb.MaxRouterInfoBytes || compressed.Len() > 0xffff {
 		return ssu2RouterInfoStoreSnapshot{}, ErrSSU2Peer
 	}
 	return ssu2RouterInfoStoreSnapshot{
@@ -604,7 +605,7 @@ func (snapshot ssu2RouterInfoStoreSnapshot) message(now time.Time) (i2np.Message
 	return i2np.Message{Header: i2np.Header{Type: i2np.DatabaseStore, ID: id, Expiration: uint64(now.Add(time.Minute).UnixMilli())}, Payload: payload}, nil
 }
 
-func selectSSU2Keys(info networkdatabase.RouterInfo) (ssu2PeerAddress, error) {
+func selectSSU2Keys(info netdb.RouterInfo) (ssu2PeerAddress, error) {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -673,7 +674,7 @@ func (m *SSU2Manager) introduceFromRouterInfo(ctx context.Context, target founda
 	return lastErr
 }
 
-func selectSSU2Introducers(info networkdatabase.RouterInfo, now uint64) []ssu2IntroducerCandidate {
+func selectSSU2Introducers(info netdb.RouterInfo, now uint64) []ssu2IntroducerCandidate {
 	addresses := info.Addresses()
 	var candidates []ssu2IntroducerCandidate
 	for {

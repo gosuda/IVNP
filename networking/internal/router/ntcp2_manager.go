@@ -9,12 +9,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/ingress"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"gosuda.org/ivnp/networking/internal/transport/ntcp2"
-	"gosuda.org/ivnp/observability"
 	"io"
 	"log/slog"
 	"net"
@@ -24,6 +18,13 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/ingress"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/networking/internal/transport/ntcp2"
+	"gosuda.org/ivnp/observability"
 )
 
 const (
@@ -46,7 +47,7 @@ var (
 // construction; callers must republish matching `s`, `i`, and `v=2` address
 // options before starting the manager.
 type NTCP2ManagerConfig struct {
-	Database         *networkdatabase.Database
+	Database         *netdb.Database
 	StaticPrivate    []byte
 	StaticIV         []byte
 	NetworkID        uint8
@@ -72,7 +73,7 @@ type ntcp2DialAttempt struct {
 }
 
 type NTCP2Manager struct {
-	database           *networkdatabase.Database
+	database           *netdb.Database
 	staticPrivate      [32]byte
 	staticIV           [aes.BlockSize]byte
 	networkID          uint8
@@ -454,7 +455,7 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer foundation.Hash) e
 	if !ok {
 		return ErrNTCP2Peer
 	}
-	if err := networkdatabase.ReseedRouterInfoFresh(ref.Info, uint64(bindings.Clock.Now().UnixMilli())); err != nil {
+	if err := netdb.ReseedRouterInfoFresh(ref.Info, uint64(bindings.Clock.Now().UnixMilli())); err != nil {
 		return fmt.Errorf("%w: %v", ErrNTCP2Peer, err)
 	}
 	remote, err := selectNTCP2AddressForNetwork(ref.Info, ntcp2IPv4Only(bindings.NTCP2))
@@ -668,7 +669,7 @@ func (m *NTCP2Manager) handleNTCP2RouterInfoBlock(peer foundation.Hash, data []b
 	if len(data) < 2 || data[0]&^byte(1) != 0 {
 		return false
 	}
-	info, err := networkdatabase.ParseRouterInfo(data[1:])
+	info, err := netdb.ParseRouterInfo(data[1:])
 	if err != nil || info.Hash() != peer {
 		return false
 	}
@@ -711,24 +712,24 @@ func (m *NTCP2Manager) localHandshakePayload(local LocalInfo) ([]byte, error) {
 	return payload, nil
 }
 
-func validateNTCP2HandshakePayload(payload, static []byte) (networkdatabase.RouterInfo, error) {
+func validateNTCP2HandshakePayload(payload, static []byte) (netdb.RouterInfo, error) {
 	iterator := ntcp2.NewBlockIterator(payload)
 	first, ok, err := iterator.Next()
 	if err != nil || !ok || first.Type != ntcp2.BlockRouterInfo || len(first.Data) < 2 || first.Data[0]&^byte(1) != 0 {
-		return networkdatabase.RouterInfo{}, ErrNTCP2Peer
+		return netdb.RouterInfo{}, ErrNTCP2Peer
 	}
-	info, err := networkdatabase.ParseRouterInfo(first.Data[1:])
+	info, err := netdb.ParseRouterInfo(first.Data[1:])
 	if err != nil {
-		return networkdatabase.RouterInfo{}, err
+		return netdb.RouterInfo{}, err
 	}
 	valid, err := info.Verify()
 	if err != nil || !valid || !hasNTCP2Static(info, static) {
-		return networkdatabase.RouterInfo{}, ErrNTCP2Peer
+		return netdb.RouterInfo{}, ErrNTCP2Peer
 	}
 	for {
 		block, ok, err := iterator.Next()
 		if err != nil {
-			return networkdatabase.RouterInfo{}, err
+			return netdb.RouterInfo{}, err
 		}
 		if !ok {
 			return info, nil
@@ -739,11 +740,11 @@ func validateNTCP2HandshakePayload(payload, static []byte) (networkdatabase.Rout
 		if block.Type == ntcp2.BlockPadding {
 			continue
 		}
-		return networkdatabase.RouterInfo{}, ErrNTCP2Peer
+		return netdb.RouterInfo{}, ErrNTCP2Peer
 	}
 }
 
-func (m *NTCP2Manager) admitInboundPeer(peer networkdatabase.RouterInfo, static []byte, nowMillis uint64) bool {
+func (m *NTCP2Manager) admitInboundPeer(peer netdb.RouterInfo, static []byte, nowMillis uint64) bool {
 	if !validNTCP2RouterInfoTime(peer, nowMillis) {
 		return false
 	}
@@ -761,11 +762,11 @@ func (m *NTCP2Manager) admitInboundPeer(peer networkdatabase.RouterInfo, static 
 	return m.database.AdmitRouterInfo(peer, false, nowMillis) == nil
 }
 
-func validNTCP2RouterInfoTime(info networkdatabase.RouterInfo, nowMillis uint64) bool {
-	return networkdatabase.RouterInfoFresh(info, nowMillis) == nil
+func validNTCP2RouterInfoTime(info netdb.RouterInfo, nowMillis uint64) bool {
+	return netdb.RouterInfoFresh(info, nowMillis) == nil
 }
 
-func hasNTCP2Static(info networkdatabase.RouterInfo, static []byte) bool {
+func hasNTCP2Static(info netdb.RouterInfo, static []byte) bool {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -797,7 +798,7 @@ func hasNTCP2Static(info networkdatabase.RouterInfo, static []byte) bool {
 	}
 }
 
-func hasNTCP2LocalAddress(info networkdatabase.RouterInfo, static, iv []byte) bool {
+func hasNTCP2LocalAddress(info netdb.RouterInfo, static, iv []byte) bool {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -851,11 +852,11 @@ type ntcp2Address struct {
 	iv     [aes.BlockSize]byte
 }
 
-func selectNTCP2Address(info networkdatabase.RouterInfo) (ntcp2Address, error) {
+func selectNTCP2Address(info netdb.RouterInfo) (ntcp2Address, error) {
 	return selectNTCP2AddressForNetwork(info, false)
 }
 
-func selectNTCP2AddressForNetwork(info networkdatabase.RouterInfo, preferIPv4 bool) (ntcp2Address, error) {
+func selectNTCP2AddressForNetwork(info netdb.RouterInfo, preferIPv4 bool) (ntcp2Address, error) {
 	var fallback ntcp2Address
 	found := false
 	addresses := info.Addresses()

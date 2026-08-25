@@ -3,14 +3,15 @@ package sam
 import (
 	"context"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/internal/ingress"
-	"gosuda.org/ivnp/internal/relay"
 	"net"
 	"strings"
 	"sync"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/internal/ingress"
+	"gosuda.org/ivnp/internal/relay"
 )
 
 type destinationConnection interface {

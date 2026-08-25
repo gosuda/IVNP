@@ -5,8 +5,9 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"filippo.io/edwards25519"
 	"time"
+
+	"filippo.io/edwards25519"
 )
 
 // Values were independently derived from the ELS2 specification's RFC-5869

@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"gosuda.org/ivnp/observability"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/observability"
 )
 
 const defaultNetworkID = 2
@@ -33,7 +34,7 @@ type SSU2Introducer struct {
 // callers must not supply duplicate property keys.
 type LocalRouterInfoConfig struct {
 	Local         foundation.LocalIdentityOwner
-	Database      *networkdatabase.Database
+	Database      *netdb.Database
 	Clock         Clock
 	NetworkID     uint32
 	RouterVersion string
@@ -47,8 +48,8 @@ type LocalRouterInfoConfig struct {
 // retains an immutable snapshot, and admits each successful publication into
 // the supplied local netdb.
 type LocalRouterInfo struct {
-	info     *networkdatabase.LocalRouterInfo
-	database *networkdatabase.Database
+	info     *netdb.LocalRouterInfo
+	database *netdb.Database
 	clock    Clock
 	metrics  *observability.Registry
 
@@ -73,11 +74,11 @@ func NewLocalRouterInfo(config LocalRouterInfoConfig) (*LocalRouterInfo, error) 
 	if err != nil {
 		return nil, err
 	}
-	contacts := networkdatabase.RouterInfoContacts{
+	contacts := netdb.RouterInfoContacts{
 		Peers:   append([]foundation.Hash(nil), config.Peers...),
 		Options: baseOptions,
 	}
-	info, err := networkdatabase.NewLocalRouterInfo(networkdatabase.LocalRouterInfoConfig{
+	info, err := netdb.NewLocalRouterInfo(netdb.LocalRouterInfoConfig{
 		Local:    config.Local,
 		Contacts: contacts,
 	})
@@ -105,10 +106,10 @@ func (l *LocalRouterInfo) Sign(message []byte) []byte {
 
 // Snapshot returns the last signed RouterInfo, or its zero value before the
 // first successful publication or after contact data changes.
-func (l *LocalRouterInfo) Snapshot() networkdatabase.RouterInfo {
+func (l *LocalRouterInfo) Snapshot() netdb.RouterInfo {
 	info, ok := l.info.Snapshot()
 	if !ok {
-		return networkdatabase.RouterInfo{}
+		return netdb.RouterInfo{}
 	}
 	return info
 }
@@ -274,25 +275,25 @@ func (l *LocalRouterInfo) UpdateSSU2Introducers(ctx context.Context, leases []SS
 	return nil
 }
 
-func (l *LocalRouterInfo) contactsLocked(addresses []PublishedAddress, reachability Reachability) (networkdatabase.RouterInfoContacts, error) {
+func (l *LocalRouterInfo) contactsLocked(addresses []PublishedAddress, reachability Reachability) (netdb.RouterInfoContacts, error) {
 	options, err := localRouterCapabilities(l.baseOptions, reachability)
 	if err != nil {
-		return networkdatabase.RouterInfoContacts{}, err
+		return netdb.RouterInfoContacts{}, err
 	}
-	contacts := networkdatabase.RouterInfoContacts{
-		Addresses: make([]networkdatabase.LocalRouterAddress, len(addresses)),
+	contacts := netdb.RouterInfoContacts{
+		Addresses: make([]netdb.LocalRouterAddress, len(addresses)),
 		Peers:     append([]foundation.Hash(nil), l.peers...),
 		Options:   options,
 	}
 	for index, address := range addresses {
 		options, err := mappingOptions(address.Options)
 		if err != nil {
-			return networkdatabase.RouterInfoContacts{}, err
+			return netdb.RouterInfoContacts{}, err
 		}
 		if len(address.Transport) == 0 || len(address.Transport) > 255 {
-			return networkdatabase.RouterInfoContacts{}, ErrLocalRouterInfoOptions
+			return netdb.RouterInfoContacts{}, ErrLocalRouterInfoOptions
 		}
-		contacts.Addresses[index] = networkdatabase.LocalRouterAddress{
+		contacts.Addresses[index] = netdb.LocalRouterAddress{
 			Cost:           address.Cost,
 			TransportStyle: []byte(address.Transport),
 			Options:        options,

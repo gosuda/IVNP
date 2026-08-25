@@ -6,13 +6,14 @@ import (
 	"crypto/ecdh"
 	"crypto/sha256"
 	"errors"
-	"gosuda.org/ivnp/cryptography"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/garlic/ecies"
-	"gosuda.org/ivnp/networking/internal/i2np"
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
+	garlicecies "gosuda.org/ivnp/networking/internal/garlic/ecies"
+	"gosuda.org/ivnp/networking/internal/i2np"
 )
 
 type buildCounterReader struct{ value byte }

@@ -8,22 +8,23 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"hash/crc32"
+	"io"
+	"sync"
+	"time"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/networking/internal/datagram"
 	"gosuda.org/ivnp/networking/internal/garlic"
-	"gosuda.org/ivnp/networking/internal/garlic/ecies"
+	garlicecies "gosuda.org/ivnp/networking/internal/garlic/ecies"
 	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
+	"gosuda.org/ivnp/networking/internal/netdb"
 	"gosuda.org/ivnp/networking/internal/streaming"
-	"gosuda.org/ivnp/networking/internal/streaming/tunnel"
+	streamingtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
 	"gosuda.org/ivnp/networking/internal/tunnel"
 	"gosuda.org/ivnp/observability"
-	"hash/crc32"
-	"io"
-	"sync"
-	"time"
 )
 
 var (
@@ -51,8 +52,8 @@ type MessageIDSource func() (uint32, error)
 // LeaseSet lookup manager is used only when the target is absent from Database;
 // all messages and Delivery.Payload remain borrowed until SendTunnel returns.
 type StreamingTunnelSenderConfig struct {
-	Database *networkdatabase.Database
-	Requests *networkdatabase.RequestManager
+	Database *netdb.Database
+	Requests *netdb.RequestManager
 	// Garlic is retained solely for explicitly stored legacy remote LeaseSets.
 	// Local destinations use Ratchet and LS2/ELS2 by default.
 	Garlic  *garlic.SessionManager
@@ -74,15 +75,15 @@ type StreamingTunnelSenderConfig struct {
 type RemoteELSContext struct {
 	Identity      foundation.Identity
 	Secret        []byte
-	Authorization networkdatabase.ELSClientAuthorization
+	Authorization netdb.ELSClientAuthorization
 }
 
 // StreamingTunnelSender resolves LS2 destinations and sends authenticated
 // ECIES-X25519-AEAD Garlic cloves through its owning outbound tunnel pool.
 // Legacy ElGamal remains available only for explicit remote compatibility.
 type StreamingTunnelSender struct {
-	database       *networkdatabase.Database
-	requests       *networkdatabase.RequestManager
+	database       *netdb.Database
+	requests       *netdb.RequestManager
 	garlic         *garlic.SessionManager
 	ratchet        *garlic.RatchetManager
 	tunnels        *tunnel.Runtime
@@ -290,7 +291,7 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streami
 	defer s.releaseScratch(scratch)
 	var (
 		encrypted []byte
-		lease     networkdatabase.Lease
+		lease     netdb.Lease
 	)
 	if set2 != nil {
 		if s.ratchet == nil {
@@ -409,7 +410,7 @@ func clearStreamingSenderScratch(scratch *streamingSenderScratch) {
 	clear(scratch.frame[:])
 }
 
-func (s *StreamingTunnelSender) sendEncryptedTo(ctx context.Context, lease networkdatabase.Lease, encrypted []byte, expires uint64, frame []byte) error {
+func (s *StreamingTunnelSender) sendEncryptedTo(ctx context.Context, lease netdb.Lease, encrypted []byte, expires uint64, frame []byte) error {
 	outbound, ok := s.pool.Select(tunnel.Outbound, s.now())
 	if !ok {
 		return tunnel.ErrCircuitNotFound
@@ -495,7 +496,7 @@ func (s *StreamingTunnelSender) destinationCloveSetTo(set, dataPayload []byte, d
 	cloveCount := 0
 	if shouldBundleLeaseSet(delivery) {
 		if storeType, stored, ok := s.database.StoredLeaseSet(delivery.From); ok {
-			storePayload, storeErr := networkdatabase.MarshalDatabaseStore(delivery.From, storeType, stored, 0, foundation.Hash{}, 0)
+			storePayload, storeErr := netdb.MarshalDatabaseStore(delivery.From, storeType, stored, 0, foundation.Hash{}, 0)
 			if storeErr != nil {
 				return nil, storeErr
 			}
@@ -551,7 +552,7 @@ func (s *StreamingTunnelSender) destinationRatchetPayloadTo(dst, dataPayload []b
 	used := 0
 	if shouldBundleLeaseSet(delivery) {
 		if storeType, stored, ok := s.database.StoredLeaseSet(delivery.From); ok && storeType == i2np.StoreLeaseSet2 {
-			storePayload, storeErr := networkdatabase.MarshalDatabaseStore(delivery.From, storeType, stored, 0, foundation.Hash{}, 0)
+			storePayload, storeErr := netdb.MarshalDatabaseStore(delivery.From, storeType, stored, 0, foundation.Hash{}, 0)
 			if storeErr != nil {
 				return nil, storeErr
 			}
@@ -629,7 +630,7 @@ func appendRatchetGarlicClove(dst []byte, delivery garlic.Delivery, message i2np
 	return dst[:3+bodyLen], nil
 }
 
-func (s *StreamingTunnelSender) resolveLeaseSet(ctx context.Context, target foundation.Hash) (*networkdatabase.LeaseSet2, *networkdatabase.LeaseSet, error) {
+func (s *StreamingTunnelSender) resolveLeaseSet(ctx context.Context, target foundation.Hash) (*netdb.LeaseSet2, *netdb.LeaseSet, error) {
 	s.remoteMu.RLock()
 	policy, encrypted := s.remoteELS[target]
 	if encrypted {
@@ -659,7 +660,7 @@ func (s *StreamingTunnelSender) resolveLeaseSet(ctx context.Context, target foun
 	return nil, nil, ErrLeaseSetUnavailable
 }
 
-func (s *StreamingTunnelSender) resolveEncryptedLeaseSet(ctx context.Context, policy RemoteELSContext) (*networkdatabase.LeaseSet2, *networkdatabase.LeaseSet, error) {
+func (s *StreamingTunnelSender) resolveEncryptedLeaseSet(ctx context.Context, policy RemoteELSContext) (*netdb.LeaseSet2, *netdb.LeaseSet, error) {
 	key, err := encryptedLeaseSetDHTKey(policy.Identity, policy.Secret, s.now())
 	if err != nil {
 		return nil, nil, err
@@ -674,7 +675,7 @@ func (s *StreamingTunnelSender) resolveEncryptedLeaseSet(ctx context.Context, po
 			return nil, nil, ErrLeaseSetUnavailable
 		}
 	}
-	inner, err := networkdatabase.DecryptEncryptedLeaseSet(set, policy.Identity, policy.Secret, policy.Authorization, s.now())
+	inner, err := netdb.DecryptEncryptedLeaseSet(set, policy.Identity, policy.Secret, policy.Authorization, s.now())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -701,7 +702,7 @@ func encryptedLeaseSetDHTKey(identity foundation.Identity, secret []byte, now ui
 	kind := identity.SigningKeyType()
 	public, rest := identity.SigningKeyParts()
 	if len(rest) != 0 {
-		return foundation.Hash{}, networkdatabase.ErrEncryptedLeaseSet
+		return foundation.Hash{}, netdb.ErrEncryptedLeaseSet
 	}
 	blinded, err := foundation.BlindEncryptedLeaseSetPublic(kind, public, time.UnixMilli(int64(now)), secret)
 	if err != nil {
@@ -713,40 +714,40 @@ func encryptedLeaseSetDHTKey(identity foundation.Identity, secret []byte, now ui
 	return foundation.Sum(input[:]), nil
 }
 
-func selectLease2(set networkdatabase.LeaseSet2, now uint64) (networkdatabase.Lease, error) {
-	var selected networkdatabase.Lease
+func selectLease2(set netdb.LeaseSet2, now uint64) (netdb.Lease, error) {
+	var selected netdb.Lease
 	iterator := set.Leases()
 	for {
 		lease, ok, err := iterator.Next()
 		if err != nil {
-			return networkdatabase.Lease{}, err
+			return netdb.Lease{}, err
 		}
 		if !ok {
 			break
 		}
 		end := uint64(lease.EndDate) * 1000
 		if end > now && (selected.TunnelID == 0 || end > selected.EndDate) {
-			selected = networkdatabase.Lease{Gateway: lease.Gateway, TunnelID: lease.TunnelID, EndDate: end}
+			selected = netdb.Lease{Gateway: lease.Gateway, TunnelID: lease.TunnelID, EndDate: end}
 		}
 	}
 	if selected.TunnelID == 0 {
-		return networkdatabase.Lease{}, ErrLeaseSetExpired
+		return netdb.Lease{}, ErrLeaseSetExpired
 	}
 	return selected, nil
 }
 
-func selectLegacyLease(set networkdatabase.LeaseSet, now uint64) (networkdatabase.Lease, cryptography.ElGamalPublicKey, error) {
+func selectLegacyLease(set netdb.LeaseSet, now uint64) (netdb.Lease, cryptography.ElGamalPublicKey, error) {
 	if len(set.EncryptionKey) != cryptography.ElGamalPublicKeySize {
-		return networkdatabase.Lease{}, cryptography.ElGamalPublicKey{}, ErrUnsupportedEncryption
+		return netdb.Lease{}, cryptography.ElGamalPublicKey{}, ErrUnsupportedEncryption
 	}
 	var recipient cryptography.ElGamalPublicKey
 	copy(recipient[:], set.EncryptionKey)
-	var selected networkdatabase.Lease
+	var selected netdb.Lease
 	iterator := set.Leases()
 	for {
 		lease, ok, err := iterator.Next()
 		if err != nil {
-			return networkdatabase.Lease{}, cryptography.ElGamalPublicKey{}, err
+			return netdb.Lease{}, cryptography.ElGamalPublicKey{}, err
 		}
 		if !ok {
 			break
@@ -756,7 +757,7 @@ func selectLegacyLease(set networkdatabase.LeaseSet, now uint64) (networkdatabas
 		}
 	}
 	if selected.TunnelID == 0 {
-		return networkdatabase.Lease{}, cryptography.ElGamalPublicKey{}, ErrLeaseSetExpired
+		return netdb.Lease{}, cryptography.ElGamalPublicKey{}, ErrLeaseSetExpired
 	}
 	return selected, recipient, nil
 }
@@ -1321,7 +1322,7 @@ func ratchetReplyTarget(cloves []garlic.Clove, observed foundation.Hash) (founda
 		if err != nil || store.Type != i2np.StoreLeaseSet2 {
 			continue
 		}
-		set, err := networkdatabase.ParseLeaseSet2(store.Data)
+		set, err := netdb.ParseLeaseSet2(store.Data)
 		if err != nil || set.Hash() != store.Key {
 			continue
 		}

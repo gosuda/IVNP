@@ -1,13 +1,14 @@
 package sam
 
-import "gosuda.org/ivnp/networking"
-
-import "cmp"
-
 import (
+	"gosuda.org/ivnp/networking"
+
+	"cmp"
+
 	"context"
 	"errors"
 	"fmt"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 

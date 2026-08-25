@@ -4,9 +4,10 @@ package ntcp2
 import (
 	"encoding/binary"
 	"errors"
+	"math"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
-	"math"
 )
 
 const (

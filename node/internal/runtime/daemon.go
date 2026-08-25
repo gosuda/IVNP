@@ -1,15 +1,15 @@
 // Package noderuntime composes IVNP's durable state, native router runtime, and local services.
 package noderuntime
 
-import "gosuda.org/ivnp/state"
-
-import "gosuda.org/ivnp/client"
-
-import "gosuda.org/ivnp/networking"
-
-import "cmp"
-
 import (
+	"gosuda.org/ivnp/state"
+
+	"gosuda.org/ivnp/client"
+
+	"gosuda.org/ivnp/networking"
+
+	"cmp"
+
 	"context"
 	"crypto/ecdh"
 	"crypto/ed25519"
@@ -17,6 +17,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/internal/parallelism"

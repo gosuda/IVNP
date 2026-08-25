@@ -1,8 +1,8 @@
 package main
 
-import "gosuda.org/ivnp/client"
-
 import (
+	"gosuda.org/ivnp/client"
+
 	"bufio"
 	"bytes"
 	"context"

@@ -3,14 +3,15 @@ package router
 import (
 	"context"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/interfaces/stream"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/stream"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/networking/internal/netdb"
 )
 
 var _ stream.StreamNetwork = (*Router)(nil)
@@ -80,8 +81,8 @@ func (s *fakeSockets) ListenUDP(context.Context, Endpoint) (*net.UDPConn, error)
 
 type fakeLocalInfo struct{ log *eventLog }
 
-func (l *fakeLocalInfo) Hash() foundation.Hash                { return foundation.Hash{} }
-func (l *fakeLocalInfo) Snapshot() networkdatabase.RouterInfo { return networkdatabase.RouterInfo{} }
+func (l *fakeLocalInfo) Hash() foundation.Hash      { return foundation.Hash{} }
+func (l *fakeLocalInfo) Snapshot() netdb.RouterInfo { return netdb.RouterInfo{} }
 func (l *fakeLocalInfo) ReplaceAddresses([]PublishedAddress) error {
 	l.log.add("replace-addresses")
 	return nil
@@ -166,12 +167,12 @@ type fakeReseed struct {
 	mu        sync.Mutex
 	context   context.Context
 	endpoints []string
-	database  *networkdatabase.Database
+	database  *netdb.Database
 	seenAt    uint64
 	calls     int
 }
 
-func (r *fakeReseed) FetchAny(ctx context.Context, endpoints []string, database *networkdatabase.Database, seenAt uint64) (int, error) {
+func (r *fakeReseed) FetchAny(ctx context.Context, endpoints []string, database *netdb.Database, seenAt uint64) (int, error) {
 	if r.completed != nil {
 		defer close(r.completed)
 	}
@@ -198,7 +199,7 @@ func (r *fakeReseed) FetchAny(ctx context.Context, endpoints []string, database 
 	return 0, r.err
 }
 
-func (r *fakeReseed) call() (context.Context, []string, *networkdatabase.Database, uint64) {
+func (r *fakeReseed) call() (context.Context, []string, *netdb.Database, uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.context, r.endpoints, r.database, r.seenAt
@@ -212,7 +213,7 @@ func (r *fakeReseed) callCount() int {
 
 func newRuntimeForTest(t *testing.T, sockets SocketRuntime, transport TransportManager, log *eventLog) *Router {
 	t.Helper()
-	database := networkdatabase.NewDatabase(foundation.Hash{}, 1)
+	database := netdb.NewDatabase(foundation.Hash{}, 1)
 	router, err := New(Config{
 		NTCP2: Endpoint{Network: "tcp", Address: "127.0.0.1:0"},
 		SSU2:  Endpoint{Network: "udp", Address: "127.0.0.1:0"},
@@ -229,7 +230,7 @@ func newRuntimeForTest(t *testing.T, sockets SocketRuntime, transport TransportM
 func newRuntimeWithStreamBackendForTest(t *testing.T, backend StreamBackend) *Router {
 	t.Helper()
 	log := new(eventLog)
-	database := networkdatabase.NewDatabase(foundation.Hash{}, 1)
+	database := netdb.NewDatabase(foundation.Hash{}, 1)
 	router, err := New(Config{}, Dependencies{
 		Database: database, LocalInfo: &fakeLocalInfo{log: log}, Transport: newFakeTransport(log),
 		Sockets: &fakeSockets{log: log}, Addresses: &fakeAddresses{log: log}, Clock: WallClock{},
@@ -241,9 +242,9 @@ func newRuntimeWithStreamBackendForTest(t *testing.T, backend StreamBackend) *Ro
 	return router
 }
 
-func newReseedRuntimeForTest(t *testing.T, cfg Config, log *eventLog, reseed ReseedRunner, clock Clock) (*Router, *networkdatabase.Database, *fakeTransport) {
+func newReseedRuntimeForTest(t *testing.T, cfg Config, log *eventLog, reseed ReseedRunner, clock Clock) (*Router, *netdb.Database, *fakeTransport) {
 	t.Helper()
-	database := networkdatabase.NewDatabase(foundation.Hash{}, 1)
+	database := netdb.NewDatabase(foundation.Hash{}, 1)
 	transport := newFakeTransport(log)
 	router, err := New(cfg, Dependencies{
 		Database: database, LocalInfo: &fakeLocalInfo{log: log}, Transport: transport,
@@ -510,10 +511,10 @@ func TestRouterReseedsWithFiftyTransportStaleRetainedPeers(t *testing.T) {
 	runtime, _, _ := newReseedRuntimeForTest(t, Config{
 		ReseedEndpoints: []string{"https://reseed.example/i2p"},
 	}, log, reseed, fixedClock{now: now})
-	database := networkdatabase.NewDatabase(foundation.Hash{}, 64)
+	database := netdb.NewDatabase(foundation.Hash{}, 64)
 	runtime.deps.Database = database
 
-	published := uint64(now.UnixMilli()) - networkdatabase.RouterInfoMaxAgeMillis - 1
+	published := uint64(now.UnixMilli()) - netdb.RouterInfoMaxAgeMillis - 1
 	for range reseedBootstrapMinimum {
 		local, err := foundation.GenerateLocalRouterAddress()
 		if err != nil {
@@ -523,7 +524,7 @@ func TestRouterReseedsWithFiftyTransportStaleRetainedPeers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		database.Routers().StoreVerified(networkdatabase.RouterInfo{Identity: identity, Published: published}, false, uint64(now.UnixMilli()))
+		database.Routers().StoreVerified(netdb.RouterInfo{Identity: identity, Published: published}, false, uint64(now.UnixMilli()))
 	}
 	if got := database.Routers().Len(); got != reseedBootstrapMinimum {
 		t.Fatalf("retained peers = %d, want %d", got, reseedBootstrapMinimum)

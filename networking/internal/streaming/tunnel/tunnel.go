@@ -1,11 +1,11 @@
 package streamingtunnel
 
-import "gosuda.org/ivnp/interfaces/stream"
-import "gosuda.org/ivnp/interfaces/destination"
-
-import "cmp"
-
 import (
+	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/interfaces/stream"
+
+	"cmp"
+
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -13,15 +13,16 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/parallelism"
-	"gosuda.org/ivnp/networking/internal/streaming"
 	"io"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/parallelism"
+	"gosuda.org/ivnp/networking/internal/streaming"
 )
 
 type Packet = streaming.Packet

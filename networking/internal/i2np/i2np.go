@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
 )

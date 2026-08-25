@@ -5,9 +5,10 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"encoding/base64"
-	"gosuda.org/ivnp/cryptography"
 	"strings"
 	"testing"
+
+	"gosuda.org/ivnp/cryptography"
 )
 
 func TestGenerateAddress(t *testing.T) {

@@ -4,15 +4,15 @@ package networking
 import (
 	"gosuda.org/ivnp/networking/internal/datagram"
 	"gosuda.org/ivnp/networking/internal/garlic"
-	"gosuda.org/ivnp/networking/internal/garlic/ecies"
+	garlicecies "gosuda.org/ivnp/networking/internal/garlic/ecies"
 	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_address_translation/natpmp"
-	"gosuda.org/ivnp/networking/internal/network_address_translation/upnp"
-	"gosuda.org/ivnp/networking/internal/network_database"
+	"gosuda.org/ivnp/networking/internal/nat/natpmp"
+	"gosuda.org/ivnp/networking/internal/nat/upnp"
+	"gosuda.org/ivnp/networking/internal/netdb"
 	"gosuda.org/ivnp/networking/internal/reseed"
 	"gosuda.org/ivnp/networking/internal/router"
 	"gosuda.org/ivnp/networking/internal/streaming"
-	"gosuda.org/ivnp/networking/internal/streaming/tunnel"
+	streamingtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
 	"gosuda.org/ivnp/networking/internal/tunnel"
 )
 
@@ -41,31 +41,31 @@ type (
 	NetworkAddressTranslationPortMappingMapping        = natpmp.Mapping
 	NetworkAddressTranslationPortMappingMappingRequest = natpmp.MappingRequest
 	NetworkAddressTranslationPortMappingPublicAddress  = natpmp.PublicAddress
-	NetworkDatabase                                    = networkdatabase.Database
-	NetworkDatabaseConfirmedPublisher                  = networkdatabase.ConfirmedPublisher
-	NetworkDatabaseELSClientAuthorization              = networkdatabase.ELSClientAuthorization
-	NetworkDatabaseEncryptedLeaseSet                   = networkdatabase.EncryptedLeaseSet
-	NetworkDatabaseEncryptedLeaseSetAuthorization      = networkdatabase.EncryptedLeaseSetAuthorization
-	NetworkDatabaseExplorer                            = networkdatabase.Explorer
-	NetworkDatabaseExplorerConfig                      = networkdatabase.ExplorerConfig
-	NetworkDatabaseLease                               = networkdatabase.Lease
-	NetworkDatabaseLeaseSet                            = networkdatabase.LeaseSet
-	NetworkDatabaseLeaseSet2                           = networkdatabase.LeaseSet2
-	NetworkDatabaseLeaseSetPublisherConfig             = networkdatabase.LeaseSetPublisherConfig
-	NetworkDatabaseLocalEncryptedLeaseSet              = networkdatabase.LocalEncryptedLeaseSet
-	NetworkDatabaseLookupResponderConfig               = networkdatabase.LookupResponderConfig
-	NetworkDatabaseLookupResult                        = networkdatabase.LookupResult
-	NetworkDatabaseMetaLeaseSet                        = networkdatabase.MetaLeaseSet
-	NetworkDatabasePublicationTokenRegistry            = networkdatabase.PublicationTokenRegistry
-	NetworkDatabaseRequestManager                      = networkdatabase.RequestManager
-	NetworkDatabaseRequestManagerConfig                = networkdatabase.RequestManagerConfig
-	NetworkDatabaseResponderProfiles                   = networkdatabase.ResponderProfiles
-	NetworkDatabaseRouterAddress                       = networkdatabase.RouterAddress
-	NetworkDatabaseRouterInfo                          = networkdatabase.RouterInfo
-	NetworkDatabaseRouterInfoPublisherConfig           = networkdatabase.RouterInfoPublisherConfig
-	NetworkDatabaseRouterInfoStore                     = networkdatabase.RouterInfoStore
-	NetworkDatabaseRouterInfoStoreConfig               = networkdatabase.RouterInfoStoreConfig
-	NetworkDatabaseRouterRef                           = networkdatabase.RouterRef
+	NetworkDatabase                                    = netdb.Database
+	NetworkDatabaseConfirmedPublisher                  = netdb.ConfirmedPublisher
+	NetworkDatabaseELSClientAuthorization              = netdb.ELSClientAuthorization
+	NetworkDatabaseEncryptedLeaseSet                   = netdb.EncryptedLeaseSet
+	NetworkDatabaseEncryptedLeaseSetAuthorization      = netdb.EncryptedLeaseSetAuthorization
+	NetworkDatabaseExplorer                            = netdb.Explorer
+	NetworkDatabaseExplorerConfig                      = netdb.ExplorerConfig
+	NetworkDatabaseLease                               = netdb.Lease
+	NetworkDatabaseLeaseSet                            = netdb.LeaseSet
+	NetworkDatabaseLeaseSet2                           = netdb.LeaseSet2
+	NetworkDatabaseLeaseSetPublisherConfig             = netdb.LeaseSetPublisherConfig
+	NetworkDatabaseLocalEncryptedLeaseSet              = netdb.LocalEncryptedLeaseSet
+	NetworkDatabaseLookupResponderConfig               = netdb.LookupResponderConfig
+	NetworkDatabaseLookupResult                        = netdb.LookupResult
+	NetworkDatabaseMetaLeaseSet                        = netdb.MetaLeaseSet
+	NetworkDatabasePublicationTokenRegistry            = netdb.PublicationTokenRegistry
+	NetworkDatabaseRequestManager                      = netdb.RequestManager
+	NetworkDatabaseRequestManagerConfig                = netdb.RequestManagerConfig
+	NetworkDatabaseResponderProfiles                   = netdb.ResponderProfiles
+	NetworkDatabaseRouterAddress                       = netdb.RouterAddress
+	NetworkDatabaseRouterInfo                          = netdb.RouterInfo
+	NetworkDatabaseRouterInfoPublisherConfig           = netdb.RouterInfoPublisherConfig
+	NetworkDatabaseRouterInfoStore                     = netdb.RouterInfoStore
+	NetworkDatabaseRouterInfoStoreConfig               = netdb.RouterInfoStoreConfig
+	NetworkDatabaseRouterRef                           = netdb.RouterRef
 	ReseedClient                                       = reseed.Client
 	Router                                             = router.Router
 	RouterAddressPublisher                             = router.AddressPublisher
@@ -159,11 +159,11 @@ const (
 	NetworkAddressTranslationPortMappingDefaultPort = natpmp.DefaultPort
 	NetworkAddressTranslationPortMappingTCP         = natpmp.TCP
 	NetworkAddressTranslationPortMappingUDP         = natpmp.UDP
-	NetworkDatabaseDefaultBucketCapacity            = networkdatabase.DefaultBucketCapacity
-	NetworkDatabaseLeaseSetLookup                   = networkdatabase.LeaseSetLookup
-	NetworkDatabaseMaxLeaseSetBytes                 = networkdatabase.MaxLeaseSetBytes
-	NetworkDatabasePublicationFloodfillK            = networkdatabase.PublicationFloodfillK
-	NetworkDatabaseReseedRouterInfoMaxAgeMillis     = networkdatabase.ReseedRouterInfoMaxAgeMillis
+	NetworkDatabaseDefaultBucketCapacity            = netdb.DefaultBucketCapacity
+	NetworkDatabaseLeaseSetLookup                   = netdb.LeaseSetLookup
+	NetworkDatabaseMaxLeaseSetBytes                 = netdb.MaxLeaseSetBytes
+	NetworkDatabasePublicationFloodfillK            = netdb.PublicationFloodfillK
+	NetworkDatabaseReseedRouterInfoMaxAgeMillis     = netdb.ReseedRouterInfoMaxAgeMillis
 	RouterReachabilityFirewalled                    = router.ReachabilityFirewalled
 	RouterReachabilityReachable                     = router.ReachabilityReachable
 	RouterStateFailed                               = router.StateFailed
@@ -195,29 +195,29 @@ var (
 	I2NPParseTunnelGateway                        = i2np.ParseTunnelGateway
 	I2NPParseWire                                 = i2np.ParseWire
 	NetworkAddressTranslationPortMappingNewClient = natpmp.NewClient
-	NetworkDatabaseBuildDatabaseLookup            = networkdatabase.BuildDatabaseLookup
-	NetworkDatabaseCompressRouterInfo             = networkdatabase.CompressRouterInfo
-	NetworkDatabaseErrNoFloodfill                 = networkdatabase.ErrNoFloodfill
-	NetworkDatabaseErrRequestManagerClosed        = networkdatabase.ErrRequestManagerClosed
-	NetworkDatabaseLoadStaticRouterInfos          = networkdatabase.LoadStaticRouterInfos
-	NetworkDatabaseMarshalDatabaseStore           = networkdatabase.MarshalDatabaseStore
-	NetworkDatabaseNewDatabase                    = networkdatabase.NewDatabase
-	NetworkDatabaseNewExplorer                    = networkdatabase.NewExplorer
-	NetworkDatabaseNewLeaseSetPublisher           = networkdatabase.NewLeaseSetPublisher
-	NetworkDatabaseNewLocalEncryptedLeaseSet      = networkdatabase.NewLocalEncryptedLeaseSet
-	NetworkDatabaseNewLocalLeaseSet2WithTypes     = networkdatabase.NewLocalLeaseSet2WithTypes
-	NetworkDatabaseNewLookupResponder             = networkdatabase.NewLookupResponder
-	NetworkDatabaseNewPublicationTokenRegistry    = networkdatabase.NewPublicationTokenRegistry
-	NetworkDatabaseNewRequestManager              = networkdatabase.NewRequestManager
-	NetworkDatabaseNewResponderProfiles           = networkdatabase.NewResponderProfiles
-	NetworkDatabaseNewRouterInfoPublisher         = networkdatabase.NewRouterInfoPublisher
-	NetworkDatabaseNewRouterInfoStore             = networkdatabase.NewRouterInfoStore
-	NetworkDatabaseParseEncryptedLeaseSet         = networkdatabase.ParseEncryptedLeaseSet
-	NetworkDatabaseParseLeaseSet                  = networkdatabase.ParseLeaseSet
-	NetworkDatabaseParseLeaseSet2                 = networkdatabase.ParseLeaseSet2
-	NetworkDatabaseParseMetaLeaseSet              = networkdatabase.ParseMetaLeaseSet
-	NetworkDatabaseParseRouterAddress             = networkdatabase.ParseRouterAddress
-	NetworkDatabaseParseRouterInfo                = networkdatabase.ParseRouterInfo
+	NetworkDatabaseBuildDatabaseLookup            = netdb.BuildDatabaseLookup
+	NetworkDatabaseCompressRouterInfo             = netdb.CompressRouterInfo
+	NetworkDatabaseErrNoFloodfill                 = netdb.ErrNoFloodfill
+	NetworkDatabaseErrRequestManagerClosed        = netdb.ErrRequestManagerClosed
+	NetworkDatabaseLoadStaticRouterInfos          = netdb.LoadStaticRouterInfos
+	NetworkDatabaseMarshalDatabaseStore           = netdb.MarshalDatabaseStore
+	NetworkDatabaseNewDatabase                    = netdb.NewDatabase
+	NetworkDatabaseNewExplorer                    = netdb.NewExplorer
+	NetworkDatabaseNewLeaseSetPublisher           = netdb.NewLeaseSetPublisher
+	NetworkDatabaseNewLocalEncryptedLeaseSet      = netdb.NewLocalEncryptedLeaseSet
+	NetworkDatabaseNewLocalLeaseSet2WithTypes     = netdb.NewLocalLeaseSet2WithTypes
+	NetworkDatabaseNewLookupResponder             = netdb.NewLookupResponder
+	NetworkDatabaseNewPublicationTokenRegistry    = netdb.NewPublicationTokenRegistry
+	NetworkDatabaseNewRequestManager              = netdb.NewRequestManager
+	NetworkDatabaseNewResponderProfiles           = netdb.NewResponderProfiles
+	NetworkDatabaseNewRouterInfoPublisher         = netdb.NewRouterInfoPublisher
+	NetworkDatabaseNewRouterInfoStore             = netdb.NewRouterInfoStore
+	NetworkDatabaseParseEncryptedLeaseSet         = netdb.ParseEncryptedLeaseSet
+	NetworkDatabaseParseLeaseSet                  = netdb.ParseLeaseSet
+	NetworkDatabaseParseLeaseSet2                 = netdb.ParseLeaseSet2
+	NetworkDatabaseParseMetaLeaseSet              = netdb.ParseMetaLeaseSet
+	NetworkDatabaseParseRouterAddress             = netdb.ParseRouterAddress
+	NetworkDatabaseParseRouterInfo                = netdb.ParseRouterInfo
 	ReseedDefaultSU3SignersAt                     = reseed.DefaultSU3SignersAt
 	RouterErrDataPlaneConfig                      = router.ErrDataPlaneConfig
 	RouterErrDefaultDestination                   = router.ErrDefaultDestination

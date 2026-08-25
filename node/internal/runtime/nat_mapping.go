@@ -1,10 +1,10 @@
 package noderuntime
 
-import "gosuda.org/ivnp/networking"
-
-import "cmp"
-
 import (
+	"gosuda.org/ivnp/networking"
+
+	"cmp"
+
 	"context"
 	"encoding/binary"
 	"errors"

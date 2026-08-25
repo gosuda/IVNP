@@ -3,11 +3,12 @@ package frontend
 import (
 	"bufio"
 	"context"
-	"gosuda.org/ivnp/interfaces/stream"
-	"gosuda.org/ivnp/internal/ingress"
 	"io"
 	"net"
 	"time"
+
+	"gosuda.org/ivnp/interfaces/stream"
+	"gosuda.org/ivnp/internal/ingress"
 )
 
 const defaultSOCKS5Address = "127.0.0.1:4447"

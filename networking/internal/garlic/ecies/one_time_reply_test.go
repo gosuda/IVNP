@@ -2,9 +2,10 @@ package garlicecies
 
 import (
 	"errors"
+	"testing"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/networking/internal/i2np"
-	"testing"
 )
 
 func TestOneTimeReplyExistingSessionRoundTripAndPadding(t *testing.T) {

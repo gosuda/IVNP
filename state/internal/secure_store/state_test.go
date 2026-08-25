@@ -3,10 +3,11 @@ package securestore
 import (
 	"bytes"
 	"errors"
-	"gosuda.org/ivnp/foundation"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 func TestLoadOrCreatePersistsRouterAndLegacyDestinationIdentityMaterial(t *testing.T) {

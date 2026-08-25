@@ -3,9 +3,10 @@ package noise
 import (
 	"bytes"
 	"errors"
-	"gosuda.org/ivnp/cryptography"
 	"math"
 	"testing"
+
+	"gosuda.org/ivnp/cryptography"
 )
 
 func TestSymmetricStateTranscriptAndCipher(t *testing.T) {

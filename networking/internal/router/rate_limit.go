@@ -2,12 +2,13 @@ package router
 
 import (
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/parallelism"
 	"hash/maphash"
 	"net"
 	"net/netip"
 	"sync"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/parallelism"
 )
 
 // ErrRateLimited reports that a single authenticated peer or UDP source has

@@ -3,13 +3,14 @@ package router
 import (
 	"context"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"gosuda.org/ivnp/networking/internal/tunnel"
 	"net"
 	"sync"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/networking/internal/tunnel"
 )
 
 var (
@@ -81,7 +82,7 @@ type AddressPublisherCloser interface {
 // LocalInfo owns immutable local RouterInfo snapshots and their publication.
 type LocalInfo interface {
 	Hash() foundation.Hash
-	Snapshot() networkdatabase.RouterInfo
+	Snapshot() netdb.RouterInfo
 	ReplaceAddresses([]PublishedAddress) error
 	SetReachability(Reachability)
 	Publish(context.Context) error
@@ -139,7 +140,7 @@ type StreamBackend interface {
 // ReseedRunner is reserved for router-owned bootstrap work. It intentionally
 // mirrors reseed.Client without adding a second admission path to netdb.
 type ReseedRunner interface {
-	FetchAny(context.Context, []string, *networkdatabase.Database, uint64) (int, error)
+	FetchAny(context.Context, []string, *netdb.Database, uint64) (int, error)
 }
 
 // Config defines optional native transport bindings and bootstrap reseed
@@ -168,7 +169,7 @@ type NetDBRequestHandler interface {
 }
 
 type Dependencies struct {
-	Database  *networkdatabase.Database
+	Database  *netdb.Database
 	Service   *Service
 	LocalInfo LocalInfo
 	Transport TransportManager
@@ -190,7 +191,7 @@ type Dependencies struct {
 	// and advances every destination-local request domain.
 	RequestHandler NetDBRequestHandler
 	// LookupResponder owns bounded DatabaseLookup reply work.
-	LookupResponder *networkdatabase.LookupResponder
+	LookupResponder *netdb.LookupResponder
 	// DeliveryStatusMux correlates confirmed publication and health tokens.
 	DeliveryStatusMux *DeliveryStatusMux
 	// TunnelTest handles live tunnel health probes.

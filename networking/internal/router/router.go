@@ -7,12 +7,13 @@ package router
 import (
 	"context"
 	"errors"
+	"sync"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/networking/internal/garlic"
 	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"sync"
+	"gosuda.org/ivnp/networking/internal/netdb"
 )
 
 var (
@@ -82,7 +83,7 @@ type Sinks struct {
 // filter retains each admission-time bucket for longer than the largest
 // accepted I2NP lifetime, so identifier churn cannot evict a live replay.
 type Service struct {
-	database *networkdatabase.Database
+	database *netdb.Database
 	sinks    Sinks
 	replay   replayFilter
 	limiter  rateLimiter
@@ -105,8 +106,8 @@ type preparedI2NP struct {
 	records i2np.BuildRecords
 }
 
-func NewService(database *networkdatabase.Database) *Service { return NewWithSinks(database, Sinks{}) }
-func NewWithSinks(database *networkdatabase.Database, sinks Sinks) *Service {
+func NewService(database *netdb.Database) *Service { return NewWithSinks(database, Sinks{}) }
+func NewWithSinks(database *netdb.Database, sinks Sinks) *Service {
 	return &Service{database: database, sinks: sinks}
 }
 

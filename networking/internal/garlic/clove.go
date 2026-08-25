@@ -4,6 +4,7 @@ package garlic
 import (
 	"encoding/binary"
 	"errors"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
 	"gosuda.org/ivnp/networking/internal/i2np"

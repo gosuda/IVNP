@@ -3,8 +3,9 @@ package datagram
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"gosuda.org/ivnp/foundation"
 	"testing"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 func TestV2AndV3(t *testing.T) {

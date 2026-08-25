@@ -2,11 +2,12 @@ package sam
 
 import (
 	"context"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/interfaces/destination"
 	"strings"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
 )
 
 type readinessController struct {

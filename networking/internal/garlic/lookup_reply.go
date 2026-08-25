@@ -1,11 +1,12 @@
 package garlic
 
-import "cmp"
-
 import (
+	"cmp"
+
 	"encoding/binary"
 	"errors"
-	"gosuda.org/ivnp/networking/internal/garlic/ecies"
+
+	garlicecies "gosuda.org/ivnp/networking/internal/garlic/ecies"
 	"gosuda.org/ivnp/networking/internal/i2np"
 )
 

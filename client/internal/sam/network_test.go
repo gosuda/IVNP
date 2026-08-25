@@ -7,13 +7,14 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
-	"gosuda.org/ivnp/foundation"
 	"io"
 	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 func TestNetworkStreamDialAndListen(t *testing.T) {

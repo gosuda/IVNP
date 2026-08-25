@@ -4,10 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"io"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
-	"io"
 )
 
 // StartVariableOutbound creates a historical 528-byte VariableTunnelBuild.

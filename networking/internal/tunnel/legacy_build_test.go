@@ -5,9 +5,10 @@ import (
 	"crypto/ecdh"
 	"crypto/sha256"
 	"encoding/binary"
+	"testing"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/foundation"
-	"testing"
 )
 
 func TestVariableBuildKnownRequestLayouts(t *testing.T) {

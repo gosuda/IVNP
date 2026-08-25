@@ -3,8 +3,9 @@ package router
 import (
 	"context"
 	"encoding/binary"
+
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/garlic/ecies"
+	garlicecies "gosuda.org/ivnp/networking/internal/garlic/ecies"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/tunnel"
 )

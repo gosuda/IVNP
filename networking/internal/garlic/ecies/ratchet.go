@@ -5,10 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"sync"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/observability"
-	"sync"
 )
 
 const (

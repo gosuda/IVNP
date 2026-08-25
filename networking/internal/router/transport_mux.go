@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"gosuda.org/ivnp/networking/internal/tunnel"
 	"net"
 	"sync"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/networking/internal/tunnel"
 )
 
 var (
@@ -27,7 +28,7 @@ var (
 // Send so transport selection is based only on a RouterInfo admitted by netdb.
 // Either manager may be nil, but not both.
 type TransportMuxConfig struct {
-	Database *networkdatabase.Database
+	Database *netdb.Database
 	NTCP2    TransportManager
 	SSU2     TransportManager
 }
@@ -40,7 +41,7 @@ type TransportMuxConfig struct {
 // peer could not be reached. It never retries an error from an attempted
 // message write because delivery may then be ambiguous.
 type TransportMux struct {
-	database *networkdatabase.Database
+	database *netdb.Database
 	ntcp2    TransportManager
 	ssu2     TransportManager
 
@@ -262,7 +263,7 @@ func (m *TransportMux) UsableRemoteRouterInfos(now time.Time) int {
 	_, peers := m.database.Routers().Snapshot()
 	count := 0
 	for _, peer := range peers {
-		if networkdatabase.ReseedRouterInfoFresh(peer.Info, nowMillis) != nil {
+		if netdb.ReseedRouterInfoFresh(peer.Info, nowMillis) != nil {
 			continue
 		}
 		if m.ntcp2 != nil && ntcp2RouterInfoCapable(peer.Info, nowMillis) {
@@ -294,7 +295,7 @@ func (m *TransportMux) selectManagers(peer foundation.Hash) (TransportManager, T
 	}
 	now := time.Now()
 	nowMillis := uint64(now.UnixMilli())
-	if err := networkdatabase.ReseedRouterInfoFresh(ref.Info, nowMillis); err != nil {
+	if err := netdb.ReseedRouterInfoFresh(ref.Info, nowMillis); err != nil {
 		return nil, nil, false
 	}
 
@@ -316,14 +317,14 @@ func (m *TransportMux) selectManagers(peer foundation.Hash) (TransportManager, T
 	}
 }
 
-func ntcp2RouterInfoCapable(info networkdatabase.RouterInfo, nowMillis uint64) bool {
+func ntcp2RouterInfoCapable(info netdb.RouterInfo, nowMillis uint64) bool {
 	if _, err := selectNTCP2Address(info); err != nil {
 		return false
 	}
 	return hasCurrentTransportAddress(info, nowMillis, []byte("NTCP"), []byte("NTCP2"))
 }
 
-func ssu2RouterInfoCapable(info networkdatabase.RouterInfo, now uint64) bool {
+func ssu2RouterInfoCapable(info netdb.RouterInfo, now uint64) bool {
 	if _, err := selectSSU2Keys(info); err != nil {
 		return false
 	}
@@ -334,7 +335,7 @@ func ssu2RouterInfoCapable(info networkdatabase.RouterInfo, now uint64) bool {
 	return len(selectSSU2Introducers(info, now)) != 0
 }
 
-func hasCurrentTransportAddress(info networkdatabase.RouterInfo, nowMillis uint64, first, second []byte) bool {
+func hasCurrentTransportAddress(info netdb.RouterInfo, nowMillis uint64, first, second []byte) bool {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()

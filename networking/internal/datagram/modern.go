@@ -2,10 +2,11 @@ package datagram
 
 import (
 	"encoding/binary"
+	"time"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/internal/wire"
-	"time"
 )
 
 const (

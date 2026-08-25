@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/networking/internal/streaming/tunnel"
+	streamingtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
 )
 
 type testByteBudget struct {

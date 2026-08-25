@@ -2,17 +2,18 @@ package router
 
 import (
 	"context"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"gosuda.org/ivnp/networking/internal/transport/ntcp2"
-	"gosuda.org/ivnp/networking/internal/transport/ssu2"
-	"gosuda.org/ivnp/observability"
 	"net"
 	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/networking/internal/transport/ntcp2"
+	"gosuda.org/ivnp/networking/internal/transport/ssu2"
+	"gosuda.org/ivnp/observability"
 )
 
 // The allocation ceilings document the deliberate ownership boundary: framing
@@ -171,8 +172,8 @@ func TestSSU2LiveVectorReadAuthDispatchWriteAllocations(t *testing.T) {
 	bobConn := newSSU2LoopbackConn(t)
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
-	aliceDB := networkdatabase.NewDatabase(alice.Hash(), 16)
-	bobDB := networkdatabase.NewDatabase(bob.Hash(), 16)
+	aliceDB := netdb.NewDatabase(alice.Hash(), 16)
+	bobDB := netdb.NewDatabase(bob.Hash(), 16)
 	now := uint64(time.Now().UnixMilli())
 	if err := aliceDB.AdmitRouterInfo(bob.Snapshot(), false, now); err != nil {
 		t.Fatal(err)

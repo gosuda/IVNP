@@ -1,10 +1,11 @@
 package sam
 
-import "gosuda.org/ivnp/networking"
-
 import (
+	"gosuda.org/ivnp/networking"
+
 	"encoding/base32"
 	"fmt"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/ingress"

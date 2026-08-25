@@ -1,20 +1,22 @@
 package sam
 
-import "gosuda.org/ivnp/networking"
-
 import (
+	"gosuda.org/ivnp/networking"
+
 	"bufio"
 	"context"
 	"fmt"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 
-	"gosuda.org/ivnp/observability"
 	"io"
 	"net"
 	"strings"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/observability"
 )
 
 func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {

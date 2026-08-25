@@ -14,7 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"gosuda.org/ivnp/state/internal/filesystem_store"
+	filesystemstore "gosuda.org/ivnp/state/internal/filesystem_store"
 )
 
 // ErrInvalidOperating reports a syntactically valid file with an unsafe or unsupported operating value.

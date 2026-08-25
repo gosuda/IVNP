@@ -9,16 +9,17 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/garlic"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"gosuda.org/ivnp/networking/internal/transport/noise"
-	"gosuda.org/ivnp/networking/internal/tunnel"
 	"os"
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/garlic"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/networking/internal/transport/noise"
+	"gosuda.org/ivnp/networking/internal/tunnel"
 )
 
 // TestI2PDNTCP2Interop proves an explicit DatabaseLookup round trip with a
@@ -37,7 +38,7 @@ func TestI2PDNTCP2Interop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read native i2pd RouterInfo: %v", err)
 	}
-	peer, err := networkdatabase.ParseRouterInfo(wire)
+	peer, err := netdb.ParseRouterInfo(wire)
 	if err != nil {
 		t.Fatalf("parse native i2pd RouterInfo: %v", err)
 	}
@@ -48,12 +49,12 @@ func TestI2PDNTCP2Interop(t *testing.T) {
 	if _, err = selectNTCP2Address(peer); err != nil {
 		t.Fatalf("select native i2pd NTCP2 address: %v", err)
 	}
-	if !networkdatabase.IsFloodfill(peer) {
+	if !netdb.IsFloodfill(peer) {
 		t.Fatal("native i2pd peer is not floodfill and cannot prove direct DatabaseLookup handling")
 	}
 
 	alice, aliceStatic, aliceIV := newI2PDInteropLocal(t)
-	database := networkdatabase.NewDatabase(alice.Hash(), 16)
+	database := netdb.NewDatabase(alice.Hash(), 16)
 	if err = database.AdmitRouterInfo(peer, false, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatalf("admit native i2pd RouterInfo: %v", err)
 	}
@@ -208,7 +209,7 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read native i2pd RouterInfo: %v", err)
 	}
-	peer, err := networkdatabase.ParseRouterInfo(wire)
+	peer, err := netdb.ParseRouterInfo(wire)
 	if err != nil {
 		t.Fatalf("parse native i2pd RouterInfo: %v", err)
 	}
@@ -233,7 +234,7 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read native reply-gateway i2pd RouterInfo: %v", err)
 	}
-	replyPeer, err := networkdatabase.ParseRouterInfo(replyWire)
+	replyPeer, err := netdb.ParseRouterInfo(replyWire)
 	if err != nil {
 		t.Fatalf("parse native reply-gateway i2pd RouterInfo: %v", err)
 	}
@@ -252,7 +253,7 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 	copy(replyBuildStatic[:], replyBuildKeyBytes)
 
 	alice, aliceStatic, aliceIV := newI2PDInteropLocal(t)
-	database := networkdatabase.NewDatabase(alice.Hash(), 16)
+	database := netdb.NewDatabase(alice.Hash(), 16)
 	now := func() uint64 { return uint64(time.Now().UnixMilli()) }
 	if err = database.AdmitRouterInfo(peer, false, now()); err != nil {
 		t.Fatalf("admit native endpoint i2pd RouterInfo: %v", err)
@@ -296,11 +297,11 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 			if endpoint != peer.Hash() || replyRouter != replyPeer.Hash() {
 				return fmt.Errorf("unexpected reply RouterInfo seed endpoint=%s reply=%s", endpoint, replyRouter)
 			}
-			compressed, compressErr := networkdatabase.CompressRouterInfo(replyWire)
+			compressed, compressErr := netdb.CompressRouterInfo(replyWire)
 			if compressErr != nil {
 				return compressErr
 			}
-			payload, marshalErr := networkdatabase.MarshalDatabaseStore(replyRouter, i2np.StoreRouterInfo, compressed, 0, foundation.Hash{}, 0)
+			payload, marshalErr := netdb.MarshalDatabaseStore(replyRouter, i2np.StoreRouterInfo, compressed, 0, foundation.Hash{}, 0)
 			if marshalErr != nil {
 				return marshalErr
 			}
@@ -465,12 +466,12 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 		t.Fatal("native i2pd ignored the outbound ShortTunnelBuild reply for 15 seconds")
 	}
 
-	compressed, err := networkdatabase.CompressRouterInfo(alice.Snapshot().Bytes())
+	compressed, err := netdb.CompressRouterInfo(alice.Snapshot().Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
 	const publicationToken = uint32(0x10203040)
-	storePayload, err := networkdatabase.MarshalDatabaseStore(alice.Hash(), i2np.StoreRouterInfo, compressed, publicationToken, replyPeerHash, receiveID)
+	storePayload, err := netdb.MarshalDatabaseStore(alice.Hash(), i2np.StoreRouterInfo, compressed, publicationToken, replyPeerHash, receiveID)
 	if err != nil {
 		t.Fatal(err)
 	}

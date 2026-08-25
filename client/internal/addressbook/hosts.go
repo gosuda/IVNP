@@ -4,10 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"gosuda.org/ivnp/foundation"
 	"io"
 	"os"
 	"strings"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 func normalizeName(value string) (string, error) {

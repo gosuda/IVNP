@@ -3,8 +3,9 @@ package tunnel
 import (
 	"context"
 	"errors"
-	"gosuda.org/ivnp/foundation"
 	"sync"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 var (

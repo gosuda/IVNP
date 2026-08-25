@@ -1,8 +1,8 @@
 package sam
 
-import "gosuda.org/ivnp/networking"
-
 import (
+	"gosuda.org/ivnp/networking"
+
 	"bytes"
 	"net"
 	"strconv"

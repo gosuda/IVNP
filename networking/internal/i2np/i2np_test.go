@@ -3,9 +3,10 @@ package i2np
 import (
 	"encoding/binary"
 	"errors"
+	"testing"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
-	"testing"
 )
 
 func TestStandardFrameRoundTripAndChecksum(t *testing.T) {

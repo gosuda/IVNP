@@ -3,11 +3,12 @@ package router
 import (
 	"context"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/networking/internal/streaming/tunnel"
 	"net"
 	"sync"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
+	streamingtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
 )
 
 var (

@@ -7,9 +7,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"gosuda.org/ivnp/foundation"
 	"io/fs"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 // certificates contains the current Java-I2P reseed trust set from

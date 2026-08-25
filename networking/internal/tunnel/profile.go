@@ -1,8 +1,9 @@
 package tunnel
 
 import (
-	"gosuda.org/ivnp/foundation"
 	"sync"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 const (

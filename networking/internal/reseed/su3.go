@@ -7,8 +7,9 @@ import (
 	"crypto/sha512"
 	"encoding/binary"
 	"errors"
-	"gosuda.org/ivnp/foundation"
 	"math/big"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 const (

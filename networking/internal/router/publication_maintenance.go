@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sync"
 
-	"gosuda.org/ivnp/networking/internal/network_database"
+	"gosuda.org/ivnp/networking/internal/netdb"
 )
 
 var ErrPublicationMaintenanceConfig = errors.New("router: invalid publication maintenance configuration")
@@ -28,7 +28,7 @@ type LeaseSetRefresher interface {
 // tick because its publisher already owns its precise renewal deadline.
 type PublicationMaintenanceConfig struct {
 	RouterInfo        RouterInfoRefresher
-	NetworkRouterInfo networkdatabase.ConfirmedPublisher
+	NetworkRouterInfo netdb.ConfirmedPublisher
 	LeaseSet          LeaseSetRefresher
 	Now               func() uint64
 	RouterInfoRefresh uint64
@@ -46,7 +46,7 @@ type PublicationMaintenanceResult struct {
 // Each call joins its bounded publication work before returning.
 type PublicationMaintenance struct {
 	routerInfo        RouterInfoRefresher
-	networkRouterInfo networkdatabase.ConfirmedPublisher
+	networkRouterInfo netdb.ConfirmedPublisher
 	leaseSet          LeaseSetRefresher
 	now               func() uint64
 	refresh           uint64

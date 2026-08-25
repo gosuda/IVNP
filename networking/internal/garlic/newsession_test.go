@@ -2,8 +2,9 @@ package garlic
 
 import (
 	"bytes"
-	"gosuda.org/ivnp/cryptography"
 	"testing"
+
+	"gosuda.org/ivnp/cryptography"
 )
 
 func TestNewSessionRoundTripAndTamperRejection(t *testing.T) {

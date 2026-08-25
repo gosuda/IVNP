@@ -2,9 +2,9 @@
 // status endpoints for IVNP processes.
 package registry
 
-import "cmp"
-
 import (
+	"cmp"
+
 	"errors"
 	"io"
 	"log/slog"

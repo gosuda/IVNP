@@ -1,10 +1,11 @@
 package sam
 
-import "gosuda.org/ivnp/networking"
-
 import (
+	"gosuda.org/ivnp/networking"
+
 	"bufio"
 	"context"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 

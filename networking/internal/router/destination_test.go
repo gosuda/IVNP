@@ -3,14 +3,15 @@ package router
 import (
 	"context"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/networking/internal/streaming/tunnel"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
+	streamingtunnel "gosuda.org/ivnp/networking/internal/streaming/tunnel"
 )
 
 var _ StreamBackend = (*DestinationManager)(nil)

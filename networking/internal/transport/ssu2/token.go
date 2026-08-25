@@ -2,6 +2,7 @@ package ssu2
 
 import (
 	"encoding/binary"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
 )

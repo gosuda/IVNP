@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"crypto/ecdh"
 	"errors"
+	"io"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
 	"gosuda.org/ivnp/networking/internal/transport/noise"
-	"io"
 )
 
 const (

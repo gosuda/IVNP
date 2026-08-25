@@ -3,15 +3,16 @@ package router
 import (
 	"context"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"gosuda.org/ivnp/networking/internal/transport/ssu2"
 	"net"
 	"net/netip"
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/networking/internal/transport/ssu2"
 )
 
 func TestSSU2PeerTestOutcomeTable(t *testing.T) {
@@ -166,11 +167,11 @@ func TestSSU2ManagerLivePeerTestOrchestration(t *testing.T) {
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
 	charlie, charlieStatic, charlieIntro := newSSU2TestLocal(t, charlieConn.LocalAddr().String())
-	aliceDB, bobDB, charlieDB := networkdatabase.NewDatabase(alice.Hash(), 16), networkdatabase.NewDatabase(bob.Hash(), 16), networkdatabase.NewDatabase(charlie.Hash(), 16)
+	aliceDB, bobDB, charlieDB := netdb.NewDatabase(alice.Hash(), 16), netdb.NewDatabase(bob.Hash(), 16), netdb.NewDatabase(charlie.Hash(), 16)
 	now := uint64(time.Now().UnixMilli())
 	for _, admission := range []struct {
-		database *networkdatabase.Database
-		info     networkdatabase.RouterInfo
+		database *netdb.Database
+		info     netdb.RouterInfo
 	}{
 		{aliceDB, bob.Snapshot()}, {aliceDB, charlie.Snapshot()},
 		{bobDB, charlie.Snapshot()}, {charlieDB, alice.Snapshot()},
@@ -281,12 +282,12 @@ func TestSSU2LiveRelayTagLeasePublishesRenewsAndWithdraws(t *testing.T) {
 	bobConn := newSSU2LoopbackConn(t)
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
-	aliceDB := networkdatabase.NewDatabase(alice.Hash(), 16)
-	bobDB := networkdatabase.NewDatabase(bob.Hash(), 16)
+	aliceDB := netdb.NewDatabase(alice.Hash(), 16)
+	bobDB := netdb.NewDatabase(bob.Hash(), 16)
 	now := uint64(time.Now().UnixMilli())
 	for _, admission := range []struct {
-		database *networkdatabase.Database
-		info     networkdatabase.RouterInfo
+		database *netdb.Database
+		info     netdb.RouterInfo
 	}{
 		{aliceDB, bob.Snapshot()},
 		{bobDB, alice.Snapshot()},
@@ -347,12 +348,12 @@ func TestSSU2LiveNewTokenCacheSkipsRetryAndExpires(t *testing.T) {
 	t.Cleanup(proxy.Close)
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, proxy.conn.LocalAddr().String())
-	aliceDB := networkdatabase.NewDatabase(alice.Hash(), 16)
-	bobDB := networkdatabase.NewDatabase(bob.Hash(), 16)
+	aliceDB := netdb.NewDatabase(alice.Hash(), 16)
+	bobDB := netdb.NewDatabase(bob.Hash(), 16)
 	now := uint64(time.Now().UnixMilli())
 	for _, admission := range []struct {
-		database *networkdatabase.Database
-		info     networkdatabase.RouterInfo
+		database *netdb.Database
+		info     netdb.RouterInfo
 	}{
 		{aliceDB, bob.Snapshot()},
 		{bobDB, alice.Snapshot()},
@@ -420,12 +421,12 @@ func TestSSU2LivePathMigrationRejectsWrongSourceReplayAndTimeout(t *testing.T) {
 	t.Cleanup(proxy.Close)
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, proxy.primary.LocalAddr().String())
-	aliceDB := networkdatabase.NewDatabase(alice.Hash(), 16)
-	bobDB := networkdatabase.NewDatabase(bob.Hash(), 16)
+	aliceDB := netdb.NewDatabase(alice.Hash(), 16)
+	bobDB := netdb.NewDatabase(bob.Hash(), 16)
 	now := uint64(time.Now().UnixMilli())
 	for _, admission := range []struct {
-		database *networkdatabase.Database
-		info     networkdatabase.RouterInfo
+		database *netdb.Database
+		info     netdb.RouterInfo
 	}{
 		{aliceDB, bob.Snapshot()},
 		{bobDB, alice.Snapshot()},
@@ -505,7 +506,7 @@ func newSSU2LoopbackConn(t *testing.T) *net.UDPConn {
 	return conn
 }
 
-func newSSU2LiveManager(t *testing.T, database *networkdatabase.Database, static, intro []byte, tokenLifetime, idleTimeout time.Duration) *SSU2Manager {
+func newSSU2LiveManager(t *testing.T, database *netdb.Database, static, intro []byte, tokenLifetime, idleTimeout time.Duration) *SSU2Manager {
 	t.Helper()
 	manager, err := NewSSU2Manager(SSU2ManagerConfig{
 		Database: database, StaticPrivate: static, IntroKey: intro, TokenLifetime: tokenLifetime,
@@ -569,7 +570,7 @@ func ssu2LiveMessage(id uint32) i2np.Message {
 	}
 }
 
-func hasSSU2IntroducerOptions(info networkdatabase.RouterInfo) bool {
+func hasSSU2IntroducerOptions(info netdb.RouterInfo) bool {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -807,7 +808,7 @@ func TestSSU2PeerTestOutOfSessionRolesRequireApprovedExactEndpoints(t *testing.T
 	now := time.Now()
 	alice, _, _ := newSSU2TestLocal(t, "127.0.0.1:31001")
 	charlie, _, _ := newSSU2TestLocal(t, "127.0.0.1:31002")
-	database := networkdatabase.NewDatabase(alice.Hash(), 16)
+	database := netdb.NewDatabase(alice.Hash(), 16)
 	if err := database.AdmitRouterInfo(charlie.Snapshot(), false, uint64(now.UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
@@ -857,7 +858,7 @@ func TestSSU2PeerTestOutOfSessionRolesRequireApprovedExactEndpoints(t *testing.T
 	}
 
 	remoteAlice, _, _ := newSSU2TestLocal(t, "127.0.0.1:31004")
-	charlieDB := networkdatabase.NewDatabase(charlie.Hash(), 16)
+	charlieDB := netdb.NewDatabase(charlie.Hash(), 16)
 	if err := charlieDB.AdmitRouterInfo(remoteAlice.Snapshot(), false, uint64(now.UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
@@ -1056,7 +1057,7 @@ func TestSSU2RelayPermutationRandomizesOnlyIndependentFlows(t *testing.T) {
 
 func TestSSU2PeerTestControlUsesBoundedRelayMixingClass(t *testing.T) {
 	peer, _, _ := newSSU2TestLocal(t, "127.0.0.1:31020")
-	database := networkdatabase.NewDatabase(foundation.Hash{1}, 4)
+	database := netdb.NewDatabase(foundation.Hash{1}, 4)
 	now := time.Now()
 	if err := database.AdmitRouterInfo(peer.Snapshot(), false, uint64(now.UnixMilli())); err != nil {
 		t.Fatal(err)

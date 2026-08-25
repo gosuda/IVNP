@@ -5,11 +5,12 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"testing"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/garlic"
 	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"testing"
+	"gosuda.org/ivnp/networking/internal/netdb"
 )
 
 func TestServiceValidatesExpiryAndReplay(t *testing.T) {
@@ -152,7 +153,7 @@ func TestServiceDoesNotReplayRejectPayloadOrRouteFailures(t *testing.T) {
 
 func TestServiceAcknowledgesSuccessfulDatabaseStoreOnce(t *testing.T) {
 	const now = uint64(1_000)
-	database := networkdatabase.NewDatabase(foundation.Hash{}, networkdatabase.DefaultBucketCapacity)
+	database := netdb.NewDatabase(foundation.Hash{}, netdb.DefaultBucketCapacity)
 	payload, key := testEncryptedDatabaseStore(t, 77, 9)
 	replies := 0
 	service := NewWithSinks(database, Sinks{DatabaseStoreReply: func(gateway foundation.Hash, tunnelID uint32, status i2np.DeliveryStatusMessage) error {
@@ -197,7 +198,7 @@ func testEncryptedDatabaseStore(t *testing.T, replyToken, replyTunnelID uint32) 
 	unsigned[offset+2] = 7
 	signed := append([]byte{byte(i2np.StoreEncryptedLeaseSet)}, unsigned...)
 	leaseSet := append(unsigned, ed25519.Sign(private, signed)...)
-	parsed, err := networkdatabase.ParseEncryptedLeaseSet(leaseSet)
+	parsed, err := netdb.ParseEncryptedLeaseSet(leaseSet)
 	if err != nil {
 		t.Fatal(err)
 	}

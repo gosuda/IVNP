@@ -3,6 +3,7 @@ package tunnel
 import (
 	"encoding/binary"
 	"errors"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
 )

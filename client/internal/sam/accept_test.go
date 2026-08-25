@@ -2,13 +2,14 @@ package sam
 
 import (
 	"context"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/interfaces/destination"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
 )
 
 type fifoController struct {

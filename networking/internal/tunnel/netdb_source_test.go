@@ -5,16 +5,17 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/network_database"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/netdb"
 )
 
 func TestNetDBOutboundBuildSourceRanksDistinctVerifiedPeers(t *testing.T) {
 	left := verifiedX25519Router(t, 1)
 	right := verifiedX25519Router(t, 2)
-	table := networkdatabase.NewTable(foundation.Hash{}, 8)
+	table := netdb.NewTable(foundation.Hash{}, 8)
 	table.StoreVerified(left, false, 1)
 	table.StoreVerified(right, false, 1)
 	profiles := NewPeerProfiles(PeerProfilesConfig{Window: 4})
@@ -47,7 +48,7 @@ func TestNetDBOutboundBuildSourceRanksDistinctVerifiedPeers(t *testing.T) {
 
 func TestNetDBBuildSourceRejectsReseedFreshButTransportStalePeer(t *testing.T) {
 	info := verifiedX25519Router(t, 1)
-	table := networkdatabase.NewTable(foundation.Hash{}, 8)
+	table := netdb.NewTable(foundation.Hash{}, 8)
 	table.StoreVerified(info, false, 1)
 	source, err := NewNetDBInboundBuildSource(NetDBInboundBuildSourceConfig{
 		Table: table, Profiles: NewPeerProfiles(PeerProfilesConfig{}), LocalRouter: foundation.Hash{8},
@@ -66,7 +67,7 @@ func TestNetDBBuildSourceRejectsReseedFreshButTransportStalePeer(t *testing.T) {
 func TestNetDBBuildSourceExcludesTransportIneligiblePeer(t *testing.T) {
 	unusable := verifiedX25519Router(t, 1)
 	usable := verifiedX25519Router(t, 2)
-	table := networkdatabase.NewTable(foundation.Hash{}, 8)
+	table := netdb.NewTable(foundation.Hash{}, 8)
 	table.StoreVerified(unusable, false, 1)
 	table.StoreVerified(usable, false, 1)
 	source, err := NewNetDBInboundBuildSource(NetDBInboundBuildSourceConfig{
@@ -87,7 +88,7 @@ func TestNetDBBuildSourceExcludesTransportIneligiblePeer(t *testing.T) {
 	}
 }
 
-func verifiedX25519Router(t *testing.T, marker byte) networkdatabase.RouterInfo {
+func verifiedX25519Router(t *testing.T, marker byte) netdb.RouterInfo {
 	t.Helper()
 	seed := make([]byte, ed25519.SeedSize)
 	seed[0] = marker
@@ -105,7 +106,7 @@ func verifiedX25519Router(t *testing.T, marker byte) networkdatabase.RouterInfo 
 	binary.BigEndian.PutUint64(unsigned[len(identity):], 1)
 	// The final address count, peer count, and empty mapping are already zero.
 	signature := ed25519.Sign(private, unsigned)
-	info, err := networkdatabase.ParseRouterInfo(append(unsigned, signature...))
+	info, err := netdb.ParseRouterInfo(append(unsigned, signature...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,12 +114,12 @@ func verifiedX25519Router(t *testing.T, marker byte) networkdatabase.RouterInfo 
 }
 
 func TestNetDBBuildSourcesLimitClosestCandidatesBeforeProfileRanking(t *testing.T) {
-	table := networkdatabase.NewTable(foundation.Hash{}, 8)
+	table := netdb.NewTable(foundation.Hash{}, 8)
 	for marker := byte(1); marker <= 3; marker++ {
 		table.StoreVerified(verifiedX25519Router(t, marker), false, 1)
 	}
 	target := foundation.Hash{}
-	all := table.ClosestInto(make([]networkdatabase.RouterRef, table.Len()), target)
+	all := table.ClosestInto(make([]netdb.RouterRef, table.Len()), target)
 	outside := all[2].Hash
 	profiles := NewPeerProfiles(PeerProfilesConfig{Window: 4})
 	profiles.RecordSuccess(outside, 1)
@@ -160,7 +161,7 @@ func TestNetDBBuildSourcesLimitClosestCandidatesBeforeProfileRanking(t *testing.
 }
 
 func TestNetDBBuildSourcePrefersConfiguredVerifiedBootstrapPeers(t *testing.T) {
-	table := networkdatabase.NewTable(foundation.Hash{}, 8)
+	table := netdb.NewTable(foundation.Hash{}, 8)
 	ordinary := verifiedX25519Router(t, 1)
 	preferred := verifiedX25519Router(t, 2)
 	table.StoreVerified(ordinary, false, 1)
@@ -183,7 +184,7 @@ func TestNetDBBuildSourcePrefersConfiguredVerifiedBootstrapPeers(t *testing.T) {
 }
 
 func TestNetDBOutboundBuildSourceUsesNextPreferredPeerForInboundReplyGateway(t *testing.T) {
-	table := networkdatabase.NewTable(foundation.Hash{}, 8)
+	table := netdb.NewTable(foundation.Hash{}, 8)
 	first := verifiedX25519Router(t, 1)
 	second := verifiedX25519Router(t, 2)
 	table.StoreVerified(first, false, 1)
@@ -207,7 +208,7 @@ func TestNetDBOutboundBuildSourceUsesNextPreferredPeerForInboundReplyGateway(t *
 }
 
 func TestNetDBBuildSourcesProbePreferredPeersAfterProfileQuarantine(t *testing.T) {
-	table := networkdatabase.NewTable(foundation.Hash{}, 8)
+	table := netdb.NewTable(foundation.Hash{}, 8)
 	first := verifiedX25519Router(t, 1)
 	second := verifiedX25519Router(t, 2)
 	ordinary := verifiedX25519Router(t, 3)
@@ -255,7 +256,7 @@ func TestNetDBBuildSourcesProbePreferredPeersAfterProfileQuarantine(t *testing.T
 
 func TestNetDBBuildSourceRetainsPreferredPeerOutsideRoutingKBucket(t *testing.T) {
 	local := foundation.Hash{8}
-	table := networkdatabase.NewTable(local, 5)
+	table := netdb.NewTable(local, 5)
 	preferred := verifiedX25519Router(t, 1)
 	table.StoreVerified(preferred, false, 1)
 	source, err := NewNetDBInboundBuildSource(NetDBInboundBuildSourceConfig{

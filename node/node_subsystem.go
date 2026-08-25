@@ -2,7 +2,7 @@
 package node
 
 import (
-	"gosuda.org/ivnp/node/internal/runtime"
+	noderuntime "gosuda.org/ivnp/node/internal/runtime"
 	"gosuda.org/ivnp/state"
 )
 

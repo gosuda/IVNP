@@ -3,8 +3,8 @@ package state
 
 import (
 	"gosuda.org/ivnp/state/internal/configuration"
-	"gosuda.org/ivnp/state/internal/filesystem_store"
-	"gosuda.org/ivnp/state/internal/secure_store"
+	filesystemstore "gosuda.org/ivnp/state/internal/filesystem_store"
+	securestore "gosuda.org/ivnp/state/internal/secure_store"
 )
 
 type (

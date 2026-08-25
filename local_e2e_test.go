@@ -1,8 +1,8 @@
 package ivnp
 
-import "gosuda.org/ivnp/networking"
-
 import (
+	"gosuda.org/ivnp/networking"
+
 	"bytes"
 	"context"
 	"testing"

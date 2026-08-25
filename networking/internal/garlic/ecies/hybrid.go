@@ -4,6 +4,7 @@ package garlicecies
 
 import (
 	"errors"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/networking/internal/transport/noise"
 )

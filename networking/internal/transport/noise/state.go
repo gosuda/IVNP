@@ -6,9 +6,10 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
+	"math"
+
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/wire"
-	"math"
 )
 
 var ErrNonceExhausted = errors.New("noise: ChaCha nonce exhausted")

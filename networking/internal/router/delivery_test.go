@@ -2,10 +2,11 @@ package router
 
 import (
 	"errors"
+	"testing"
+
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/garlic"
 	"gosuda.org/ivnp/networking/internal/i2np"
-	"testing"
 )
 
 func TestCloveDeliveryModesRouteToExplicitSinks(t *testing.T) {

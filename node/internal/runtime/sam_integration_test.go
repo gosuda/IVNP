@@ -1,8 +1,8 @@
 package noderuntime
 
-import "gosuda.org/ivnp/state"
-
 import (
+	"gosuda.org/ivnp/state"
+
 	"bufio"
 	"context"
 	"io"

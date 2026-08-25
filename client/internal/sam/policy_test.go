@@ -1,8 +1,9 @@
 package sam
 
 import (
-	"gosuda.org/ivnp/foundation"
 	"testing"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 func TestSessionPolicyPreservesCryptoOrderAndAuthorizationMode(t *testing.T) {

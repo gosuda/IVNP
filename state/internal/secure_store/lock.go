@@ -7,7 +7,7 @@ import (
 	"sync"
 	"syscall"
 
-	"gosuda.org/ivnp/state/internal/filesystem_store"
+	filesystemstore "gosuda.org/ivnp/state/internal/filesystem_store"
 )
 
 const lockFileName = ".ivnp.lock"

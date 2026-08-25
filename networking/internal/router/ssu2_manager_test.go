@@ -7,16 +7,17 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"gosuda.org/ivnp/networking/internal/transport/ssu2"
 	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/networking/internal/transport/ssu2"
 )
 
 func TestSSU2RouterInfoStoreUsesDeterministicGzipAndServiceAdmission(t *testing.T) {
@@ -40,7 +41,7 @@ func TestSSU2RouterInfoStoreUsesDeterministicGzipAndServiceAdmission(t *testing.
 	if len(store.Data) < 2 || store.Data[0] != 0x1f || store.Data[1] != 0x8b {
 		t.Fatalf("RouterInfo store is not gzip: %x", store.Data[:min(2, len(store.Data))])
 	}
-	database := networkdatabase.NewDatabase(foundation.Hash{}, 16)
+	database := netdb.NewDatabase(foundation.Hash{}, 16)
 	service := NewService(database)
 	if err = service.HandleI2NP(first, uint64(now.UnixMilli()), false); err != nil {
 		t.Fatalf("Service rejected SSU2 RouterInfo store: %v", err)
@@ -128,7 +129,7 @@ func TestSSU2DispatchI2NPUsesClockAndRejectsExpired(t *testing.T) {
 		t.Fatalf("dispatch now = %d, want %d", deliveredAt, now.UnixMilli())
 	}
 
-	service := NewService(networkdatabase.NewDatabase(foundation.Hash{}, 16))
+	service := NewService(netdb.NewDatabase(foundation.Hash{}, 16))
 	manager = &SSU2Manager{ctx: context.Background(), bindings: TransportBindings{
 		Clock: fixedClock{now: now},
 		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message i2np.Message, nowMillis uint64, floodfill bool) error {
@@ -156,8 +157,8 @@ func TestSSU2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
-	aliceDB := networkdatabase.NewDatabase(alice.Hash(), 16)
-	bobDB := networkdatabase.NewDatabase(bob.Hash(), 16)
+	aliceDB := netdb.NewDatabase(alice.Hash(), 16)
+	bobDB := netdb.NewDatabase(bob.Hash(), 16)
 	if err = aliceDB.AdmitRouterInfo(bob.Snapshot(), false, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatalf("admit Bob RouterInfo: %v", err)
 	}
@@ -306,13 +307,13 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	aliceDB := networkdatabase.NewDatabase(alice.Hash(), 16)
-	bobDB := networkdatabase.NewDatabase(bob.Hash(), 16)
-	charlieDB := networkdatabase.NewDatabase(charlie.Hash(), 16)
+	aliceDB := netdb.NewDatabase(alice.Hash(), 16)
+	bobDB := netdb.NewDatabase(bob.Hash(), 16)
+	charlieDB := netdb.NewDatabase(charlie.Hash(), 16)
 	now := uint64(time.Now().UnixMilli())
 	for _, admission := range []struct {
-		database *networkdatabase.Database
-		info     networkdatabase.RouterInfo
+		database *netdb.Database
+		info     netdb.RouterInfo
 	}{
 		{aliceDB, bob.Snapshot()},
 		{aliceDB, charlie.Snapshot()},
@@ -858,7 +859,7 @@ func TestValidateSSU2ConfirmedPayloadInflatesGzipRouterInfo(t *testing.T) {
 		t.Fatalf("gzip RouterInfo = %s, %x, %v", info.Hash(), gotIntro, err)
 	}
 
-	oversized := append([]byte{2, 1}, gzipSSU2TestBytes(t, make([]byte, networkdatabase.MaxRouterInfoBytes+1))...)
+	oversized := append([]byte{2, 1}, gzipSSU2TestBytes(t, make([]byte, netdb.MaxRouterInfoBytes+1))...)
 	payload, err = ssu2.MarshalBlock(nil, ssu2.BlockRouterInfo, oversized)
 	if err != nil {
 		t.Fatal(err)

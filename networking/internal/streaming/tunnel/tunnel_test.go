@@ -3,14 +3,15 @@ package streamingtunnel
 import (
 	"bytes"
 	"context"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/interfaces/stream"
-	"gosuda.org/ivnp/networking/internal/streaming"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/stream"
+	"gosuda.org/ivnp/networking/internal/streaming"
 )
 
 var (

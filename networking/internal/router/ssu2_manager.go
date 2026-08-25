@@ -1,8 +1,8 @@
 package router
 
-import "cmp"
-
 import (
+	"cmp"
+
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -13,13 +13,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/ingress"
-	"gosuda.org/ivnp/internal/parallelism"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/networking/internal/network_database"
-	"gosuda.org/ivnp/networking/internal/transport/ssu2"
-	"gosuda.org/ivnp/observability"
 	"io"
 	"log/slog"
 	"net"
@@ -30,6 +23,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/ingress"
+	"gosuda.org/ivnp/internal/parallelism"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/networking/internal/netdb"
+	"gosuda.org/ivnp/networking/internal/transport/ssu2"
+	"gosuda.org/ivnp/observability"
 )
 
 const (
@@ -86,7 +87,7 @@ type PeerTestResult struct {
 // SSU2ManagerConfig contains the private static X25519 key and public SSU2
 // introduction key advertised in the local RouterInfo's SSU/SSU2 address.
 type SSU2ManagerConfig struct {
-	Database         *networkdatabase.Database
+	Database         *netdb.Database
 	StaticPrivate    []byte
 	IntroKey         []byte
 	NetworkID        uint8
@@ -116,7 +117,7 @@ type SSU2ManagerConfig struct {
 // Confirmed reassembly, RouterInfo/static-key binding validation, and delivery
 // of complete SSU2 I2NP blocks to Router's transport callback.
 type SSU2Manager struct {
-	database             *networkdatabase.Database
+	database             *netdb.Database
 	staticPrivate        []byte
 	introKey             []byte
 	tokenSecret          [sha256.Size]byte
@@ -562,7 +563,7 @@ type ssu2RelayStoreJob struct {
 	request   ssu2.RelayRequest
 	alice     *ssu2TransportSession
 	charlie   *ssu2TransportSession
-	aliceInfo networkdatabase.RouterInfo
+	aliceInfo netdb.RouterInfo
 	localHash foundation.Hash
 }
 
@@ -1521,7 +1522,7 @@ func (m *SSU2Manager) newOutboundLocked(peer foundation.Hash) (*ssu2OutboundPend
 	if !ok {
 		return nil, ErrSSU2Peer
 	}
-	if err := networkdatabase.ReseedRouterInfoFresh(ref.Info, uint64(m.nowLocked().UnixMilli())); err != nil {
+	if err := netdb.ReseedRouterInfoFresh(ref.Info, uint64(m.nowLocked().UnixMilli())); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSSU2Peer, err)
 	}
 	address, err := selectSSU2Address(ref.Info)
@@ -2228,7 +2229,7 @@ func (m *SSU2Manager) peerTestEndpointApproved(peer foundation.Hash, source neti
 	return ok && peerTestInfoEndpointApproved(info, source)
 }
 
-func peerTestInfoEndpointApproved(info networkdatabase.RouterInfo, source netip.AddrPort) bool {
+func peerTestInfoEndpointApproved(info netdb.RouterInfo, source netip.AddrPort) bool {
 	if !source.IsValid() {
 		return false
 	}
@@ -3164,7 +3165,7 @@ func (m *SSU2Manager) localConfirmedPayload() ([]byte, error) {
 	return ssu2.MarshalBlock(nil, ssu2.BlockRouterInfo, data)
 }
 
-func (m *SSU2Manager) admitSSU2Peer(peer networkdatabase.RouterInfo, static []byte, now time.Time) bool {
+func (m *SSU2Manager) admitSSU2Peer(peer netdb.RouterInfo, static []byte, now time.Time) bool {
 	if !validSSU2RouterInfoTime(peer, uint64(now.UnixMilli())) || m.database == nil {
 		return false
 	}
@@ -4304,7 +4305,7 @@ func (s *ssu2TransportSession) expireFragments(now time.Time) {
 	}
 }
 
-func validateSSU2ConfirmedPayload(payload, static []byte) (networkdatabase.RouterInfo, []byte, error) {
+func validateSSU2ConfirmedPayload(payload, static []byte) (netdb.RouterInfo, []byte, error) {
 	iterator := ssu2.NewBlockIterator(payload)
 	first, ok, err := iterator.Next()
 	validateSSU2ConfirmedPayloadRejected := err != nil || !ok || first.Type != ssu2.BlockRouterInfo || len(first.Data) < 2 || first.Data[0]&^byte(3) != 0
@@ -4312,34 +4313,34 @@ func validateSSU2ConfirmedPayload(payload, static []byte) (networkdatabase.Route
 		validateSSU2ConfirmedPayloadRejected = first.Data[1] != 1
 	}
 	if validateSSU2ConfirmedPayloadRejected {
-		return networkdatabase.RouterInfo{}, nil, ErrSSU2Peer
+		return netdb.RouterInfo{}, nil, ErrSSU2Peer
 	}
 	raw := first.Data[2:]
 	if first.Data[0]&2 != 0 {
 		raw, err = inflateSSU2RouterInfo(raw)
 		if err != nil {
-			return networkdatabase.RouterInfo{}, nil, ErrSSU2Peer
+			return netdb.RouterInfo{}, nil, ErrSSU2Peer
 		}
 	}
-	info, err := networkdatabase.ParseRouterInfo(raw)
+	info, err := netdb.ParseRouterInfo(raw)
 	if err != nil {
-		return networkdatabase.RouterInfo{}, nil, ErrSSU2Peer
+		return netdb.RouterInfo{}, nil, ErrSSU2Peer
 	}
 	valid, err := info.Verify()
 	intro, found := ssu2IntroForStatic(info, static)
 	if err != nil || !valid || !found {
-		return networkdatabase.RouterInfo{}, nil, ErrSSU2Peer
+		return netdb.RouterInfo{}, nil, ErrSSU2Peer
 	}
 	for {
 		block, ok, err := iterator.Next()
 		if err != nil {
-			return networkdatabase.RouterInfo{}, nil, ErrSSU2Peer
+			return netdb.RouterInfo{}, nil, ErrSSU2Peer
 		}
 		if !ok {
 			return info, intro, nil
 		}
 		if block.Type != ssu2.BlockOptions && block.Type != ssu2.BlockPadding && block.Type != ssu2.BlockI2NP {
-			return networkdatabase.RouterInfo{}, nil, ErrSSU2Peer
+			return netdb.RouterInfo{}, nil, ErrSSU2Peer
 		}
 	}
 }
@@ -4351,31 +4352,31 @@ func inflateSSU2RouterInfo(compressed []byte) ([]byte, error) {
 	}
 	reader.Multistream(false)
 	defer reader.Close()
-	raw, err := io.ReadAll(io.LimitReader(reader, int64(networkdatabase.MaxRouterInfoBytes+1)))
+	raw, err := io.ReadAll(io.LimitReader(reader, int64(netdb.MaxRouterInfoBytes+1)))
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) > networkdatabase.MaxRouterInfoBytes {
-		return nil, networkdatabase.ErrRouterInfoTooLarge
+	if len(raw) > netdb.MaxRouterInfoBytes {
+		return nil, netdb.ErrRouterInfoTooLarge
 	}
 	return raw, nil
 }
 
-func validSSU2RouterInfoTime(info networkdatabase.RouterInfo, nowMillis uint64) bool {
-	return networkdatabase.RouterInfoFresh(info, nowMillis) == nil
+func validSSU2RouterInfoTime(info netdb.RouterInfo, nowMillis uint64) bool {
+	return netdb.RouterInfoFresh(info, nowMillis) == nil
 }
 
-func hasSSU2Keys(info networkdatabase.RouterInfo, static, intro []byte) bool {
+func hasSSU2Keys(info netdb.RouterInfo, static, intro []byte) bool {
 	candidate, ok := ssu2IntroForStatic(info, static)
 	return ok && bytes.Equal(candidate, intro)
 }
 
-func hasSSU2Static(info networkdatabase.RouterInfo, static []byte) bool {
+func hasSSU2Static(info netdb.RouterInfo, static []byte) bool {
 	_, ok := ssu2IntroForStatic(info, static)
 	return ok
 }
 
-func ssu2IntroForStatic(info networkdatabase.RouterInfo, static []byte) ([]byte, bool) {
+func ssu2IntroForStatic(info netdb.RouterInfo, static []byte) ([]byte, bool) {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -4413,7 +4414,7 @@ func ssu2IntroForStatic(info networkdatabase.RouterInfo, static []byte) ([]byte,
 	}
 }
 
-func selectSSU2Address(info networkdatabase.RouterInfo) (ssu2PeerAddress, error) {
+func selectSSU2Address(info netdb.RouterInfo) (ssu2PeerAddress, error) {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()

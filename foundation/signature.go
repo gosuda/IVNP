@@ -11,10 +11,11 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"errors"
-	"gosuda.org/ivnp/cryptography"
-	"gosuda.org/ivnp/internal/pool"
 	"math/big"
 	"sync"
+
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/internal/pool"
 )
 
 var ErrUnsupportedSignature = errors.New("i2p: signature type is not supported by the configured crypto backend")

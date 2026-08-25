@@ -8,16 +8,17 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
-	"gosuda.org/ivnp/cryptography"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/garlic/ecies"
-	"gosuda.org/ivnp/networking/internal/i2np"
-	"gosuda.org/ivnp/observability"
 	"io"
 	"log/slog"
 	"slices"
 	"strconv"
 	"sync"
+
+	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/foundation"
+	garlicecies "gosuda.org/ivnp/networking/internal/garlic/ecies"
+	"gosuda.org/ivnp/networking/internal/i2np"
+	"gosuda.org/ivnp/observability"
 )
 
 const (

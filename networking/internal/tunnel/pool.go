@@ -2,10 +2,11 @@ package tunnel
 
 import (
 	"errors"
-	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking/internal/i2np"
 	"sort"
 	"sync"
+
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/i2np"
 )
 
 var (

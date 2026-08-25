@@ -2,8 +2,9 @@ package securestore
 
 import (
 	"bytes"
-	"gosuda.org/ivnp/foundation"
 	"testing"
+
+	"gosuda.org/ivnp/foundation"
 )
 
 func TestEncryptedLeaseSetPolicyPersistsForLegacyEd25519Destination(t *testing.T) {
