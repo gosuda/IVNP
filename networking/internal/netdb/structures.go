@@ -10,15 +10,18 @@ import (
 
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/wire"
+	"gosuda.org/ivnp/networking/internal/i2np"
 )
 
 const (
-	MaxRouterInfoBytes = 4 * 1024 // Java I2P RouterInfo.MAX_UNCOMPRESSED_SIZE
-	MaxLeaseSetBytes   = 4 * 1024 // encrypted LS2 payload limit and retained-state bound
-	MaxRouterAddresses = 255      // one-byte address count
-	MaxRouterPeers     = 255      // one-byte peer hash count
-	MaxLeases          = 16       // specified limit for LeaseSet and LeaseSet2
-	MaxLeaseSet2Keys   = 8        // Java I2P LeaseSet2.MAX_KEYS
+	MaxRouterInfoBytes            = 4 * 1024 // Java I2P RouterInfo.MAX_UNCOMPRESSED_SIZE
+	MaxLeaseSetBytes              = i2np.I2PDMaxPayload
+	MinEncryptedLeaseSetDataBytes = 24   // Java I2P EncryptedLeaseSet.MIN_ENCRYPTED_SIZE
+	MaxEncryptedLeaseSetDataBytes = 4096 // Java I2P EncryptedLeaseSet.MAX_ENCRYPTED_SIZE
+	MaxRouterAddresses            = 255  // one-byte address count
+	MaxRouterPeers                = 255  // one-byte peer hash count
+	MaxLeases                     = 16   // Java I2P LeaseSet.MAX_LEASES
+	MaxLeaseSet2Keys              = 8    // Java I2P LeaseSet2.MAX_KEYS
 )
 
 var (

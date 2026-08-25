@@ -33,7 +33,8 @@ func SealOneTimeReplyExistingSession(dst []byte, key [cryptography.ChaChaKeySize
 	if err := validateOneTimeReply(reply); err != nil {
 		return nil, err
 	}
-	if reply.Header.Expiration < 1000 || reply.Header.Expiration/1000 > uint64(^uint32(0)) {
+	expiration, ok := i2np.EncodeTransportExpiration(reply.Header.Expiration)
+	if !ok || reply.Header.Expiration < 1000 {
 		return nil, ErrOneTimeReplyExistingSession
 	}
 	cloveLen := oneTimeReplyCloveHeader + len(reply.Payload)
@@ -57,7 +58,7 @@ func SealOneTimeReplyExistingSession(dst []byte, key [cryptography.ChaChaKeySize
 	plaintext[3] = 0 // LOCAL delivery instruction
 	plaintext[4] = byte(reply.Header.Type)
 	binary.BigEndian.PutUint32(plaintext[5:9], reply.Header.ID)
-	binary.BigEndian.PutUint32(plaintext[9:13], uint32(reply.Header.Expiration/1000))
+	binary.BigEndian.PutUint32(plaintext[9:13], expiration)
 	copy(plaintext[13:13+len(reply.Payload)], reply.Payload)
 	if len(padding) != 0 {
 		off := oneTimeReplyBlockHeader + cloveLen
@@ -124,7 +125,7 @@ func parseOneTimeReplyExistingSession(plaintext []byte) (i2np.Message, error) {
 		Header: i2np.Header{
 			Type:       i2np.MessageType(clove[1]),
 			ID:         binary.BigEndian.Uint32(clove[2:6]),
-			Expiration: uint64(binary.BigEndian.Uint32(clove[6:10])) * 1000,
+			Expiration: i2np.DecodeTransportExpiration(binary.BigEndian.Uint32(clove[6:10])),
 		},
 		Payload: clove[oneTimeReplyCloveHeader:],
 	}

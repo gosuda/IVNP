@@ -510,15 +510,12 @@ func (r *Runtime) SendBlock(ctx context.Context, circuitID uint32, block Block) 
 }
 
 // HandleGateway injects an embedded standard I2NP message received in a
-// TunnelGateway envelope into the named local gateway circuit. Gateway
-// envelopes are control-plane inputs, so the frame is revalidated before it
-// enters the high-throughput tunnel block path.
+// TunnelGateway envelope into the named local gateway circuit. ParseTunnelGateway
+// has already validated the embedded frame; its payload remains opaque so an
+// IBGW can relay future I2NP types exactly as Java I2P does.
 func (r *Runtime) HandleGateway(tunnelID uint32, message i2np.Message) error {
 	if r == nil {
 		return ErrCircuitNotFound
-	}
-	if err := i2np.ValidatePayload(message.Header.Type, message.Payload); err != nil {
-		return err
 	}
 	buffer, ok := packet.Acquire(0, message.EncodedLen())
 	if !ok {

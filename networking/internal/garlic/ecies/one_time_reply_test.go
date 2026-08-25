@@ -25,8 +25,14 @@ func TestOneTimeReplyExistingSessionRoundTripAndPadding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opened.Header != reply.Header || string(opened.Payload) != string(reply.Payload) {
-		t.Fatalf("opened reply = %#v, want %#v", opened, reply)
+	expiration, ok := i2np.EncodeTransportExpiration(reply.Header.Expiration)
+	if !ok {
+		t.Fatal("test expiration is not encodable")
+	}
+	wantHeader := reply.Header
+	wantHeader.Expiration = i2np.DecodeTransportExpiration(expiration)
+	if opened.Header != wantHeader || string(opened.Payload) != string(reply.Payload) {
+		t.Fatalf("opened reply = %#v, want header %#v payload %x", opened, wantHeader, reply.Payload)
 	}
 	if len(opened.Payload) != 0 && &opened.Payload[0] != &plaintext[13] {
 		t.Fatal("opened payload does not alias caller storage")

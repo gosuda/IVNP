@@ -69,8 +69,9 @@ func TestBuildReplySenderSendsTunnelGatewayDirectlyToIBGW(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opened.Header != reply.Header || string(opened.Payload) != string(reply.Payload) {
-		t.Fatalf("opened reply = %#v", opened)
+	wantHeader := javaTransportHeader(t, reply.Header)
+	if opened.Header != wantHeader || string(opened.Payload) != string(reply.Payload) {
+		t.Fatalf("opened reply = %#v, want header %#v", opened, wantHeader)
 	}
 	if received.Header.Type != 0 {
 		t.Fatal("remote reply was delivered to local Service")
@@ -148,8 +149,9 @@ func TestBuildReplySenderGarlicSurvivesServiceAdmissionWithoutReplayCollision(t 
 	if err = service.HandleI2NP(tunnelGateway.Embedded, now, false); err != nil {
 		t.Fatal(err)
 	}
-	if received.Header != reply.Header || string(received.Payload) != string(reply.Payload) {
-		t.Fatalf("admitted reply = %#v", received)
+	wantHeader := javaTransportHeader(t, reply.Header)
+	if received.Header != wantHeader || string(received.Payload) != string(reply.Payload) {
+		t.Fatalf("admitted reply = %#v, want header %#v", received, wantHeader)
 	}
 }
 
@@ -218,4 +220,14 @@ func buildReplyIDSource(ids ...uint32) MessageIDSource {
 		index++
 		return id, nil
 	}
+}
+
+func javaTransportHeader(t testing.TB, header i2np.Header) i2np.Header {
+	t.Helper()
+	seconds, ok := i2np.EncodeTransportExpiration(header.Expiration)
+	if !ok {
+		t.Fatal("test expiration is not encodable")
+	}
+	header.Expiration = i2np.DecodeTransportExpiration(seconds)
+	return header
 }

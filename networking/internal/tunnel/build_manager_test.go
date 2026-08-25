@@ -604,7 +604,7 @@ func TestBuildManagerAllowsLocalEndpointTransitOnly(t *testing.T) {
 	}
 }
 
-func TestBuildManagerGatewayTransitInjectsTunnelGateway(t *testing.T) {
+func TestBuildManagerGatewayTransitRelaysUnknownI2NP(t *testing.T) {
 	const now = uint64(1_700_000_000_000)
 	sender := new(captureTunnelSender)
 	runtime := NewRuntime(RuntimeConfig{Sender: sender, Now: func() uint64 { return now }})
@@ -627,9 +627,9 @@ func TestBuildManagerGatewayTransitInjectsTunnelGateway(t *testing.T) {
 	if err = manager.installTransitCircuit(request, keys, now); err != nil {
 		t.Fatal(err)
 	}
-	statusPayload := make([]byte, 12)
-	status := i2np.Message{Header: i2np.Header{Type: i2np.DeliveryStatus, ID: 77, Expiration: now + 1}, Payload: statusPayload}
-	if err = runtime.HandleGateway(request.ReceiveTunnelID, status); err != nil {
+	const futureType i2np.MessageType = 222
+	unknown := i2np.Message{Header: i2np.Header{Type: futureType, ID: 77, Expiration: now + 1}, Payload: []byte{1, 2, 3}}
+	if err = runtime.HandleGateway(request.ReceiveTunnelID, unknown); err != nil {
 		t.Fatal(err)
 	}
 	sent := sender.take()
@@ -652,8 +652,8 @@ func TestBuildManagerGatewayTransitInjectsTunnelGateway(t *testing.T) {
 		t.Fatalf("gateway payload blocks = %d, %#v, %v", count, blocks[0], err)
 	}
 	delivered, used, err := i2np.ParseUnchecked(blocks[0].Data)
-	if err != nil || used != len(blocks[0].Data) || delivered.Header.Type != i2np.DeliveryStatus || delivered.Header.ID != status.Header.ID {
-		t.Fatalf("gateway payload delivery = %#v, %d, %v", delivered, used, err)
+	if err != nil || used != len(blocks[0].Data) || delivered.Header.Type != futureType || delivered.Header.ID != unknown.Header.ID || !bytes.Equal(delivered.Payload, unknown.Payload) {
+		t.Fatalf("unknown gateway payload delivery = %#v, %d, %v", delivered, used, err)
 	}
 }
 

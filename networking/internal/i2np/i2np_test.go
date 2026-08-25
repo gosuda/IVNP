@@ -58,8 +58,33 @@ func TestParseRejectsDeclaredTruncation(t *testing.T) {
 	}
 }
 
+func TestTransportExpirationMatchesJavaRounding(t *testing.T) {
+	tests := []struct {
+		milliseconds uint64
+		seconds      uint32
+		decoded      uint64
+	}{
+		{milliseconds: 1_499, seconds: 1, decoded: 1_500},
+		{milliseconds: 1_500, seconds: 2, decoded: 2_500},
+		{milliseconds: uint64(^uint32(0))*1000 + 499, seconds: ^uint32(0), decoded: uint64(^uint32(0))*1000 + 500},
+	}
+	for _, tt := range tests {
+		seconds, ok := EncodeTransportExpiration(tt.milliseconds)
+		if !ok || seconds != tt.seconds {
+			t.Fatalf("EncodeTransportExpiration(%d) = %d, %t, want %d, true", tt.milliseconds, seconds, ok, tt.seconds)
+		}
+		if decoded := DecodeTransportExpiration(seconds); decoded != tt.decoded {
+			t.Fatalf("DecodeTransportExpiration(%d) = %d, want %d", seconds, decoded, tt.decoded)
+		}
+	}
+	if _, ok := EncodeTransportExpiration(uint64(^uint32(0))*1000 + 500); ok {
+		t.Fatal("overflowing rounded expiration was accepted")
+	}
+}
+
 func TestDatabaseStoreConditionalLengths(t *testing.T) {
 	payload := make([]byte, 37+2+3)
+	payload[0] = 1
 	payload[32] = byte(StoreRouterInfo)
 	binary.BigEndian.PutUint16(payload[37:39], 3)
 	copy(payload[39:], []byte{1, 2, 3})
@@ -100,6 +125,7 @@ type databaseLookupLayoutCase struct {
 	exclusions int
 	tags       int
 	tagLen     int
+	publicKey  bool
 }
 
 func TestDatabaseLookupReplyLayouts(t *testing.T) {
@@ -107,7 +133,7 @@ func TestDatabaseLookupReplyLayouts(t *testing.T) {
 		{name: "unencrypted tunnel", flags: lookupDelivery | lookupTypeMask, exclusions: 1},
 		{name: "legacy AES", flags: lookupEncrypted | 0x04, exclusions: 2, tags: 2, tagLen: 32},
 		{name: "ECIES AEAD", flags: lookupDelivery | lookupECIES | 0x08, exclusions: 1, tags: 1, tagLen: 8},
-		{name: "ECIES with legacy bit", flags: lookupEncrypted | lookupECIES, tags: 1, tagLen: 8},
+		{name: "ECIES public key", flags: lookupEncrypted | lookupECIES, publicKey: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -122,7 +148,9 @@ func testDatabaseLookupReplyLayout(t *testing.T, test databaseLookupLayoutCase) 
 	if test.flags&lookupDelivery != 0 {
 		size += 4
 	}
-	if test.tagLen != 0 {
+	if test.publicKey {
+		size += 32
+	} else if test.tagLen != 0 {
 		size += 32 + 1 + test.tags*test.tagLen
 	}
 	payload := make([]byte, size)
@@ -138,7 +166,9 @@ func testDatabaseLookupReplyLayout(t *testing.T, test databaseLookupLayoutCase) 
 		payload[off+i*foundation.HashLength] = byte(i + 1)
 	}
 	off += test.exclusions * foundation.HashLength
-	if test.tagLen != 0 {
+	if test.publicKey {
+		payload[off] = 0xa5
+	} else if test.tagLen != 0 {
 		payload[off] = 0xa5
 		off += 32
 		payload[off] = byte(test.tags)
@@ -155,6 +185,14 @@ func testDatabaseLookupReplyLayout(t *testing.T, test databaseLookupLayoutCase) 
 	if test.flags&lookupDelivery != 0 && lookup.ReplyTunnelID != 1 {
 		t.Fatalf("reply tunnel = %d, want 1", lookup.ReplyTunnelID)
 	}
+	if test.publicKey {
+		if len(lookup.ReplyPublicKey) != 32 || lookup.ReplyPublicKey[0] != 0xa5 {
+			t.Fatalf("public reply key = %x, want 32 bytes beginning a5", lookup.ReplyPublicKey)
+		}
+		if len(lookup.ReplyKey) != 0 || len(lookup.ReplyTags) != 0 {
+			t.Fatalf("public-key lookup also populated symmetric fields: key %x tags %x", lookup.ReplyKey, lookup.ReplyTags)
+		}
+	}
 	if test.tagLen != 0 && (lookup.ReplyKey[0] != 0xa5 || lookup.ReplyTags[0] != 0x5a) {
 		t.Fatalf("reply fields = %x %x", lookup.ReplyKey, lookup.ReplyTags)
 	}
@@ -163,12 +201,15 @@ func testDatabaseLookupReplyLayout(t *testing.T, test databaseLookupLayoutCase) 
 func TestDatabaseLookupRejectsMalformedReplyLayouts(t *testing.T) {
 	makeLookup := func(flags uint8, tags, tagLen int) []byte {
 		size := 67
-		if tagLen != 0 {
+		publicKey := flags&(lookupEncrypted|lookupECIES) == lookupEncrypted|lookupECIES
+		if publicKey {
+			size += 32
+		} else if tagLen != 0 {
 			size += 32 + 1 + tags*tagLen
 		}
 		payload := make([]byte, size)
 		payload[64] = flags
-		if tagLen != 0 {
+		if tagLen != 0 && !publicKey {
 			payload[67+32] = byte(tags)
 		}
 		return payload
@@ -183,6 +224,8 @@ func TestDatabaseLookupRejectsMalformedReplyLayouts(t *testing.T) {
 		{name: "trailing ECIES", payload: append(makeLookup(lookupECIES, 1, 8), 1), want: ErrMalformed},
 		{name: "truncated ECIES", payload: makeLookup(lookupECIES, 1, 8)[:107], want: wire.ErrShortBuffer},
 		{name: "multiple ECIES tags", payload: makeLookup(lookupECIES, 2, 16), want: ErrMalformed},
+		{name: "trailing ECIES public key", payload: append(makeLookup(lookupEncrypted|lookupECIES, 0, 0), 1), want: ErrMalformed},
+		{name: "truncated ECIES public key", payload: makeLookup(lookupEncrypted|lookupECIES, 0, 0)[:98], want: wire.ErrShortBuffer},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -291,6 +334,7 @@ func TestParseStandardHasNoHeapAllocation(t *testing.T) {
 
 func TestDatabaseStoreDefersJavaRouterInfoInflationCap(t *testing.T) {
 	compressed := make([]byte, 37+2+MaxRouterInfoBytes+1)
+	compressed[0] = 1
 	compressed[32] = byte(StoreRouterInfo)
 	binary.BigEndian.PutUint16(compressed[37:39], MaxRouterInfoBytes+1)
 	store, err := ParseDatabaseStore(compressed)
@@ -299,10 +343,20 @@ func TestDatabaseStoreDefersJavaRouterInfoInflationCap(t *testing.T) {
 	}
 }
 
-func TestDatabaseStoreEnforcesLeaseSetObjectCap(t *testing.T) {
-	leaseSet := make([]byte, 37+I2PDMaxLeaseSetBytes+1)
+func TestDatabaseStoreAcceptsLeaseSetOverFourKiB(t *testing.T) {
+	leaseSet := make([]byte, 37+4*1024+1)
+	leaseSet[0] = 1
 	leaseSet[32] = byte(StoreLeaseSet)
-	if _, err := ParseDatabaseStore(leaseSet); !errors.Is(err, ErrPayloadTooLarge) {
-		t.Fatalf("LeaseSet cap = %v", err)
+	store, err := ParseDatabaseStore(leaseSet)
+	if err != nil || len(store.Data) != 4*1024+1 {
+		t.Fatalf("large LeaseSet = %d bytes, %v", len(store.Data), err)
+	}
+}
+
+func TestDatabaseStoreRejectsAllZeroKeyBeforePayloadParsing(t *testing.T) {
+	payload := make([]byte, 37+1)
+	payload[32] = byte(StoreLeaseSet)
+	if _, err := ParseDatabaseStore(payload); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("all-zero DatabaseStore key error = %v, want ErrMalformed", err)
 	}
 }

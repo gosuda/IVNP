@@ -26,7 +26,11 @@ var ErrRouterMessage = errors.New("garlic/ecies: invalid router message")
 // router-to-router messages. The plaintext contains one DateTime block and one
 // LOCAL Garlic Clove carrying the supplied I2NP message.
 func SealRouterMessage(dst []byte, remoteStatic []byte, message i2np.Message, now uint64, random io.Reader) ([]byte, error) {
-	if len(remoteStatic) != 32 || random == nil || message.Header.Expiration < 1000 || message.Header.Expiration/1000 > uint64(^uint32(0)) || now/1000 > uint64(^uint32(0)) {
+	if len(remoteStatic) != 32 || random == nil || message.Header.Expiration < 1000 || now/1000 > uint64(^uint32(0)) {
+		return nil, ErrRouterMessage
+	}
+	expiration, ok := i2np.EncodeTransportExpiration(message.Header.Expiration)
+	if !ok {
 		return nil, ErrRouterMessage
 	}
 	plainLen := 7 + 3 + routerMessageHeader + len(message.Payload)
@@ -64,7 +68,7 @@ func SealRouterMessage(dst []byte, remoteStatic []byte, message i2np.Message, no
 	plain[off] = 0
 	plain[off+1] = byte(message.Header.Type)
 	binary.BigEndian.PutUint32(plain[off+2:off+6], message.Header.ID)
-	binary.BigEndian.PutUint32(plain[off+6:off+10], uint32(message.Header.Expiration/1000))
+	binary.BigEndian.PutUint32(plain[off+6:off+10], expiration)
 	copy(plain[off+10:], message.Payload)
 	sealed, err := state.EncryptAndHash(dst[32:32+plainLen+cryptography.ChaChaTagSize], plain)
 	if err != nil {
@@ -121,7 +125,7 @@ func OpenRouterMessage(dst, staticPrivate, encrypted []byte, now uint64) (i2np.M
 	}
 	message := i2np.Message{Header: i2np.Header{
 		Type: i2np.MessageType(plain[off+1]), ID: binary.BigEndian.Uint32(plain[off+2 : off+6]),
-		Expiration: uint64(binary.BigEndian.Uint32(plain[off+6:off+10])) * 1000,
+		Expiration: i2np.DecodeTransportExpiration(binary.BigEndian.Uint32(plain[off+6 : off+10])),
 	}, Payload: plain[off+10:]}
 	if err = i2np.ValidatePayload(message.Header.Type, message.Payload); err != nil {
 		return i2np.Message{}, ErrRouterMessage

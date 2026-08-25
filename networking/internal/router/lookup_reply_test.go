@@ -134,7 +134,7 @@ func TestLookupResponderRejectsIncompleteEncryptedMetadataAtIngress(t *testing.T
 		t.Fatal(err)
 	}
 	lookup := i2np.DatabaseLookupMessage{
-		From: foundation.Hash{2}, Flags: 1 << 4, ReplyKey: make([]byte, 32), ReplyTagLen: 8,
+		Key: foundation.Hash{3}, From: foundation.Hash{2}, Flags: 1 << 4, ReplyKey: make([]byte, 32), ReplyTagLen: 8,
 	}
 	if err = responder.Enqueue(lookup); !errors.Is(err, garlic.ErrLookupReply) {
 		t.Fatalf("Enqueue() = %v, want ErrLookupReply", err)

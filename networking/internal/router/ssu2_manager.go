@@ -4133,13 +4133,17 @@ func forEachSSU2I2NPFragment(scratch []byte, message i2np.Message, send func([]b
 	if len(message.Payload) > i2np.I2PDMaxPayload {
 		return i2np.ErrPayloadTooLarge
 	}
+	expiration, ok := i2np.EncodeTransportExpiration(message.Header.Expiration)
+	if !ok {
+		return i2np.ErrPayloadTooLarge
+	}
 	firstDataLen := i2np.TransportHeaderLen + maxFirst
 	first := scratch[:3+firstDataLen]
 	first[0] = ssu2.BlockFirstFragment
 	binary.BigEndian.PutUint16(first[1:3], uint16(firstDataLen))
 	first[3] = byte(message.Header.Type)
 	binary.BigEndian.PutUint32(first[4:8], message.Header.ID)
-	binary.BigEndian.PutUint32(first[8:12], uint32(message.Header.Expiration/1000))
+	binary.BigEndian.PutUint32(first[8:12], expiration)
 	copy(first[3+i2np.TransportHeaderLen:], message.Payload[:maxFirst])
 	if err := send(first); err != nil {
 		return err
@@ -4171,6 +4175,10 @@ func marshalSSU2I2NPTo(dst []byte, message i2np.Message) ([]byte, error) {
 	if len(message.Payload) > i2np.I2PDMaxPayload {
 		return nil, i2np.ErrPayloadTooLarge
 	}
+	expiration, ok := i2np.EncodeTransportExpiration(message.Header.Expiration)
+	if !ok {
+		return nil, i2np.ErrPayloadTooLarge
+	}
 	dataLen := i2np.TransportHeaderLen + len(message.Payload)
 	frameLen := 3 + dataLen
 	if len(dst) < frameLen {
@@ -4181,7 +4189,7 @@ func marshalSSU2I2NPTo(dst []byte, message i2np.Message) ([]byte, error) {
 	binary.BigEndian.PutUint16(payload[1:3], uint16(dataLen))
 	payload[3] = byte(message.Header.Type)
 	binary.BigEndian.PutUint32(payload[4:8], message.Header.ID)
-	binary.BigEndian.PutUint32(payload[8:12], uint32(message.Header.Expiration/1000))
+	binary.BigEndian.PutUint32(payload[8:12], expiration)
 	copy(payload[3+i2np.TransportHeaderLen:], message.Payload)
 	return payload, nil
 }
@@ -4195,7 +4203,7 @@ func decodeSSU2I2NP(data []byte) (i2np.Message, error) {
 	// that batch is returned to the socket, so this is a synchronous borrowed
 	// payload view, not an ownership transfer.
 	return i2np.Message{
-		Header:  i2np.Header{Type: header.Type, ID: header.ID, Expiration: uint64(header.Expiration) * 1000},
+		Header:  i2np.Header{Type: header.Type, ID: header.ID, Expiration: header.Expiration},
 		Payload: data[i2np.TransportHeaderLen:],
 	}, nil
 }
@@ -4287,7 +4295,7 @@ func (s *ssu2TransportSession) addFragment(kind uint8, data []byte, now time.Tim
 		return i2np.Message{}, false, ErrSSU2Peer
 	}
 	message := i2np.Message{
-		Header:  i2np.Header{Type: assembly.header.Type, ID: assembly.header.ID, Expiration: uint64(assembly.header.Expiration) * 1000},
+		Header:  i2np.Header{Type: assembly.header.Type, ID: assembly.header.ID, Expiration: assembly.header.Expiration},
 		Payload: payload,
 	}
 	delete(s.fragments, id)

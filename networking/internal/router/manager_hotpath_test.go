@@ -129,8 +129,14 @@ func TestSSU2ManagerDataFramingUsesReceiveAndSessionBuffers(t *testing.T) {
 		return packet
 	}
 	manager.handleData(session, seal())
-	if delivered.Header != message.Header || string(delivered.Payload) != string(message.Payload) {
-		t.Fatalf("SSU2 data framing delivered %#v, want %#v", delivered, message)
+	wantHeader := message.Header
+	expiration, ok := i2np.EncodeTransportExpiration(message.Header.Expiration)
+	if !ok {
+		t.Fatal("test expiration is not encodable")
+	}
+	wantHeader.Expiration = i2np.DecodeTransportExpiration(expiration)
+	if delivered.Header != wantHeader || string(delivered.Payload) != string(message.Payload) {
+		t.Fatalf("SSU2 data framing delivered %#v, want header %#v payload %x", delivered, wantHeader, message.Payload)
 	}
 	if got := testing.AllocsPerRun(100, func() { manager.handleData(session, seal()) }); got > 3 {
 		t.Fatalf("SSU2 data receive allocations = %v, want at most AEAD seal/open and ACK ownership", got)

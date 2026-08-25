@@ -46,3 +46,20 @@ func TestDeliveryRejectsReservedFlags(t *testing.T) {
 		t.Fatalf("reserved flags = %v", err)
 	}
 }
+
+func TestDeliveryIgnoresDeprecatedEncryptedFlag(t *testing.T) {
+	wire := make([]byte, 1+32)
+	wire[0] = 0x80 | byte(DeliveryDestination<<5)
+	wire[1] = 0xa5
+	delivery, used, err := ParseDelivery(wire)
+	if err != nil || used != len(wire) || delivery.Type != DeliveryDestination || delivery.To[0] != 0xa5 {
+		t.Fatalf("deprecated encrypted flag parse = %#v, %d, %v", delivery, used, err)
+	}
+	encoded := make([]byte, delivery.EncodedLen())
+	if _, err = delivery.MarshalTo(encoded); err != nil {
+		t.Fatal(err)
+	}
+	if encoded[0] != byte(DeliveryDestination<<5) || encoded[1] != 0xa5 {
+		t.Fatalf("delivery serialized deprecated flag: %x", encoded)
+	}
+}

@@ -609,7 +609,11 @@ func appendRatchetGarlicClove(dst []byte, delivery garlic.Delivery, message i2np
 		return nil, garlic.ErrDelivery
 	}
 	bodyLen := deliveryLen + 9 + len(message.Payload)
-	if bodyLen > int(^uint16(0)) || len(dst) < 3+bodyLen || message.Header.Expiration/1000 > uint64(^uint32(0)) {
+	if bodyLen > int(^uint16(0)) || len(dst) < 3+bodyLen {
+		return nil, i2np.ErrPayloadTooLarge
+	}
+	expiration, ok := i2np.EncodeTransportExpiration(message.Header.Expiration)
+	if !ok {
 		return nil, i2np.ErrPayloadTooLarge
 	}
 	dst[0] = 11
@@ -625,7 +629,7 @@ func appendRatchetGarlicClove(dst []byte, delivery garlic.Delivery, message i2np
 	}
 	dst[off] = byte(message.Header.Type)
 	binary.BigEndian.PutUint32(dst[off+1:off+5], message.Header.ID)
-	binary.BigEndian.PutUint32(dst[off+5:off+9], uint32(message.Header.Expiration/1000))
+	binary.BigEndian.PutUint32(dst[off+5:off+9], expiration)
 	copy(dst[off+9:], message.Payload)
 	return dst[:3+bodyLen], nil
 }

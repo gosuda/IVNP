@@ -19,9 +19,6 @@ const (
 // instruction. MarshalTo validates that its fields can be represented.
 func (d Delivery) EncodedLen() int {
 	n := 1
-	if d.Encrypted {
-		n += 32
-	}
 	if d.Type != DeliveryLocal {
 		n += 32
 	}
@@ -35,10 +32,7 @@ func (d Delivery) EncodedLen() int {
 }
 
 func (d Delivery) valid() bool {
-	if d.Type > DeliveryTunnel || (d.Encrypted && len(d.SessionKey) != 32) {
-		return false
-	}
-	return d.Type != DeliveryTunnel || d.TunnelID != 0
+	return d.Type <= DeliveryTunnel && (d.Type != DeliveryTunnel || d.TunnelID != 0)
 }
 
 // MarshalTo writes d's legacy Garlic delivery instruction into dst without
@@ -52,9 +46,6 @@ func (d Delivery) MarshalTo(dst []byte) (int, error) {
 	}
 
 	flags := byte(d.Type << 5)
-	if d.Encrypted {
-		flags |= 0x80
-	}
 	if d.Delay != 0 {
 		flags |= 0x10
 	}
@@ -63,9 +54,6 @@ func (d Delivery) MarshalTo(dst []byte) (int, error) {
 	}
 	dst[0] = flags
 	off := 1
-	if d.Encrypted {
-		off += copy(dst[off:], d.SessionKey)
-	}
 	if d.Type != DeliveryLocal {
 		off += copy(dst[off:], d.To[:])
 	}

@@ -109,7 +109,11 @@ func TestNTCP2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 		t.Fatalf("Send after message-level rejection: %v", err)
 	}
 	wantHeader := message.Header
-	wantHeader.Expiration = wantHeader.Expiration / 1000 * 1000
+	expiration, ok := i2np.EncodeTransportExpiration(message.Header.Expiration)
+	if !ok {
+		t.Fatal("test expiration is not encodable")
+	}
+	wantHeader.Expiration = i2np.DecodeTransportExpiration(expiration)
 	select {
 	case got := <-received:
 		if got.Header != wantHeader {
@@ -177,8 +181,12 @@ func TestNTCP2I2NPUsesTransportHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	expiration, ok := i2np.EncodeTransportExpiration(message.Header.Expiration)
+	if !ok {
+		t.Fatal("test expiration is not encodable")
+	}
 	if decoded.Header.Type != message.Header.Type || decoded.Header.ID != message.Header.ID ||
-		decoded.Header.Expiration != message.Header.Expiration/1000*1000 ||
+		decoded.Header.Expiration != i2np.DecodeTransportExpiration(expiration) ||
 		string(decoded.Payload) != string(message.Payload) {
 		t.Fatalf("NTCP2 transport I2NP round trip = %#v, want %#v", decoded, message)
 	}

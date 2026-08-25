@@ -29,8 +29,14 @@ func TestRouterMessageNoiseNRoundTripAndTamperRejection(t *testing.T) {
 		t.Fatalf("Noise-N packet length = %d", len(sealed))
 	}
 	opened, err := OpenRouterMessage(make([]byte, len(sealed)), privateBytes, sealed, now)
-	if err != nil || opened.Header != message.Header || !bytes.Equal(opened.Payload, message.Payload) {
-		t.Fatalf("opened router message = %#v, %v", opened, err)
+	expiration, ok := i2np.EncodeTransportExpiration(message.Header.Expiration)
+	if !ok {
+		t.Fatal("test expiration is not encodable")
+	}
+	wantHeader := message.Header
+	wantHeader.Expiration = i2np.DecodeTransportExpiration(expiration)
+	if err != nil || opened.Header != wantHeader || !bytes.Equal(opened.Payload, message.Payload) {
+		t.Fatalf("opened router message = %#v, want header %#v: %v", opened, wantHeader, err)
 	}
 	tampered := append([]byte(nil), sealed...)
 	tampered[len(tampered)-1] ^= 1

@@ -166,7 +166,7 @@ func TestLookupResponderRejectsEncryptedReplyWithoutWrapper(t *testing.T) {
 	if err = responder.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err = responder.Enqueue(i2np.DatabaseLookupMessage{From: from, Flags: uint8(RouterInfoLookup<<2) | 1<<1}); !errors.Is(err, ErrLookupReplyEncryptionUnsupported) {
+	if err = responder.Enqueue(i2np.DatabaseLookupMessage{Key: foundation.Hash{3}, From: from, Flags: uint8(RouterInfoLookup<<2) | 1<<1}); !errors.Is(err, ErrLookupReplyEncryptionUnsupported) {
 		t.Fatalf("Enqueue() = %v, want ErrLookupReplyEncryptionUnsupported", err)
 	}
 	if err = responder.Close(); err != nil {
@@ -179,5 +179,65 @@ func TestLookupResponderRejectsEncryptedReplyWithoutWrapper(t *testing.T) {
 	defer capture.mu.Unlock()
 	if len(capture.messages) != 0 {
 		t.Fatalf("plaintext fallback = %#v", capture.messages)
+	}
+}
+
+func TestLookupResponderLeavesPreliminaryECIESPublicKeyReplyPlaintext(t *testing.T) {
+	capture := &lookupReplyCapture{ready: make(chan struct{}, 1)}
+	local, from, key := foundation.Hash{1}, foundation.Hash{2}, foundation.Hash{3}
+	responder, err := NewLookupResponder(LookupResponderConfig{Database: NewDatabase(local, DefaultBucketCapacity), Sender: capture, Local: local, Now: func() uint64 { return 100 }, Random: func() uint32 { return 7 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = responder.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lookup := i2np.DatabaseLookupMessage{
+		Key: key, From: from, Flags: uint8(RouterInfoLookup<<2) | 1<<1 | 1<<4, ReplyPublicKey: make([]byte, 32),
+	}
+	if err = responder.Enqueue(lookup); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-capture.ready:
+	case <-time.After(time.Second):
+		t.Fatal("responder did not send public-key lookup reply")
+	}
+	if err = responder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = responder.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	if len(capture.messages) != 1 || capture.messages[0].Header.Type != i2np.DatabaseSearchReply {
+		t.Fatalf("public-key lookup reply = %#v, want plaintext DatabaseSearchReply", capture.messages)
+	}
+}
+
+func TestLookupResponderDropsAllZeroSearchKey(t *testing.T) {
+	capture := &lookupReplyCapture{ready: make(chan struct{}, 1)}
+	local := foundation.Hash{1}
+	responder, err := NewLookupResponder(LookupResponderConfig{Database: NewDatabase(local, DefaultBucketCapacity), Sender: capture, Local: local, Now: func() uint64 { return 100 }, Random: func() uint32 { return 7 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = responder.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err = responder.Enqueue(i2np.DatabaseLookupMessage{From: foundation.Hash{2}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = responder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = responder.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	if len(capture.messages) != 0 {
+		t.Fatalf("all-zero lookup produced replies: %#v", capture.messages)
 	}
 }

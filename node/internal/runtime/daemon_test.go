@@ -547,8 +547,10 @@ func TestMuxRequestSenderUsesEstablishedOutboundTunnel(t *testing.T) {
 		t.Fatalf("garlic payload length = %d", len(decoded.Payload))
 	}
 	inner, err := networking.GarlicECIESOpenRouterMessage(make([]byte, len(decoded.Payload)), private.Bytes(), decoded.Payload[4:], 100)
-	if err != nil || inner.Header != message.Header {
-		t.Fatalf("embedded lookup = %#v, %v", inner.Header, err)
+	wantHeader := message.Header
+	wantHeader.Expiration = 1_500
+	if err != nil || inner.Header != wantHeader {
+		t.Fatalf("embedded lookup = %#v, want %#v: %v", inner.Header, wantHeader, err)
 	}
 	lookup, err := networking.I2NPParseDatabaseLookup(inner.Payload)
 	muxRequestSenderUsesEstablishedOutboundTunnelRejected := err != nil || lookup.From != replyGateway || lookup.ReplyTunnelID != 7 || !lookup.ReplyUsesECIES() ||

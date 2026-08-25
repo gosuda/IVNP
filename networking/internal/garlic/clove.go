@@ -26,12 +26,10 @@ const (
 
 // Delivery is a zero-copy Garlic clove delivery instruction.
 type Delivery struct {
-	Type       DeliveryType
-	Encrypted  bool
-	SessionKey []byte
-	To         foundation.Hash
-	TunnelID   uint32
-	Delay      uint32
+	Type     DeliveryType
+	To       foundation.Hash
+	TunnelID uint32
+	Delay    uint32
 }
 
 func ParseDelivery(src []byte) (Delivery, int, error) {
@@ -42,15 +40,8 @@ func ParseDelivery(src []byte) (Delivery, int, error) {
 	if flags&0x0f != 0 {
 		return Delivery{}, 0, ErrDelivery
 	}
-	out := Delivery{Encrypted: flags&0x80 != 0, Type: DeliveryType((flags >> 5) & 3)}
+	out := Delivery{Type: DeliveryType((flags >> 5) & 3)}
 	off := 1
-	if out.Encrypted {
-		if len(src)-off < 32 {
-			return Delivery{}, 0, wire.ErrShortBuffer
-		}
-		out.SessionKey = src[off : off+32]
-		off += 32
-	}
 	if out.Type != DeliveryLocal {
 		if len(src)-off < 32 {
 			return Delivery{}, 0, wire.ErrShortBuffer

@@ -190,11 +190,11 @@ func testEncryptedDatabaseStore(t *testing.T, replyToken, replyTunnelID uint32) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	unsigned := make([]byte, 2+len(public)+4+2+2+2+1)
+	unsigned := make([]byte, 2+len(public)+4+2+2+2+netdb.MinEncryptedLeaseSetDataBytes)
 	binary.BigEndian.PutUint16(unsigned[:2], uint16(foundation.SigningRedDSASHA512Ed25519))
 	copy(unsigned[2:], public)
 	offset := 2 + len(public) + 4 + 2 + 2
-	binary.BigEndian.PutUint16(unsigned[offset:offset+2], 1)
+	binary.BigEndian.PutUint16(unsigned[offset:offset+2], netdb.MinEncryptedLeaseSetDataBytes)
 	unsigned[offset+2] = 7
 	signed := append([]byte{byte(i2np.StoreEncryptedLeaseSet)}, unsigned...)
 	leaseSet := append(unsigned, ed25519.Sign(private, signed)...)

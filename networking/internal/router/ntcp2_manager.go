@@ -953,13 +953,17 @@ func marshalNTCP2I2NPTo(dst []byte, message i2np.Message) error {
 	if len(message.Payload) > i2np.I2PDMaxPayload {
 		return i2np.ErrPayloadTooLarge
 	}
+	expiration, ok := i2np.EncodeTransportExpiration(message.Header.Expiration)
+	if !ok {
+		return i2np.ErrPayloadTooLarge
+	}
 	encodedLen := i2np.TransportHeaderLen + len(message.Payload)
 	if len(dst) < encodedLen {
 		return io.ErrShortBuffer
 	}
 	dst[0] = byte(message.Header.Type)
 	binary.BigEndian.PutUint32(dst[1:5], message.Header.ID)
-	binary.BigEndian.PutUint32(dst[5:9], uint32(message.Header.Expiration/1000))
+	binary.BigEndian.PutUint32(dst[5:9], expiration)
 	copy(dst[i2np.TransportHeaderLen:encodedLen], message.Payload)
 	return nil
 }
@@ -970,7 +974,7 @@ func decodeNTCP2I2NP(data []byte) (i2np.Message, error) {
 		return i2np.Message{}, err
 	}
 	return i2np.Message{
-		Header:  i2np.Header{Type: header.Type, ID: header.ID, Expiration: uint64(header.Expiration) * 1000},
+		Header:  i2np.Header{Type: header.Type, ID: header.ID, Expiration: header.Expiration},
 		Payload: append([]byte(nil), data[i2np.TransportHeaderLen:]...),
 	}, nil
 }

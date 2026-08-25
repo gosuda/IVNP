@@ -219,7 +219,11 @@ func TestSSU2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 	}
 	select {
 	case got := <-received:
-		if got.Header.Type != message.Header.Type || got.Header.ID != message.Header.ID || got.Header.Expiration != message.Header.Expiration/1000*1000 {
+		expiration, ok := i2np.EncodeTransportExpiration(message.Header.Expiration)
+		if !ok {
+			t.Fatal("test expiration is not encodable")
+		}
+		if got.Header.Type != message.Header.Type || got.Header.ID != message.Header.ID || got.Header.Expiration != i2np.DecodeTransportExpiration(expiration) {
 			t.Fatalf("received I2NP header = %#v, want %#v", got.Header, message.Header)
 		}
 	case <-time.After(5 * time.Second):

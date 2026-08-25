@@ -32,8 +32,7 @@ const (
 	// Java I2P 2.13.0 accepts RouterInfo after decompression through 4 KiB.
 	// The compressed DatabaseStore field is bounded separately by its uint16
 	// length and the enclosing I2NP payload.
-	MaxRouterInfoBytes   = 4 * 1024
-	I2PDMaxLeaseSetBytes = 4 * 1024
+	MaxRouterInfoBytes = 4 * 1024
 
 	TunnelDataPayloadLen     = 1024
 	TunnelDataMessageLen     = 4 + TunnelDataPayloadLen
@@ -173,21 +172,21 @@ func marshalStandard(dst []byte, header Header, payload []byte, payloadLimit int
 // the authenticated transport encapsulation.
 type ShortHeader struct {
 	Type       MessageType
-	Expiration uint32 // seconds since Unix epoch
+	Expiration uint64 // milliseconds since Unix epoch, centered in the encoded second
 }
 
 func ParseLegacyShortHeader(src []byte) (ShortHeader, error) {
 	if len(src) < LegacyShortHeaderLen {
 		return ShortHeader{}, wire.ErrShortBuffer
 	}
-	return ShortHeader{Type: MessageType(src[0]), Expiration: binary.BigEndian.Uint32(src[1:5])}, nil
+	return ShortHeader{Type: MessageType(src[0]), Expiration: DecodeTransportExpiration(binary.BigEndian.Uint32(src[1:5]))}, nil
 }
 
 // TransportHeader is the NTCP2, SSU2, and ECIES garlic nine-byte header.
 type TransportHeader struct {
 	Type       MessageType
 	ID         uint32
-	Expiration uint32 // seconds since Unix epoch
+	Expiration uint64 // milliseconds since Unix epoch, centered in the encoded second
 }
 
 func ParseTransportHeader(src []byte) (TransportHeader, error) {
@@ -197,8 +196,24 @@ func ParseTransportHeader(src []byte) (TransportHeader, error) {
 	return TransportHeader{
 		Type:       MessageType(src[0]),
 		ID:         binary.BigEndian.Uint32(src[1:5]),
-		Expiration: binary.BigEndian.Uint32(src[5:9]),
+		Expiration: DecodeTransportExpiration(binary.BigEndian.Uint32(src[5:9])),
 	}, nil
+}
+
+// EncodeTransportExpiration matches Java I2P's nearest-second transport
+// encoding. The bool is false when the rounded value exceeds uint32.
+func EncodeTransportExpiration(milliseconds uint64) (uint32, bool) {
+	const max = uint64(^uint32(0))
+	if milliseconds > max*1000+499 {
+		return 0, false
+	}
+	return uint32((milliseconds + 500) / 1000), true
+}
+
+// DecodeTransportExpiration places a seconds-only wire value at the middle of
+// its represented second, matching Java I2P's transport parser.
+func DecodeTransportExpiration(seconds uint32) uint64 {
+	return uint64(seconds)*1000 + 500
 }
 
 // StoreType identifies the data carried by a DatabaseStore message.
@@ -234,6 +249,9 @@ func ParseDatabaseStore(payload []byte) (DatabaseStoreMessage, error) {
 	}
 	var out DatabaseStoreMessage
 	copy(out.Key[:], payload[:32])
+	if out.Key == (foundation.Hash{}) {
+		return DatabaseStoreMessage{}, ErrMalformed
+	}
 	out.RawType = payload[32]
 	out.Type = StoreType(out.RawType & 0x0f)
 	switch out.Type {
@@ -266,9 +284,6 @@ func ParseDatabaseStore(payload []byte) (DatabaseStoreMessage, error) {
 	if off == len(payload) {
 		return DatabaseStoreMessage{}, ErrMalformed
 	}
-	if out.Type != StoreRouterInfo && len(payload)-off > I2PDMaxLeaseSetBytes {
-		return DatabaseStoreMessage{}, ErrPayloadTooLarge
-	}
 	out.Data = payload[off:]
 	return out, nil
 }
@@ -282,15 +297,18 @@ const (
 
 // DatabaseLookupMessage is a validated DatabaseLookup payload. Excluded and
 // ReplyTags are flat 32-byte or tag-length records to avoid per-record slices.
+// ReplyPublicKey is set only for Java I2P's preliminary 0x12 ECIES public-key
+// form, which carries no reply-key tag.
 type DatabaseLookupMessage struct {
-	Key           foundation.Hash
-	From          foundation.Hash
-	Flags         uint8
-	ReplyTunnelID uint32
-	Excluded      []byte
-	ReplyKey      []byte
-	ReplyTags     []byte
-	ReplyTagLen   uint8
+	Key            foundation.Hash
+	From           foundation.Hash
+	Flags          uint8
+	ReplyTunnelID  uint32
+	Excluded       []byte
+	ReplyKey       []byte
+	ReplyTags      []byte
+	ReplyTagLen    uint8
+	ReplyPublicKey []byte
 }
 
 func (m DatabaseLookupMessage) ExcludedCount() int { return len(m.Excluded) / foundation.HashLength }
@@ -310,21 +328,21 @@ func (m DatabaseLookupMessage) ReplyEncrypted() bool {
 	return m.Flags&(lookupEncrypted|lookupECIES) != 0
 }
 
-// ReplyUsesECIES reports whether the request selected the authenticated
-// ChaCha20-Poly1305 one-time ratchet reply format. It has precedence over the
-// legacy AES flag when both bits are present.
-func (m DatabaseLookupMessage) ReplyUsesECIES() bool { return m.Flags&lookupECIES != 0 }
+// ReplyUsesECIES reports whether the request supplied an existing-session
+// ChaCha20-Poly1305 key and one ratchet tag.
+func (m DatabaseLookupMessage) ReplyUsesECIES() bool {
+	return m.Flags&(lookupEncrypted|lookupECIES) == lookupECIES
+}
 
-// ReplyEncryptionMode reports the requested reply encryption mode. ECIES has
-// precedence when both legacy and ECIES flags are present.
+// ReplyUsesECIESPublicKey reports whether both encryption flags selected Java
+// I2P's preliminary ECIES public-key form. This form has no reply-key tag.
+func (m DatabaseLookupMessage) ReplyUsesECIESPublicKey() bool {
+	return m.Flags&(lookupEncrypted|lookupECIES) == lookupEncrypted|lookupECIES
+}
+
+// ReplyEncryptionMode returns the exact reply-encryption flag combination.
 func (m DatabaseLookupMessage) ReplyEncryptionMode() uint8 {
-	if m.Flags&lookupECIES != 0 {
-		return lookupECIES
-	}
-	if m.Flags&lookupEncrypted != 0 {
-		return lookupEncrypted
-	}
-	return 0
+	return m.Flags & (lookupEncrypted | lookupECIES)
 }
 
 // LookupType returns the two-bit wire lookup type.
@@ -376,6 +394,16 @@ func ParseDatabaseLookup(payload []byte) (DatabaseLookupMessage, error) {
 		if off != len(payload) {
 			return DatabaseLookupMessage{}, ErrMalformed
 		}
+		return out, nil
+	}
+	if out.ReplyUsesECIESPublicKey() {
+		if len(payload)-off < 32 {
+			return DatabaseLookupMessage{}, wire.ErrShortBuffer
+		}
+		if len(payload)-off != 32 {
+			return DatabaseLookupMessage{}, ErrMalformed
+		}
+		out.ReplyPublicKey = payload[off:]
 		return out, nil
 	}
 

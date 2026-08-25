@@ -35,18 +35,34 @@ func TestMetaLeaseSetBoundsAndFlags(t *testing.T) {
 
 func TestEncryptedLeaseSetLengthValidation(t *testing.T) {
 	keyLen, _ := foundation.SigningDSASHA1.PublicKeyLen()
-	payload := make([]byte, 2+keyLen+4+2+2+2+1+40)
+	signatureLen, _ := foundation.SigningDSASHA1.SignatureLen()
+	payload := make([]byte, 2+keyLen+4+2+2+2+MinEncryptedLeaseSetDataBytes+signatureLen)
 	binary.BigEndian.PutUint16(payload[:2], uint16(foundation.SigningDSASHA1))
 	offset := 2 + keyLen + 4 + 2 + 2
-	binary.BigEndian.PutUint16(payload[offset:offset+2], 1)
-	offset += 2
-	payload[offset] = 1
+	binary.BigEndian.PutUint16(payload[offset:offset+2], MinEncryptedLeaseSetDataBytes)
 	set, err := ParseEncryptedLeaseSet(payload)
-	if err != nil || len(set.EncryptedData) != 1 || len(set.Signature) != 40 {
+	if err != nil || len(set.EncryptedData) != MinEncryptedLeaseSetDataBytes || len(set.Signature) != signatureLen {
 		t.Fatalf("ParseEncryptedLeaseSet() = %#v, %v", set, err)
 	}
-	binary.BigEndian.PutUint16(payload[2+keyLen+4+2+2:2+keyLen+4+2+2+2], 2)
-	if _, err := ParseEncryptedLeaseSet(payload); !errors.Is(err, wire.ErrShortBuffer) {
-		t.Fatalf("truncated encrypted payload = %v", err)
+	binary.BigEndian.PutUint16(payload[offset:offset+2], MinEncryptedLeaseSetDataBytes-1)
+	if _, err = ParseEncryptedLeaseSet(payload); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("undersized encrypted payload = %v, want ErrMalformed", err)
+	}
+	binary.BigEndian.PutUint16(payload[offset:offset+2], MinEncryptedLeaseSetDataBytes+1)
+	if _, err = ParseEncryptedLeaseSet(payload); !errors.Is(err, wire.ErrShortBuffer) {
+		t.Fatalf("truncated encrypted payload = %v, want short buffer", err)
+	}
+}
+
+func TestEncryptedLeaseSetAcceptsJavaMaximumEncryptedPayload(t *testing.T) {
+	keyLen, _ := foundation.SigningEdDSASHA512Ed25519.PublicKeyLen()
+	signatureLen, _ := foundation.SigningEdDSASHA512Ed25519.SignatureLen()
+	payload := make([]byte, 2+keyLen+4+2+2+2+MaxEncryptedLeaseSetDataBytes+signatureLen)
+	binary.BigEndian.PutUint16(payload[:2], uint16(foundation.SigningEdDSASHA512Ed25519))
+	offset := 2 + keyLen + 4 + 2 + 2
+	binary.BigEndian.PutUint16(payload[offset:offset+2], MaxEncryptedLeaseSetDataBytes)
+	set, err := ParseEncryptedLeaseSet(payload)
+	if err != nil || len(set.Bytes()) <= 4*1024 || len(set.EncryptedData) != MaxEncryptedLeaseSetDataBytes {
+		t.Fatalf("maximum Java Encrypted LS2 = %d total bytes, %d encrypted bytes, %v", len(set.Bytes()), len(set.EncryptedData), err)
 	}
 }

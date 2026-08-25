@@ -26,15 +26,15 @@ func MarshalDatabaseStore(key foundation.Hash, typeID i2np.StoreType, data []byt
 	if typeID == i2np.StoreRouterInfo && len(data) > 0xffff {
 		return nil, ErrInvalidDatabaseStore
 	}
-	if typeID != i2np.StoreRouterInfo && len(data) > i2np.I2PDMaxLeaseSetBytes {
-		return nil, ErrInvalidDatabaseStore
-	}
 	length := 37 + len(data)
 	if token != 0 {
 		length += 36
 	}
 	if typeID == i2np.StoreRouterInfo {
 		length += 2
+	}
+	if length > i2np.I2PDMaxPayload {
+		return nil, ErrInvalidDatabaseStore
 	}
 	payload := make([]byte, length)
 	copy(payload, key[:])

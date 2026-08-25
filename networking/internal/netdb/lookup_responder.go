@@ -105,7 +105,10 @@ func (r *LookupResponder) Start(parent context.Context) error {
 }
 
 func (r *LookupResponder) Enqueue(lookup i2np.DatabaseLookupMessage) error {
-	if lookup.ReplyEncrypted() {
+	if lookup.Key == (foundation.Hash{}) {
+		return nil
+	}
+	if lookup.ReplyEncrypted() && !lookup.ReplyUsesECIESPublicKey() {
 		if r.wrapper == nil {
 			return ErrLookupReplyEncryptionUnsupported
 		}
@@ -117,6 +120,7 @@ func (r *LookupResponder) Enqueue(lookup i2np.DatabaseLookupMessage) error {
 		Key: lookup.Key, From: lookup.From, Flags: lookup.Flags, ReplyTunnelID: lookup.ReplyTunnelID,
 		Excluded: append([]byte(nil), lookup.Excluded...), ReplyKey: append([]byte(nil), lookup.ReplyKey...),
 		ReplyTags: append([]byte(nil), lookup.ReplyTags...), ReplyTagLen: lookup.ReplyTagLen,
+		ReplyPublicKey: append([]byte(nil), lookup.ReplyPublicKey...),
 	}}
 	r.mu.Lock()
 	if r.closed {
@@ -160,8 +164,10 @@ func clearLookupJob(job *lookupJob) {
 	}
 	clear(job.lookup.ReplyKey)
 	clear(job.lookup.ReplyTags)
+	clear(job.lookup.ReplyPublicKey)
 	job.lookup.ReplyKey = nil
 	job.lookup.ReplyTags = nil
+	job.lookup.ReplyPublicKey = nil
 }
 
 func (r *LookupResponder) respond(ctx context.Context, lookup i2np.DatabaseLookupMessage) error {
@@ -215,7 +221,7 @@ func (r *LookupResponder) respond(ctx context.Context, lookup i2np.DatabaseLooku
 	} else {
 		message = i2np.Message{Header: i2np.Header{Type: i2np.DatabaseSearchReply, ID: r.messageID(), Expiration: saturatingAdd(r.now(), databaseLookupEnvelopeLifetime)}, Payload: r.searchReply(lookup)}
 	}
-	if lookup.ReplyEncrypted() {
+	if lookup.ReplyEncrypted() && !lookup.ReplyUsesECIESPublicKey() {
 		if r.wrapper == nil {
 			return ErrLookupReplyEncryptionUnsupported
 		}

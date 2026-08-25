@@ -245,7 +245,7 @@ func ParseEncryptedLeaseSet(src []byte) (EncryptedLeaseSet, error) {
 	if err != nil {
 		return EncryptedLeaseSet{}, err
 	}
-	if length == 0 {
+	if length < MinEncryptedLeaseSetDataBytes || length > MaxEncryptedLeaseSetDataBytes {
 		return EncryptedLeaseSet{}, ErrMalformed
 	}
 	encrypted, err := cursor.ReadBytes(int(length))
