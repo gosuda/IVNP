@@ -4,11 +4,10 @@ import (
 	"crypto/ecdh"
 	"encoding/binary"
 	"errors"
-	"testing"
-
-	"gosuda.org/ivnp"
 	"gosuda.org/ivnp/crypto/cryptx"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/support/observability"
+	"testing"
 )
 
 func ratchetPair(t testing.TB) (*RatchetManager, *RatchetManager, ivnp.Hash, ivnp.Hash, uint64) {

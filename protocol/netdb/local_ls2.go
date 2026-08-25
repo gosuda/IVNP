@@ -3,10 +3,9 @@ package netdb
 import (
 	"encoding/binary"
 	"errors"
-	"sync"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/protocol/i2np"
+	"sync"
 )
 
 var ErrLocalLeaseSet2 = errors.New("netdb: invalid local LeaseSet2")

@@ -3,9 +3,8 @@ package netdb
 import (
 	"encoding/binary"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
 	"testing"
-
-	"gosuda.org/ivnp"
 )
 
 func legacyIdentity() []byte {

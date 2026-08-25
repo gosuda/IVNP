@@ -4,12 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"sync"
-	"testing"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/protocol/i2np"
 	"gosuda.org/ivnp/support/observability"
+	"sync"
+	"testing"
 )
 
 type capturedTunnelMessage struct {

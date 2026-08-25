@@ -7,15 +7,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/binary"
 	"errors"
-	"io"
-	"net"
-	"net/http"
-	"path/filepath"
-	"sync"
-	"testing"
-	"time"
-
-	ivnp "gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/network/router"
 	"gosuda.org/ivnp/network/tunnel"
 	"gosuda.org/ivnp/protocol/garlic"
@@ -26,6 +18,13 @@ import (
 	"gosuda.org/ivnp/service/clientapi"
 	"gosuda.org/ivnp/support/config"
 	"gosuda.org/ivnp/support/state"
+	"io"
+	"net"
+	"net/http"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
 )
 
 type recordingSockets struct{ calls int }

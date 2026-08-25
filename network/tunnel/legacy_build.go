@@ -8,10 +8,9 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
-	"io"
-
-	ivnp "gosuda.org/ivnp"
 	"gosuda.org/ivnp/crypto/cryptx"
+	ivnp "gosuda.org/ivnp/i2p"
+	"io"
 )
 
 // The variable build format is retained for interoperability with routers that

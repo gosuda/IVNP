@@ -1,22 +1,33 @@
 # Architecture
 
-## Layers
+## Packages and import direction
+
+IVNP library imports point from composition toward foundations. `cmd` and
+`integration` are applications above the public facade; no library package
+imports `gosuda.org/ivnp`.
 
 ```text
-crypto/cryptx           ChaCha20-Poly1305, Elligator2, ElGamal, and ML-KEM
-network/transport/noise Noise symmetric transcript and KDF
-network/transport/ntcp2 NTCP2 SessionRequest and authenticated TCP data frames
-network/transport/ssu2  SSU2 header protection and authenticated UDP data packets
-protocol/garlic         Legacy and ECIES decrypted clove and delivery parsing
-protocol/i2np           Standard/short headers and every defined payload grammar
-protocol/netdb          RouterInfo, LeaseSet variants, Kademlia, floodfill storage
-network/router          Replay-bounded authenticated I2NP dispatch and data plane
-network/tunnel          Short/legacy tunnel build, gateway, pool, and maintenance
-service                 Daemon, SAM, client API, address book, and proxy surfaces
-support                 Configuration, state, persistence, and observability
+gosuda.org/ivnp              Stable public facade
+service/daemon               Complete node composition and durable ownership
+service/*                    SAM, proxies, address book, and client services
+network/router               Authenticated routing and transport composition
+network/tunnel               Tunnel build, gateway, pool, and maintenance
+api/destination              Destination-facing contracts shared by router/services
+protocol/*                   I2NP, netdb, garlic, datagram, and streaming codecs
+network/transport/*          Noise, NTCP2, and SSU2 framing
+api/stream                   Minimal stream dialing/listening contract
+i2p                          Hashes, identities, mappings, keys, and signatures
+crypto/*, internal/*         Cryptographic and allocation/wire foundations
 ```
 
-`ivnp` owns common wire structures: certificates, key certificates, identities, mappings, hashes, and signatures. `internal/wire` is the only byte cursor/writer implementation. It returns aliases into caller input and never grows a destination.
+`architecture_test.go` loads production and test imports with `go list` and
+rejects upward edges. The root facade re-exports stable aliases and constructors;
+specialized packages remain available to advanced callers.
+
+`i2p` owns common wire structures: certificates, key certificates, identities,
+mappings, hashes, local Destinations, and signatures. `internal/wire` is the
+only byte cursor/writer implementation. It returns aliases into caller input and
+never grows a destination.
 
 ## Ownership and GC policy
 

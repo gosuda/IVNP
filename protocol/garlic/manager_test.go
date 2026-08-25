@@ -3,10 +3,9 @@ package garlic
 import (
 	"bytes"
 	"errors"
-	"testing"
-
-	ivnp "gosuda.org/ivnp"
 	"gosuda.org/ivnp/crypto/cryptx"
+	ivnp "gosuda.org/ivnp/i2p"
+	"testing"
 )
 
 type countingReader struct{ next byte }

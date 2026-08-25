@@ -5,11 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/support/fsstore"
 	"os"
 	"sync"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/support/fsstore"
 )
 
 const (

@@ -3,25 +3,25 @@ package tunnel
 import (
 	"bytes"
 	"context"
+	streamapi "gosuda.org/ivnp/api/stream"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/protocol/streaming"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/protocol/streaming"
 )
 
 var (
-	_ net.Conn           = (*tunnelConn)(nil)
-	_ ivnp.StreamNetwork = (*TunnelNetwork)(nil)
+	_ net.Conn                = (*tunnelConn)(nil)
+	_ streamapi.StreamNetwork = (*TunnelNetwork)(nil)
 )
 
 func TestTunnelNetworkDialListenOrderedBytes(t *testing.T) {
 	fabric := &streamFabric{networks: make(map[ivnp.Hash]*TunnelNetwork), zeroSYNACKPorts: true}
 	client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
-	listener, err := (ivnp.ListenerConfig{Network: server}).Listen(context.Background(), ":8080")
+	listener, err := (streamapi.ListenerConfig{Network: server}).Listen(context.Background(), ":8080")
 	if err != nil {
 		t.Fatal(err)
 	}

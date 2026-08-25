@@ -5,10 +5,9 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"errors"
-	"time"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/protocol/i2np"
+	"time"
 )
 
 var ErrInvalidDatabaseStore = errors.New("netdb: invalid database store")

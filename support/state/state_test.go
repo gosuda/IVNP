@@ -3,11 +3,10 @@ package state
 import (
 	"bytes"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
 	"os"
 	"path/filepath"
 	"testing"
-
-	ivnp "gosuda.org/ivnp"
 )
 
 func TestLoadOrCreatePersistsRouterAndLegacyDestinationIdentityMaterial(t *testing.T) {

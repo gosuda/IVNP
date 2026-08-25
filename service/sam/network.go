@@ -12,14 +12,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	ivnp "gosuda.org/ivnp/i2p"
 	"net"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"gosuda.org/ivnp"
 )
 
 const defaultAddress = "127.0.0.1:7656"

@@ -3,15 +3,14 @@ package router
 import (
 	"context"
 	"errors"
+	clientapi "gosuda.org/ivnp/api/destination"
+	ivnp "gosuda.org/ivnp/i2p"
+	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
-
-	"gosuda.org/ivnp"
-	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
-	"gosuda.org/ivnp/service/clientapi"
 )
 
 var _ StreamBackend = (*DestinationManager)(nil)

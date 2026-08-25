@@ -2,8 +2,7 @@ package netdb
 
 import (
 	"encoding/binary"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/internal/wire"
 )
 

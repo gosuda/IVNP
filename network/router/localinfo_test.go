@@ -3,12 +3,11 @@ package router
 import (
 	"context"
 	"errors"
-	"testing"
-	"time"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/protocol/netdb"
 	"gosuda.org/ivnp/support/observability"
+	"testing"
+	"time"
 )
 
 func TestLocalRouterInfoPublishesRouterLifecycleState(t *testing.T) {

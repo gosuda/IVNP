@@ -3,11 +3,10 @@ package garlic
 import (
 	"errors"
 	"fmt"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/protocol/garlic/ecies"
 	"runtime"
 	"testing"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/protocol/garlic/ecies"
 )
 
 func establishRatchetShard(shard *ecies.RatchetManager, peer ivnp.Hash, remote *ivnp.LocalDestination, now uint64) error {

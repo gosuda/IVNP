@@ -38,10 +38,15 @@ For public NTCP2 interoperability, configure `LocalRouterInfoConfig.RouterVersio
 to a maintained I2P router version. Native peers reject a RouterInfo without a
 compatible `router.version`; IVNP does not invent one on the application's behalf.
 
-## Public I2P stream API
+## Public I2P API
 
-`ivnp.Dialer` and `ivnp.ListenerConfig` call a `StreamNetwork`; they never map
-an `.i2p` address to native TCP. `router.DestinationManager` is the embedded
+`gosuda.org/ivnp` is the stable facade. `ivnp.New` constructs a complete
+embedded `ivnp.Node`; construction has no I/O, while `Start`, `Close`, and
+`Wait` retain the daemon lifecycle described above. The facade also exposes
+`ivnp.NewRouter` for callers assembling router dependencies themselves.
+
+`ivnp.Dialer` and `ivnp.ListenerConfig` call an `ivnp.StreamNetwork`; they never
+map an `.i2p` address to native TCP. `router.DestinationManager` is the embedded
 implementation: it owns one or more isolated `DestinationSession` instances,
 each backed by the bounded tunnel Streaming runtime. A manager or session may
 be passed directly to the public API after its tunnel sender and inbound

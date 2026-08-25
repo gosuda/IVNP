@@ -3,14 +3,13 @@ package sam
 import (
 	"encoding/base32"
 	"fmt"
-	"io"
-	"strings"
-
-	ivnp "gosuda.org/ivnp"
+	clientapi "gosuda.org/ivnp/api/destination"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/protocol/datagram"
 	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
-	"gosuda.org/ivnp/service/clientapi"
+	"io"
+	"strings"
 )
 
 func (s *Server) handleSend(connection *serverConnection, cmd command) error {

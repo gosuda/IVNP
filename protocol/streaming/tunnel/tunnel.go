@@ -1,5 +1,7 @@
 package tunnel
 
+import streamapi "gosuda.org/ivnp/api/stream"
+
 import "cmp"
 
 import (
@@ -10,16 +12,15 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/internal/parallelism"
+	"gosuda.org/ivnp/protocol/streaming"
 	"io"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/internal/parallelism"
-	"gosuda.org/ivnp/protocol/streaming"
 )
 
 type Packet = streaming.Packet
@@ -308,7 +309,7 @@ func (n *TunnelNetwork) ListenI2P(ctx context.Context, address string) (net.List
 		return nil, net.ErrClosed
 	}
 	if _, exists := n.listeners[port]; exists {
-		return nil, ivnp.ErrAddressInUse
+		return nil, streamapi.ErrAddressInUse
 	}
 	n.listeners[port] = listener
 	go func() {

@@ -4,6 +4,7 @@ package sam
 
 import (
 	"context"
+	ivnp "gosuda.org/ivnp/api/stream"
 	"io"
 	"net"
 	"net/http"
@@ -11,8 +12,6 @@ import (
 	"os"
 	"testing"
 	"time"
-
-	"gosuda.org/ivnp"
 )
 
 // TestJavaI2PHTTPProxyB32Integration proves the public net.Listener-shaped

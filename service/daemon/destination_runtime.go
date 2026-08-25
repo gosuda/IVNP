@@ -5,13 +5,7 @@ import "cmp"
 import (
 	"context"
 	"errors"
-	"log/slog"
-	"net"
-	"sync"
-	"time"
-	"unicode/utf8"
-
-	ivnp "gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/network/router"
 	"gosuda.org/ivnp/network/tunnel"
@@ -23,6 +17,11 @@ import (
 	"gosuda.org/ivnp/support/config"
 	"gosuda.org/ivnp/support/observability"
 	"gosuda.org/ivnp/support/state"
+	"log/slog"
+	"net"
+	"sync"
+	"time"
+	"unicode/utf8"
 )
 
 var (

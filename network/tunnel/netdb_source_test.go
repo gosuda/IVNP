@@ -5,11 +5,10 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/protocol/netdb"
 	"testing"
 	"time"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/protocol/netdb"
 )
 
 func TestNetDBOutboundBuildSourceRanksDistinctVerifiedPeers(t *testing.T) {

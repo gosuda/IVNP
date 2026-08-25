@@ -7,11 +7,10 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
-	"io"
-
-	ivnp "gosuda.org/ivnp"
 	"gosuda.org/ivnp/crypto/cryptx"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/network/transport/noise"
+	"io"
 )
 
 const (

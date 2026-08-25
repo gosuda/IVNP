@@ -4,16 +4,15 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	clientapi "gosuda.org/ivnp/api/destination"
+	ivnp "gosuda.org/ivnp/i2p"
+	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
+	"gosuda.org/ivnp/support/observability"
 	"io"
 	"net"
 	"strings"
 	"testing"
 	"time"
-
-	ivnp "gosuda.org/ivnp"
-	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
-	"gosuda.org/ivnp/service/clientapi"
-	"gosuda.org/ivnp/support/observability"
 )
 
 func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {

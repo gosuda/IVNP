@@ -3,17 +3,16 @@ package sam
 import (
 	"bufio"
 	"context"
+	clientapi "gosuda.org/ivnp/api/destination"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/protocol/datagram"
+	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
 	"io"
 	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/protocol/datagram"
-	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
-	"gosuda.org/ivnp/service/clientapi"
 )
 
 type loopController struct {

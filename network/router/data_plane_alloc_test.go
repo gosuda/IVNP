@@ -1,10 +1,9 @@
 package router
 
 import (
-	"testing"
-
-	ivnp "gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
+	"testing"
 )
 
 func TestStreamingDestinationFramingHasZeroAllocations(t *testing.T) {

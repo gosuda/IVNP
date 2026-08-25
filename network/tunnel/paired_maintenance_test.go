@@ -2,11 +2,10 @@ package tunnel
 
 import (
 	"context"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/protocol/i2np"
 	"testing"
 	"time"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/protocol/i2np"
 )
 
 type pairedInboundSource struct {

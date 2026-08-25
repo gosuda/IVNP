@@ -3,10 +3,9 @@ package netdb
 import (
 	"context"
 	"errors"
-	"log/slog"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/protocol/i2np"
+	"log/slog"
 )
 
 var ErrRouterInfoPublisherConfig = errors.New("netdb: invalid RouterInfo publisher configuration")

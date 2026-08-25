@@ -1,9 +1,8 @@
 package netdb
 
 import (
+	ivnp "gosuda.org/ivnp/i2p"
 	"sync"
-
-	"gosuda.org/ivnp"
 )
 
 const defaultResponderProfilePeers = 64

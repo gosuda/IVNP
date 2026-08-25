@@ -5,12 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	"testing"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/protocol/garlic"
 	"gosuda.org/ivnp/protocol/i2np"
 	"gosuda.org/ivnp/protocol/netdb"
+	"testing"
 )
 
 func TestServiceValidatesExpiryAndReplay(t *testing.T) {

@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/hkdf"
-	"gosuda.org/ivnp"
 	"gosuda.org/ivnp/crypto/cryptx"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/protocol/i2np"
 )
 

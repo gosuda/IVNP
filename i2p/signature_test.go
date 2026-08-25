@@ -1,4 +1,4 @@
-package ivnp
+package i2p
 
 import (
 	"crypto"

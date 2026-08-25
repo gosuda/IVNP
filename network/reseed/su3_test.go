@@ -8,11 +8,10 @@ import (
 	"crypto/sha512"
 	"encoding/binary"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
 	"math/big"
 	"testing"
 	"time"
-
-	"gosuda.org/ivnp"
 )
 
 func TestVerifySU3JavaNONEwithRSAPKCS1v15(t *testing.T) {

@@ -6,11 +6,10 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/protocol/i2np"
 	"testing"
 	"time"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/protocol/i2np"
 )
 
 type elsFailReader struct {

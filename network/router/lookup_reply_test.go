@@ -4,15 +4,14 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"sync"
-	"testing"
-	"time"
-
-	ivnp "gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/network/tunnel"
 	"gosuda.org/ivnp/protocol/garlic"
 	"gosuda.org/ivnp/protocol/i2np"
 	"gosuda.org/ivnp/protocol/netdb"
+	"sync"
+	"testing"
+	"time"
 )
 
 type encryptedLookupReplyCapture struct {

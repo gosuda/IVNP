@@ -4,9 +4,8 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
 	"testing"
-
-	"gosuda.org/ivnp"
 )
 
 func TestLocalRouterInfoPublishesVerifiedOwnedAdvertisement(t *testing.T) {

@@ -2,7 +2,7 @@ package netdb
 
 import (
 	"fmt"
-	ivnp "gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 
 	"gosuda.org/ivnp/support/fsstore"
 )

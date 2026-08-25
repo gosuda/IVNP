@@ -9,6 +9,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/internal/ingress"
+	"gosuda.org/ivnp/network/transport/ntcp2"
+	"gosuda.org/ivnp/protocol/i2np"
+	"gosuda.org/ivnp/protocol/netdb"
+	"gosuda.org/ivnp/support/observability"
 	"io"
 	"log/slog"
 	"net"
@@ -18,13 +24,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/internal/ingress"
-	"gosuda.org/ivnp/network/transport/ntcp2"
-	"gosuda.org/ivnp/protocol/i2np"
-	"gosuda.org/ivnp/protocol/netdb"
-	"gosuda.org/ivnp/support/observability"
 )
 
 const (

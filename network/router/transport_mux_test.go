@@ -3,13 +3,12 @@ package router
 import (
 	"context"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/protocol/i2np"
+	"gosuda.org/ivnp/protocol/netdb"
 	"sync"
 	"testing"
 	"time"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/protocol/i2np"
-	"gosuda.org/ivnp/protocol/netdb"
 )
 
 type muxTestTransport struct {

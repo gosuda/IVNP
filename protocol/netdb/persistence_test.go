@@ -4,11 +4,10 @@ import (
 	"crypto/ed25519"
 	cryptorand "crypto/rand"
 	"encoding/binary"
+	ivnp "gosuda.org/ivnp/i2p"
 	"os"
 	"path/filepath"
 	"testing"
-
-	ivnp "gosuda.org/ivnp"
 )
 
 func signedPersistenceRouter(t *testing.T, published uint64) RouterInfo {

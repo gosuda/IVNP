@@ -8,6 +8,21 @@ Go 1.27 I2P router-protocol implementation.
 - Public fixed-port operation and loopback-bound client-only operation; loopback transports never request NAT mappings.
 - Caller-owned hot-path buffers, sensitive slab release, bounded queues, and allocation regression tests.
 
+The root package is the stable facade. One IVNP import covers full-node
+construction and the commonly used protocol parsers:
+
+```go
+import ivnp "gosuda.org/ivnp"
+
+cfg, err := ivnp.LoadOrCreateConfig("ivnp.conf")
+node, err := ivnp.New(cfg, ivnp.Options{})
+routerInfo, err := ivnp.ParseRouterInfo(rawRouterInfo)
+message, consumed, err := ivnp.ParseI2NP(wire)
+```
+
+Advanced callers may still import the specialized `i2p`, `protocol`, `network`,
+`api`, and `service` packages directly.
+
 ```sh
 go test ./...
 ```

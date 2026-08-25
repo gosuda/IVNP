@@ -9,19 +9,18 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
-	"io"
-	"net"
-	"sync"
-	"testing"
-	"time"
-
-	ivnp "gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/network/tunnel"
 	"gosuda.org/ivnp/protocol/garlic"
 	"gosuda.org/ivnp/protocol/i2np"
 	"gosuda.org/ivnp/protocol/netdb"
 	"gosuda.org/ivnp/protocol/streaming"
 	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
+	"io"
+	"net"
+	"sync"
+	"testing"
+	"time"
 )
 
 type dataPlaneTunnelSender struct {

@@ -8,13 +8,8 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	"hash/crc32"
-	"io"
-	"sync"
-	"time"
-
-	ivnp "gosuda.org/ivnp"
 	"gosuda.org/ivnp/crypto/cryptx"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/network/tunnel"
 	"gosuda.org/ivnp/protocol/datagram"
@@ -25,6 +20,10 @@ import (
 	"gosuda.org/ivnp/protocol/streaming"
 	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
 	"gosuda.org/ivnp/support/observability"
+	"hash/crc32"
+	"io"
+	"sync"
+	"time"
 )
 
 var (

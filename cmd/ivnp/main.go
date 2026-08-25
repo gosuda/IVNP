@@ -10,8 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"gosuda.org/ivnp/service/daemon"
-	"gosuda.org/ivnp/support/config"
+	ivnp "gosuda.org/ivnp"
 )
 
 var version = "dev"
@@ -36,13 +35,13 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stdout, version)
 		return 0
 	}
-	cfg, err := config.LoadOrCreateOperating(*configPath)
+	cfg, err := ivnp.LoadOrCreateConfig(*configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ivnp: configuration error:", err)
 		return 1
 	}
 	logger := newLogger(cfg.Log)
-	d, err := daemon.New(cfg, daemon.Options{Logger: logger})
+	d, err := ivnp.New(cfg, ivnp.Options{Logger: logger})
 	if err != nil {
 		logger.Error("daemon initialization failed", "error", err)
 		return 1
@@ -61,7 +60,7 @@ func run(args []string) int {
 	return 0
 }
 
-func newLogger(cfg config.Log) *slog.Logger {
+func newLogger(cfg ivnp.LogConfig) *slog.Logger {
 	level := new(slog.LevelVar)
 	switch cfg.Level {
 	case "debug":

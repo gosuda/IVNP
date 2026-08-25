@@ -5,10 +5,9 @@ import (
 	"compress/gzip"
 	"encoding/hex"
 	"errors"
-	"testing"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/internal/pool"
+	"testing"
 )
 
 func gzipBytes(t *testing.T, input []byte) []byte {

@@ -2,10 +2,9 @@ package netdb
 
 import (
 	"encoding/binary"
-	"sync"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/internal/wire"
+	"sync"
 )
 
 // LocalLeaseSet holds locally published inbound-lease metadata. It does not

@@ -3,16 +3,15 @@ package daemon
 import (
 	"context"
 	"errors"
-	"net"
-	"time"
-
-	ivnp "gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/network/router"
 	"gosuda.org/ivnp/network/tunnel"
 	"gosuda.org/ivnp/protocol/datagram"
 	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
 	"gosuda.org/ivnp/service/clientapi"
 	"gosuda.org/ivnp/support/state"
+	"net"
+	"time"
 )
 
 var errDestinationCryptoTypes = errors.New("daemon: unsupported destination crypto type order")

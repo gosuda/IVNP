@@ -3,11 +3,10 @@ package netdb
 import (
 	"context"
 	"errors"
-	"sync"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/protocol/i2np"
+	"sync"
 )
 
 var (

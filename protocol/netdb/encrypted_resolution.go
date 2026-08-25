@@ -4,10 +4,9 @@ import (
 	"bytes"
 	"crypto/ecdh"
 	"encoding/binary"
-	"time"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/protocol/i2np"
+	"time"
 )
 
 // DecryptEncryptedLeaseSet verifies, decrypts, and validates an ELS2 for the

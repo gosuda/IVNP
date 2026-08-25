@@ -6,16 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/internal/pool"
+	"gosuda.org/ivnp/protocol/netdb"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 	"time"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/internal/pool"
-	"gosuda.org/ivnp/protocol/netdb"
 )
 
 func zipArchiveBytes(t *testing.T, name string, payload []byte) []byte {

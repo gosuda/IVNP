@@ -11,6 +11,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"gosuda.org/ivnp/crypto/cryptx"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/support/fsstore"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,10 +21,6 @@ import (
 	"sync"
 	"syscall"
 	"unicode/utf8"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/crypto/cryptx"
-	"gosuda.org/ivnp/support/fsstore"
 )
 
 const (

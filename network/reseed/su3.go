@@ -7,7 +7,7 @@ import (
 	"crypto/sha512"
 	"encoding/binary"
 	"errors"
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"math/big"
 )
 

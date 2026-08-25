@@ -4,14 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"net"
-	"sync"
-	"time"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/network/tunnel"
 	"gosuda.org/ivnp/protocol/i2np"
 	"gosuda.org/ivnp/protocol/netdb"
+	"net"
+	"sync"
+	"time"
 )
 
 var (

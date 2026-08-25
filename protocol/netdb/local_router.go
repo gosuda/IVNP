@@ -5,9 +5,8 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
 	"sync"
-
-	"gosuda.org/ivnp"
 )
 
 var ErrLocalRouterIdentity = errors.New("netdb: local RouterInfo identity does not match signing key")

@@ -1,4 +1,4 @@
-package ivnp
+package stream
 
 import (
 	"context"
@@ -8,7 +8,10 @@ import (
 
 var (
 	ErrUnsupportedNetwork    = errors.New("i2p: unsupported network")
-	errStreamNetworkRequired = errors.New("i2p: StreamNetwork is required")
+	ErrAddressInUse          = errors.New("i2p: address already listening")
+	ErrAddressUnavailable    = errors.New("i2p: address is not listening")
+	ErrAddressInvalid        = errors.New("i2p: invalid address")
+	ErrStreamNetworkRequired = errors.New("i2p: StreamNetwork is required")
 )
 
 // StreamNetwork provides I2P stream dialing and listening.
@@ -31,7 +34,7 @@ func (d Dialer) DialContext(ctx context.Context, network, address string) (net.C
 		return nil, ErrUnsupportedNetwork
 	}
 	if d.Network == nil {
-		return nil, errStreamNetworkRequired
+		return nil, ErrStreamNetworkRequired
 	}
 	return d.Network.DialI2P(ctx, address)
 }
@@ -49,7 +52,7 @@ type ListenerConfig struct {
 // Listen listens on address through the configured I2P stream network.
 func (c ListenerConfig) Listen(ctx context.Context, address string) (net.Listener, error) {
 	if c.Network == nil {
-		return nil, errStreamNetworkRequired
+		return nil, ErrStreamNetworkRequired
 	}
 	return c.Network.ListenI2P(ctx, address)
 }

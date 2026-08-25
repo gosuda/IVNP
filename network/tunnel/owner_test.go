@@ -2,9 +2,8 @@ package tunnel
 
 import (
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
 	"testing"
-
-	"gosuda.org/ivnp"
 )
 
 func TestOwnedPoolsRejectCrossDestinationCircuits(t *testing.T) {

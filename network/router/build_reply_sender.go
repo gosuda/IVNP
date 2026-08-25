@@ -3,8 +3,7 @@ package router
 import (
 	"context"
 	"encoding/binary"
-
-	ivnp "gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/network/tunnel"
 	"gosuda.org/ivnp/protocol/garlic/ecies"
 	"gosuda.org/ivnp/protocol/i2np"

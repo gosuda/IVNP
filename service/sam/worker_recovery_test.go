@@ -3,15 +3,14 @@ package sam
 import (
 	"context"
 	"errors"
+	clientapi "gosuda.org/ivnp/api/destination"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/internal/ingress"
+	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
 	"net"
 	"sync"
 	"testing"
 	"time"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/internal/ingress"
-	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
-	"gosuda.org/ivnp/service/clientapi"
 )
 
 type panicRecorder struct{ reports chan ingress.Panic }

@@ -3,17 +3,17 @@ package router
 import (
 	"context"
 	"errors"
+	streamapi "gosuda.org/ivnp/api/stream"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/protocol/i2np"
+	"gosuda.org/ivnp/protocol/netdb"
 	"net"
 	"sync"
 	"testing"
 	"time"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/protocol/i2np"
-	"gosuda.org/ivnp/protocol/netdb"
 )
 
-var _ ivnp.StreamNetwork = (*Router)(nil)
+var _ streamapi.StreamNetwork = (*Router)(nil)
 
 type eventLog struct {
 	mu     sync.Mutex

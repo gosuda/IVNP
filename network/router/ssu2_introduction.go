@@ -5,15 +5,14 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/binary"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/network/transport/ssu2"
+	"gosuda.org/ivnp/protocol/i2np"
+	"gosuda.org/ivnp/protocol/netdb"
 	"net"
 	"net/netip"
 	"strconv"
 	"time"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/network/transport/ssu2"
-	"gosuda.org/ivnp/protocol/i2np"
-	"gosuda.org/ivnp/protocol/netdb"
 )
 
 const (

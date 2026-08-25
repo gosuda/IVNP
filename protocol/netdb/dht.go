@@ -3,11 +3,10 @@ package netdb
 import (
 	"crypto/subtle"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/internal/parallelism"
 	"math/bits"
 	"sync"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/internal/parallelism"
 )
 
 const BucketCount = ivnp.HashLength * 8

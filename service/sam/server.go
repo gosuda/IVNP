@@ -5,17 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	clientapi "gosuda.org/ivnp/api/destination"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/internal/ingress"
+	"gosuda.org/ivnp/support/observability"
 	"io"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/internal/ingress"
-	"gosuda.org/ivnp/service/clientapi"
-	"gosuda.org/ivnp/support/observability"
 )
 
 const (

@@ -3,11 +3,10 @@ package tunnel
 import (
 	"context"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/protocol/i2np"
 	"testing"
 	"time"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/protocol/i2np"
 )
 
 func TestPeerProfilesBoundHistoryAndScoreDeterministically(t *testing.T) {

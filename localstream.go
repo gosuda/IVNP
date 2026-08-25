@@ -2,15 +2,8 @@ package ivnp
 
 import (
 	"context"
-	"errors"
 	"net"
 	"sync"
-)
-
-var (
-	ErrAddressInUse       = errors.New("i2p: address already listening")
-	ErrAddressUnavailable = errors.New("i2p: address is not listening")
-	ErrAddressInvalid     = errors.New("i2p: invalid address")
 )
 
 type localStreamNetwork struct {

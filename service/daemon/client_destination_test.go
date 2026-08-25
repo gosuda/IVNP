@@ -3,13 +3,12 @@ package daemon
 import (
 	"context"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/network/router"
+	"gosuda.org/ivnp/service/clientapi"
 	"path/filepath"
 	"testing"
 	"time"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/network/router"
-	"gosuda.org/ivnp/service/clientapi"
 )
 
 func TestNeutralDestinationControllerUsesDaemonOwnedIsolatedGraph(t *testing.T) {

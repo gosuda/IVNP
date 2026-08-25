@@ -4,15 +4,14 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	streamapi "gosuda.org/ivnp/api/stream"
+	"gosuda.org/ivnp/internal/ingress"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/internal/ingress"
 )
 
 const (
@@ -24,7 +23,7 @@ const (
 
 // HTTPProxyConfig configures a local HTTP CONNECT and absolute-form proxy.
 type HTTPProxyConfig struct {
-	Network           ivnp.StreamNetwork
+	Network           streamapi.StreamNetwork
 	Resolver          DestinationResolver
 	ListenAddress     string
 	AllowRemote       bool

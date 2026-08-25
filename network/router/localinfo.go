@@ -4,14 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/protocol/netdb"
+	"gosuda.org/ivnp/support/observability"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/protocol/netdb"
-	"gosuda.org/ivnp/support/observability"
 )
 
 const defaultNetworkID = 2

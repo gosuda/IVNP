@@ -2,9 +2,8 @@ package state
 
 import (
 	"bytes"
+	ivnp "gosuda.org/ivnp/i2p"
 	"testing"
-
-	"gosuda.org/ivnp"
 )
 
 func TestEncryptedLeaseSetPolicyPersistsForLegacyEd25519Destination(t *testing.T) {

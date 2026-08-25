@@ -1,10 +1,9 @@
 package netdb
 
 import (
+	ivnp "gosuda.org/ivnp/i2p"
 	"math/bits"
 	"slices"
-
-	"gosuda.org/ivnp"
 )
 
 // Java I2P's router NetDB uses K=24 and B=4. B divides every XOR-distance

@@ -2,10 +2,9 @@ package netdb
 
 import (
 	"errors"
-	"testing"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/protocol/i2np"
+	"testing"
 )
 
 func TestLocalLeaseSet2BuildsVerifiedECIESAdvertisement(t *testing.T) {

@@ -5,11 +5,10 @@ import "cmp"
 import (
 	"context"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/protocol/i2np"
 	"log/slog"
 	"sync"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/protocol/i2np"
 )
 
 const (

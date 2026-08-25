@@ -3,8 +3,6 @@ package garlic
 import (
 	"errors"
 	"sync"
-
-	"gosuda.org/ivnp/network/tunnel"
 )
 
 var (
@@ -19,14 +17,14 @@ var (
 type ReplyKeyRegistry struct {
 	mu      sync.Mutex
 	max     int
-	entries map[[8]byte]tunnel.GarlicReplyKey
+	entries map[[8]byte]GarlicReplyKey
 }
 
 // ReplyKeyConsumer is the ECIES one-time Existing Session receiver seam. It
 // consumes the leading 8-byte tag before authentication, preventing a failed
 // packet from restoring a reply key.
 type ReplyKeyConsumer interface {
-	ConsumeGarlicReplyKey([8]byte, uint64) (tunnel.GarlicReplyKey, bool)
+	ConsumeGarlicReplyKey([8]byte, uint64) (GarlicReplyKey, bool)
 }
 
 // NewReplyKeyRegistry constructs a bounded registry. A non-positive limit uses
@@ -35,13 +33,13 @@ func NewReplyKeyRegistry(max int) *ReplyKeyRegistry {
 	if max <= 0 {
 		max = 64
 	}
-	return &ReplyKeyRegistry{max: max, entries: make(map[[8]byte]tunnel.GarlicReplyKey)}
+	return &ReplyKeyRegistry{max: max, entries: make(map[[8]byte]GarlicReplyKey)}
 }
 
 // RegisterGarlicReplyKey retains key until it is consumed, explicitly removed,
 // or expired. It never evicts a live reply key: callers must fail the matching
 // build rather than make its reply undecryptable.
-func (r *ReplyKeyRegistry) RegisterGarlicReplyKey(key tunnel.GarlicReplyKey) error {
+func (r *ReplyKeyRegistry) RegisterGarlicReplyKey(key GarlicReplyKey) error {
 	if r == nil || key.ExpiresAt == 0 {
 		return ErrReplyKeyRegistryFull
 	}
@@ -59,8 +57,8 @@ func (r *ReplyKeyRegistry) RegisterGarlicReplyKey(key tunnel.GarlicReplyKey) err
 
 // ConsumeGarlicReplyKey returns and removes an unexpired reply key. It is
 // one-use even when subsequent packet authentication fails.
-func (r *ReplyKeyRegistry) ConsumeGarlicReplyKey(tag [8]byte, nowMillis uint64) (tunnel.GarlicReplyKey, bool) {
-	var zero tunnel.GarlicReplyKey
+func (r *ReplyKeyRegistry) ConsumeGarlicReplyKey(tag [8]byte, nowMillis uint64) (GarlicReplyKey, bool) {
+	var zero GarlicReplyKey
 	if r == nil {
 		return zero, false
 	}

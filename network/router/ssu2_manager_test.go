@@ -7,17 +7,16 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/network/transport/ssu2"
+	"gosuda.org/ivnp/protocol/i2np"
+	"gosuda.org/ivnp/protocol/netdb"
 	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/network/transport/ssu2"
-	"gosuda.org/ivnp/protocol/i2np"
-	"gosuda.org/ivnp/protocol/netdb"
 )
 
 func TestSSU2RouterInfoStoreUsesDeterministicGzipAndServiceAdmission(t *testing.T) {

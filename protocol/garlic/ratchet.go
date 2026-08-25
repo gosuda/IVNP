@@ -2,11 +2,10 @@ package garlic
 
 import (
 	"encoding/binary"
-	"sync"
-
-	ivnp "gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/protocol/garlic/ecies"
+	"sync"
 )
 
 type RatchetConfig = ecies.RatchetConfig

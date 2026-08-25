@@ -3,15 +3,14 @@ package sam
 import (
 	"context"
 	"errors"
+	clientapi "gosuda.org/ivnp/api/destination"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/internal/ingress"
+	internalrelay "gosuda.org/ivnp/internal/relay"
 	"net"
 	"strings"
 	"sync"
 	"time"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/internal/ingress"
-	internalrelay "gosuda.org/ivnp/internal/relay"
-	"gosuda.org/ivnp/service/clientapi"
 )
 
 type destinationConnection interface {

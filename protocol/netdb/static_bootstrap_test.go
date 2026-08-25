@@ -2,11 +2,10 @@ package netdb
 
 import (
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
 	"os"
 	"path/filepath"
 	"testing"
-
-	ivnp "gosuda.org/ivnp"
 )
 
 func TestLoadStaticRouterInfosRequiresSignedFreshExactFiles(t *testing.T) {

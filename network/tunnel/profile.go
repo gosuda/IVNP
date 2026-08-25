@@ -1,9 +1,8 @@
 package tunnel
 
 import (
+	ivnp "gosuda.org/ivnp/i2p"
 	"sync"
-
-	ivnp "gosuda.org/ivnp"
 )
 
 const (

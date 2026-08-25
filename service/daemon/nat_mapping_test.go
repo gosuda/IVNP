@@ -5,6 +5,12 @@ import "cmp"
 import (
 	"context"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/network/natpmp"
+	"gosuda.org/ivnp/network/router"
+	"gosuda.org/ivnp/network/upnp"
+	"gosuda.org/ivnp/protocol/netdb"
+	"gosuda.org/ivnp/support/config"
 	"io"
 	"log/slog"
 	"net"
@@ -13,13 +19,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/network/natpmp"
-	"gosuda.org/ivnp/network/router"
-	"gosuda.org/ivnp/network/upnp"
-	"gosuda.org/ivnp/protocol/netdb"
-	"gosuda.org/ivnp/support/config"
 )
 
 type fakeNATPMPClient struct {

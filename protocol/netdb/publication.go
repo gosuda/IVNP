@@ -5,7 +5,7 @@ import "cmp"
 import (
 	"context"
 	"errors"
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/protocol/i2np"
 	"log/slog"

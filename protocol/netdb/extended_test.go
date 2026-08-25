@@ -3,10 +3,9 @@ package netdb
 import (
 	"encoding/binary"
 	"errors"
-	"testing"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/internal/wire"
+	"testing"
 )
 
 func TestMetaLeaseSetBoundsAndFlags(t *testing.T) {

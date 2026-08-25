@@ -6,16 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	clientapi "gosuda.org/ivnp/api/destination"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/protocol/datagram"
 	"net"
 	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/protocol/datagram"
-	"gosuda.org/ivnp/service/clientapi"
 )
 
 func (s *Server) dispatch(connection *serverConnection, cmd command) (bool, error) {

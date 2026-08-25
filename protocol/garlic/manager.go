@@ -4,12 +4,11 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"gosuda.org/ivnp/crypto/cryptx"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/internal/parallelism"
 	"io"
 	"sync"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/crypto/cryptx"
-	"gosuda.org/ivnp/internal/parallelism"
 )
 
 const (

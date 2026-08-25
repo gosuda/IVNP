@@ -2,12 +2,11 @@ package sam
 
 import (
 	"context"
+	clientapi "gosuda.org/ivnp/api/destination"
+	ivnp "gosuda.org/ivnp/i2p"
 	"strings"
 	"testing"
 	"time"
-
-	ivnp "gosuda.org/ivnp"
-	"gosuda.org/ivnp/service/clientapi"
 )
 
 type readinessController struct {

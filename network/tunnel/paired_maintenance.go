@@ -3,9 +3,8 @@ package tunnel
 import (
 	"context"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
 	"sync"
-
-	ivnp "gosuda.org/ivnp"
 )
 
 var (

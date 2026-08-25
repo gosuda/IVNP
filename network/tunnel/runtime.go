@@ -5,14 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	"sync"
-	"sync/atomic"
-	"time"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/internal/packet"
 	"gosuda.org/ivnp/protocol/i2np"
 	"gosuda.org/ivnp/support/observability"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 const (

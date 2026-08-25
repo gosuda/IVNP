@@ -6,8 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-
-	ivnp "gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 )
 
 var ErrInvalidKey = errors.New("sam: invalid private destination")

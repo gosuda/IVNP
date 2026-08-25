@@ -4,10 +4,9 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
-	"testing"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/internal/wire"
+	"testing"
 )
 
 func TestLocalLeaseSetSnapshotExpiresAndReplaces(t *testing.T) {

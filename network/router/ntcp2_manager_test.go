@@ -6,16 +6,15 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/network/transport/ntcp2"
+	"gosuda.org/ivnp/protocol/i2np"
+	"gosuda.org/ivnp/protocol/netdb"
 	"io"
 	"net"
 	"os"
 	"testing"
 	"time"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/network/transport/ntcp2"
-	"gosuda.org/ivnp/protocol/i2np"
-	"gosuda.org/ivnp/protocol/netdb"
 )
 
 func TestNTCP2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {

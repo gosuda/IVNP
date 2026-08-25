@@ -4,10 +4,9 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"sync"
-
-	ivnp "gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/protocol/i2np"
+	"sync"
 )
 
 var (

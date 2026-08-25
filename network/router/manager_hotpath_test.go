@@ -2,18 +2,17 @@ package router
 
 import (
 	"context"
-	"net"
-	"net/netip"
-	"sync/atomic"
-	"testing"
-	"time"
-
-	ivnp "gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/network/transport/ntcp2"
 	"gosuda.org/ivnp/network/transport/ssu2"
 	"gosuda.org/ivnp/protocol/i2np"
 	"gosuda.org/ivnp/protocol/netdb"
 	"gosuda.org/ivnp/support/observability"
+	"net"
+	"net/netip"
+	"sync/atomic"
+	"testing"
+	"time"
 )
 
 // The allocation ceilings document the deliberate ownership boundary: framing

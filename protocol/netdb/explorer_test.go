@@ -3,9 +3,8 @@ package netdb
 import (
 	"bytes"
 	"context"
+	ivnp "gosuda.org/ivnp/i2p"
 	"testing"
-
-	ivnp "gosuda.org/ivnp"
 )
 
 func TestExplorationTargetStaysInSelectedBucket(t *testing.T) {

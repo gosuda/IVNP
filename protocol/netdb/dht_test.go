@@ -1,9 +1,8 @@
 package netdb
 
 import (
+	ivnp "gosuda.org/ivnp/i2p"
 	"testing"
-
-	"gosuda.org/ivnp"
 )
 
 func routerWithSeed(seed byte) RouterInfo {

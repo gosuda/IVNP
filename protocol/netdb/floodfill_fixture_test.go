@@ -3,9 +3,8 @@ package netdb
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	ivnp "gosuda.org/ivnp/i2p"
 	"testing"
-
-	"gosuda.org/ivnp"
 )
 
 func TestSignedRouterInfoCapsControlsFloodfillAdmission(t *testing.T) {

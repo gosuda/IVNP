@@ -1,12 +1,11 @@
-package clientapi
+package destination
 
 import (
 	"context"
+	ivnp "gosuda.org/ivnp/i2p"
+	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
 	"net"
 	"sync"
-
-	ivnp "gosuda.org/ivnp"
-	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
 )
 
 // DestinationResolver resolves an ASCII I2P name or validates a literal full

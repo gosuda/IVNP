@@ -9,17 +9,16 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"os"
-	"sync"
-	"testing"
-	"time"
-
-	"gosuda.org/ivnp"
+	ivnp "gosuda.org/ivnp/i2p"
 	"gosuda.org/ivnp/network/transport/noise"
 	"gosuda.org/ivnp/network/tunnel"
 	"gosuda.org/ivnp/protocol/garlic"
 	"gosuda.org/ivnp/protocol/i2np"
 	"gosuda.org/ivnp/protocol/netdb"
+	"os"
+	"sync"
+	"testing"
+	"time"
 )
 
 // TestI2PDNTCP2Interop proves an explicit DatabaseLookup round trip with a

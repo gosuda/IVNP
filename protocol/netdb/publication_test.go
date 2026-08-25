@@ -5,11 +5,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	ivnp "gosuda.org/ivnp/i2p"
+	"gosuda.org/ivnp/protocol/i2np"
 	"sync"
 	"testing"
-
-	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/protocol/i2np"
 )
 
 type publisherLeaseSource struct {

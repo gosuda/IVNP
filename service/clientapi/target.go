@@ -1,11 +1,10 @@
 package clientapi
 
 import (
+	ivnp "gosuda.org/ivnp/i2p"
 	"net"
 	"strconv"
 	"strings"
-
-	"gosuda.org/ivnp"
 )
 
 const maxDestinationHost = 4096

@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
+	clientapi "gosuda.org/ivnp/api/destination"
 	streamtunnel "gosuda.org/ivnp/protocol/streaming/tunnel"
-	"gosuda.org/ivnp/service/clientapi"
 )
 
 type testByteBudget struct {
