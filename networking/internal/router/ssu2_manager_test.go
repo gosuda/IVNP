@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
@@ -870,6 +871,154 @@ func TestValidateSSU2ConfirmedPayloadInflatesGzipRouterInfo(t *testing.T) {
 	}
 	if _, _, err = validateSSU2ConfirmedPayload(payload, testECDHPublic(t, static)); err == nil {
 		t.Fatal("oversized gzip RouterInfo was accepted")
+	}
+}
+
+func TestSSU2EgressBackpressuresWhenSlotsAreBusy(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		free := make(chan *ssu2EgressSlot, 1)
+		free <- &ssu2EgressSlot{done: make(chan error, 1)}
+		queue := make(chan *ssu2EgressSlot, 1)
+		manager := &SSU2Manager{
+			started:     true,
+			ctx:         ctx,
+			egressFree:  free,
+			egressQueue: queue,
+		}
+		remote := net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:1234"))
+		firstResult := make(chan error, 1)
+		go func() { firstResult <- manager.writeTo([]byte{1}, remote) }()
+		first := <-queue
+
+		secondResult := make(chan error, 1)
+		go func() { secondResult <- manager.writeTo([]byte{2}, remote) }()
+		synctest.Wait()
+		select {
+		case err := <-secondResult:
+			t.Fatalf("second write returned instead of applying backpressure: %v", err)
+		default:
+		}
+
+		first.done <- nil
+		if err := <-firstResult; err != nil {
+			t.Fatalf("first write: %v", err)
+		}
+		second := <-queue
+		second.done <- nil
+		if err := <-secondResult; err != nil {
+			t.Fatalf("second write: %v", err)
+		}
+		if dropped := manager.IOStats().Dropped; dropped != 0 {
+			t.Fatalf("backpressured writes counted as dropped: %d", dropped)
+		}
+	})
+}
+
+func TestSSU2SendHonorsCallerCancellationDuringEgressAdmission(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		send, err := ssu2.NewDataCipher(bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		peer := foundation.Hash{1}
+		session := &ssu2TransportSession{
+			peer:         peer,
+			sendID:       9,
+			receiveID:    10,
+			remote:       net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:1234")),
+			send:         send,
+			nextPacket:   1,
+			lastActivity: time.Now(),
+		}
+		session.initReliability()
+		managerCtx, stopManager := context.WithCancel(t.Context())
+		defer stopManager()
+		manager := &SSU2Manager{
+			started:        true,
+			ctx:            managerCtx,
+			idleTimeout:    time.Hour,
+			sessionsByPeer: map[foundation.Hash]*ssu2TransportSession{peer: session},
+			sessionsByID:   map[uint64]*ssu2TransportSession{session.receiveID: session},
+			bindings:       TransportBindings{Clock: WallClock{}},
+			egressFree:     make(chan *ssu2EgressSlot),
+			egressQueue:    make(chan *ssu2EgressSlot, 1),
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		result := make(chan error, 1)
+		go func() {
+			result <- manager.Send(ctx, peer, managerHotPathMessage())
+		}()
+		synctest.Wait()
+
+		cancel()
+		synctest.Wait()
+		if err = <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled send = %v, want %v", err, context.Canceled)
+		}
+		if session.nextPacket != 1 {
+			t.Fatalf("canceled send advanced packet number to %d", session.nextPacket)
+		}
+		if queued := len(manager.egressQueue); queued != 0 {
+			t.Fatalf("canceled send queued %d datagrams", queued)
+		}
+	})
+}
+
+func TestSSU2EgressCollectsOnlyReadyDatagrams(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	manager := &SSU2Manager{started: true, ctx: ctx, egressQueue: make(chan *ssu2EgressSlot, ssu2EgressSlots)}
+	for index := range 3 {
+		manager.egressQueue <- &ssu2EgressSlot{length: index + 1}
+	}
+	var slots [ssu2EgressSlots]*ssu2EgressSlot
+	count, ok := manager.collectEgressBatch(&slots)
+	if !ok || count != 3 {
+		t.Fatalf("collected batch = (%d, %t), want (3, true)", count, ok)
+	}
+}
+
+func TestSSU2QueuedWriteReturnsBeforeSocketCompletion(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	free := make(chan *ssu2EgressSlot, 1)
+	free <- &ssu2EgressSlot{done: make(chan error, 1)}
+	manager := &SSU2Manager{
+		started:     true,
+		ctx:         ctx,
+		egressFree:  free,
+		egressQueue: make(chan *ssu2EgressSlot, 1),
+	}
+	remote := net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:1234"))
+	if err := manager.writeToQueued([]byte{1}, remote); err != nil {
+		t.Fatalf("queue write: %v", err)
+	}
+	slot := <-manager.egressQueue
+	if slot.wait {
+		t.Fatal("queued write requested synchronous completion")
+	}
+	slots := []*ssu2EgressSlot{slot}
+	manager.completeEgressSlots(slots, 1, nil)
+	if available := len(manager.egressFree); available != 1 {
+		t.Fatalf("recycled egress slots = %d, want 1", available)
+	}
+}
+
+func TestSSU2QueuesOnePendingACKPerSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	manager := &SSU2Manager{started: true, ctx: ctx, ackQueue: make(chan *ssu2TransportSession, 4)}
+	session := new(ssu2TransportSession)
+	for range 3 {
+		manager.queueACK(session)
+	}
+	if queued := len(manager.ackQueue); queued != 1 {
+		t.Fatalf("queued ACK sessions = %d, want 1", queued)
+	}
+	if got := <-manager.ackQueue; got != session {
+		t.Fatal("ACK queue returned another session")
 	}
 }
 

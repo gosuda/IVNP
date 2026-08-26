@@ -21,22 +21,23 @@ const (
 )
 
 type samSession struct {
-	server         *Server
-	root           *samSession
-	id             string
-	style          sessionStyle
-	endpoint       destination.DestinationEndpoint
-	control        *serverConnection
-	ctx            context.Context
-	cancel         context.CancelFunc
-	sourceIP       netip.Addr
-	fromPort       uint16
-	toPort         uint16
-	listenPort     uint16
-	protocol       uint8
-	listenProtocol uint8
-	rawHeader      bool
-	udpTarget      *net.UDPAddr
+	server           *Server
+	root             *samSession
+	id               string
+	style            sessionStyle
+	endpoint         destination.DestinationEndpoint
+	control          *serverConnection
+	ctx              context.Context
+	cancel           context.CancelFunc
+	sourceIP         netip.Addr
+	fromPort         uint16
+	toPort           uint16
+	listenPort       uint16
+	protocol         uint8
+	listenProtocol   uint8
+	rawHeader        bool
+	udpTarget        *net.UDPAddr
+	datagramOverhead int
 
 	forward             bool
 	mu                  sync.Mutex
@@ -58,6 +59,7 @@ type samSession struct {
 func newRootSession(server *Server, id string, style sessionStyle, endpoint destination.DestinationEndpoint, control *serverConnection, fromPort, toPort, listenPort uint16, protocol, listenProtocol uint8, rawHeader bool, udpTarget *net.UDPAddr) *samSession {
 	ctx, cancel := context.WithCancel(server.ctx)
 	s := &samSession{server: server, id: id, style: style, endpoint: endpoint, control: control, ctx: ctx, cancel: cancel, sourceIP: connectionIP(control.Conn), fromPort: fromPort, toPort: toPort, listenPort: listenPort, protocol: protocol, listenProtocol: listenProtocol, rawHeader: rawHeader, udpTarget: udpTarget, children: make(map[string]*samSession), attachments: make(map[net.Conn]struct{}), queueBytes: newByteBudget(server.config.MaxSessionQueueBytes), acceptRequests: make(chan acceptRequest, server.config.SessionQueue)}
+	s.datagramOverhead = datagramV1Overhead(endpoint)
 	s.root = s
 	return s
 }

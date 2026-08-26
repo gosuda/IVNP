@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"errors"
 	"sync"
+
+	"gosuda.org/ivnp/internal/pool"
 )
 
 var (
@@ -21,6 +23,7 @@ type Fragment struct {
 
 type partial struct {
 	parts    [128][]byte
+	leases   [128]*pool.Lease
 	seen     [128]bool
 	terminal [128]bool
 	last     uint8
@@ -31,11 +34,12 @@ type partial struct {
 
 // Reassembler bounds retained incomplete data by entry count and message size.
 type Reassembler struct {
-	mu         sync.Mutex
-	maxEntries int
-	maxMessage int
-	clock      uint64
-	entries    map[uint32]*partial
+	mu          sync.Mutex
+	maxEntries  int
+	maxMessage  int
+	clock       uint64
+	entries     map[uint32]*partial
+	partialPool sync.Pool
 }
 
 func NewReassembler(maxEntries, maxMessage int) *Reassembler {
@@ -45,7 +49,9 @@ func NewReassembler(maxEntries, maxMessage int) *Reassembler {
 	if maxMessage <= 0 {
 		maxMessage = 62_690
 	}
-	return &Reassembler{maxEntries: maxEntries, maxMessage: maxMessage, entries: make(map[uint32]*partial)}
+	reassembler := &Reassembler{maxEntries: maxEntries, maxMessage: maxMessage, entries: make(map[uint32]*partial)}
+	reassembler.partialPool.New = func() any { return new(partial) }
+	return reassembler
 }
 
 // Add copies one fragment and returns a complete caller-owned message only
@@ -62,35 +68,42 @@ func (r *Reassembler) Add(fragment Fragment) ([]byte, bool, error) {
 		if len(r.entries) == r.maxEntries {
 			r.evictOldest()
 		}
-		entry = new(partial)
+		entry = r.partialPool.Get().(*partial)
 		r.entries[fragment.MessageID] = entry
 	}
 	entry.touched = r.clock
 	if entry.hasLast && fragment.Number > entry.last {
-		delete(r.entries, fragment.MessageID)
+		r.remove(fragment.MessageID)
 		return nil, false, ErrFragment
 	}
 	if entry.seen[fragment.Number] {
 		if entry.terminal[fragment.Number] != fragment.Last || !bytes.Equal(entry.parts[fragment.Number], fragment.Data) {
-			delete(r.entries, fragment.MessageID)
+			r.remove(fragment.MessageID)
 			return nil, false, ErrFragment
 		}
 		return nil, false, nil
 	}
 	if entry.size > r.maxMessage-len(fragment.Data) {
-		delete(r.entries, fragment.MessageID)
+		r.remove(fragment.MessageID)
 		return nil, false, ErrTooLarge
 	}
-	entry.parts[fragment.Number] = append([]byte(nil), fragment.Data...)
+	lease, ok := pool.AcquireLease(len(fragment.Data))
+	if !ok {
+		r.remove(fragment.MessageID)
+		return nil, false, ErrTooLarge
+	}
+	part, _ := lease.Bytes(len(fragment.Data))
+	copy(part, fragment.Data)
+	entry.parts[fragment.Number], entry.leases[fragment.Number] = part, lease
 	entry.seen[fragment.Number], entry.terminal[fragment.Number], entry.size = true, fragment.Last, entry.size+len(fragment.Data)
 	if fragment.Last {
 		if entry.hasLast && entry.last != fragment.Number {
-			delete(r.entries, fragment.MessageID)
+			r.remove(fragment.MessageID)
 			return nil, false, ErrFragment
 		}
 		for i := int(fragment.Number) + 1; i < len(entry.seen); i++ {
 			if entry.seen[i] {
-				delete(r.entries, fragment.MessageID)
+				r.remove(fragment.MessageID)
 				return nil, false, ErrFragment
 			}
 		}
@@ -108,7 +121,7 @@ func (r *Reassembler) Add(fragment Fragment) ([]byte, bool, error) {
 	for i := uint8(0); i <= entry.last; i++ {
 		message = append(message, entry.parts[i]...)
 	}
-	delete(r.entries, fragment.MessageID)
+	r.remove(fragment.MessageID)
 	return message, true, nil
 }
 
@@ -119,7 +132,7 @@ func (r *Reassembler) Expire(cutoff uint64) int {
 	removed := 0
 	for id, entry := range r.entries {
 		if entry.touched < cutoff {
-			delete(r.entries, id)
+			r.remove(id)
 			removed++
 		}
 	}
@@ -134,5 +147,20 @@ func (r *Reassembler) evictOldest() {
 			oldestID, oldest = id, entry.touched
 		}
 	}
-	delete(r.entries, oldestID)
+	r.remove(oldestID)
+}
+
+func (r *Reassembler) remove(messageID uint32) {
+	entry := r.entries[messageID]
+	if entry == nil {
+		return
+	}
+	delete(r.entries, messageID)
+	for index, lease := range entry.leases {
+		lease.Release()
+		entry.leases[index] = nil
+		entry.parts[index] = nil
+	}
+	*entry = partial{}
+	r.partialPool.Put(entry)
 }

@@ -258,6 +258,7 @@ func (s *Server) addSubsession(connection *serverConnection, cmd command) error 
 	}
 	ctx, cancel := context.WithCancel(root.ctx)
 	child := &samSession{server: s, root: root, id: id, style: style, endpoint: root.endpoint, control: connection, ctx: ctx, cancel: cancel, sourceIP: root.sourceIP, fromPort: fromPort, toPort: toPort, listenPort: listenPort, protocol: protocol, listenProtocol: listenProtocol, rawHeader: rawHeader, udpTarget: udpTarget, children: make(map[string]*samSession), attachments: make(map[net.Conn]struct{}), queueBytes: newByteBudget(s.config.MaxSessionQueueBytes), acceptRequests: make(chan acceptRequest, s.config.SessionQueue)}
+	child.datagramOverhead = root.datagramOverhead
 	if err = s.addChild(child); err != nil {
 		cancel()
 		return connection.writeLine("SESSION STATUS RESULT=DUPLICATED_ID")

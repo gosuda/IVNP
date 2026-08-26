@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"errors"
+	"sync"
 )
 
 const LayerPayloadSize = 1024
@@ -16,7 +17,42 @@ var ErrLayerSize = errors.New("tunnel: layer payload must be 1024 bytes")
 type LayerCipher struct {
 	layer, ivKey        [32]byte
 	layerBlock, ivBlock cipher.Block
+	modePool            *cbcModePool
 	encrypt             bool
+}
+
+type reusableCBCMode interface {
+	cipher.BlockMode
+	SetIV([]byte)
+}
+
+type reusableCBCState struct {
+	mode reusableCBCMode
+	iv   [aes.BlockSize]byte
+}
+
+type cbcModePool struct {
+	block   cipher.Block
+	encrypt bool
+	modes   sync.Pool
+}
+
+func newCBCModePool(block cipher.Block, encrypt bool) *cbcModePool {
+	pool := &cbcModePool{block: block, encrypt: encrypt}
+	pool.modes.New = func() any { return pool.newMode() }
+	pool.modes.Put(pool.newMode())
+	return pool
+}
+
+func (p *cbcModePool) newMode() *reusableCBCState {
+	var iv [aes.BlockSize]byte
+	var mode cipher.BlockMode
+	if p.encrypt {
+		mode = cipher.NewCBCEncrypter(p.block, iv[:])
+	} else {
+		mode = cipher.NewCBCDecrypter(p.block, iv[:])
+	}
+	return &reusableCBCState{mode: mode.(reusableCBCMode)}
 }
 
 func NewLayerEncryptor(layer, ivKey []byte) (LayerCipher, error) { return newLayer(layer, ivKey, true) }
@@ -39,6 +75,7 @@ func newLayer(layer, ivKey []byte, encrypt bool) (LayerCipher, error) {
 	if err != nil {
 		return LayerCipher{}, err
 	}
+	c.modePool = newCBCModePool(c.layerBlock, encrypt)
 	c.encrypt = encrypt
 	return c, nil
 }
@@ -49,17 +86,20 @@ func (c *LayerCipher) Transform(dst, src []byte) error {
 	if c.layerBlock == nil || c.ivBlock == nil {
 		return ErrLayerSize
 	}
-	layer, ivc := c.layerBlock, c.ivBlock
-	var iv [aes.BlockSize]byte
+	layerMode, ivc := c.modePool, c.ivBlock
+	state := layerMode.modes.Get().(*reusableCBCState)
 	if c.encrypt {
-		ivc.Encrypt(iv[:], src[:16])
-		cbcEncrypt(layer, dst[16:1024], src[16:1024], iv[:])
-		ivc.Encrypt(dst[:16], iv[:])
+		ivc.Encrypt(state.iv[:], src[:16])
+		state.mode.SetIV(state.iv[:])
+		state.mode.CryptBlocks(dst[16:1024], src[16:1024])
+		ivc.Encrypt(dst[:16], state.iv[:])
 	} else {
-		ivc.Decrypt(iv[:], src[:16])
-		cbcDecrypt(layer, dst[16:1024], src[16:1024], iv[:])
-		ivc.Decrypt(dst[:16], iv[:])
+		ivc.Decrypt(state.iv[:], src[:16])
+		state.mode.SetIV(state.iv[:])
+		state.mode.CryptBlocks(dst[16:1024], src[16:1024])
+		ivc.Decrypt(dst[:16], state.iv[:])
 	}
+	layerMode.modes.Put(state)
 	return nil
 }
 func cbcEncrypt(block cipher.Block, dst, src, iv []byte) {

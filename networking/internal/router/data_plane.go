@@ -17,6 +17,7 @@ import (
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
+	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/networking/internal/datagram"
 	"gosuda.org/ivnp/networking/internal/garlic"
 	garlicecies "gosuda.org/ivnp/networking/internal/garlic/ecies"
@@ -113,7 +114,6 @@ type streamingSenderScratch struct {
 	ratchet   [i2np.I2PDMaxPayload]byte
 	plain     [i2np.I2PDMaxPayload]byte
 	encrypted [i2np.I2PDMaxPayload]byte
-	frame     [i2np.I2PDMaxFrame]byte
 }
 
 type streamingSeedCacheEntry struct {
@@ -294,7 +294,12 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streami
 	if err != nil {
 		return err
 	}
-	defer s.releaseScratch(scratch)
+	scratchHeld := true
+	defer func() {
+		if scratchHeld {
+			s.releaseScratch(scratch)
+		}
+	}()
 	var (
 		encrypted []byte
 		lease     netdb.Lease
@@ -345,7 +350,8 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streami
 			return err
 		}
 	}
-	err = s.sendEncryptedTo(ctx, lease, encrypted, expires, scratch.frame[:])
+	scratchHeld = false
+	err = s.finishEncryptedSend(ctx, lease, encrypted, expires, scratch)
 	if err == nil && s.metrics != nil {
 		s.metrics.IncGarlicTunnelClovesForwarded()
 	}
@@ -393,8 +399,7 @@ func (s *StreamingTunnelSender) SendRatchetReply(ctx context.Context, target fou
 	if err != nil {
 		return err
 	}
-	defer s.releaseScratch(scratch)
-	return s.sendEncryptedTo(ctx, lease, packet, saturatingAdd(now, dataPlaneEnvelopeLifetime), scratch.frame[:])
+	return s.finishEncryptedSend(ctx, lease, packet, saturatingAdd(now, dataPlaneEnvelopeLifetime), scratch)
 }
 func (s *StreamingTunnelSender) acquireScratch(ctx context.Context) (*streamingSenderScratch, error) {
 	select {
@@ -419,34 +424,55 @@ func clearStreamingSenderScratch(scratch *streamingSenderScratch) {
 	clear(scratch.ratchet[:])
 	clear(scratch.plain[:])
 	clear(scratch.encrypted[:])
-	clear(scratch.frame[:])
 }
 
-func (s *StreamingTunnelSender) sendEncryptedTo(ctx context.Context, lease netdb.Lease, encrypted []byte, expires uint64, frame []byte) error {
+func (s *StreamingTunnelSender) finishEncryptedSend(ctx context.Context, lease netdb.Lease, encrypted []byte, expires uint64, scratch *streamingSenderScratch) error {
+	encoded, frameLease, err := s.frameEncrypted(encrypted, expires)
+	s.releaseScratch(scratch)
+	if err != nil {
+		return err
+	}
+	defer frameLease.Release()
+	return s.sendFramedTo(ctx, lease, encoded)
+}
+
+func (s *StreamingTunnelSender) frameEncrypted(encrypted []byte, expires uint64) ([]byte, *pool.Lease, error) {
+	if len(encrypted) > i2np.I2PDMaxPayload-4 {
+		return nil, nil, i2np.ErrPayloadTooLarge
+	}
+	garlicPayloadLen := 4 + len(encrypted)
+	encodedLen := i2np.StandardHeaderLen + garlicPayloadLen
+	frameLease, ok := pool.AcquireLease(encodedLen)
+	if !ok {
+		return nil, nil, i2np.ErrPayloadTooLarge
+	}
+	encoded, ok := frameLease.Bytes(encodedLen)
+	if !ok {
+		frameLease.Release()
+		return nil, nil, i2np.ErrPayloadTooLarge
+	}
+	garlicPayload := encoded[i2np.StandardHeaderLen:]
+	binary.BigEndian.PutUint32(garlicPayload, uint32(len(encrypted)))
+	copy(garlicPayload[4:], encrypted)
+	garlicID, err := s.id()
+	if err != nil {
+		frameLease.Release()
+		return nil, nil, err
+	}
+	message := i2np.Message{Header: i2np.Header{Type: i2np.Garlic, ID: garlicID, Expiration: expires}, Payload: garlicPayload}
+	if _, err = message.MarshalTo(encoded); err != nil {
+		frameLease.Release()
+		return nil, nil, err
+	}
+	return encoded, frameLease, nil
+}
+
+func (s *StreamingTunnelSender) sendFramedTo(ctx context.Context, lease netdb.Lease, encoded []byte) error {
 	outbound, ok := s.pool.Select(tunnel.Outbound, s.now())
 	if !ok {
 		return tunnel.ErrCircuitNotFound
 	}
 	s.seedLeaseGateway(ctx, outbound, lease.Gateway)
-	if len(encrypted) > i2np.I2PDMaxPayload-4 {
-		return i2np.ErrPayloadTooLarge
-	}
-	garlicPayloadLen := 4 + len(encrypted)
-	if len(frame) < i2np.StandardHeaderLen+garlicPayloadLen {
-		return i2np.ErrPayloadTooLarge
-	}
-	garlicPayload := frame[i2np.StandardHeaderLen : i2np.StandardHeaderLen+garlicPayloadLen]
-	binary.BigEndian.PutUint32(garlicPayload, uint32(len(encrypted)))
-	copy(garlicPayload[4:], encrypted)
-	garlicID, err := s.id()
-	if err != nil {
-		return err
-	}
-	message := i2np.Message{Header: i2np.Header{Type: i2np.Garlic, ID: garlicID, Expiration: expires}, Payload: garlicPayload}
-	encoded := frame[:message.EncodedLen()]
-	if _, err = message.MarshalTo(encoded); err != nil {
-		return err
-	}
 	return s.tunnels.SendBlock(ctx, outbound.ID, tunnel.Block{Delivery: tunnel.DeliveryTunnel, Gateway: lease.Gateway, TunnelID: lease.TunnelID, Data: encoded})
 }
 func (s *StreamingTunnelSender) seedLeaseGateway(ctx context.Context, outbound tunnel.Entry, gateway foundation.Hash) {

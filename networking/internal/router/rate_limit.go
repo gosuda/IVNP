@@ -105,16 +105,20 @@ func (l *rateLimiter) initialize() {
 }
 func (l *rateLimiter) shardIndex(key [32]byte) int {
 	l.once.Do(l.initialize)
-	return int(maphash.Bytes(rateLimitShardSeed, key[:]) % uint64(len(l.shards)))
+	hash := maphash.Bytes(rateLimitShardSeed, key[:])
+	return int(hash % uint64(len(l.shards)))
 }
 
 func (l *rateLimiter) allow(class rateClass, key [32]byte, nowMillis uint64) bool {
-	shard := &l.shards[l.shardIndex(key)]
+	l.once.Do(l.initialize)
+	hash := maphash.Bytes(rateLimitShardSeed, key[:])
+	shard := &l.shards[int(hash%uint64(len(l.shards)))]
+	start := int((hash / uint64(len(l.shards))) % uint64(len(shard.entries)))
 	policy := ratePolicies[class]
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	entry := shard.entry(key, nowMillis)
+	entry := shard.entry(key, start, nowMillis)
 	if entry == nil {
 		shard.counters[class].denied++
 		return false
@@ -145,37 +149,44 @@ func (l *rateLimiter) allow(class rateClass, key [32]byte, nowMillis uint64) boo
 	return true
 }
 
-func (l *rateLimiterShard) entry(key [32]byte, nowMillis uint64) *rateEntry {
-	var vacant *rateEntry
-	for i := range l.entries {
-		entry := &l.entries[i]
+func (l *rateLimiterShard) entry(key [32]byte, start int, nowMillis uint64) *rateEntry {
+	idle := -1
+	for offset := range len(l.entries) {
+		index := (start + offset) % len(l.entries)
+		entry := &l.entries[index]
 		if entry.used {
 			if entry.key == key {
 				return entry
 			}
-			if vacant == nil && rateEntryIdle(entry, nowMillis) {
-				vacant = entry
+			if idle < 0 && rateEntryIdle(entry, nowMillis) {
+				idle = index
 			}
 			continue
 		}
-		if vacant ==
-
-			nil {
-			vacant = entry
+		if idle >= 0 {
+			index = idle
 		}
-
+		l.entries[index] = rateEntry{key: key, used: true}
+		return &l.entries[index]
 	}
-	if vacant == nil {
+	if idle < 0 {
 		return nil
 	}
-	*vacant = rateEntry{key: key, used: true}
-	return vacant
+	l.entries[idle] = rateEntry{key: key, used: true}
+	return &l.entries[idle]
 }
 
 func rateEntryIdle(entry *rateEntry, nowMillis uint64) bool {
 	for class, bucket := range entry.buckets {
+		if !bucket.initialized {
+			continue
+		}
 		policy := ratePolicies[rateClass(class)]
-		if bucket.initialized && (nowMillis <= bucket.at || nowMillis-bucket.at < policy.refillMillis) {
+		missing := uint64(policy.capacity - bucket.tokens)
+		if missing == 0 {
+			continue
+		}
+		if nowMillis <= bucket.at || (nowMillis-bucket.at)/policy.refillMillis < missing {
 			return false
 		}
 	}

@@ -58,6 +58,22 @@ func BenchmarkAcquireRelease(b *testing.B) {
 	}
 }
 
+func BenchmarkAcquireLeaseRelease(b *testing.B) {
+	lease, ok := AcquireLease(1024)
+	if !ok {
+		b.Fatal("AcquireLease failed")
+	}
+	lease.Release()
+	b.ReportAllocs()
+	for b.Loop() {
+		lease, ok = AcquireLease(1024)
+		if !ok {
+			b.Fatal("AcquireLease failed")
+		}
+		lease.Release()
+	}
+}
+
 func TestAcquireRejectsNegativeSize(t *testing.T) {
 	if buf, ok := Acquire(-1); ok || buf != nil {
 		t.Fatalf("Acquire(-1) = %v, %t", buf, ok)

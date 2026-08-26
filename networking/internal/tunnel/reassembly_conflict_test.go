@@ -39,3 +39,37 @@ func TestReassemblerEvictsAndExpiresIncompleteEntries(t *testing.T) {
 		t.Fatalf("Expire = %d, entries=%d", removed, len(r.entries))
 	}
 }
+
+func TestReassemblerPooledEntryDoesNotRetainEvictedFragments(t *testing.T) {
+	reassembler := NewReassembler(1, 64)
+	if _, _, err := reassembler.Add(Fragment{MessageID: 1, Number: 0, Data: []byte("old")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := reassembler.Add(Fragment{MessageID: 2, Number: 0, Data: []byte("new")}); err != nil {
+		t.Fatal(err)
+	}
+	message, done, err := reassembler.Add(Fragment{MessageID: 2, Number: 1, Last: true, Data: []byte(" tail")})
+	if err != nil || !done || string(message) != "new tail" {
+		t.Fatalf("reused entry message = %q, %t, %v", message, done, err)
+	}
+	if message, done, err = reassembler.Add(Fragment{MessageID: 1, Number: 1, Last: true, Data: []byte(" tail")}); err != nil || done || message != nil {
+		t.Fatalf("evicted message resumed with pooled data = %q, %t, %v", message, done, err)
+	}
+}
+
+func BenchmarkReassemblerPooledFragments(b *testing.B) {
+	reassembler := NewReassembler(1, 64)
+	first := Fragment{Number: 0, Data: []byte("first")}
+	last := Fragment{Number: 1, Last: true, Data: []byte("last")}
+	b.ReportAllocs()
+	for b.Loop() {
+		first.MessageID++
+		last.MessageID = first.MessageID
+		if _, _, err := reassembler.Add(first); err != nil {
+			b.Fatal(err)
+		}
+		if _, done, err := reassembler.Add(last); err != nil || !done {
+			b.Fatalf("complete = %t, %v", done, err)
+		}
+	}
+}

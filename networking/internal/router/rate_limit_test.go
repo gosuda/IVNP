@@ -1,7 +1,9 @@
 package router
 
 import (
+	"encoding/binary"
 	"errors"
+	"hash/maphash"
 	"net"
 	"runtime"
 	"testing"
@@ -102,6 +104,73 @@ func TestRateLimiterDistributesIPv4SourcesAcrossCapacity(t *testing.T) {
 	}
 	if len(loads) < 4 {
 		t.Fatalf("%d IPv4 sources reached only %d of %d shards", sources, len(loads), len(limiter.shards))
+	}
+}
+
+func TestRateLimiterOpenAddressingIsolatesCollisions(t *testing.T) {
+	var limiter rateLimiter
+	type location struct {
+		shard int
+		slot  int
+	}
+	collisions := make(map[location][][32]byte)
+	var keys [][32]byte
+	for value := uint64(1); value < 10_000 && len(keys) < 3; value++ {
+		var key [32]byte
+		binary.BigEndian.PutUint64(key[:8], value)
+		limiter.once.Do(limiter.initialize)
+		hash := maphash.Bytes(rateLimitShardSeed, key[:])
+		shard := int(hash % uint64(len(limiter.shards)))
+		slot := int((hash / uint64(len(limiter.shards))) % uint64(len(limiter.shards[shard].entries)))
+		where := location{shard: shard, slot: slot}
+		collisions[where] = append(collisions[where], key)
+		if len(collisions[where]) == 3 {
+			keys = collisions[where]
+		}
+	}
+	if len(keys) != 3 {
+		t.Fatal("failed to find deterministic open-addressing collisions")
+	}
+
+	policy := ratePolicies[rateTunnelBuild]
+	for range policy.capacity {
+		if !limiter.allow(rateTunnelBuild, keys[0], 1) {
+			t.Fatal("colliding source was denied before capacity")
+		}
+	}
+	if limiter.allow(rateTunnelBuild, keys[0], 1) {
+		t.Fatal("exhausted colliding source was admitted")
+	}
+	if !limiter.allow(rateTunnelBuild, keys[1], 1) || !limiter.allow(rateTunnelBuild, keys[2], 1) {
+		t.Fatal("open-addressing collision shared another source's bucket")
+	}
+	if limiter.allow(rateTunnelBuild, keys[0], 1) {
+		t.Fatal("collision insertion replaced an active exhausted source")
+	}
+}
+
+func TestRateLimiterEvictsOnlyFullyRefilledEntry(t *testing.T) {
+	var limiter rateLimiter
+	var incoming [32]byte
+	incoming[0] = 1
+	limiter.once.Do(limiter.initialize)
+	hash := maphash.Bytes(rateLimitShardSeed, incoming[:])
+	shard := &limiter.shards[int(hash%uint64(len(limiter.shards)))]
+	policy := ratePolicies[rateTunnelBuild]
+	shard.mu.Lock()
+	for index := range shard.entries {
+		key := [32]byte{byte(index + 2)}
+		shard.entries[index] = rateEntry{key: key, used: true}
+		shard.entries[index].buckets[rateTunnelBuild] = rateBucket{initialized: true, tokens: 0, at: 0}
+	}
+	shard.mu.Unlock()
+
+	fullRefill := uint64(policy.capacity) * policy.refillMillis
+	if limiter.allow(rateTunnelBuild, incoming, fullRefill-1) {
+		t.Fatal("new source evicted an entry before its bucket fully refilled")
+	}
+	if !limiter.allow(rateTunnelBuild, incoming, fullRefill) {
+		t.Fatal("new source did not reuse a fully refilled entry")
 	}
 }
 

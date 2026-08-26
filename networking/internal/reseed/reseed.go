@@ -226,7 +226,7 @@ func (c Client) FetchInto(ctx context.Context, endpoint string, database *netdb.
 				if file.UncompressedSize64 == 0 || file.UncompressedSize64 > uint64(netdb.MaxRouterInfoBytes) {
 					continue
 				}
-				data, readErr := readRouterInfo(file)
+				data, lease, readErr := readRouterInfo(file)
 				if readErr != nil {
 					continue
 				}
@@ -236,7 +236,7 @@ func (c Client) FetchInto(ctx context.Context, endpoint string, database *netdb.
 						seenAt)
 				}
 
-				pool.Release(data)
+				lease.Release()
 				results[index] = parseErr == nil
 			}
 		}()
@@ -365,35 +365,33 @@ func (c Client) FetchAny(ctx context.Context, endpoints []string, database *netd
 	return 0, errors.Join(compacted...)
 }
 
-func readRouterInfo(file *zip.File) ([]byte, error) {
+func readRouterInfo(file *zip.File) ([]byte, *pool.Lease, error) {
 	reader, err := file.Open()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer reader.Close()
 	size := int(file.UncompressedSize64)
-	data, ok := pool.Acquire(size + 1)
+	lease, ok := pool.AcquireLease(size + 1)
 	if !ok {
-		return nil, ErrArchiveTooLarge
+		return nil, nil, ErrArchiveTooLarge
 	}
+	data, _ := lease.Bytes(size + 1)
 	read, err := io.ReadFull(reader, data[:size])
 	if err != nil || read != size {
-		pool.Release(data)
-		if err ==
-			nil {
+		lease.Release()
+		if err == nil {
 			err = io.ErrUnexpectedEOF
 		}
-
-		return nil, err
+		return nil, nil, err
 	}
 	one, err := reader.Read(data[size:])
 	if one != 0 || (err != nil && err != io.EOF) {
-		pool.Release(data)
+		lease.Release()
 		if err == nil {
 			err = ErrArchiveTooLarge
 		}
-
-		return nil, err
+		return nil, nil, err
 	}
-	return data[:size], nil
+	return data[:size], lease, nil
 }

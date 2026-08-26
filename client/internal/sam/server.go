@@ -261,10 +261,10 @@ func (c *serverConnection) writeLine(line string) error {
 	_, err := io.WriteString(c.Conn, line+"\n")
 	return err
 }
-func (c *serverConnection) writeFrame(header string, body []byte) error {
+func (c *serverConnection) writeFrame(header, body []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if _, err := io.WriteString(c.Conn, header+"\n"); err != nil {
+	if _, err := c.Conn.Write(header); err != nil {
 		return err
 	}
 	_, err := c.Conn.Write(body)

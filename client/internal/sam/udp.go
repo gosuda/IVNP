@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"gosuda.org/ivnp/internal/ingress"
+	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/networking"
 )
 
@@ -14,10 +15,21 @@ type udpPacket struct {
 	session  *samSession
 	target   string
 	payload  []byte
+	lease    *pool.Lease
 	fromPort uint16
 	toPort   uint16
 	protocol uint8
 	charged  int64
+}
+
+func (p *udpPacket) releasePayload() {
+	if p.lease != nil {
+		p.lease.ReleaseSensitive()
+		p.lease = nil
+	} else {
+		clear(p.payload)
+	}
+	p.payload = nil
 }
 
 func (s *Server) udpReadLoop() {
@@ -43,7 +55,7 @@ func (s *Server) udpReadLoop() {
 		}
 		packet.charged = int64(n)
 		if !packet.session.reserve(packet.charged) {
-			clear(packet.payload)
+			packet.releasePayload()
 			if s.config.Metrics != nil {
 				s.config.Metrics.IncSAMUDPBackpressureRejected()
 			}
@@ -53,14 +65,14 @@ func (s *Server) udpReadLoop() {
 		case s.udpIngress <- packet:
 		case <-s.ctx.Done():
 			packet.session.release(packet.charged)
-			clear(packet.payload)
+			packet.releasePayload()
 			return
 		default:
 			if s.config.Metrics != nil {
 				s.config.Metrics.IncSAMUDPBackpressureRejected()
 			}
 			packet.session.release(packet.charged)
-			clear(packet.payload)
+			packet.releasePayload()
 		}
 	}
 }
@@ -74,7 +86,7 @@ func (s *Server) udpSendLoop() {
 				select {
 				case packet := <-s.udpIngress:
 					packet.session.release(packet.charged)
-					clear(packet.payload)
+					packet.releasePayload()
 				default:
 					return
 				}
@@ -90,7 +102,7 @@ func (s *Server) udpSendLoop() {
 				select {
 				case packet := <-s.udpIngress:
 					packet.session.release(packet.charged)
-					clear(packet.payload)
+					packet.releasePayload()
 				default:
 					return
 				}
@@ -101,7 +113,7 @@ func (s *Server) udpSendLoop() {
 
 func (s *Server) processUDPPacket(packet udpPacket) {
 	defer packet.session.release(packet.charged)
-	defer clear(packet.payload)
+	defer packet.releasePayload()
 	defer func() {
 		if value := recover(); value != nil {
 			_ = ingress.Report(value, s.config.PanicReporter, ingress.BoundarySAMUDP, nil)
@@ -157,10 +169,17 @@ func (s *Server) parseUDPPacket(wire []byte, source net.Addr) (udpPacket, bool) 
 			return udpPacket{}, false
 		}
 	}
-	if session.style == styleDatagram && len(wire)-newline-1 > s.config.MaxDatagramBytes-1024 {
+	payloadLen := len(wire) - newline - 1
+	if session.style == styleDatagram && (session.datagramOverhead <= 0 || payloadLen > s.config.MaxDatagramBytes-session.datagramOverhead) {
 		return udpPacket{}, false
 	}
-	packet.payload = append([]byte(nil), wire[newline+1:]...)
+	lease, ok := pool.AcquireLease(payloadLen)
+	if !ok {
+		return udpPacket{}, false
+	}
+	packet.payload, _ = lease.Bytes(payloadLen)
+	packet.lease = lease
+	copy(packet.payload, wire[newline+1:])
 	return packet, true
 }
 
@@ -198,18 +217,21 @@ func (s *Server) sendUDPPacket(packet udpPacket) {
 		return
 	}
 	payload := packet.payload
-	var framed []byte
 	protocol := packet.protocol
+	var framedLease *pool.Lease
 	if session.style == styleDatagram {
-		framed = make([]byte, s.config.MaxDatagramBytes)
-		n, marshalErr := session.endpoint.MarshalDatagramV1To(framed, packet.payload)
-		if marshalErr != nil {
-			clear(framed)
+		framed, lease, ok := session.datagramFrame(len(packet.payload))
+		if !ok {
 			return
 		}
-		payload = framed[:n]
+		framedLease = lease
+		defer framedLease.ReleaseSensitive()
+		n, marshalErr := session.endpoint.MarshalDatagramV1To(framed, packet.payload)
+		if marshalErr != nil || n != len(framed) {
+			return
+		}
+		payload = framed
 		protocol = networking.DatagramProtocolDatagram1
 	}
 	_ = session.endpoint.SendMessage(session.ctx, networking.StreamingTunnelDelivery{From: session.endpoint.Hash(), To: hash, FromPort: packet.fromPort, ToPort: packet.toPort, Protocol: protocol, Payload: payload})
-	clear(framed)
 }

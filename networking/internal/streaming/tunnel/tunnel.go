@@ -14,12 +14,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/interfaces/stream"
 	"gosuda.org/ivnp/internal/parallelism"
+	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/networking/internal/streaming"
 )
 
@@ -55,6 +57,8 @@ const (
 	localMaxPayloadSize       = MaxPacketSize - HeaderLen
 	defaultPeerMaxPayloadSize = 1730
 	minPeerMaxPayloadSize     = 512
+	tunnelRetryUpdateIdle     = false
+	tunnelRetryUpdatePending  = true
 )
 
 const (
@@ -123,7 +127,10 @@ type TunnelNetwork struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	done           chan struct{}
+	outboundMu     sync.RWMutex
 	outbound       chan sendRequest
+	retryUpdates   chan *tunnelConn
+	completionPool sync.Pool
 	deliveryQueues []chan sendRequest
 	closeOnce      sync.Once
 	wg             sync.WaitGroup
@@ -194,6 +201,7 @@ func NewTunnelNetwork(config TunnelNetworkConfig) (*TunnelNetwork, error) {
 		cancel:         cancel,
 		done:           make(chan struct{}),
 		outbound:       make(chan sendRequest, DefaultTunnelSendQueue),
+		retryUpdates:   make(chan *tunnelConn, DefaultTunnelSendQueue),
 		deliveryQueues: make([]chan sendRequest, deliveryWorkers),
 	}
 	network.wg.Add(1 + deliveryWorkers)
@@ -554,10 +562,17 @@ func (n *TunnelNetwork) maintain() {
 	defer n.wg.Done()
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
-	var queued []sendRequest
+	requests := sendSchedule{items: make([]scheduledSend, 0, cap(n.outbound))}
+	retries := retrySchedule{indices: make(map[*tunnelConn]int)}
 	for {
 		now := time.Now()
-		due := n.nextDue(now, queued)
+		due := now.Add(time.Hour)
+		if request, ok := requests.peek(); ok {
+			due = request.due
+		}
+		if retry, ok := retries.peek(); ok && retry.due.Before(due) {
+			due = retry.due
+		}
 		if !timer.Stop() {
 			select {
 			case <-timer.C:
@@ -567,65 +582,90 @@ func (n *TunnelNetwork) maintain() {
 		timer.Reset(max(time.Nanosecond, time.Until(due)))
 		select {
 		case <-n.done:
-			for _, request := range queued {
-				request.finish(net.ErrClosed)
+			n.outboundMu.Lock()
+			requests.finishAll(net.ErrClosed)
+			for {
+				select {
+				case request := <-n.outbound:
+					request.finish(net.ErrClosed)
+				default:
+					n.outboundMu.Unlock()
+					return
+				}
 			}
-			return
 		case request := <-n.outbound:
-			if len(queued) == cap(n.outbound) {
+			if request.connection == nil || len(requests.items) == cap(n.outbound) {
 				request.finish(ErrTunnelBackpressure)
-			} else {
-				queued = append(queued, request)
+				continue
 			}
+			now = time.Now()
+			requests.push(request, request.connection.paceDue(now))
+			retries.upsert(request.connection, request.connection.retryDue())
+		case connection := <-n.retryUpdates:
+			connection.retryUpdateQueued.Store(tunnelRetryUpdateIdle)
+			retries.upsert(connection, connection.retryDue())
 		case <-timer.C:
 			now = time.Now()
-			n.dispatchEarliest(now, &queued)
-			queued = n.queueRetries(now, queued)
+			n.queueDueRetries(now, &requests, &retries)
+			n.dispatchDue(now, &requests)
 		}
 	}
 }
 
-func (n *TunnelNetwork) dispatchEarliest(now time.Time, queued *[]sendRequest) {
-	index, requestDue := earliestQueuedRequest(now, *queued)
-	if index < 0 || now.Before(requestDue) {
-		return
-	}
-	request := (*queued)[index]
-	copy((*queued)[index:], (*queued)[index+1:])
-	(*queued)[len(*queued)-1] = sendRequest{}
-	*queued = (*queued)[:len(*queued)-1]
-	if err := request.ctx.Err(); err != nil {
-		request.finish(err)
-		return
-	}
-	request.connection.advancePace(now)
-	n.dispatchDelivery(request)
-}
-
-func (n *TunnelNetwork) queueRetries(now time.Time, queued []sendRequest) []sendRequest {
-	n.mu.RLock()
-	connections := make([]*tunnelConn, 0, len(n.byID))
-	for _, connection := range n.byID {
-		connections = append(connections, connection)
-	}
-	n.mu.RUnlock()
-	for _, connection := range connections {
-		queued = n.queueConnectionRetries(now, queued, connection)
-	}
-	return queued
-}
-
-func (n *TunnelNetwork) queueConnectionRetries(now time.Time, queued []sendRequest, connection *tunnelConn) []sendRequest {
-	if now.Before(connection.retryDue(now)) {
-		return queued
-	}
-	for _, wire := range connection.retry(now) {
-		if len(queued) == cap(n.outbound) {
-			break
+func (n *TunnelNetwork) dispatchDue(now time.Time, requests *sendSchedule) {
+	for {
+		scheduled, ok := requests.peek()
+		if !ok {
+			return
 		}
-		queued = append(queued, sendRequest{connection: connection, wire: wire, ctx: n.ctx})
+		actualDue := scheduled.request.connection.paceDue(now)
+		if actualDue.After(scheduled.due) {
+			requests.updateTop(actualDue)
+			continue
+		}
+		if now.Before(actualDue) {
+			return
+		}
+		request := requests.pop().request
+		if err := request.ctx.Err(); err != nil {
+			request.finish(err)
+			continue
+		}
+		request.connection.advancePace(now)
+		n.dispatchDelivery(request)
 	}
-	return queued
+}
+
+func (n *TunnelNetwork) queueDueRetries(now time.Time, requests *sendSchedule, retries *retrySchedule) {
+	for {
+		scheduled, ok := retries.peek()
+		if !ok || now.Before(scheduled.due) {
+			return
+		}
+		connection := retries.pop().connection
+		resends := connection.retry(now)
+		for index, resend := range resends {
+			if len(requests.items) == cap(n.outbound) {
+				for _, unqueued := range resends[index:] {
+					unqueued.lease.release()
+				}
+				break
+			}
+			requests.push(sendRequest{connection: connection, wire: resend.wire, lease: resend.lease, ctx: n.ctx}, connection.paceDue(now))
+		}
+		retries.upsert(connection, connection.retryDue())
+	}
+}
+
+func (n *TunnelNetwork) scheduleRetry(connection *tunnelConn) {
+	if connection == nil || !connection.retryUpdateQueued.CompareAndSwap(tunnelRetryUpdateIdle, tunnelRetryUpdatePending) {
+		return
+	}
+	select {
+	case n.retryUpdates <- connection:
+	case <-n.done:
+		connection.retryUpdateQueued.Store(tunnelRetryUpdateIdle)
+	}
 }
 
 func (n *TunnelNetwork) dispatchDelivery(request sendRequest) {
@@ -665,14 +705,42 @@ func (n *TunnelNetwork) deliveryWorker(jobs <-chan sendRequest) {
 type sendRequest struct {
 	connection *tunnelConn
 	wire       []byte
+	lease      *wireLease
 	ctx        context.Context
-	result     chan error
+	result     *sendCompletion
 }
 
 func (r sendRequest) finish(err error) {
+	if r.result != nil {
+		r.result.value <- err
+		r.result.release()
+	}
+	r.lease.release()
+}
+
+type sendCompletion struct {
+	owner *sync.Pool
+	value chan error
+	refs  atomic.Int32
+}
+
+func (n *TunnelNetwork) acquireCompletion() *sendCompletion {
+	completion, _ := n.completionPool.Get().(*sendCompletion)
+	if completion == nil {
+		completion = &sendCompletion{value: make(chan error, 1)}
+	}
 	select {
-	case r.result <- err:
+	case <-completion.value:
 	default:
+	}
+	completion.owner = &n.completionPool
+	completion.refs.Store(2)
+	return completion
+}
+
+func (c *sendCompletion) release() {
+	if c.refs.Add(-1) == 0 {
+		c.owner.Put(c)
 	}
 }
 
@@ -683,38 +751,184 @@ func (n *TunnelNetwork) deliver(connection *tunnelConn, wire []byte) error {
 	})
 }
 
-func (n *TunnelNetwork) nextDue(now time.Time, queued []sendRequest) time.Time {
-	_, due := earliestQueuedRequest(now, queued)
-	if due.IsZero() {
-		due = now.Add(time.Hour)
-	}
-	n.mu.RLock()
-	connections := make([]*tunnelConn, 0, len(n.byID))
-	for _, connection := range n.byID {
-		connections = append(connections, connection)
-	}
-	n.mu.RUnlock()
-	for _, connection := range connections {
-		if candidate := connection.retryDue(now); candidate.Before(due) {
-			due = candidate
-		}
-	}
-	return due
+type scheduledSend struct {
+	request sendRequest
+	due     time.Time
+	order   uint64
 }
 
-func earliestQueuedRequest(now time.Time, queued []sendRequest) (int, time.Time) {
-	index := -1
-	var due time.Time
-	for candidateIndex := range queued {
-		if queued[candidateIndex].connection == nil {
-			continue
-		}
-		candidateDue := queued[candidateIndex].connection.paceDue(now)
-		if index < 0 || candidateDue.Before(due) {
-			index, due = candidateIndex, candidateDue
-		}
+type sendSchedule struct {
+	items []scheduledSend
+	order uint64
+}
+
+func (h *sendSchedule) less(left, right int) bool {
+	if h.items[left].due.Equal(h.items[right].due) {
+		return h.items[left].order < h.items[right].order
 	}
-	return index, due
+	return h.items[left].due.Before(h.items[right].due)
+}
+
+func (h *sendSchedule) swap(left, right int) {
+	h.items[left], h.items[right] = h.items[right], h.items[left]
+}
+
+func (h *sendSchedule) push(request sendRequest, due time.Time) {
+	h.order++
+	h.items = append(h.items, scheduledSend{request: request, due: due, order: h.order})
+	for index := len(h.items) - 1; index > 0; {
+		parent := (index - 1) / 2
+		if !h.less(index, parent) {
+			break
+		}
+		h.swap(index, parent)
+		index = parent
+	}
+}
+
+func (h *sendSchedule) peek() (scheduledSend, bool) {
+	if len(h.items) == 0 {
+		return scheduledSend{}, false
+	}
+	return h.items[0], true
+}
+
+func (h *sendSchedule) pop() scheduledSend {
+	item := h.items[0]
+	last := len(h.items) - 1
+	h.items[0] = h.items[last]
+	h.items[last] = scheduledSend{}
+	h.items = h.items[:last]
+	h.down(0)
+	return item
+}
+
+func (h *sendSchedule) updateTop(due time.Time) {
+	h.items[0].due = due
+	h.down(0)
+}
+
+func (h *sendSchedule) down(index int) {
+	for {
+		left := 2*index + 1
+		if left >= len(h.items) {
+			return
+		}
+		child := left
+		if right := left + 1; right < len(h.items) && h.less(right, left) {
+			child = right
+		}
+		if !h.less(child, index) {
+			return
+		}
+		h.swap(index, child)
+		index = child
+	}
+}
+
+func (h *sendSchedule) finishAll(err error) {
+	for len(h.items) != 0 {
+		h.pop().request.finish(err)
+	}
+}
+
+type scheduledRetry struct {
+	connection *tunnelConn
+	due        time.Time
+}
+
+type retrySchedule struct {
+	items   []scheduledRetry
+	indices map[*tunnelConn]int
+}
+
+func (h *retrySchedule) less(left, right int) bool {
+	return h.items[left].due.Before(h.items[right].due)
+}
+
+func (h *retrySchedule) swap(left, right int) {
+	h.items[left], h.items[right] = h.items[right], h.items[left]
+	h.indices[h.items[left].connection] = left
+	h.indices[h.items[right].connection] = right
+}
+
+func (h *retrySchedule) upsert(connection *tunnelConn, due time.Time) {
+	index, exists := h.indices[connection]
+	if due.IsZero() {
+		if exists {
+			h.remove(index)
+		}
+		return
+	}
+	if exists {
+		h.items[index].due = due
+		h.fix(index)
+		return
+	}
+	h.items = append(h.items, scheduledRetry{connection: connection, due: due})
+	index = len(h.items) - 1
+	h.indices[connection] = index
+	for index > 0 {
+		parent := (index - 1) / 2
+		if !h.less(index, parent) {
+			break
+		}
+		h.swap(index, parent)
+		index = parent
+	}
+}
+
+func (h *retrySchedule) peek() (scheduledRetry, bool) {
+	if len(h.items) == 0 {
+		return scheduledRetry{}, false
+	}
+	return h.items[0], true
+}
+
+func (h *retrySchedule) pop() scheduledRetry {
+	return h.remove(0)
+}
+
+func (h *retrySchedule) remove(index int) scheduledRetry {
+	item := h.items[index]
+	delete(h.indices, item.connection)
+	last := len(h.items) - 1
+	if index != last {
+		h.items[index] = h.items[last]
+		h.indices[h.items[index].connection] = index
+	}
+	h.items[last] = scheduledRetry{}
+	h.items = h.items[:last]
+	if index < len(h.items) {
+		h.fix(index)
+	}
+	return item
+}
+
+func (h *retrySchedule) fix(index int) {
+	for index > 0 {
+		parent := (index - 1) / 2
+		if !h.less(index, parent) {
+			break
+		}
+		h.swap(index, parent)
+		index = parent
+	}
+	for {
+		left := 2*index + 1
+		if left >= len(h.items) {
+			return
+		}
+		child := left
+		if right := left + 1; right < len(h.items) && h.less(right, left) {
+			child = right
+		}
+		if !h.less(child, index) {
+			return
+		}
+		h.swap(index, child)
+		index = child
+	}
 }
 
 type tunnelConn struct {
@@ -734,6 +948,7 @@ type tunnelConn struct {
 	pending            map[uint32]pendingPacket
 	reordered          map[uint32]receivedPacket
 	synchronize        []byte
+	synchronizeLease   *wireLease
 	syncSent           time.Time
 	syncRetries        int
 	rto                streaming.RTOEstimator
@@ -742,6 +957,7 @@ type tunnelConn struct {
 	haveAck            bool
 	duplicateACK       uint8
 	peerMaxPayloadSize int
+	retryUpdateQueued  atomic.Bool
 	nextPaced          time.Time
 	peerClosedOK       bool
 	localWriteClosed   bool
@@ -768,9 +984,14 @@ type tunnelConn struct {
 
 type pendingPacket struct {
 	wire          []byte
+	lease         *wireLease
 	sent          time.Time
 	retries       int
 	retransmitted bool
+}
+
+func (p pendingPacket) release() {
+	p.lease.release()
 }
 
 type receivedPacket struct {
@@ -800,20 +1021,24 @@ func (c *tunnelConn) advancePace(now time.Time) {
 	c.mu.Unlock()
 }
 
-func (c *tunnelConn) retryDue(now time.Time) time.Time {
+func (c *tunnelConn) retryDue() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	due := now.Add(time.Hour)
+	if c.isDoneLocked() {
+		return time.Time{}
+	}
+	var due time.Time
 	rto := c.rto.RTO()
 	if c.remoteID == 0 && len(c.synchronize) != 0 {
 		due = c.syncSent.Add(rto)
 	}
 	for _, pending := range c.pending {
-		if !pending.sent.IsZero() {
-			candidate := pending.sent.Add(rto)
-			if candidate.Before(due) {
-				due = candidate
-			}
+		if pending.sent.IsZero() {
+			continue
+		}
+		candidate := pending.sent.Add(rto)
+		if due.IsZero() || candidate.Before(due) {
+			due = candidate
 		}
 	}
 	return due
@@ -829,7 +1054,7 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 	}
 
 	var sendACK, sendReset, finishClose, startCloseTimer bool
-	var fastRetransmit [][]byte
+	var fastRetransmit []leasedSend
 	c.mu.Lock()
 	if c.isDoneLocked() {
 		c.mu.Unlock()
@@ -839,7 +1064,8 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 		c.mu.Unlock()
 		return err
 	}
-	if packet.Flags&FlagNoACK == 0 {
+	retryChanged := packet.Flags&FlagNoACK == 0
+	if retryChanged {
 		fastRetransmit = c.acknowledgeLocked(packet.AckThrough, packet.NACKs, time.Now())
 	}
 	if packet.Flags&FlagReset != 0 {
@@ -860,12 +1086,21 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 		}
 	}
 	c.mu.Unlock()
+	if retryChanged {
+		c.network.scheduleRetry(c)
+	}
 	if sendReset {
 		c.abort(true)
+		for _, unsent := range fastRetransmit {
+			unsent.lease.release()
+		}
 		return ErrTunnelBackpressure
 	}
-	for _, wire := range fastRetransmit {
-		if err := c.sendWire(ctx, wire); err != nil {
+	for index, resend := range fastRetransmit {
+		if err := c.sendWireOwned(ctx, resend.wire, resend.lease); err != nil {
+			for _, unsent := range fastRetransmit[index+1:] {
+				unsent.lease.release()
+			}
 			return err
 		}
 	}
@@ -886,6 +1121,9 @@ func (c *tunnelConn) preparePeerLocked(delivery Delivery, packet Packet) error {
 	if c.remoteID != 0 {
 		if packet.SendStreamID != c.localID || packet.ReceiveStreamID != c.remoteID {
 			return invalidTunnelPacket("stream ID mismatch", packet)
+		}
+		if packet.Flags&FlagNoACK == 0 {
+			c.releaseSynchronizeLocked()
 		}
 		if packet.Flags&(FlagSynchronize|FlagClose|FlagReset) == 0 {
 			return nil
@@ -913,6 +1151,7 @@ func (c *tunnelConn) preparePeerLocked(delivery Delivery, packet Packet) error {
 	c.peerIdentity = identity
 	c.updatePeerMaxPayloadSizeLocked(peerMaxPayloadSize)
 	c.remoteID = packet.ReceiveStreamID
+	c.releaseSynchronizeLocked()
 	c.markEstablished()
 	return nil
 }
@@ -954,7 +1193,7 @@ func (c *tunnelConn) enqueueExpectedLocked(received receivedPacket) bool {
 	}
 }
 
-func (c *tunnelConn) acknowledgeLocked(through uint32, nacks []byte, now time.Time) [][]byte {
+func (c *tunnelConn) acknowledgeLocked(through uint32, nacks []byte, now time.Time) []leasedSend {
 	if len(nacks)%4 != 0 || len(nacks) > 4*MaxWindow {
 		return nil
 	}
@@ -964,6 +1203,7 @@ func (c *tunnelConn) acknowledgeLocked(through uint32, nacks []byte, now time.Ti
 			if !pending.retransmitted && !pending.sent.IsZero() {
 				c.rto.Observe(now.Sub(pending.sent))
 			}
+			pending.release()
 			delete(c.pending, sequence)
 			acknowledged++
 		}
@@ -1012,7 +1252,8 @@ func (c *tunnelConn) acknowledgeLocked(through uint32, nacks []byte, now time.Ti
 	pending.retransmitted = true
 	pending.sent = now
 	c.pending[selected] = pending
-	return [][]byte{pending.wire}
+	pending.lease.retain()
+	return []leasedSend{{wire: pending.wire, lease: pending.lease}}
 }
 
 func (c *tunnelConn) enqueueReceivedLocked(packet receivedPacket) bool {
@@ -1048,16 +1289,34 @@ func (c *tunnelConn) sendSynchronize(ctx context.Context, originator bool) error
 		packet = Packet{SendStreamID: c.remoteID, ReceiveStreamID: c.localID, Sequence: 0, Flags: FlagSynchronize | FlagSignatureIncluded | FlagFromIncluded | FlagMaxPacketSize}
 	}
 	wire, err := c.network.signedControl(packet, controlOptions{includeFrom: true, includeMax: true})
+	var lease *wireLease
 	if err == nil {
+		wire, lease = leaseWire(wire)
+		c.releaseSynchronizeLocked()
 		c.synchronize = wire
+		c.synchronizeLease = lease
 		c.syncSent = time.Now()
 		c.syncRetries++
+		lease.retain()
 	}
 	c.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	return c.sendWire(ctx, wire)
+	if err = c.sendWireOwned(ctx, wire, lease); err != nil {
+		c.mu.Lock()
+		if len(c.synchronize) != 0 && &c.synchronize[0] == &wire[0] {
+			c.releaseSynchronizeLocked()
+		}
+		c.mu.Unlock()
+	}
+	return err
+}
+
+func (c *tunnelConn) releaseSynchronizeLocked() {
+	c.synchronizeLease.release()
+	c.synchronize = nil
+	c.synchronizeLease = nil
 }
 
 func (c *tunnelConn) sendACK(ctx context.Context) error {
@@ -1096,16 +1355,41 @@ func (c *tunnelConn) nacksLocked() []byte {
 }
 
 func (c *tunnelConn) sendWire(ctx context.Context, wire []byte) error {
-	request := sendRequest{connection: c, wire: wire, ctx: ctx, result: make(chan error, 1)}
+	return c.sendWireOwned(ctx, wire, nil)
+}
+
+func (c *tunnelConn) sendWireOwned(ctx context.Context, wire []byte, lease *wireLease) error {
+	completion := c.network.acquireCompletion()
+	request := sendRequest{connection: c, wire: wire, lease: lease, ctx: ctx, result: completion}
+	c.network.outboundMu.RLock()
 	select {
-	case c.network.outbound <- request:
 	case <-c.network.done:
+		c.network.outboundMu.RUnlock()
+		completion.release()
+		completion.release()
+		lease.release()
 		return net.ErrClosed
-	case <-ctx.Done():
-		return ctx.Err()
+	default:
 	}
 	select {
-	case err := <-request.result:
+	case c.network.outbound <- request:
+		c.network.outboundMu.RUnlock()
+	case <-c.network.done:
+		c.network.outboundMu.RUnlock()
+		completion.release()
+		completion.release()
+		lease.release()
+		return net.ErrClosed
+	case <-ctx.Done():
+		c.network.outboundMu.RUnlock()
+		completion.release()
+		completion.release()
+		lease.release()
+		return ctx.Err()
+	}
+	defer completion.release()
+	select {
+	case err := <-completion.value:
 		return err
 	case <-c.network.done:
 		return net.ErrClosed
@@ -1114,8 +1398,8 @@ func (c *tunnelConn) sendWire(ctx context.Context, wire []byte) error {
 	}
 }
 
-func (c *tunnelConn) retry(now time.Time) [][]byte {
-	var resend [][]byte
+func (c *tunnelConn) retry(now time.Time) []leasedSend {
+	var resend []leasedSend
 	closeConnection := false
 	c.mu.Lock()
 	if c.isDoneLocked() {
@@ -1130,7 +1414,8 @@ func (c *tunnelConn) retry(now time.Time) [][]byte {
 			c.syncRetries++
 			c.syncSent = now
 			c.rto.Backoff()
-			resend = append(resend, c.synchronize)
+			c.synchronizeLease.retain()
+			resend = append(resend, leasedSend{wire: c.synchronize, lease: c.synchronizeLease})
 		}
 	}
 	lost := false
@@ -1139,6 +1424,7 @@ func (c *tunnelConn) retry(now time.Time) [][]byte {
 			continue
 		}
 		if pending.retries >= c.network.maxRetries {
+			pending.release()
 			delete(c.pending, sequence)
 			closeConnection = true
 			continue
@@ -1147,7 +1433,8 @@ func (c *tunnelConn) retry(now time.Time) [][]byte {
 		pending.retransmitted = true
 		pending.sent = now
 		c.pending[sequence] = pending
-		resend = append(resend, pending.wire)
+		pending.lease.retain()
+		resend = append(resend, leasedSend{wire: pending.wire, lease: pending.lease})
 		lost = true
 	}
 	if lost {
@@ -1233,17 +1520,20 @@ func (c *tunnelConn) Write(src []byte) (int, error) {
 		sequence := c.nextSequence
 		c.nextSequence++
 		packet := Packet{SendStreamID: c.remoteID, ReceiveStreamID: c.localID, Sequence: sequence, AckThrough: c.expect - 1, Payload: chunk}
-		wire, err := marshalPacket(packet)
+		wire, lease, err := marshalPacketLeased(packet)
 		if err == nil {
-			c.pending[sequence] = pendingPacket{wire: wire, sent: time.Now()}
+			c.pending[sequence] = pendingPacket{wire: wire, lease: lease, sent: time.Now()}
+			lease.retain()
 		}
 		c.mu.Unlock()
 		if err != nil {
 			return written, err
 		}
-		if err = c.sendWire(context.Background(), wire); err != nil {
+		if err = c.sendWireOwned(context.Background(), wire, lease); err != nil {
 			c.mu.Lock()
+			pending := c.pending[sequence]
 			delete(c.pending, sequence)
+			pending.release()
 			c.signalWakeLocked()
 			c.mu.Unlock()
 			return written, err
@@ -1350,6 +1640,13 @@ func (c *tunnelConn) abort(sendReset bool) {
 	}
 	c.closeOnce.Do(func() {
 		close(c.done)
+		c.mu.Lock()
+		for sequence, pending := range c.pending {
+			pending.release()
+			delete(c.pending, sequence)
+		}
+		c.releaseSynchronizeLocked()
+		c.mu.Unlock()
 		c.network.unregister(c)
 		c.signalWake()
 	})
@@ -1402,20 +1699,25 @@ func (c *tunnelConn) initiateClose() error {
 		sequence := c.nextSequence
 		packet := Packet{SendStreamID: c.remoteID, ReceiveStreamID: c.localID, Sequence: sequence, AckThrough: c.expect - 1, Flags: FlagClose | FlagSignatureIncluded}
 		wire, err := c.network.signedControl(packet, controlOptions{})
+		var lease *wireLease
 		if err == nil {
+			wire, lease = leaseWire(wire)
 			c.nextSequence++
 			c.localWriteClosed = true
 			c.localCloseSequence = sequence
-			c.pending[sequence] = pendingPacket{wire: wire, sent: time.Now()}
+			c.pending[sequence] = pendingPacket{wire: wire, lease: lease, sent: time.Now()}
+			lease.retain()
 		}
 		c.mu.Unlock()
 		if err != nil {
 			result = err
 			return
 		}
-		if result = c.sendWire(c.network.ctx, wire); result != nil {
+		if result = c.sendWireOwned(c.network.ctx, wire, lease); result != nil {
 			c.mu.Lock()
+			pending := c.pending[sequence]
 			delete(c.pending, sequence)
+			pending.release()
 			c.signalWakeLocked()
 			c.mu.Unlock()
 		}
@@ -1670,6 +1972,74 @@ func marshalPacket(packet Packet) ([]byte, error) {
 		return nil, err
 	}
 	return wire, nil
+}
+
+type leasedSend struct {
+	wire  []byte
+	lease *wireLease
+}
+
+type wireLease struct {
+	slab *pool.Lease
+	refs atomic.Int32
+}
+
+var wireLeasePool sync.Pool
+
+func acquireWireLease(size int) ([]byte, *wireLease, bool) {
+	slab, ok := pool.AcquireLease(size)
+	if !ok {
+		return nil, nil, false
+	}
+	wire, ok := slab.Bytes(size)
+	if !ok {
+		slab.Release()
+		return nil, nil, false
+	}
+	lease, _ := wireLeasePool.Get().(*wireLease)
+	if lease == nil {
+		lease = &wireLease{}
+	}
+	lease.slab = slab
+	lease.refs.Store(1)
+	return wire, lease, true
+}
+
+func (l *wireLease) retain() {
+	if l != nil {
+		l.refs.Add(1)
+	}
+}
+
+func (l *wireLease) release() {
+	if l == nil || l.refs.Add(-1) != 0 {
+		return
+	}
+	l.slab.Release()
+	l.slab = nil
+	wireLeasePool.Put(l)
+}
+
+func marshalPacketLeased(packet Packet) ([]byte, *wireLease, error) {
+	encodedLen := packet.EncodedLen()
+	if encodedLen < HeaderLen {
+		return nil, nil, ErrTunnelPacket
+	}
+	wire, lease, ok := acquireWireLease(encodedLen)
+	if !ok {
+		return nil, nil, ErrTunnelBackpressure
+	}
+	if _, err := packet.MarshalTo(wire); err != nil {
+		lease.release()
+		return nil, nil, err
+	}
+	return wire, lease, nil
+}
+
+func leaseWire(src []byte) ([]byte, *wireLease) {
+	dst, lease, _ := acquireWireLease(len(src))
+	copy(dst, src)
+	return dst, lease
 }
 
 func splitI2PAddress(address string) (string, uint16, error) {

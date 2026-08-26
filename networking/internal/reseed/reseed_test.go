@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/networking/internal/netdb"
 )
 
@@ -47,11 +46,11 @@ func zipFile(t *testing.T, name string, payload []byte) *zip.File {
 
 func TestReadRouterInfoUsesBoundedPoolBuffer(t *testing.T) {
 	payload := bytes.Repeat([]byte{0x5a}, 1024)
-	data, err := readRouterInfo(zipFile(t, "routerInfo-test.dat", payload))
+	data, lease, err := readRouterInfo(zipFile(t, "routerInfo-test.dat", payload))
 	if err != nil || !bytes.Equal(data, payload) {
 		t.Fatalf("readRouterInfo() = %d bytes, %v", len(data), err)
 	}
-	pool.Release(data)
+	lease.Release()
 }
 
 func TestClientRejectsInsecureEndpointBeforeNetwork(t *testing.T) {

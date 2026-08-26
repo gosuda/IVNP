@@ -436,6 +436,7 @@ func TestSSU2LivePathMigrationRejectsWrongSourceReplayAndTimeout(t *testing.T) {
 		}
 	}
 	received := make(chan i2np.Message, 1)
+	bobReceived := make(chan i2np.Message, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	aliceManager := newSSU2LiveManager(t, aliceDB, aliceStatic, aliceIntro, time.Second, 10*time.Second)
 	bobManager := newSSU2LiveManager(t, bobDB, bobStatic, bobIntro, time.Second, 10*time.Second)
@@ -444,29 +445,39 @@ func TestSSU2LivePathMigrationRejectsWrongSourceReplayAndTimeout(t *testing.T) {
 		received <- message
 		return nil
 	})
-	startSSU2LiveManager(t, ctx, bobManager, bobConn, bob, nil)
+	startSSU2LiveManager(t, ctx, bobManager, bobConn, bob, func(message i2np.Message, _ uint64, _ bool) error {
+		bobReceived <- message
+		return nil
+	})
 	t.Cleanup(func() {
 		cancel()
 		closeSSU2LiveManager(t, aliceManager)
 		closeSSU2LiveManager(t, bobManager)
 	})
 
-	sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
-	defer sendCancel()
-	if err := aliceManager.Send(sendCtx, bob.Hash(), ssu2LiveMessage(1)); err != nil {
-		t.Fatalf("establish initial path: %v", err)
+	send := func(manager *SSU2Manager, peer foundation.Hash, id uint32, action string) {
+		sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer sendCancel()
+		if err := manager.Send(sendCtx, peer, ssu2LiveMessage(id)); err != nil {
+			t.Fatalf("%s: %v", action, err)
+		}
+	}
+	send(aliceManager, bob.Hash(), 1, "establish initial path")
+	select {
+	case message := <-bobReceived:
+		if message.Header.ID != 1 {
+			t.Fatalf("initial path delivered message %d, want 1", message.Header.ID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial path did not deliver Alice traffic")
 	}
 	proxy.Migrate()
-	if err := aliceManager.Send(sendCtx, bob.Hash(), ssu2LiveMessage(2)); err != nil {
-		t.Fatalf("send authenticated traffic over candidate path: %v", err)
-	}
+	send(aliceManager, bob.Hash(), 2, "send authenticated traffic over candidate path")
 	secondary := proxy.secondary.LocalAddr().(*net.UDPAddr)
 	waitForSSU2Live(t, 4*time.Second, func() bool {
 		return liveSessionRemoteIs(bobManager, alice.Hash(), secondary)
 	}, "authenticated PathChallenge/PathResponse migration")
-	if err := bobManager.Send(sendCtx, alice.Hash(), ssu2LiveMessage(3)); err != nil {
-		t.Fatalf("send over migrated endpoint: %v", err)
-	}
+	send(bobManager, alice.Hash(), 3, "send over migrated endpoint")
 	select {
 	case message := <-received:
 		if message.Header.ID != 3 {

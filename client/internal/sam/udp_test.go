@@ -12,6 +12,7 @@ import (
 
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/networking"
 	"gosuda.org/ivnp/observability"
 )
@@ -313,4 +314,141 @@ func TestUDPBlockingDestinationSendCancelsAndWaitIsBounded(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Server.Wait remained blocked after cancellation")
 	}
+}
+
+func TestDatagramFrameUsesExactPayloadCapacity(t *testing.T) {
+	local, err := foundation.GenerateLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := &loopEndpoint{
+		local:         local,
+		controller:    &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)},
+		subscriptions: make(map[destination.DestinationRoute]*loopSubscription),
+	}
+	defer endpoint.Close()
+	payload := []byte("exact datagram")
+	overhead := datagramV1Overhead(endpoint)
+	session := &samSession{
+		server:           &Server{config: ServerConfig{MaxDatagramBytes: overhead + len(payload)}},
+		endpoint:         endpoint,
+		datagramOverhead: overhead,
+	}
+	frame, lease, ok := session.datagramFrame(len(payload))
+	if !ok {
+		t.Fatal("exact-size datagram frame rejected")
+	}
+	defer lease.ReleaseSensitive()
+	n, err := endpoint.MarshalDatagramV1To(frame, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(frame) || len(frame) != overhead+len(payload) {
+		t.Fatalf("framed length = %d, marshal length = %d, want %d", len(frame), n, overhead+len(payload))
+	}
+	if _, tooLarge, accepted := session.datagramFrame(len(payload) + 1); accepted {
+		tooLarge.ReleaseSensitive()
+		t.Fatal("oversized datagram frame accepted")
+	}
+}
+
+func TestSAMHeaderEncoding(t *testing.T) {
+	payload := []byte("payload")
+	datagramWire, datagramLease, ok := datagramUDPWire("source", 0, 65535, payload)
+	if !ok {
+		t.Fatal("datagram UDP wire allocation failed")
+	}
+	if got, want := string(datagramWire), "source\nFROM_PORT=0\nTO_PORT=65535\n\npayload"; got != want {
+		t.Fatalf("datagram UDP wire = %q, want %q", got, want)
+	}
+	datagramLease.ReleaseSensitive()
+
+	rawWire, rawLease, ok := rawUDPWire(65535, 0, 255, payload)
+	if !ok {
+		t.Fatal("raw UDP wire allocation failed")
+	}
+	if got, want := string(rawWire), "FROM_PORT=65535\nTO_PORT=0\nPROTOCOL=255\n\npayload"; got != want {
+		t.Fatalf("raw UDP wire = %q, want %q", got, want)
+	}
+	rawLease.ReleaseSensitive()
+
+	datagramHeader, datagramHeaderLease, ok := datagramReceivedHeader("source", 1, 2, len(payload))
+	if !ok {
+		t.Fatal("datagram header allocation failed")
+	}
+	if got, want := string(datagramHeader), "DATAGRAM RECEIVED DESTINATION=source FROM_PORT=1 TO_PORT=2 SIZE=7\n"; got != want {
+		t.Fatalf("datagram header = %q, want %q", got, want)
+	}
+	datagramHeaderLease.Release()
+
+	rawHeader, rawHeaderLease, ok := rawReceivedHeader(18, 3, 4, len(payload))
+	if !ok {
+		t.Fatal("raw header allocation failed")
+	}
+	if got, want := string(rawHeader), "RAW RECEIVED PROTOCOL=18 FROM_PORT=3 TO_PORT=4 SIZE=7\n"; got != want {
+		t.Fatalf("raw header = %q, want %q", got, want)
+	}
+	rawHeaderLease.Release()
+}
+
+func TestUDPPacketReleaseClearsLeasedPayload(t *testing.T) {
+	lease, ok := pool.AcquireLease(4)
+	if !ok {
+		t.Fatal("payload lease allocation failed")
+	}
+	payload, _ := lease.Bytes(4)
+	copy(payload, "data")
+	alias := payload
+	packet := udpPacket{payload: payload, lease: lease}
+	packet.releasePayload()
+	if packet.payload != nil || packet.lease != nil {
+		t.Fatal("released packet retained payload ownership")
+	}
+	for i, value := range alias {
+		if value != 0 {
+			t.Fatalf("released payload byte %d = %d", i, value)
+		}
+	}
+}
+
+func BenchmarkSAMFramingBuffers(b *testing.B) {
+	const source = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-~"
+	payload := make([]byte, 1024)
+	session := &samSession{
+		server:           &Server{config: ServerConfig{MaxDatagramBytes: 2048}},
+		datagramOverhead: 512,
+	}
+	b.Run("datagram-frame", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			frame, lease, ok := session.datagramFrame(len(payload))
+			if !ok {
+				b.Fatal("frame allocation failed")
+			}
+			frame[0] = 1
+			lease.ReleaseSensitive()
+		}
+	})
+	b.Run("datagram-udp-header", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			wire, lease, ok := datagramUDPWire(source, 65535, 65535, payload)
+			if !ok {
+				b.Fatal("wire allocation failed")
+			}
+			lease.ReleaseSensitive()
+			_ = wire
+		}
+	})
+	b.Run("raw-udp-header", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			wire, lease, ok := rawUDPWire(65535, 65535, 255, payload)
+			if !ok {
+				b.Fatal("wire allocation failed")
+			}
+			lease.ReleaseSensitive()
+			_ = wire
+		}
+	})
 }

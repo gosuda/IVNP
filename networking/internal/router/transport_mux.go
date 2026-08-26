@@ -24,11 +24,6 @@ var (
 	ErrTransportUnavailable = errors.New("router: supported transport unavailable for peer")
 )
 
-const (
-	transportBootstrapDialGrace = 750 * time.Millisecond
-	transportReadyDialGrace     = 2 * time.Second
-)
-
 type preferredSessionManager interface {
 	TransportManager
 	tunnel.SessionEnsurer
@@ -47,23 +42,22 @@ type transportCapabilities struct {
 // Send so transport selection is based only on a RouterInfo admitted by netdb.
 // Either manager may be nil, but not both.
 type TransportMuxConfig struct {
-	Database   *netdb.Database
-	NTCP2      TransportManager
-	SSU2       TransportManager
-	PreferSSU2 func() bool
-	Metrics    *observability.Registry
+	Database *netdb.Database
+	NTCP2    TransportManager
+	SSU2     TransportManager
+	Metrics  *observability.Registry
 }
 
 // TransportMux reuses an authenticated session before opening another
 // transport. For a peer with direct NTCP2 and SSU2 addresses, it races both
-// handshakes and retains SSU2 when both succeed. Introducer-only SSU2 remains a
-// fallback because its relay setup is materially slower than a direct dial.
+// handshakes and returns the first authenticated session. Introducer-only SSU2
+// remains a fallback because its relay setup is materially slower than a
+// direct dial.
 type TransportMux struct {
-	database   *netdb.Database
-	ntcp2      TransportManager
-	ssu2       TransportManager
-	preferSSU2 func() bool
-	metrics    *observability.Registry
+	database *netdb.Database
+	ntcp2    TransportManager
+	ssu2     TransportManager
+	metrics  *observability.Registry
 
 	lifecycleMu  sync.Mutex
 	started      bool
@@ -84,11 +78,10 @@ func NewTransportMux(config TransportMuxConfig) (*TransportMux, error) {
 		return nil, ErrTransportMuxConfig
 	}
 	return &TransportMux{
-		database:   config.Database,
-		ntcp2:      config.NTCP2,
-		ssu2:       config.SSU2,
-		preferSSU2: config.PreferSSU2,
-		metrics:    config.Metrics,
+		database: config.Database,
+		ntcp2:    config.NTCP2,
+		ssu2:     config.SSU2,
+		metrics:  config.Metrics,
 	}, nil
 }
 
@@ -273,28 +266,32 @@ func ensureTransportSession(ctx context.Context, manager TransportManager, peer 
 }
 
 func (m *TransportMux) sessionManager(ctx context.Context, peer foundation.Hash) (TransportManager, bool, error) {
-	capabilities, ok := m.capabilities(peer)
-	if !ok || capabilities.ntcp2 == nil || capabilities.ssu2 == nil || !capabilities.directSSU2 {
-		return nil, false, nil
-	}
-	ntcp2, ntcp2OK := capabilities.ntcp2.(preferredSessionManager)
-	ssu2, ssu2OK := capabilities.ssu2.(preferredSessionManager)
-	if !ntcp2OK || !ssu2OK {
-		return nil, false, nil
-	}
-	if ssu2.HasSession(peer) {
+	ntcp2, ntcp2OK := m.ntcp2.(preferredSessionManager)
+	ssu2, ssu2OK := m.ssu2.(preferredSessionManager)
+	if ssu2OK && ssu2.HasSession(peer) {
 		if m.metrics != nil {
 			m.metrics.IncTransportSessionReuses()
 			m.metrics.IncTransportSSU2Promotions()
 		}
-		ntcp2.DropSession(peer)
+		if ntcp2OK {
+			ntcp2.DropSession(peer)
+		}
 		return ssu2, true, nil
 	}
-	if ntcp2.HasSession(peer) {
+	if ntcp2OK && ntcp2.HasSession(peer) {
 		if m.metrics != nil {
 			m.metrics.IncTransportSessionReuses()
 		}
 		return ntcp2, true, nil
+	}
+	capabilities, ok := m.capabilities(peer)
+	if !ok || capabilities.ntcp2 == nil || capabilities.ssu2 == nil || !capabilities.directSSU2 {
+		return nil, false, nil
+	}
+	ntcp2, ntcp2OK = capabilities.ntcp2.(preferredSessionManager)
+	ssu2, ssu2OK = capabilities.ssu2.(preferredSessionManager)
+	if !ntcp2OK || !ssu2OK {
+		return nil, false, nil
 	}
 	manager, err := m.raceDirectSessions(ctx, peer, ntcp2, ssu2)
 	return manager, true, err
@@ -320,54 +317,28 @@ func (m *TransportMux) raceDirectSessions(ctx context.Context, peer foundation.H
 		if second.err != nil {
 			return nil, errors.Join(first.err, second.err)
 		}
-		if second.manager == ssu2 {
-			ntcp2.DropSession(peer)
-			m.recordSSU2RaceWin()
-		} else if m.metrics != nil {
-			m.metrics.IncTransportNTCP2RaceWins()
-		}
+		m.recordSessionRaceWinner(second.manager, ntcp2)
 		return second.manager, nil
 	}
-	if first.manager == ssu2 {
-		cancel()
-		second := <-results
-		if second.err == nil {
-			ntcp2.DropSession(peer)
+	cancel()
+	go func() {
+		loser := <-results
+		if loser.err == nil {
+			loser.manager.DropSession(peer)
 		}
-		m.recordSSU2RaceWin()
-		return ssu2, nil
-	}
-
-	grace := m.dialGrace()
-	timer := time.NewTimer(grace)
-	defer timer.Stop()
-	select {
-	case second := <-results:
-		if second.err == nil && second.manager == ssu2 {
-			ntcp2.DropSession(peer)
-			m.recordSSU2RaceWin()
-			return ssu2, nil
-		}
-		if m.metrics != nil {
-			m.metrics.IncTransportNTCP2RaceWins()
-		}
-		return ntcp2, nil
-	case <-timer.C:
-		cancel()
-		if m.metrics != nil {
-			m.metrics.IncTransportNTCP2RaceWins()
-		}
-		return ntcp2, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	}()
+	m.recordSessionRaceWinner(first.manager, ntcp2)
+	return first.manager, nil
 }
 
-func (m *TransportMux) dialGrace() time.Duration {
-	if m.preferSSU2 != nil && m.preferSSU2() {
-		return transportReadyDialGrace
+func (m *TransportMux) recordSessionRaceWinner(winner, ntcp2 preferredSessionManager) {
+	if winner != ntcp2 {
+		m.recordSSU2RaceWin()
+		return
 	}
-	return transportBootstrapDialGrace
+	if m.metrics != nil {
+		m.metrics.IncTransportNTCP2RaceWins()
+	}
 }
 
 func (m *TransportMux) recordSSU2RaceWin() {

@@ -579,7 +579,6 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 	} else {
 		mux, err = networking.RouterNewTransportMux(networking.RouterTransportMuxConfig{
 			Database: database, NTCP2: ntcp, SSU2: ssu, Metrics: registry,
-			PreferSSU2: func() bool { return registry.Snapshot().Bootstrap.Stage >= 3 },
 		})
 		if err != nil {
 			return nil, err

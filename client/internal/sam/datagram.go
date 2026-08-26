@@ -2,13 +2,14 @@ package sam
 
 import (
 	"encoding/base32"
-	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/ingress"
+	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/networking"
 )
 
@@ -32,12 +33,16 @@ func (s *Server) handleSend(connection *serverConnection, cmd command) error {
 	if !sizePresent || err != nil || size > uint64(s.config.MaxDatagramBytes) {
 		return connection.writeLine(cmd.verb + " STATUS RESULT=I2P_ERROR MESSAGE=INVALID_SIZE")
 	}
-	body := make([]byte, int(size))
+	bodyLease, ok := pool.AcquireLease(int(size))
+	if !ok {
+		return connection.writeLine(cmd.verb + " STATUS RESULT=I2P_ERROR MESSAGE=INVALID_SIZE")
+	}
+	body, _ := bodyLease.Bytes(int(size))
 	if _, err = io.ReadFull(connection.reader, body); err != nil {
-		clear(body)
+		bodyLease.ReleaseSensitive()
 		return err
 	}
-	defer clear(body)
+	defer bodyLease.ReleaseSensitive()
 	target := cmd.values["DESTINATION"]
 	resolved, err := s.resolveTarget(session.ctx, target)
 	if err != nil {
@@ -54,15 +59,19 @@ func (s *Server) handleSend(connection *serverConnection, cmd command) error {
 	}
 	protocol := session.protocol
 	payload := body
-	var framed []byte
+	var framedLease *pool.Lease
 	if cmd.verb == "DATAGRAM" {
-		framed = make([]byte, s.config.MaxDatagramBytes)
-		n, marshalErr := session.endpoint.MarshalDatagramV1To(framed, body)
-		if marshalErr != nil {
-			clear(framed)
+		framed, lease, frameOK := session.datagramFrame(len(body))
+		if !frameOK {
 			return connection.writeLine("DATAGRAM STATUS RESULT=I2P_ERROR")
 		}
-		payload = framed[:n]
+		framedLease = lease
+		defer framedLease.ReleaseSensitive()
+		n, marshalErr := session.endpoint.MarshalDatagramV1To(framed, body)
+		if marshalErr != nil || n != len(framed) {
+			return connection.writeLine("DATAGRAM STATUS RESULT=I2P_ERROR")
+		}
+		payload = framed
 		protocol = networking.DatagramProtocolDatagram1
 	}
 	if cmd.verb == "RAW" {
@@ -75,9 +84,6 @@ func (s *Server) handleSend(connection *serverConnection, cmd command) error {
 		}
 	}
 	err = session.endpoint.SendMessage(session.ctx, networking.StreamingTunnelDelivery{From: session.endpoint.Hash(), To: hash, FromPort: uint16(fromPort), ToPort: uint16(toPort), Protocol: protocol, Payload: payload})
-	if framed != nil {
-		clear(framed)
-	}
 	if err != nil {
 		return connection.writeLine(cmd.verb + " STATUS RESULT=CANT_REACH_PEER")
 	}
@@ -96,56 +102,72 @@ func (s *samSession) receiveLoop(subscription destination.MessageSubscription) {
 		if err != nil {
 			return
 		}
-		func() {
-			defer func() {
-				if value := recover(); value != nil {
-					_ = ingress.Report(value, s.server.config.PanicReporter, ingress.BoundarySAMWorker, s.control.RemoteAddr())
-				}
-			}()
-			defer message.Release()
-			delivery := message.Delivery
-			switch s.style {
-			case styleDatagram:
-				packet, parseErr := networking.DatagramParsePacket(networking.DatagramProtocolDatagram1, delivery.Payload)
-				if parseErr != nil {
-					return
-				}
-				valid, verifyErr := packet.V1.Verify()
-				if verifyErr != nil || !valid || packet.V1.From.Hash() != delivery.From {
-					return
-				}
-				source := foundation.EncodeI2PBase64(packet.V1.From.Bytes())
-				if s.udpTarget != nil {
-					header := fmt.Sprintf("%s\nFROM_PORT=%d\nTO_PORT=%d\n\n", source, delivery.FromPort, delivery.ToPort)
-					wire := make([]byte, len(header)+len(packet.V1.Payload))
-					copy(wire, header)
-					copy(wire[len(header):], packet.V1.Payload)
-					_, _ = s.server.udp.WriteTo(wire, s.udpTarget)
-					clear(wire)
-					return
-				}
-				header := fmt.Sprintf("DATAGRAM RECEIVED DESTINATION=%s FROM_PORT=%d TO_PORT=%d SIZE=%d", source, delivery.FromPort, delivery.ToPort, len(packet.V1.Payload))
-				_ = s.control.writeFrame(header, packet.V1.Payload)
-			case styleRaw:
-				if s.udpTarget != nil {
-					payload := delivery.Payload
-					var wire []byte
-					if s.rawHeader {
-						header := fmt.Sprintf("FROM_PORT=%d\nTO_PORT=%d\nPROTOCOL=%d\n\n", delivery.FromPort, delivery.ToPort, delivery.Protocol)
-						wire = make([]byte, len(header)+len(payload))
-						copy(wire, header)
-						copy(wire[len(header):], payload)
-						payload = wire
-					}
-					_, _ = s.server.udp.WriteTo(payload, s.udpTarget)
-					clear(wire)
-					return
-				}
-				header := fmt.Sprintf("RAW RECEIVED PROTOCOL=%d FROM_PORT=%d TO_PORT=%d SIZE=%d", delivery.Protocol, delivery.FromPort, delivery.ToPort, len(delivery.Payload))
-				_ = s.control.writeFrame(header, delivery.Payload)
-			}
-		}()
+		s.forwardReceivedMessage(message)
 	}
+}
+
+func (s *samSession) forwardReceivedMessage(message *destination.ReceivedMessage) {
+	defer func() {
+		if value := recover(); value != nil {
+			_ = ingress.Report(value, s.server.config.PanicReporter, ingress.BoundarySAMWorker, s.control.RemoteAddr())
+		}
+	}()
+	defer message.Release()
+	switch s.style {
+	case styleDatagram:
+		s.forwardDatagram(message.Delivery)
+	case styleRaw:
+		s.forwardRaw(message.Delivery)
+	}
+}
+
+func (s *samSession) forwardDatagram(delivery networking.StreamingTunnelDelivery) {
+	packet, err := networking.DatagramParsePacket(networking.DatagramProtocolDatagram1, delivery.Payload)
+	if err != nil {
+		return
+	}
+	valid, err := packet.V1.Verify()
+	if err != nil || !valid || packet.V1.From.Hash() != delivery.From {
+		return
+	}
+	source := foundation.EncodeI2PBase64(packet.V1.From.Bytes())
+	if s.udpTarget != nil {
+		wire, lease, ok := datagramUDPWire(source, delivery.FromPort, delivery.ToPort, packet.V1.Payload)
+		if !ok {
+			return
+		}
+		defer lease.ReleaseSensitive()
+		_, _ = s.server.udp.WriteTo(wire, s.udpTarget)
+		return
+	}
+	header, lease, ok := datagramReceivedHeader(source, delivery.FromPort, delivery.ToPort, len(packet.V1.Payload))
+	if !ok {
+		return
+	}
+	defer lease.Release()
+	_ = s.control.writeFrame(header, packet.V1.Payload)
+}
+
+func (s *samSession) forwardRaw(delivery networking.StreamingTunnelDelivery) {
+	if s.udpTarget == nil {
+		header, lease, ok := rawReceivedHeader(delivery.Protocol, delivery.FromPort, delivery.ToPort, len(delivery.Payload))
+		if !ok {
+			return
+		}
+		defer lease.Release()
+		_ = s.control.writeFrame(header, delivery.Payload)
+		return
+	}
+	if !s.rawHeader {
+		_, _ = s.server.udp.WriteTo(delivery.Payload, s.udpTarget)
+		return
+	}
+	wire, lease, ok := rawUDPWire(delivery.FromPort, delivery.ToPort, delivery.Protocol, delivery.Payload)
+	if !ok {
+		return
+	}
+	defer lease.ReleaseSensitive()
+	_, _ = s.server.udp.WriteTo(wire, s.udpTarget)
 }
 
 func destinationHash(value string) (foundation.Hash, error) {
@@ -163,4 +185,131 @@ func destinationHash(value string) (foundation.Hash, error) {
 	}
 	copy(hash[:], decoded)
 	return hash, nil
+}
+
+func datagramV1Overhead(endpoint destination.DestinationEndpoint) int {
+	if endpoint == nil {
+		return 0
+	}
+	identity, err := foundation.ParseDestination(endpoint.Destination())
+	if err != nil {
+		return 0
+	}
+	signatureLen, ok := identity.SigningKeyType().SignatureLen()
+	if !ok {
+		return 0
+	}
+	return identity.EncodedLen() + signatureLen
+}
+
+func (s *samSession) datagramFrame(payloadLen int) ([]byte, *pool.Lease, bool) {
+	if s == nil || s.server == nil || payloadLen < 0 {
+		return nil, nil, false
+	}
+	overhead := s.datagramOverhead
+	if overhead == 0 || payloadLen > s.server.config.MaxDatagramBytes-overhead {
+		return nil, nil, false
+	}
+	size := overhead + payloadLen
+	lease, ok := pool.AcquireLease(size)
+	if !ok {
+		return nil, nil, false
+	}
+	frame, ok := lease.Bytes(size)
+	if !ok {
+		lease.Release()
+		return nil, nil, false
+	}
+	return frame, lease, true
+}
+
+func decimalLen(value uint64) int {
+	length := 1
+	for value >= 10 {
+		value /= 10
+		length++
+	}
+	return length
+}
+
+func appendDecimal(dst []byte, offset int, value uint64) int {
+	return len(strconv.AppendUint(dst[:offset], value, 10))
+}
+
+func datagramUDPWire(source string, fromPort, toPort uint16, payload []byte) ([]byte, *pool.Lease, bool) {
+	const fixed = "\nFROM_PORT=\nTO_PORT=\n\n"
+	headerLen := len(source) + len(fixed) + decimalLen(uint64(fromPort)) + decimalLen(uint64(toPort))
+	lease, ok := pool.AcquireLease(headerLen + len(payload))
+	if !ok {
+		return nil, nil, false
+	}
+	wire, _ := lease.Bytes(headerLen + len(payload))
+	offset := copy(wire, source)
+	offset += copy(wire[offset:], "\nFROM_PORT=")
+	offset = appendDecimal(wire, offset, uint64(fromPort))
+	offset += copy(wire[offset:], "\nTO_PORT=")
+	offset = appendDecimal(wire, offset, uint64(toPort))
+	offset += copy(wire[offset:], "\n\n")
+	copy(wire[offset:], payload)
+	return wire, lease, true
+}
+
+func rawUDPWire(fromPort, toPort uint16, protocol uint8, payload []byte) ([]byte, *pool.Lease, bool) {
+	const fixed = "FROM_PORT=\nTO_PORT=\nPROTOCOL=\n\n"
+	headerLen := len(fixed) + decimalLen(uint64(fromPort)) + decimalLen(uint64(toPort)) + decimalLen(uint64(protocol))
+	lease, ok := pool.AcquireLease(headerLen + len(payload))
+	if !ok {
+		return nil, nil, false
+	}
+	wire, _ := lease.Bytes(headerLen + len(payload))
+	offset := copy(wire, "FROM_PORT=")
+	offset = appendDecimal(wire, offset, uint64(fromPort))
+	offset += copy(wire[offset:], "\nTO_PORT=")
+	offset = appendDecimal(wire, offset, uint64(toPort))
+	offset += copy(wire[offset:], "\nPROTOCOL=")
+	offset = appendDecimal(wire, offset, uint64(protocol))
+	offset += copy(wire[offset:], "\n\n")
+	copy(wire[offset:], payload)
+	return wire, lease, true
+}
+
+func datagramReceivedHeader(source string, fromPort, toPort uint16, payloadLen int) ([]byte, *pool.Lease, bool) {
+	const prefix = "DATAGRAM RECEIVED DESTINATION="
+	const fixed = " FROM_PORT= TO_PORT= SIZE=\n"
+	size := len(prefix) + len(source) + len(fixed) + decimalLen(uint64(fromPort)) + decimalLen(uint64(toPort)) + decimalLen(uint64(payloadLen))
+	lease, ok := pool.AcquireLease(size)
+	if !ok {
+		return nil, nil, false
+	}
+	header, _ := lease.Bytes(size)
+	offset := copy(header, prefix)
+	offset += copy(header[offset:], source)
+	offset += copy(header[offset:], " FROM_PORT=")
+	offset = appendDecimal(header, offset, uint64(fromPort))
+	offset += copy(header[offset:], " TO_PORT=")
+	offset = appendDecimal(header, offset, uint64(toPort))
+	offset += copy(header[offset:], " SIZE=")
+	offset = appendDecimal(header, offset, uint64(payloadLen))
+	header[offset] = '\n'
+	return header, lease, true
+}
+
+func rawReceivedHeader(protocol uint8, fromPort, toPort uint16, payloadLen int) ([]byte, *pool.Lease, bool) {
+	const fixed = "RAW RECEIVED PROTOCOL= FROM_PORT= TO_PORT= SIZE=\n"
+	size := len(fixed) + decimalLen(uint64(protocol)) + decimalLen(uint64(fromPort)) + decimalLen(uint64(toPort)) + decimalLen(uint64(payloadLen))
+	lease, ok := pool.AcquireLease(size)
+	if !ok {
+		return nil, nil, false
+	}
+	header, _ := lease.Bytes(size)
+	offset := copy(header, "RAW RECEIVED PROTOCOL=")
+	offset = appendDecimal(header, offset, uint64(protocol))
+	offset += copy(header[offset:], " FROM_PORT=")
+	offset = appendDecimal(header, offset, uint64(fromPort))
+	offset += copy(header[offset:], " TO_PORT=")
+	offset = appendDecimal(header, offset, uint64(toPort))
+	offset += copy(header[offset:], " SIZE=")
+	offset = appendDecimal(header, offset, uint64(payloadLen))
+	header[offset] = '\n'
+	return header, lease, true
 }

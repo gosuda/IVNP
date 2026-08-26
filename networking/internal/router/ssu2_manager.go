@@ -50,12 +50,13 @@ const (
 	ssu2ReceiveBatchSize  = 32
 	ssu2DispatchQueueSize = 64
 	ssu2EgressSlots       = 32
-	ssu2EgressMinTarget   = 16
-	ssu2EgressFlush       = time.Millisecond
+	ssu2ACKDelay          = time.Millisecond
 	ssu2MaxNewTokens      = 1024
 	ssu2RelayTarget       = 3
 	ssu2RelayPublishMin   = 100 * time.Millisecond
 	ssu2RelayPublishMax   = 30 * time.Second
+	ssu2ACKIdle           = false
+	ssu2ACKPending        = true
 )
 
 var (
@@ -143,11 +144,13 @@ type SSU2Manager struct {
 	done                 chan struct{}
 	close                sync.Once
 	wg                   sync.WaitGroup
+	egressMu             sync.RWMutex
 
 	receiveFree    chan *ssu2ReceiveBatch
 	authQueue      chan ssu2ReceiveJob
 	dispatchQueues []chan *ssu2DispatchBatch
 	dispatchFree   chan *ssu2DispatchBatch
+	ackQueue       chan *ssu2TransportSession
 	egressFree     chan *ssu2EgressSlot
 	egressQueue    chan *ssu2EgressSlot
 	ioStats        ssu2IOStats
@@ -242,8 +245,15 @@ type ssu2EgressSlot struct {
 	addr   netip.AddrPort
 	zone   uint32
 	relay  bool
+	wait   bool
 	flow   uint64
 	done   chan error
+}
+
+type ssu2EgressOptions struct {
+	relay bool
+	wait  bool
+	flow  uint64
 }
 
 func (m *SSU2Manager) releaseSensitive() {
@@ -310,6 +320,7 @@ type ssu2TransportSession struct {
 	sentStore  []byte
 	fragmentMu sync.Mutex
 	ackMu      sync.Mutex
+	ackQueued  atomic.Bool
 	ackPayload [3 + 5 + 2*ssu2.MaxACKRanges]byte
 	fragments  map[uint32]*ssu2FragmentAssembly
 
@@ -707,6 +718,7 @@ func (m *SSU2Manager) Start(parent context.Context, bindings TransportBindings) 
 	m.relayPublish = make(chan struct{}, 1)
 	m.receiveFree = receiveFree
 	m.authQueue = make(chan ssu2ReceiveJob, ssu2ReceiveBatchCount*ssu2ReceiveBatchSize)
+	m.ackQueue = make(chan *ssu2TransportSession, m.maxSessions)
 	authWorkers := parallelism.Workers(cap(m.authQueue))
 	dispatchWorkers := parallelism.Workers(ssu2DispatchQueueSize)
 	relayWorkers := parallelism.Workers(m.maxPending)
@@ -731,7 +743,7 @@ func (m *SSU2Manager) Start(parent context.Context, bindings TransportBindings) 
 	}
 	m.mu.Unlock()
 
-	m.wg.Add(4 + authWorkers + dispatchWorkers + relayWorkers)
+	m.wg.Add(5 + authWorkers + dispatchWorkers + relayWorkers)
 	go m.readLoop()
 	for range authWorkers {
 		go m.authLoop()
@@ -739,6 +751,7 @@ func (m *SSU2Manager) Start(parent context.Context, bindings TransportBindings) 
 	for _, queue := range m.dispatchQueues {
 		go m.dispatchLoop(queue)
 	}
+	go m.ackLoop()
 	go m.egressLoop()
 	go m.retransmitLoop()
 	for range relayWorkers {
@@ -941,7 +954,7 @@ func (m *SSU2Manager) Send(ctx context.Context, peer foundation.Hash, message i2
 	session.frameMu.Lock()
 	defer session.frameMu.Unlock()
 	return forEachSSU2I2NPFragment(session.frame[:], message, func(payload []byte) error {
-		if err = m.sendData(session, payload); err == nil {
+		if err = m.sendDataContext(ctx, session, payload); err == nil {
 			return nil
 		}
 		if m.sessionActive(session) {
@@ -952,7 +965,7 @@ func (m *SSU2Manager) Send(ctx context.Context, peer foundation.Hash, message i2
 			m.recordOutboundFailure(peer, err)
 			return err
 		}
-		return m.sendData(session, payload)
+		return m.sendDataContext(ctx, session, payload)
 	})
 }
 
@@ -1011,7 +1024,7 @@ func (m *SSU2Manager) SendPeerTest(ctx context.Context, peer foundation.Hash, te
 	if err != nil {
 		return err
 	}
-	return m.writeRelayTo(packet, remote, uint64(test.Nonce))
+	return m.writeRelayToContext(ctx, packet, remote, uint64(test.Nonce))
 }
 
 // maybeStartPeerTest activates peer testing for newly established outbound
@@ -2722,7 +2735,7 @@ func (m *SSU2Manager) handleSessionConfirmed(packet []byte, pending *ssu2Inbound
 	pending.responder.ReleaseSensitive()
 	pending.reassembly.ReleaseSensitive()
 	session.received.Observe(0)
-	_ = m.sendACK(session)
+	m.queueACK(session)
 	_ = m.sendNewToken(session)
 }
 
@@ -2943,7 +2956,7 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 		return
 	}
 	if ackEliciting {
-		_ = m.sendACK(session)
+		m.queueACK(session)
 	}
 }
 
@@ -3034,6 +3047,68 @@ func (m *SSU2Manager) sendData(session *ssu2TransportSession, payload []byte) er
 	return m.sendSessionData(session, payload, true)
 }
 
+func (m *SSU2Manager) sendDataContext(ctx context.Context, session *ssu2TransportSession, payload []byte) error {
+	return m.sendSessionDataContext(ctx, session, payload, true)
+}
+
+func (m *SSU2Manager) queueACK(session *ssu2TransportSession) {
+	if session == nil || !session.ackQueued.CompareAndSwap(ssu2ACKIdle, ssu2ACKPending) {
+		return
+	}
+	m.mu.RLock()
+	queue := m.ackQueue
+	m.mu.RUnlock()
+	if queue == nil {
+		session.ackQueued.Store(ssu2ACKIdle)
+		_ = m.sendACK(session)
+		return
+	}
+	select {
+	case queue <- session:
+	case <-m.contextDone():
+		session.ackQueued.Store(ssu2ACKIdle)
+	}
+}
+
+func (m *SSU2Manager) ackLoop() {
+	defer m.wg.Done()
+	timer := time.NewTimer(ssu2ACKDelay)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
+	pending := make([]*ssu2TransportSession, 0, m.maxSessions)
+	for {
+		select {
+		case session := <-m.ackQueue:
+			pending = append(pending, session)
+		case <-m.contextDone():
+			return
+		}
+		timer.Reset(ssu2ACKDelay)
+	collect:
+		for {
+			select {
+			case session := <-m.ackQueue:
+				pending = append(pending, session)
+			case <-timer.C:
+				break collect
+			case <-m.contextDone():
+				for _, session := range pending {
+					session.ackQueued.Store(ssu2ACKIdle)
+				}
+				return
+			}
+		}
+		for _, session := range pending {
+			session.ackQueued.Store(ssu2ACKIdle)
+			_ = m.sendACK(session)
+		}
+		clear(pending)
+		pending = pending[:0]
+	}
+}
+
 func (m *SSU2Manager) sendACK(session *ssu2TransportSession) error {
 	var ranges [ssu2.MaxACKRanges]ssu2.ACKRange
 	session.ackMu.Lock()
@@ -3051,9 +3126,22 @@ func (m *SSU2Manager) sendACK(session *ssu2TransportSession) error {
 	}
 	payload[0] = ssu2.BlockACK
 	binary.BigEndian.PutUint16(payload[1:3], uint16(len(ackData)))
-	return m.sendSessionData(session, payload[:3+len(ackData)], false)
+	return m.sendSessionDataQueued(session, payload[:3+len(ackData)], false)
 }
+
 func (m *SSU2Manager) sendSessionData(session *ssu2TransportSession, payload []byte, reliable bool) error {
+	return m.sendSessionDataContext(context.Background(), session, payload, reliable)
+}
+
+func (m *SSU2Manager) sendSessionDataContext(ctx context.Context, session *ssu2TransportSession, payload []byte, reliable bool) error {
+	return m.sendSessionDataMode(ctx, session, payload, reliable, true)
+}
+
+func (m *SSU2Manager) sendSessionDataQueued(session *ssu2TransportSession, payload []byte, reliable bool) error {
+	return m.sendSessionDataMode(context.Background(), session, payload, reliable, false)
+}
+
+func (m *SSU2Manager) sendSessionDataMode(ctx context.Context, session *ssu2TransportSession, payload []byte, reliable, waitEgress bool) error {
 	if len(payload) < 8 {
 		paddingLength := max(8-len(payload)-3, 0)
 		var minimumPayload [10]byte
@@ -3091,7 +3179,12 @@ func (m *SSU2Manager) sendSessionData(session *ssu2TransportSession, payload []b
 		session.sendMu.Unlock()
 		return err
 	}
-	if err = m.writeTo(packet, session.remoteAddr()); err != nil {
+	if waitEgress {
+		err = m.writeToContext(ctx, packet, session.remoteAddr())
+	} else {
+		err = m.writeToQueued(packet, session.remoteAddr())
+	}
+	if err != nil {
 		retained.release()
 		session.sendMu.Unlock()
 		return err
@@ -3760,14 +3853,32 @@ func (m *SSU2Manager) contextErr() error {
 }
 
 func (m *SSU2Manager) writeTo(packet []byte, remote net.Addr) error {
-	return m.writeToClass(packet, remote, false, 0)
+	return m.writeToContext(context.Background(), packet, remote)
+}
+
+func (m *SSU2Manager) writeToContext(ctx context.Context, packet []byte, remote net.Addr) error {
+	return m.writeToClass(ctx, packet, remote, ssu2EgressOptions{wait: true})
+}
+
+func (m *SSU2Manager) writeToQueued(packet []byte, remote net.Addr) error {
+	return m.writeToClass(context.Background(), packet, remote, ssu2EgressOptions{})
 }
 
 func (m *SSU2Manager) writeRelayTo(packet []byte, remote net.Addr, flow uint64) error {
-	return m.writeToClass(packet, remote, true, flow)
+	return m.writeRelayToContext(context.Background(), packet, remote, flow)
 }
 
-func (m *SSU2Manager) writeToClass(packet []byte, remote net.Addr, relay bool, flow uint64) error {
+func (m *SSU2Manager) writeRelayToContext(ctx context.Context, packet []byte, remote net.Addr, flow uint64) error {
+	return m.writeToClass(ctx, packet, remote, ssu2EgressOptions{relay: true, wait: true, flow: flow})
+}
+
+func (m *SSU2Manager) writeToClass(ctx context.Context, packet []byte, remote net.Addr, options ssu2EgressOptions) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(packet) == 0 || len(packet) > ssu2.MaxIPv4PacketLen {
 		return ErrSSU2Session
 	}
@@ -3807,22 +3918,36 @@ func (m *SSU2Manager) writeToClass(packet []byte, remote net.Addr, relay bool, f
 		}
 		return ErrSSU2Session
 	}
+
+	m.egressMu.RLock()
+	slot, err := m.enqueueEgress(ctx, packet, addrPort, options.relay, options.wait, options.flow, free, queue)
+	m.egressMu.RUnlock()
+	if err != nil || !options.wait {
+		return err
+	}
+	err = <-slot.done
+	m.recycleEgressSlot(slot)
+	return err
+}
+
+func (m *SSU2Manager) enqueueEgress(ctx context.Context, packet []byte, addr netip.AddrPort, relay, wait bool, flow uint64, free, queue chan *ssu2EgressSlot) (*ssu2EgressSlot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var slot *ssu2EgressSlot
 	select {
 	case slot = <-free:
-	default:
-		m.ioStats.dropped.Add(1)
-		if m.metrics != nil {
-			m.metrics.AddSSU2SendEnqueuedDatagrams(1)
-			m.metrics.AddSSU2SendQueueDrops(1)
-		}
-		return ErrSSU2Session
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-m.contextDone():
+		return nil, ErrSSU2Session
 	}
 	copy(slot.data[:], packet)
 	slot.length = len(packet)
-	slot.addr = netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port())
+	slot.addr = netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port())
 	slot.zone = 0
 	slot.relay = relay
+	slot.wait = wait
 	slot.flow = flow
 	select {
 	case queue <- slot:
@@ -3830,29 +3955,29 @@ func (m *SSU2Manager) writeToClass(packet []byte, remote net.Addr, relay bool, f
 			m.metrics.AddSSU2SendEnqueuedDatagrams(1)
 			m.metrics.IncSSU2EgressQueueDepth()
 		}
-	default:
-		m.ioStats.dropped.Add(1)
-		slot.length = 0
-		slot.relay = false
-		slot.flow = 0
-		clear(slot.data[:len(packet)])
-		free <- slot
-		if m.metrics != nil {
-			m.metrics.AddSSU2SendEnqueuedDatagrams(1)
-			m.metrics.AddSSU2SendQueueDrops(1)
-		}
-		return ErrSSU2Session
+		return slot, nil
+	case <-ctx.Done():
+		m.recycleEgressSlot(slot)
+		return nil, ctx.Err()
+	case <-m.contextDone():
+		m.recycleEgressSlot(slot)
+		return nil, ErrSSU2Session
 	}
-	err := <-slot.done
+}
+
+func (m *SSU2Manager) recycleEgressSlot(slot *ssu2EgressSlot) {
+	if slot == nil {
+		return
+	}
+	clear(slot.data[:slot.length])
 	slot.length = 0
 	slot.relay = false
+	slot.wait = false
 	slot.flow = 0
-	clear(slot.data[:len(packet)])
 	select {
 	case m.egressFree <- slot:
 	case <-m.contextDone():
 	}
-	return err
 }
 
 func (m *SSU2Manager) egressLoop() {
@@ -3865,15 +3990,9 @@ func (m *SSU2Manager) egressLoop() {
 		return
 	}
 	packets := batch.Packets()
-	target := ssu2EgressMinTarget
-	timer := time.NewTimer(ssu2EgressFlush)
-	if !timer.Stop() {
-		<-timer.C
-	}
-	defer timer.Stop()
 	var slots [ssu2EgressSlots]*ssu2EgressSlot
 	for {
-		count, ok := m.collectEgressBatch(timer, target, &slots)
+		count, ok := m.collectEgressBatch(&slots)
 		if !ok {
 			return
 		}
@@ -3890,50 +4009,25 @@ func (m *SSU2Manager) egressLoop() {
 			_ = m.Close()
 			return
 		}
-		if count == target && target < ssu2EgressSlots {
-			target++
-		} else if count < target {
-			target = ssu2EgressMinTarget
-		}
 	}
 }
 
-func (m *SSU2Manager) collectEgressBatch(timer *time.Timer, target int, slots *[ssu2EgressSlots]*ssu2EgressSlot) (int, bool) {
+func (m *SSU2Manager) collectEgressBatch(slots *[ssu2EgressSlots]*ssu2EgressSlot) (int, bool) {
 	select {
 	case slots[0] = <-m.egressQueue:
 	case <-m.contextDone():
 		return 0, false
 	}
 	count := 1
-	timer.Reset(ssu2EgressFlush)
-	for count < target {
+	for count < len(slots) {
 		select {
 		case slots[count] = <-m.egressQueue:
 			count++
-		case <-timer.C:
-			return count, true
-		case <-m.contextDone():
-			m.failEgressSlots(slots[:count])
-			return 0, false
-		}
-	}
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
 		default:
+			return count, true
 		}
 	}
 	return count, true
-}
-
-func (m *SSU2Manager) failEgressSlots(slots []*ssu2EgressSlot) {
-	for _, slot := range slots {
-		slot.done <- ErrSSU2Session
-		if m.metrics != nil {
-			m.metrics.AddSSU2SendFailedDatagrams(1)
-			m.metrics.DecSSU2EgressQueueDepth()
-		}
-	}
 }
 
 func shuffleRelaySlots(slots []*ssu2EgressSlot) {
@@ -3978,13 +4072,18 @@ func (m *SSU2Manager) completeEgressSlots(slots []*ssu2EgressSlot, written int, 
 		if m.metrics != nil {
 			m.metrics.DecSSU2EgressQueueDepth()
 		}
+		var err error
 		switch {
 		case index < written:
-			slot.done <- nil
 		case writeErr != nil:
-			slot.done <- writeErr
+			err = writeErr
 		default:
-			slot.done <- ErrSSU2Session
+			err = ErrSSU2Session
+		}
+		if slot.wait {
+			slot.done <- err
+		} else {
+			m.recycleEgressSlot(slot)
 		}
 		slots[index] = nil
 	}
@@ -4041,6 +4140,8 @@ func shuffleIndependentRelayRun(slots []*ssu2EgressSlot) {
 }
 
 func (m *SSU2Manager) failQueuedEgress() {
+	m.egressMu.Lock()
+	defer m.egressMu.Unlock()
 	for {
 		select {
 		case slot := <-m.egressQueue:
@@ -4048,7 +4149,11 @@ func (m *SSU2Manager) failQueuedEgress() {
 				if m.metrics != nil {
 					m.metrics.DecSSU2EgressQueueDepth()
 				}
-				slot.done <- ErrSSU2Session
+				if slot.wait {
+					slot.done <- ErrSSU2Session
+				} else {
+					m.recycleEgressSlot(slot)
+				}
 				if m.metrics != nil {
 					m.metrics.AddSSU2SendFailedDatagrams(1)
 				}

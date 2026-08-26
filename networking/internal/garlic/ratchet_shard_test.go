@@ -80,6 +80,103 @@ func TestRatchetManagerRejectsCrossShardBindDuplicate(t *testing.T) {
 		t.Fatal("rejected bind changed cross-shard session ownership")
 	}
 }
+func TestRatchetManagerIndexesOneTimeReceiveTags(t *testing.T) {
+	previous := runtime.GOMAXPROCS(2)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+
+	local, err := foundation.GenerateLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.ReleaseSensitive()
+	remote, err := foundation.GenerateLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.ReleaseSensitive()
+	manager, err := NewRatchetManager(local, RatchetConfig{MaxSessions: 4, MaxInboundTags: 64, TagLookahead: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.ReleaseSensitive()
+	remoteManager, err := garlicecies.NewRatchetManager(remote, garlicecies.RatchetConfig{MaxSessions: 4, MaxInboundTags: 64, TagLookahead: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remoteManager.ReleaseSensitive()
+
+	peer := foundation.Hash{0x7a}
+	remotePublic := remote.X25519Public()
+	packet, err := manager.Encrypt(make([]byte, 2048), peer, remotePublic[:], 4, nil, 1_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteResult, err := remoteManager.Receive(make([]byte, 2048), make([]byte, 2048), packet, 1_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replyTag garlicecies.SessionTag
+	copy(replyTag[:], remoteResult.Reply[:len(replyTag)])
+	manager.tagMu.RLock()
+	_, indexed := manager.tagRoutes[replyTag]
+	manager.tagMu.RUnlock()
+	if !indexed {
+		t.Fatal("pending New Session Reply tag was not indexed")
+	}
+	if _, err = manager.Receive(make([]byte, 2048), make([]byte, 1), remoteResult.Reply, 1_000); err != nil {
+		t.Fatal(err)
+	}
+	manager.tagMu.RLock()
+	_, pendingRetained := manager.tagRoutes[replyTag]
+	manager.tagMu.RUnlock()
+	if pendingRetained {
+		t.Fatal("consumed New Session Reply tag remained indexed")
+	}
+
+	existing, err := remoteManager.EncryptExisting(make([]byte, 256), remoteResult.Peer, nil, garlicecies.RatchetOptions{}, 1_001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var existingTag garlicecies.SessionTag
+	copy(existingTag[:], existing[:len(existingTag)])
+	manager.tagMu.RLock()
+	_, indexed = manager.tagRoutes[existingTag]
+	manager.tagMu.RUnlock()
+	if !indexed {
+		t.Fatal("established receive tag was not indexed")
+	}
+	if _, err = manager.Receive(make([]byte, 256), make([]byte, 1), existing, 1_001); err != nil {
+		t.Fatal(err)
+	}
+	manager.tagMu.RLock()
+	_, consumedRetained := manager.tagRoutes[existingTag]
+	manager.tagMu.RUnlock()
+	if consumedRetained {
+		t.Fatal("consumed established tag remained indexed")
+	}
+}
+
+func TestRatchetManagerRoutesUnindexedTagsByPacketHash(t *testing.T) {
+	previous := runtime.GOMAXPROCS(2)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+	local, err := foundation.GenerateLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.ReleaseSensitive()
+	manager, err := NewRatchetManager(local, RatchetConfig{MaxSessions: 4, MaxInboundTags: 64, TagLookahead: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.ReleaseSensitive()
+
+	packet := []byte{1, 0, 0, 0, 0, 0, 0, 0}
+	index, shard := manager.packetShard(packet)
+	if index != 1 || shard != manager.shards[1] {
+		t.Fatalf("unindexed packet routed to shard %d, want 1", index)
+	}
+}
+
 func TestRatchetManagerPeerChurnRemainsBounded(t *testing.T) {
 	previous := runtime.GOMAXPROCS(2)
 	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })

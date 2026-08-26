@@ -125,7 +125,32 @@ func (m *muxSessionTransport) DropSession(foundation.Hash) bool {
 	return true
 }
 
-func TestTransportMuxRacesDirectSessionsAndKeepsSSU2(t *testing.T) {
+func TestTransportMuxReturnsFirstSSU2Session(t *testing.T) {
+	database, peer := muxTestPeer(t, true, true)
+	ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
+	metrics := observability.NewRegistry()
+	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2, Metrics: metrics})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- mux.EnsureSession(context.Background(), peer) }()
+	<-ntcp2.ensureStarted
+	<-ssu2.ensureStarted
+	ssu2.ensureRelease <- nil
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	if ntcp2.HasSession(peer) || !ssu2.HasSession(peer) {
+		t.Fatalf("raced sessions = NTCP2 %t SSU2 %t", ntcp2.HasSession(peer), ssu2.HasSession(peer))
+	}
+	snapshot := metrics.Snapshot().Transport
+	if snapshot.RaceAttempts != 1 || snapshot.SSU2RaceWins != 1 || snapshot.SSU2Promotions != 1 {
+		t.Fatalf("transport race metrics = %+v", snapshot)
+	}
+}
+
+func TestTransportMuxReturnsFirstNTCP2SessionWithoutGrace(t *testing.T) {
 	database, peer := muxTestPeer(t, true, true)
 	ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
 	metrics := observability.NewRegistry()
@@ -138,15 +163,14 @@ func TestTransportMuxRacesDirectSessionsAndKeepsSSU2(t *testing.T) {
 	<-ntcp2.ensureStarted
 	<-ssu2.ensureStarted
 	ntcp2.ensureRelease <- nil
-	ssu2.ensureRelease <- nil
 	if err = <-done; err != nil {
 		t.Fatal(err)
 	}
-	if ntcp2.HasSession(peer) || !ssu2.HasSession(peer) || ntcp2.drops != 1 {
-		t.Fatalf("raced sessions = NTCP2 %t SSU2 %t drops %d", ntcp2.HasSession(peer), ssu2.HasSession(peer), ntcp2.drops)
+	if !ntcp2.HasSession(peer) || ssu2.HasSession(peer) {
+		t.Fatalf("raced sessions = NTCP2 %t SSU2 %t", ntcp2.HasSession(peer), ssu2.HasSession(peer))
 	}
 	snapshot := metrics.Snapshot().Transport
-	if snapshot.RaceAttempts != 1 || snapshot.SSU2RaceWins != 1 || snapshot.SSU2Promotions != 1 {
+	if snapshot.RaceAttempts != 1 || snapshot.NTCP2RaceWins != 1 {
 		t.Fatalf("transport race metrics = %+v", snapshot)
 	}
 }
@@ -169,6 +193,27 @@ func TestTransportMuxReusesExistingAuthenticatedSession(t *testing.T) {
 	}
 }
 
+func TestTransportMuxReusesSessionWithoutRouterInfoLookup(t *testing.T) {
+	peer := foundation.Hash{1}
+	ntcp2 := newMuxSessionTransport()
+	ntcp2.session = true
+	mux, err := NewTransportMux(TransportMuxConfig{
+		Database: netdb.NewDatabase(foundation.Hash{}, 8),
+		NTCP2:    ntcp2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = mux.EnsureSession(context.Background(), peer); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ntcp2.ensureStarted:
+		t.Fatal("existing session triggered RouterInfo-dependent dial")
+	default:
+	}
+}
+
 func TestTransportMuxPrefersExistingSSU2AndDropsNTCP2(t *testing.T) {
 	database, peer := muxTestPeer(t, true, true)
 	ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
@@ -182,23 +227,6 @@ func TestTransportMuxPrefersExistingSSU2AndDropsNTCP2(t *testing.T) {
 	}
 	if ntcp2.HasSession(peer) || !ssu2.HasSession(peer) || ntcp2.drops != 1 {
 		t.Fatalf("existing sessions = NTCP2 %t SSU2 %t drops %d", ntcp2.HasSession(peer), ssu2.HasSession(peer), ntcp2.drops)
-	}
-}
-
-func TestTransportMuxExtendsDirectSSU2GraceAfterStageThree(t *testing.T) {
-	bootstrap, err := NewTransportMux(TransportMuxConfig{Database: netdb.NewDatabase(foundation.Hash{}, 8), NTCP2: new(muxTestTransport)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ready, err := NewTransportMux(TransportMuxConfig{
-		Database: netdb.NewDatabase(foundation.Hash{}, 8), NTCP2: new(muxTestTransport),
-		PreferSSU2: func() bool { return true },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bootstrap.dialGrace() != transportBootstrapDialGrace || ready.dialGrace() != transportReadyDialGrace {
-		t.Fatalf("dial grace = bootstrap %s ready %s", bootstrap.dialGrace(), ready.dialGrace())
 	}
 }
 

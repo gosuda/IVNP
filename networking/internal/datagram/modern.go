@@ -132,13 +132,14 @@ func (d V2) VerifyTargetAt(target foundation.Hash, now uint32) (bool, error) {
 			return valid, err
 		}
 	}
-	signed, ok := pool.Acquire(len(target) + len(d.signedRest))
+	lease, ok := pool.AcquireLease(len(target) + len(d.signedRest))
 	if !ok {
 		return false, ErrDatagram
 	}
+	signed, _ := lease.Bytes(len(target) + len(d.signedRest))
 	copy(signed[:len(target)], target[:])
 	copy(signed[len(target):], d.signedRest)
-	defer pool.Release(signed)
+	defer lease.Release()
 	if d.Offline.Present() {
 		return foundation.VerifySignature(d.Offline.Type, d.Offline.PublicKey, nil, signed, d.Signature)
 	}
@@ -210,14 +211,15 @@ func MarshalV2To(dst []byte, target foundation.Hash, from foundation.Identity, f
 		off += copy(dst[off:], offline.Signature)
 	}
 	off += copy(dst[off:], payload)
-	signed, ok := pool.Acquire(len(target) + off - from.EncodedLen())
+	lease, ok := pool.AcquireLease(len(target) + off - from.EncodedLen())
 	if !ok {
 		return 0, ErrDatagram
 	}
+	signed, _ := lease.Bytes(len(target) + off - from.EncodedLen())
 	copy(signed[:len(target)], target[:])
 	copy(signed[len(target):], dst[from.EncodedLen():off])
 	signature, err := signer(signed)
-	pool.Release(signed)
+	lease.Release()
 	if err != nil {
 		return 0, err
 	}

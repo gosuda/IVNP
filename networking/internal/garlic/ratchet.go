@@ -27,9 +27,34 @@ var (
 // managers. Packet tags route established and pending inbound work directly to
 // its owner; deterministic packet hashing routes new sessions and replays.
 type RatchetManager struct {
-	routeMu sync.RWMutex
-	shards  []*garlicecies.RatchetManager
-	once    sync.Once
+	routeMu   sync.RWMutex
+	tagMu     sync.RWMutex
+	tagRoutes map[garlicecies.SessionTag]int
+	shards    []*garlicecies.RatchetManager
+	once      sync.Once
+}
+
+type ratchetTagObserver struct {
+	manager *RatchetManager
+	shard   int
+}
+
+func (o ratchetTagObserver) TagAdded(tag garlicecies.SessionTag) {
+	o.manager.tagMu.Lock()
+	if owner, exists := o.manager.tagRoutes[tag]; !exists || owner == o.shard {
+		o.manager.tagRoutes[tag] = o.shard
+	} else {
+		o.manager.tagRoutes[tag] = -1
+	}
+	o.manager.tagMu.Unlock()
+}
+
+func (o ratchetTagObserver) TagRemoved(tag garlicecies.SessionTag) {
+	o.manager.tagMu.Lock()
+	if o.manager.tagRoutes[tag] == o.shard {
+		delete(o.manager.tagRoutes, tag)
+	}
+	o.manager.tagMu.Unlock()
 }
 
 // NewRatchetManager binds sharded ECIES garlic state to one LocalDestination.
@@ -49,9 +74,13 @@ func NewRatchetManager(local *foundation.LocalDestination, config RatchetConfig)
 	shardCount := min(parallelism.Workers(maxSessions), max(1, maxTags/lookahead))
 	config.MaxSessions = (maxSessions + shardCount - 1) / shardCount
 	config.MaxInboundTags = (maxTags + shardCount - 1) / shardCount
-	manager := &RatchetManager{shards: make([]*garlicecies.RatchetManager, 0, shardCount)}
-	for range shardCount {
-		shard, err := garlicecies.NewRatchetManager(local, config)
+	manager := &RatchetManager{
+		tagRoutes: make(map[garlicecies.SessionTag]int, maxTags),
+		shards:    make([]*garlicecies.RatchetManager, 0, shardCount),
+	}
+	for index := range shardCount {
+		observer := ratchetTagObserver{manager: manager, shard: index}
+		shard, err := garlicecies.NewRatchetManagerWithTagObserver(local, config, observer)
 		if err != nil {
 			manager.ReleaseSensitive()
 			return nil, err
@@ -86,10 +115,22 @@ func (m *RatchetManager) peerShardLocked(peer foundation.Hash) (int, *garlicecie
 	return index, m.shards[index]
 }
 
-func (m *RatchetManager) packetShardLocked(packet []byte) (int, *garlicecies.RatchetManager) {
-	for index, shard := range m.shards {
-		if shard.OwnsTag(packet) {
-			return index, shard
+func (m *RatchetManager) packetShard(packet []byte) (int, *garlicecies.RatchetManager) {
+	if len(packet) >= 8 {
+		var tag garlicecies.SessionTag
+		copy(tag[:], packet[:8])
+		m.tagMu.RLock()
+		owner, indexed := m.tagRoutes[tag]
+		m.tagMu.RUnlock()
+		if indexed && owner >= 0 {
+			return owner, m.shards[owner]
+		}
+		if indexed {
+			for index, shard := range m.shards {
+				if shard.OwnsTag(packet) {
+					return index, shard
+				}
+			}
 		}
 	}
 	index := uint64(0)
@@ -195,10 +236,8 @@ func (m *RatchetManager) Receive(dst, replyDst, packet []byte, now uint64) (Ratc
 	if m == nil || len(m.shards) == 0 {
 		return RatchetResult{}, ErrRatchetClosed
 	}
-	m.routeMu.RLock()
-	index, shard := m.packetShardLocked(packet)
+	index, shard := m.packetShard(packet)
 	result, err := shard.Receive(dst, replyDst, packet, now)
-	m.routeMu.RUnlock()
 	if err != nil || result.Peer == (foundation.Hash{}) {
 		return result, err
 	}
@@ -222,6 +261,9 @@ func (m *RatchetManager) ReleaseSensitive() {
 		for _, shard := range m.shards {
 			shard.ReleaseSensitive()
 		}
+		m.tagMu.Lock()
+		clear(m.tagRoutes)
+		m.tagMu.Unlock()
 	})
 }
 

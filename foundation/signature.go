@@ -71,14 +71,15 @@ func VerifySignature(kind SigningKeyType, first, rest, message, signature []byte
 // uses a bounded slab so LeaseSet2 verification does not create a transient
 // heap object proportional to an attacker-controlled netdb payload.
 func VerifySignaturePrefixed(prefix byte, kind SigningKeyType, first, rest, message, signature []byte) (bool, error) {
-	joined, ok := pool.Acquire(len(message) + 1)
+	lease, ok := pool.AcquireLease(len(message) + 1)
 	if !ok {
 		return false, ErrMalformedSignature
 	}
+	joined, _ := lease.Bytes(len(message) + 1)
 	joined[0] = prefix
 	copy(joined[1:], message)
 	valid, err := VerifySignature(kind, first, rest, joined, signature)
-	pool.Release(joined)
+	lease.Release()
 	return valid, err
 }
 

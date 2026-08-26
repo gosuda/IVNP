@@ -292,6 +292,52 @@ func TestStreamingTunnelSenderLeaseSetGarlicTunnelDestination(t *testing.T) {
 	}
 }
 
+func TestStreamingTunnelSenderReleasesScratchBeforeTunnelIO(t *testing.T) {
+	const now = uint64(1_000)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	bridge := &dataPlaneTunnelSender{handle: func(context.Context, i2np.Message) error {
+		close(started)
+		<-release
+		return nil
+	}}
+	runtime := tunnel.NewRuntime(tunnel.RuntimeConfig{Sender: bridge, Now: func() uint64 { return now }})
+	const outboundID = uint32(91)
+	if err := runtime.RegisterOutbound(tunnel.OutboundCircuit{ID: outboundID, FirstHop: foundation.Hash{1}, NextTunnelID: 2}); err != nil {
+		t.Fatal(err)
+	}
+	tunnelPool := tunnel.NewPool(1)
+	if err := tunnelPool.Add(tunnel.Entry{ID: outboundID, Direction: tunnel.Outbound, Expires: now + 1_000}, now); err != nil {
+		t.Fatal(err)
+	}
+	sender := &StreamingTunnelSender{
+		tunnels: runtime,
+		pool:    tunnelPool,
+		now:     func() uint64 { return now },
+		nextID:  func() (uint32, error) { return 1, nil },
+		scratch: make(chan *streamingSenderScratch, 1),
+	}
+	scratch := new(streamingSenderScratch)
+	scratch.encrypted[0] = 0xaa
+	done := make(chan error, 1)
+	go func() {
+		done <- sender.finishEncryptedSend(context.Background(), netdb.Lease{Gateway: foundation.Hash{1}, TunnelID: 3}, scratch.encrypted[:1], now+1_000, scratch)
+	}()
+	<-started
+	select {
+	case returned := <-sender.scratch:
+		if returned != scratch || returned.encrypted[0] != 0 {
+			t.Fatal("scratch was not cleared before tunnel I/O")
+		}
+	default:
+		t.Fatal("scratch remained held during tunnel I/O")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGarlicReceiverDeliversNewSessionReplyAndEstablishesExistingSession(t *testing.T) {
 	const now = uint64(1_000_000)
 	initiator, err := foundation.GenerateLegacyLocalDestination()

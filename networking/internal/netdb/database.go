@@ -45,20 +45,30 @@ type leaseEntry struct {
 	typeID    i2np.StoreType
 }
 
+type leaseExpiry struct {
+	key     foundation.Hash
+	expires uint64
+}
+
 // Database is the bounded persistence-facing netdb core used by floodfill
 // handling. Every retained object owns exactly one wire byte slice; parsers
 // otherwise borrow packet memory and make no object graph per field.
 type Database struct {
-	routers   *Table
-	leasesMu  sync.RWMutex
-	leases    map[foundation.Hash]leaseEntry
-	maxLeases int
-	gzipPool  sync.Pool
-	metrics   *observability.Registry
+	routers          *Table
+	leasesMu         sync.RWMutex
+	leases           map[foundation.Hash]leaseEntry
+	leaseExpiries    []leaseExpiry
+	leaseExpiryIndex map[foundation.Hash]int
+	maxLeases        int
+	gzipPool         sync.Pool
+	metrics          *observability.Registry
 }
 
 func NewDatabase(local foundation.Hash, bucketCapacity int) *Database {
-	return &Database{routers: NewTable(local, bucketCapacity), leases: make(map[foundation.Hash]leaseEntry), maxLeases: 4096}
+	return &Database{
+		routers: NewTable(local, bucketCapacity), leases: make(map[foundation.Hash]leaseEntry),
+		leaseExpiryIndex: make(map[foundation.Hash]int), maxLeases: 4096,
+	}
 }
 
 // SetMetrics installs the daemon-owned metric registry before the database is
@@ -202,11 +212,11 @@ func (d *Database) HandleDatabaseStoreAsPublished(store i2np.DatabaseStoreMessag
 // reflooding stale but otherwise valid stores.
 func (d *Database) StoreMatchesCurrent(store i2np.DatabaseStoreMessage) bool {
 	if store.Type == i2np.StoreRouterInfo {
-		inflated, err := d.inflateRouterInfo(store.Data)
+		inflated, lease, err := d.inflateRouterInfo(store.Data)
 		if err != nil {
 			return false
 		}
-		defer pool.Release(inflated)
+		defer lease.Release()
 		incoming, err := ParseRouterInfo(inflated)
 		if err != nil {
 			return false
@@ -237,11 +247,11 @@ func (d *Database) StoreMatchesCurrent(store i2np.DatabaseStoreMessage) bool {
 }
 
 func (d *Database) storeRouterInfo(store i2np.DatabaseStoreMessage, floodfill bool, seenAt uint64) error {
-	inflated, err := d.inflateRouterInfo(store.Data)
+	inflated, lease, err := d.inflateRouterInfo(store.Data)
 	if err != nil {
 		return err
 	}
-	defer pool.Release(inflated)
+	defer lease.Release()
 	parsed, err := ParseRouterInfo(inflated)
 	if err != nil {
 		return err
@@ -531,17 +541,99 @@ func (d *Database) EncryptedLeaseSet(key foundation.Hash) (EncryptedLeaseSet, bo
 }
 
 func (d *Database) storeLeaseEntry(key foundation.Hash, entry leaseEntry) {
-	if len(d.leases) == d.maxLeases {
-		var oldestKey foundation.Hash
-		var oldest uint64 = ^uint64(0)
-		for candidate, existing := range d.leases {
-			if existing.expires < oldest {
-				oldestKey, oldest = candidate, existing.expires
-			}
+	_, exists := d.leases[key]
+	if !exists && len(d.leases) >= d.maxLeases {
+		if oldest, ok := d.popLeaseExpiryLocked(); ok {
+			delete(d.leases, oldest.key)
 		}
-		delete(d.leases, oldestKey)
 	}
 	d.leases[key] = entry
+	d.upsertLeaseExpiryLocked(key, entry.expires)
+}
+
+func (d *Database) upsertLeaseExpiryLocked(key foundation.Hash, expires uint64) {
+	if index, ok := d.leaseExpiryIndex[key]; ok {
+		d.leaseExpiries[index].expires = expires
+		d.fixLeaseExpiryLocked(index)
+		return
+	}
+	d.leaseExpiries = append(d.leaseExpiries, leaseExpiry{key: key, expires: expires})
+	index := len(d.leaseExpiries) - 1
+	d.leaseExpiryIndex[key] = index
+	for index > 0 {
+		parent := (index - 1) / 2
+		if !d.lessLeaseExpiryLocked(index, parent) {
+			break
+		}
+		d.swapLeaseExpiryLocked(index, parent)
+		index = parent
+	}
+}
+
+func (d *Database) popLeaseExpiryLocked() (leaseExpiry, bool) {
+	if len(d.leaseExpiries) == 0 {
+		return leaseExpiry{}, false
+	}
+	oldest := d.leaseExpiries[0]
+	delete(d.leaseExpiryIndex, oldest.key)
+	last := len(d.leaseExpiries) - 1
+	if last != 0 {
+		d.leaseExpiries[0] = d.leaseExpiries[last]
+		d.leaseExpiryIndex[d.leaseExpiries[0].key] = 0
+	}
+	d.leaseExpiries[last] = leaseExpiry{}
+	d.leaseExpiries = d.leaseExpiries[:last]
+	if len(d.leaseExpiries) != 0 {
+		d.fixLeaseExpiryLocked(0)
+	}
+	return oldest, true
+}
+
+func (d *Database) fixLeaseExpiryLocked(index int) {
+	for index > 0 {
+		parent := (index - 1) / 2
+		if !d.lessLeaseExpiryLocked(index, parent) {
+			break
+		}
+		d.swapLeaseExpiryLocked(index, parent)
+		index = parent
+	}
+	for {
+		left := 2*index + 1
+		if left >= len(d.leaseExpiries) {
+			return
+		}
+		child := left
+		if right := left + 1; right < len(d.leaseExpiries) && d.lessLeaseExpiryLocked(right, left) {
+			child = right
+		}
+		if !d.lessLeaseExpiryLocked(child, index) {
+			return
+		}
+		d.swapLeaseExpiryLocked(index, child)
+		index = child
+	}
+}
+
+func (d *Database) lessLeaseExpiryLocked(left, right int) bool {
+	leftExpiry := d.leaseExpiries[left].expires
+	rightExpiry := d.leaseExpiries[right].expires
+	if leftExpiry == 0 {
+		return false
+	}
+	if rightExpiry == 0 {
+		return true
+	}
+	if leftExpiry == rightExpiry {
+		return bytes.Compare(d.leaseExpiries[left].key[:], d.leaseExpiries[right].key[:]) < 0
+	}
+	return leftExpiry < rightExpiry
+}
+
+func (d *Database) swapLeaseExpiryLocked(left, right int) {
+	d.leaseExpiries[left], d.leaseExpiries[right] = d.leaseExpiries[right], d.leaseExpiries[left]
+	d.leaseExpiryIndex[d.leaseExpiries[left].key] = left
+	d.leaseExpiryIndex[d.leaseExpiries[right].key] = right
 }
 
 // ExpireLeases releases retained lease-set wire buffers whose protocol expiry
@@ -550,16 +642,19 @@ func (d *Database) ExpireLeases(nowMillis uint64) int {
 	d.leasesMu.Lock()
 	defer d.leasesMu.Unlock()
 	removed := 0
-	for key, entry := range d.leases {
-		if entry.expires != 0 && entry.expires < nowMillis {
-			delete(d.leases, key)
-			removed++
+	for len(d.leaseExpiries) != 0 {
+		oldest := d.leaseExpiries[0]
+		if oldest.expires == 0 || oldest.expires >= nowMillis {
+			break
 		}
+		d.popLeaseExpiryLocked()
+		delete(d.leases, oldest.key)
+		removed++
 	}
 	return removed
 }
 
-func (d *Database) inflateRouterInfo(compressed []byte) ([]byte, error) {
+func (d *Database) inflateRouterInfo(compressed []byte) ([]byte, *pool.Lease, error) {
 	input := bytes.NewReader(compressed)
 	value := d.gzipPool.Get()
 	var reader *gzip.Reader
@@ -571,16 +666,17 @@ func (d *Database) inflateRouterInfo(compressed []byte) ([]byte, error) {
 		err = reader.Reset(input)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	reader.Multistream(false)
 	// Read one sentinel byte beyond Java I2P's protocol maximum. This accepts
 	// an exact 4 KiB RouterInfo while rejecting a gzip bomb before it can
 	// allocate or retain a larger object.
-	output, ok := pool.Acquire(MaxRouterInfoBytes + 1)
+	lease, ok := pool.AcquireLease(MaxRouterInfoBytes + 1)
 	if !ok {
-		return nil, ErrRouterInfoTooLarge
+		return nil, nil, ErrRouterInfoTooLarge
 	}
+	output, _ := lease.Bytes(MaxRouterInfoBytes + 1)
 	used := 0
 	for {
 		n, readErr := reader.Read(output[used:])
@@ -588,8 +684,8 @@ func (d *Database) inflateRouterInfo(compressed []byte) ([]byte, error) {
 		if used > MaxRouterInfoBytes {
 			reader.Close()
 			d.gzipPool.Put(reader)
-			pool.Release(output)
-			return nil, ErrRouterInfoTooLarge
+			lease.Release()
+			return nil, nil, ErrRouterInfoTooLarge
 		}
 		if readErr == io.EOF {
 			break
@@ -597,21 +693,21 @@ func (d *Database) inflateRouterInfo(compressed []byte) ([]byte, error) {
 		if readErr != nil {
 			reader.Close()
 			d.gzipPool.Put(reader)
-			pool.Release(output)
-			return nil, readErr
+			lease.Release()
+			return nil, nil, readErr
 		}
 		if n == 0 {
 			reader.Close()
 			d.gzipPool.Put(reader)
-			pool.Release(output)
-			return nil, io.ErrNoProgress
+			lease.Release()
+			return nil, nil, io.ErrNoProgress
 		}
 	}
 	if err = reader.Close(); err != nil {
 		d.gzipPool.Put(reader)
-		pool.Release(output)
-		return nil, err
+		lease.Release()
+		return nil, nil, err
 	}
 	d.gzipPool.Put(reader)
-	return output[:used], nil
+	return output[:used], lease, nil
 }

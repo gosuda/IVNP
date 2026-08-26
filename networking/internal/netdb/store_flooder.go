@@ -90,15 +90,15 @@ func NewStoreFlooder(config StoreFlooderConfig) (*StoreFlooder, error) {
 		return nil, ErrStoreFlooderConfig
 	}
 	return &StoreFlooder{
-		database: config.Database,
-		sender:   config.Sender,
-		local:    config.Local,
-		now:      config.Now,
-		random:   config.Random,
-		logger:   config.Logger,
-		jobs:     make(chan storeFloodJob, storeFlooderQueue),
-		done:     make(chan struct{}),
-		recent:   make(map[[32]byte]uint64, storeFlooderRecentCapacity),
+		database:  config.Database,
+		sender:    config.Sender,
+		local:     config.Local,
+		now:       config.Now,
+		random:    config.Random,
+		logger:    config.Logger,
+		jobs:      make(chan storeFloodJob, storeFlooderQueue),
+		done:      make(chan struct{}),
+		recent:    make(map[[32]byte]uint64, storeFlooderRecentCapacity),
 		keyFloods: make(map[foundation.Hash]storeFloodCount, storeFlooderRecentCapacity),
 	}, nil
 }

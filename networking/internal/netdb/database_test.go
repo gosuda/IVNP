@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/pool"
 )
 
 func gzipBytes(t *testing.T, input []byte) []byte {
@@ -58,12 +57,12 @@ func TestLeaseSetRangeMatchesJavaFloodfillBounds(t *testing.T) {
 func TestInflateRouterInfoExactBoundary(t *testing.T) {
 	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	exact := make([]byte, MaxRouterInfoBytes)
-	inflated, err := database.inflateRouterInfo(gzipBytes(t, exact))
+	inflated, lease, err := database.inflateRouterInfo(gzipBytes(t, exact))
 	if err != nil || len(inflated) != MaxRouterInfoBytes {
 		t.Fatalf("exact boundary = %d bytes, %v", len(inflated), err)
 	}
-	defer pool.Release(inflated)
-	if _, err := database.inflateRouterInfo(gzipBytes(t, make([]byte, MaxRouterInfoBytes+1))); !errors.Is(err, ErrRouterInfoTooLarge) {
+	defer lease.Release()
+	if _, _, err := database.inflateRouterInfo(gzipBytes(t, make([]byte, MaxRouterInfoBytes+1))); !errors.Is(err, ErrRouterInfoTooLarge) {
 		t.Fatalf("oversize gzip error = %v, want ErrRouterInfoTooLarge", err)
 	}
 }

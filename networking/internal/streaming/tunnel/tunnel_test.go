@@ -306,6 +306,7 @@ func TestTunnelNetworkCloseCancelsBlockedRetransmission(t *testing.T) {
 		connection.mu.Lock()
 		connection.pending[1] = pendingPacket{wire: []byte{1}, sent: time.Now().Add(-time.Second)}
 		connection.mu.Unlock()
+		network.scheduleRetry(connection)
 		<-sender.started
 
 		closed := make(chan struct{})
@@ -349,16 +350,157 @@ func TestTunnelNetworkCloseDrainsPacingQueue(t *testing.T) {
 	}
 }
 
-func TestEarliestQueuedRequestDoesNotHeadOfLineBlock(t *testing.T) {
+func TestSendScheduleDoesNotHeadOfLineBlock(t *testing.T) {
 	now := time.Now()
 	delayed := &tunnelConn{nextPaced: now.Add(time.Second)}
 	ready := &tunnelConn{}
-	index, due := earliestQueuedRequest(now, []sendRequest{
-		{connection: delayed},
-		{connection: ready},
-	})
-	if index != 1 || due.After(now) {
-		t.Fatalf("earliestQueuedRequest() = %d, %v; want ready request at index 1", index, due)
+	var schedule sendSchedule
+	schedule.push(sendRequest{connection: delayed}, delayed.paceDue(now))
+	schedule.push(sendRequest{connection: ready}, ready.paceDue(now))
+	request, ok := schedule.peek()
+	if !ok || request.request.connection != ready || request.due.After(now) {
+		t.Fatalf("send schedule head = %#v; want ready request", request)
+	}
+}
+
+func TestRetryScheduleUpdatesAndRemovesConnection(t *testing.T) {
+	now := time.Now()
+	first := &tunnelConn{}
+	second := &tunnelConn{}
+	schedule := retrySchedule{indices: make(map[*tunnelConn]int)}
+	schedule.upsert(first, now.Add(time.Second))
+	schedule.upsert(second, now.Add(500*time.Millisecond))
+	schedule.upsert(first, now.Add(100*time.Millisecond))
+
+	retry, ok := schedule.peek()
+	if !ok || retry.connection != first {
+		t.Fatalf("retry schedule head = %#v; want updated first connection", retry)
+	}
+	schedule.upsert(first, time.Time{})
+	retry, ok = schedule.peek()
+	if !ok || retry.connection != second {
+		t.Fatalf("retry schedule after removal = %#v; want second connection", retry)
+	}
+}
+
+func TestSendCompletionDrainsAbandonedResult(t *testing.T) {
+	network := &TunnelNetwork{}
+	completion := network.acquireCompletion()
+	completion.release()
+	sendRequest{result: completion}.finish(context.Canceled)
+
+	reused := network.acquireCompletion()
+	select {
+	case err := <-reused.value:
+		t.Fatalf("acquired completion retained stale result %v", err)
+	default:
+	}
+	reused.release()
+	reused.release()
+}
+
+func TestPendingWireLeaseOutlivesPendingOwnerUntilSendFinishes(t *testing.T) {
+	wire, lease, ok := acquireWireLease(HeaderLen)
+	if !ok {
+		t.Fatal("acquireWireLease failed")
+	}
+	wire[0] = 1
+	lease.retain()
+	pendingPacket{wire: wire, lease: lease}.release()
+	if got := lease.refs.Load(); got != 1 {
+		t.Fatalf("wire lease references after pending release = %d, want 1", got)
+	}
+	sendRequest{wire: wire, lease: lease}.finish(nil)
+	if lease.slab != nil {
+		t.Fatal("wire lease retained slab after send completion")
+	}
+}
+
+func TestPendingSendLeaseSurvivesConcurrentNetworkClose(t *testing.T) {
+	destination, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	network, err := NewTunnelNetwork(TunnelNetworkConfig{Destination: destination, Sender: discardTunnelSender{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := network.newConn(1, 2, foundation.Hash{1}, foundation.Identity{}, 1, 2, true)
+	if err = network.register(connection); err != nil {
+		t.Fatal(err)
+	}
+
+	network.outboundMu.Lock()
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := connection.Write([]byte{1})
+		writeDone <- writeErr
+	}()
+	var lease *wireLease
+	deadline := time.After(time.Second)
+	for lease == nil {
+		connection.mu.Lock()
+		for _, pending := range connection.pending {
+			lease = pending.lease
+			break
+		}
+		connection.mu.Unlock()
+		select {
+		case <-deadline:
+			network.outboundMu.Unlock()
+			_ = network.Close()
+			t.Fatal("Write did not publish pending wire")
+		default:
+		}
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- network.Close() }()
+	<-connection.done
+	closeDeadline := time.After(time.Second)
+	for {
+		connection.mu.Lock()
+		pending := len(connection.pending)
+		connection.mu.Unlock()
+		if pending == 0 {
+			break
+		}
+		select {
+		case <-closeDeadline:
+			network.outboundMu.Unlock()
+			t.Fatal("concurrent close did not release pending owner")
+		default:
+		}
+	}
+	if got := lease.refs.Load(); got != 1 || lease.slab == nil {
+		network.outboundMu.Unlock()
+		t.Fatalf("wire lease after concurrent close = refs %d slab %p; want retained send owner", got, lease.slab)
+	}
+	network.outboundMu.Unlock()
+	if err = <-writeDone; !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Write during close = %v, want net.ErrClosed", err)
+	}
+	if err = <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+	if lease.slab != nil {
+		t.Fatal("wire lease retained slab after send admission failed")
+	}
+}
+
+func BenchmarkStreamingWireAndCompletionPools(b *testing.B) {
+	packet := Packet{SendStreamID: 1, ReceiveStreamID: 2, Sequence: 1, Payload: []byte{1, 2, 3}}
+	network := &TunnelNetwork{}
+	b.ReportAllocs()
+	for b.Loop() {
+		_, lease, err := marshalPacketLeased(packet)
+		if err != nil {
+			b.Fatal(err)
+		}
+		lease.release()
+		completion := network.acquireCompletion()
+		completion.release()
+		completion.release()
 	}
 }
 
@@ -485,7 +627,7 @@ func TestTunnelReliabilityKarnFastRetransmitAndNACKs(t *testing.T) {
 		}
 	}
 	retransmit := connection.acknowledgeLocked(2, nack, now)
-	if len(retransmit) != 1 || retransmit[0][0] != 3 {
+	if len(retransmit) != 1 || retransmit[0].wire[0] != 3 {
 		t.Fatalf("fast retransmit = %v, want packet 3", retransmit)
 	}
 	if got := connection.congestion.Window(); got != streaming.MinWindow {
