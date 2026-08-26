@@ -109,6 +109,46 @@ func TestRatchetGarlicClovesMatchI2PDCompactBlocks(t *testing.T) {
 		t.Fatalf("compact blocks = %x, want %x", got, fixture)
 	}
 }
+
+func TestSelectLease2RotatesAcrossUsableLeases(t *testing.T) {
+	const now = uint64(1_750_000_000_000)
+	destination, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.ReleaseSensitive()
+
+	local, err := netdb.NewLocalLeaseSet2(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = local.ReplaceInboundLeases([]netdb.Lease{
+		{Gateway: foundation.Hash{1}, TunnelID: 11, EndDate: now + 60_000},
+		{Gateway: foundation.Hash{2}, TunnelID: 22, EndDate: now - 1_000},
+		{Gateway: foundation.Hash{3}, TunnelID: 33, EndDate: now + 120_000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wire := make([]byte, netdb.MaxLeaseSetBytes)
+	n, err := local.MarshalTo(wire, now-60_000, destination.Sign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := netdb.ParseLeaseSet2(wire[:n])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for pick, want := range []uint32{11, 33, 11} {
+		lease, selectErr := selectLease2(set, now, uint64(pick))
+		if selectErr != nil {
+			t.Fatal(selectErr)
+		}
+		if lease.TunnelID != want {
+			t.Fatalf("pick %d selected tunnel %d, want %d", pick, lease.TunnelID, want)
+		}
+	}
+}
 func TestDestinationDataUsesI2CPGzipHeader(t *testing.T) {
 	payload := []byte("native-streaming-payload")
 	var compressed bytes.Buffer

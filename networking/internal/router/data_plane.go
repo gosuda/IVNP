@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gosuda.org/ivnp/cryptography"
@@ -106,6 +107,7 @@ type StreamingTunnelSender struct {
 	seedMu         sync.Mutex
 	seedCache      [streamingSeedCacheCapacity]streamingSeedCacheEntry
 	seedNext       uint8
+	leaseNext      atomic.Uint64
 }
 
 type streamingSenderScratch struct {
@@ -315,7 +317,7 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streami
 		if s.logger != nil {
 			s.logger.Debug("streaming remote LS2 key selected", "target", foundation.EncodeI2PBase64(delivery.To[:]), "key_type", uint16(key.Type))
 		}
-		lease, err = selectLease2(*set2, now)
+		lease, err = selectLease2(*set2, now, s.leaseNext.Add(1)-1)
 		if err != nil {
 			return err
 		}
@@ -337,7 +339,7 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streami
 			return ErrUnsupportedEncryption
 		}
 		var recipient cryptography.ElGamalPublicKey
-		lease, recipient, err = selectLegacyLease(*legacy, now)
+		lease, recipient, err = selectLegacyLease(*legacy, now, s.leaseNext.Add(1)-1)
 		if err != nil {
 			return err
 		}
@@ -391,7 +393,7 @@ func (s *StreamingTunnelSender) SendRatchetReply(ctx context.Context, target fou
 	if set2 == nil {
 		return ErrUnsupportedEncryption
 	}
-	lease, err := selectLease2(*set2, now)
+	lease, err := selectLease2(*set2, now, s.leaseNext.Add(1)-1)
 	if err != nil {
 		return err
 	}
@@ -756,9 +758,9 @@ func encryptedLeaseSetDHTKey(identity foundation.Identity, secret []byte, now ui
 	return foundation.Sum(input[:]), nil
 }
 
-func selectLease2(set netdb.LeaseSet2, now uint64) (netdb.Lease, error) {
-	var selected netdb.Lease
+func selectLease2(set netdb.LeaseSet2, now uint64, pick uint64) (netdb.Lease, error) {
 	iterator := set.Leases()
+	var usable uint64
 	for {
 		lease, ok, err := iterator.Next()
 		if err != nil {
@@ -767,25 +769,44 @@ func selectLease2(set netdb.LeaseSet2, now uint64) (netdb.Lease, error) {
 		if !ok {
 			break
 		}
-		end := uint64(lease.EndDate) * 1000
-		if end > now && (selected.TunnelID == 0 || end > selected.EndDate) {
-			selected = netdb.Lease{Gateway: lease.Gateway, TunnelID: lease.TunnelID, EndDate: end}
+		if uint64(lease.EndDate)*1000 > now {
+			usable++
 		}
 	}
-	if selected.TunnelID == 0 {
+	if usable == 0 {
 		return netdb.Lease{}, ErrLeaseSetExpired
 	}
-	return selected, nil
+
+	selected := pick % usable
+	iterator = set.Leases()
+	for {
+		lease, ok, err := iterator.Next()
+		if err != nil {
+			return netdb.Lease{}, err
+		}
+		if !ok {
+			return netdb.Lease{}, ErrLeaseSetExpired
+		}
+		end := uint64(lease.EndDate) * 1000
+		if end <= now {
+			continue
+		}
+		if selected == 0 {
+			return netdb.Lease{Gateway: lease.Gateway, TunnelID: lease.TunnelID, EndDate: end}, nil
+		}
+		selected--
+	}
 }
 
-func selectLegacyLease(set netdb.LeaseSet, now uint64) (netdb.Lease, cryptography.ElGamalPublicKey, error) {
+func selectLegacyLease(set netdb.LeaseSet, now uint64, pick uint64) (netdb.Lease, cryptography.ElGamalPublicKey, error) {
 	if len(set.EncryptionKey) != cryptography.ElGamalPublicKeySize {
 		return netdb.Lease{}, cryptography.ElGamalPublicKey{}, ErrUnsupportedEncryption
 	}
 	var recipient cryptography.ElGamalPublicKey
 	copy(recipient[:], set.EncryptionKey)
-	var selected netdb.Lease
+
 	iterator := set.Leases()
+	var usable uint64
 	for {
 		lease, ok, err := iterator.Next()
 		if err != nil {
@@ -794,14 +815,32 @@ func selectLegacyLease(set netdb.LeaseSet, now uint64) (netdb.Lease, cryptograph
 		if !ok {
 			break
 		}
-		if lease.EndDate > now && (selected.TunnelID == 0 || lease.EndDate > selected.EndDate) {
-			selected = lease
+		if lease.EndDate > now {
+			usable++
 		}
 	}
-	if selected.TunnelID == 0 {
+	if usable == 0 {
 		return netdb.Lease{}, cryptography.ElGamalPublicKey{}, ErrLeaseSetExpired
 	}
-	return selected, recipient, nil
+
+	selected := pick % usable
+	iterator = set.Leases()
+	for {
+		lease, ok, err := iterator.Next()
+		if err != nil {
+			return netdb.Lease{}, cryptography.ElGamalPublicKey{}, err
+		}
+		if !ok {
+			return netdb.Lease{}, cryptography.ElGamalPublicKey{}, ErrLeaseSetExpired
+		}
+		if lease.EndDate <= now {
+			continue
+		}
+		if selected == 0 {
+			return lease, recipient, nil
+		}
+		selected--
+	}
 }
 
 func (s *StreamingTunnelSender) id() (uint32, error) {

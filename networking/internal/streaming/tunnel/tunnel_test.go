@@ -3,6 +3,9 @@ package streamingtunnel
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -600,6 +603,89 @@ func TestTunnelNetworkAcceptsJavaSynchronizeReplyPayload(t *testing.T) {
 	got := make([]byte, len(payload))
 	if _, err = io.ReadFull(connection, got); err != nil || !bytes.Equal(got, payload) {
 		t.Fatalf("SYN-ACK payload = %q, %v", got, err)
+	}
+}
+
+func TestTunnelNetworkAcceptsJavaOfflineSignedSynchronizeReply(t *testing.T) {
+	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
+	client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
+	client.sender = discardTunnelSender{}
+	connection := client.newConn(1, 0, server.localHash, foundation.Identity{}, 1234, 80, true)
+	if err := client.register(connection); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { connection.abort(false) })
+	delivery := Delivery{From: server.localHash, To: client.localHash, FromPort: 80, ToPort: 1234, Protocol: ProtocolStreaming}
+
+	earlyACK, err := marshalPacket(Packet{SendStreamID: 1, ReceiveStreamID: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery.Payload = earlyACK
+	if err = client.HandleDelivery(context.Background(), delivery); err != nil {
+		t.Fatalf("ACK before SYN reply: %v", err)
+	}
+	if connection.remoteID != 0 {
+		t.Fatalf("early ACK established remote stream %d", connection.remoteID)
+	}
+
+	transientPublic, transientPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responsePayload := []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+	earlyClose := Packet{
+		SendStreamID: 1, ReceiveStreamID: 2, Sequence: 1,
+		Flags: FlagClose | FlagSignatureIncluded, Payload: responsePayload,
+		Options: make([]byte, ed25519.SignatureSize),
+	}
+	earlyCloseWire, err := marshalPacket(earlyClose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	earlyCloseSignatureOffset := 17 + len(earlyClose.NACKs) + 5 + len(earlyClose.Options) - ed25519.SignatureSize
+	copy(earlyCloseWire[earlyCloseSignatureOffset:earlyCloseSignatureOffset+ed25519.SignatureSize], ed25519.Sign(transientPrivate, earlyCloseWire))
+	delivery.Payload = earlyCloseWire
+	if err = client.HandleDelivery(context.Background(), delivery); err != nil {
+		t.Fatalf("CLOSE before SYN reply: %v", err)
+	}
+	offlineBlock := make([]byte, 6+len(transientPublic))
+	binary.BigEndian.PutUint32(offlineBlock[:4], uint32(time.Now().Add(time.Hour).Unix()))
+	binary.BigEndian.PutUint16(offlineBlock[4:6], uint16(foundation.SigningEdDSASHA512Ed25519))
+	copy(offlineBlock[6:], transientPublic)
+	offlineSignature, err := server.sign(offlineBlock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := Packet{
+		SendStreamID: 1, ReceiveStreamID: 2, Flags: FlagSynchronize | FlagSignatureIncluded |
+			FlagFromIncluded | FlagMaxPacketSize | FlagOfflineSignature,
+	}
+	packet.Options = append(packet.Options, server.localRaw...)
+	packet.Options = append(packet.Options, byte(localMaxPayloadSize>>8), byte(localMaxPayloadSize&0xff))
+	packet.Options = append(packet.Options, offlineBlock...)
+	packet.Options = append(packet.Options, offlineSignature...)
+	packet.Options = append(packet.Options, make([]byte, ed25519.SignatureSize)...)
+	wire, err := marshalPacket(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signatureOffset := 17 + len(packet.NACKs) + 5 + len(packet.Options) - ed25519.SignatureSize
+	copy(wire[signatureOffset:signatureOffset+ed25519.SignatureSize], ed25519.Sign(transientPrivate, wire))
+	delivery.Payload = wire
+	if err = client.HandleDelivery(context.Background(), delivery); err != nil {
+		t.Fatal(err)
+	}
+	if connection.remoteID != 2 || connection.peerSigningType != foundation.SigningEdDSASHA512Ed25519 ||
+		!bytes.Equal(connection.peerSigningPublic, transientPublic) {
+		t.Fatalf("offline SYN reply established remote=%d signing=%d key=%x", connection.remoteID, connection.peerSigningType, connection.peerSigningPublic)
+	}
+	response := make([]byte, len(responsePayload))
+	if _, err = io.ReadFull(connection, response); err != nil || !bytes.Equal(response, responsePayload) {
+		t.Fatalf("deferred response = %q, %v", response, err)
+	}
+	if n, readErr := connection.Read(make([]byte, 1)); n != 0 || readErr != io.EOF {
+		t.Fatalf("read after deferred CLOSE = %d, %v", n, readErr)
 	}
 }
 

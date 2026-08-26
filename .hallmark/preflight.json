@@ -1,0 +1,10 @@
+{
+  "date": "2026-08-27",
+  "framework": "SvelteKit 2 with Svelte 5 and adapter-static",
+  "font_stack": "Archivo Variable via @fontsource-variable/archivo",
+  "palette": "OKLCH CSS custom properties",
+  "motion": "motion-cut; no animation library",
+  "spacing": "4-point CSS custom-property scale",
+  "preserved": ["SvelteKit project boundaries", "static adapter", "existing component ownership"],
+  "introduced": ["Grid theme", "Bento Grid macrostructure", "state-complete controls", "responsive telemetry layout"]
+}

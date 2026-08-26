@@ -35,6 +35,8 @@ var (
 	ErrTooManyDestinations       = errors.New("daemon: too many destinations")
 	ErrDuplicateDestination      = errors.New("daemon: duplicate destination identity")
 	ErrPacketListenerUnsupported = errors.New("daemon: packet listener edge not configured")
+	ErrReseedUnavailable         = errors.New("daemon: reseed is unavailable")
+	ErrTunnelProbeUnavailable    = errors.New("daemon: tunnel probe is unavailable")
 )
 
 const (
@@ -147,6 +149,13 @@ type Status struct {
 	Running bool
 	Error   error
 	Router  networking.RouterStatus
+}
+
+// TunnelRuntimeSnapshot identifies one live creator tunnel without exposing
+// private destination material.
+type TunnelRuntimeSnapshot struct {
+	DestinationName string
+	Entry           networking.TunnelEntry
 }
 
 // destinationRuntime is the complete client-side ownership boundary. Router
@@ -1769,6 +1778,105 @@ func (d *Daemon) ClientStatus(context.Context) (client.ClientStatus, error) {
 		RouterHash: foundation.EncodeI2PBase64(routerHash[:]),
 		Readiness:  readiness,
 	}, status.Error
+}
+
+// Config returns an independent operating configuration snapshot.
+func (d *Daemon) Config() state.ConfigurationOperating {
+	if d == nil {
+		return state.ConfigurationOperating{}
+	}
+	d.mu.Lock()
+	config := d.config
+	d.mu.Unlock()
+	config.NetDB.BootstrapRouterInfoPaths = slices.Clone(config.NetDB.BootstrapRouterInfoPaths)
+	config.Reseed.Endpoints = slices.Clone(config.Reseed.Endpoints)
+	config.AddressBook.Subscriptions = slices.Clone(config.AddressBook.Subscriptions)
+	return config
+}
+
+// RegistrySnapshot returns current non-sensitive process and router counters.
+func (d *Daemon) RegistrySnapshot() observability.Snapshot {
+	if d == nil || d.registry == nil {
+		return observability.Snapshot{}
+	}
+	d.refreshObservability()
+	return d.registry.Snapshot()
+}
+
+// TunnelEntriesSnapshot returns every live router and destination creator
+// tunnel using one clock sample.
+func (d *Daemon) TunnelEntriesSnapshot() []TunnelRuntimeSnapshot {
+	if d == nil {
+		return nil
+	}
+	now := uint64(d.clock.Now().UnixMilli())
+	entries := d.pool.Snapshot(now)
+	snapshot := make([]TunnelRuntimeSnapshot, 0, len(entries))
+	for _, entry := range entries {
+		snapshot = append(snapshot, TunnelRuntimeSnapshot{Entry: entry})
+	}
+	for _, runtime := range d.clientRuntimeSnapshot() {
+		if !runtime.active() || runtime.pool == nil {
+			continue
+		}
+		for _, entry := range runtime.pool.Snapshot(now) {
+			snapshot = append(snapshot, TunnelRuntimeSnapshot{
+				DestinationName: runtime.name,
+				Entry:           entry,
+			})
+		}
+	}
+	return snapshot
+}
+
+// NetDBRoutersSnapshot returns borrowed immutable RouterInfo views.
+func (d *Daemon) NetDBRoutersSnapshot() []networking.NetworkDatabaseRouterRef {
+	if d == nil || d.database == nil {
+		return nil
+	}
+	_, routers := d.database.Routers().Snapshot()
+	return routers
+}
+
+// TriggerReseed starts one bounded reseed attempt when reseed is enabled.
+func (d *Daemon) TriggerReseed(ctx context.Context) (<-chan struct{}, error) {
+	if d == nil {
+		return nil, net.ErrClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	d.mu.Lock()
+	available := d.started && !d.closed && d.config.Reseed.Enabled && d.router != nil
+	router := d.router
+	d.mu.Unlock()
+	if !available {
+		return nil, ErrReseedUnavailable
+	}
+	return router.MaintainReseed(ctx), nil
+}
+
+// TriggerTunnelProbe tests the current exploratory pair.
+func (d *Daemon) TriggerTunnelProbe(ctx context.Context) error {
+	if d == nil {
+		return net.ErrClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	d.mu.Lock()
+	available := d.started && !d.closed && d.maintainer != nil && d.tunnelHealth != nil
+	maintainer, health := d.maintainer, d.tunnelHealth
+	d.mu.Unlock()
+	if !available {
+		return ErrTunnelProbeUnavailable
+	}
+	pair, ok := maintainer.Pair(uint64(d.clock.Now().UnixMilli()))
+	if !ok || pair.PeerCount == 0 {
+		return ErrTunnelProbeUnavailable
+	}
+	_, err := health.Probe(ctx, pair, foundation.Hash{})
+	return err
 }
 
 func routerStateString(state networking.RouterState) string {

@@ -103,9 +103,16 @@ func TestHTTPProxyForwardsCONNECTAndAbsoluteForm(t *testing.T) {
 			return
 		}
 		request, err := http.ReadRequest(bufio.NewReader(connection))
-		if err == nil && request.Method != http.MethodConnect {
-			_, _ = io.WriteString(connection, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+		if err != nil || request.Method == http.MethodConnect {
+			return
 		}
+		for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Server"} {
+			if request.Header.Get(name) != "" {
+				_, _ = io.WriteString(connection, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+				return
+			}
+		}
+		_, _ = io.WriteString(connection, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
 	}))
 
 	connection, err := net.Dial("tcp", proxy.Addr().String())
@@ -129,14 +136,14 @@ func TestHTTPProxyForwardsCONNECTAndAbsoluteForm(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer connection.Close()
-	_, _ = io.WriteString(connection, "GET http://"+testB32+"/path HTTP/1.1\r\nHost: "+testB32+"\r\n\r\n")
+	_, _ = io.WriteString(connection, "GET http://"+testB32+"/path HTTP/1.1\r\nHost: "+testB32+"\r\nForwarded: for=192.0.2.1\r\nX-Forwarded-For: 192.0.2.1\r\nX-Forwarded-Host: proxy.example\r\nX-Forwarded-Server: proxy.example\r\n\r\n")
 	response, err = http.ReadResponse(bufio.NewReader(connection), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, err := io.ReadAll(response.Body)
-	if err != nil || string(body) != "ok" {
-		t.Fatalf("absolute-form body = %q, %v", body, err)
+	if err != nil || response.StatusCode != http.StatusOK || string(body) != "ok" {
+		t.Fatalf("absolute-form response = %d, %q, %v", response.StatusCode, body, err)
 	}
 	calls := proxy.config.Network.(*testNetwork).calls()
 	if len(calls) != 2 || calls[0] != testB32+":80" || calls[1] != testB32+":80" {

@@ -6,7 +6,7 @@ addressbook.json
 *.log
 
 # Binaries & test artifacts
-ivnpd
+/ivnpd
 *.test
 *.out
 
@@ -14,3 +14,7 @@ ivnpd
 .DS_Store
 .idea/
 .vscode/
+
+# Embedded WebUI workspace (production build is committed for go:embed)
+cmd/ivnpd/webui/node_modules/
+cmd/ivnpd/webui/.svelte-kit/

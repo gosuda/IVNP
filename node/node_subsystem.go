@@ -10,6 +10,7 @@ type (
 	Subsystem             = noderuntime.Daemon
 	Options               = noderuntime.Options
 	Status                = noderuntime.Status
+	TunnelRuntimeSnapshot = noderuntime.TunnelRuntimeSnapshot
 	DestinationPolicy     = noderuntime.DestinationPolicy
 	DestinationPolicyKind = noderuntime.DestinationPolicyKind
 )

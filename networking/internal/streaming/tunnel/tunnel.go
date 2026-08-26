@@ -66,7 +66,8 @@ const (
 	FlagFromIncluded       = 0x0020
 	FlagDelayRequested     = 0x0040
 	FlagMaxPacketSize      = 0x0080
-	streamingKnownFlags    = FlagSynchronize | FlagClose | FlagReset | FlagSignatureIncluded | FlagFromIncluded | FlagDelayRequested | FlagMaxPacketSize | FlagNoACK
+	FlagOfflineSignature   = 0x0800
+	streamingKnownFlags    = FlagSynchronize | FlagClose | FlagReset | FlagSignatureIncluded | FlagFromIncluded | FlagDelayRequested | FlagMaxPacketSize | FlagNoACK | FlagOfflineSignature
 	streamingSignatureSize = ed25519.SignatureSize
 )
 
@@ -409,7 +410,7 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 	if handleSynchronizeRejected {
 		return invalidTunnelPacket("invalid SYN", packet)
 	}
-	identity, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, nil, true)
+	peer, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, nil, true)
 	if err != nil {
 		return fmt.Errorf("streaming SYN control: %w", err)
 	}
@@ -433,7 +434,8 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 	if err != nil {
 		return err
 	}
-	connection := n.newConn(localID, packet.ReceiveStreamID, delivery.From, identity, delivery.ToPort, delivery.FromPort, false)
+	connection := n.newConn(localID, packet.ReceiveStreamID, delivery.From, peer.identity, delivery.ToPort, delivery.FromPort, false)
+	connection.setPeerControlLocked(peer)
 	if len(packet.Payload) != 0 {
 		connection.mu.Lock()
 		queued := connection.enqueuePayloadLocked(packet.Payload)
@@ -937,6 +939,8 @@ type tunnelConn struct {
 	localID, remoteID uint32
 	peer              foundation.Hash
 	peerIdentity      foundation.Identity
+	peerSigningType   foundation.SigningKeyType
+	peerSigningPublic []byte
 	localPort         uint16
 	remotePort        uint16
 	outbound          bool
@@ -947,6 +951,7 @@ type tunnelConn struct {
 	expect             uint32
 	pending            map[uint32]pendingPacket
 	reordered          map[uint32]receivedPacket
+	preSynchronize     []deferredDelivery
 	synchronize        []byte
 	synchronizeLease   *wireLease
 	syncSent           time.Time
@@ -1055,14 +1060,23 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 
 	var sendACK, sendReset, finishClose, startCloseTimer bool
 	var fastRetransmit []leasedSend
+	var deferred []deferredDelivery
 	c.mu.Lock()
 	if c.isDoneLocked() {
 		c.mu.Unlock()
 		return net.ErrClosed
 	}
+	if c.remoteID == 0 && packet.Flags&FlagSynchronize == 0 {
+		err := c.queuePreSynchronizeLocked(delivery, packet)
+		c.mu.Unlock()
+		return err
+	}
 	if err := c.preparePeerLocked(delivery, packet); err != nil {
 		c.mu.Unlock()
 		return err
+	}
+	if c.remoteID != 0 && len(c.preSynchronize) != 0 {
+		deferred, c.preSynchronize = c.preSynchronize, nil
 	}
 	retryChanged := packet.Flags&FlagNoACK == 0
 	if retryChanged {
@@ -1114,6 +1128,11 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 	} else if startCloseTimer {
 		c.scheduleGracefulCleanup()
 	}
+	for _, pending := range deferred {
+		if err := c.network.HandleDelivery(ctx, pending.delivery); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1128,31 +1147,64 @@ func (c *tunnelConn) preparePeerLocked(delivery Delivery, packet Packet) error {
 		if packet.Flags&(FlagSynchronize|FlagClose|FlagReset) == 0 {
 			return nil
 		}
-		_, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, &c.peerIdentity, packet.Flags&FlagSynchronize != 0)
+		known := controlPeer{
+			identity: c.peerIdentity, signingType: c.peerSigningType,
+			signingPublic: c.peerSigningPublic,
+		}
+		_, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, &known, packet.Flags&FlagSynchronize != 0)
 		if err != nil {
 			return err
 		}
 		c.updatePeerMaxPayloadSizeLocked(peerMaxPayloadSize)
 		return nil
 	}
-	invalidSynchronize := packet.Flags&FlagSynchronize == 0 || packet.Flags&FlagNoACK != 0 ||
+	if packet.Flags&FlagSynchronize == 0 {
+		return invalidTunnelPacket("invalid packet before SYN reply", packet)
+	}
+	invalidSynchronize := packet.Flags&FlagNoACK != 0 ||
 		packet.SendStreamID != c.localID || packet.ReceiveStreamID == 0 ||
 		packet.Sequence != 0 || packet.NACKCount != 0
 	if invalidSynchronize {
 		return invalidTunnelPacket("invalid SYN reply", packet)
 	}
-	identity, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, nil, true)
+	peer, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, nil, true)
 	if err != nil {
 		return fmt.Errorf("streaming SYN reply control: %w", err)
 	}
 	if !c.enqueuePayloadLocked(packet.Payload) {
 		return ErrTunnelBackpressure
 	}
-	c.peerIdentity = identity
+	c.setPeerControlLocked(peer)
 	c.updatePeerMaxPayloadSizeLocked(peerMaxPayloadSize)
 	c.remoteID = packet.ReceiveStreamID
 	c.releaseSynchronizeLocked()
 	c.markEstablished()
+	return nil
+}
+
+type deferredDelivery struct {
+	sequence uint32
+	flags    uint16
+	delivery Delivery
+}
+
+func (c *tunnelConn) queuePreSynchronizeLocked(delivery Delivery, packet Packet) error {
+	if packet.SendStreamID != c.localID || packet.ReceiveStreamID == 0 || packet.Sequence >= uint32(InitialWindow) {
+		return invalidTunnelPacket("invalid packet before SYN reply", packet)
+	}
+	retained := deferredDelivery{sequence: packet.Sequence, flags: packet.Flags, delivery: delivery}
+	retained.delivery.Payload = append([]byte(nil), delivery.Payload...)
+	for index := range c.preSynchronize {
+		existing := &c.preSynchronize[index]
+		if existing.sequence == retained.sequence && existing.flags == retained.flags {
+			*existing = retained
+			return nil
+		}
+	}
+	if len(c.preSynchronize) >= InitialWindow {
+		return ErrTunnelBackpressure
+	}
+	c.preSynchronize = append(c.preSynchronize, retained)
 	return nil
 }
 
@@ -1886,62 +1938,117 @@ func (n *TunnelNetwork) signedControl(packet Packet, options controlOptions) ([]
 	return wire, nil
 }
 
-func verifyControl(packet Packet, wire []byte, claimed foundation.Hash, known *foundation.Identity, requireFrom bool) (foundation.Identity, int, error) {
+type controlPeer struct {
+	identity      foundation.Identity
+	signingType   foundation.SigningKeyType
+	signingPublic []byte
+}
+
+func (c *tunnelConn) setPeerControlLocked(peer controlPeer) {
+	c.peerIdentity = peer.identity
+	c.peerSigningType = peer.signingType
+	c.peerSigningPublic = peer.signingPublic
+}
+
+func verifyControl(packet Packet, wire []byte, claimed foundation.Hash, known *controlPeer, requireFrom bool) (controlPeer, int, error) {
 	if packet.Flags&FlagSignatureIncluded == 0 || packet.Flags&^streamingKnownFlags != 0 {
-		return foundation.Identity{}, 0, ErrTunnelPacket
+		return controlPeer{}, 0, ErrTunnelPacket
 	}
-	identity := foundation.Identity{}
+	peer := controlPeer{}
 	offset := 0
 	if packet.Flags&FlagDelayRequested != 0 {
 		if len(packet.Options) < 2 {
-			return foundation.Identity{}, 0, ErrTunnelPacket
+			return controlPeer{}, 0, ErrTunnelPacket
 		}
 		offset += 2
 	}
 	if packet.Flags&FlagFromIncluded != 0 {
 		_, consumed, err := foundation.ParseIdentity(packet.Options[offset:])
 		if err != nil {
-			return foundation.Identity{}, 0, ErrTunnelIdentity
+			return controlPeer{}, 0, ErrTunnelIdentity
 		}
 		raw := append([]byte(nil), packet.Options[offset:offset+consumed]...)
-		identity, consumed, err = foundation.ParseIdentity(raw)
-		if err != nil || consumed != len(raw) || identity.Hash() != claimed {
-			return foundation.Identity{}, 0, ErrTunnelIdentity
+		identity, parsed, err := foundation.ParseIdentity(raw)
+		if err != nil || parsed != len(raw) || identity.Hash() != claimed {
+			return controlPeer{}, 0, ErrTunnelIdentity
 		}
+		peer.identity = identity
 		offset += len(raw)
 	} else {
 		if requireFrom || known == nil {
-			return foundation.Identity{}, 0, ErrTunnelIdentity
+			return controlPeer{}, 0, ErrTunnelIdentity
 		}
-		identity = *known
+		peer = *known
 	}
 	peerMaxPayloadSize := -1
 	if packet.Flags&FlagMaxPacketSize != 0 {
 		if len(packet.Options)-offset < 2 {
-			return foundation.Identity{}, 0, ErrTunnelPacket
+			return controlPeer{}, 0, ErrTunnelPacket
 		}
 		peerMaxPayloadSize = int(binary.BigEndian.Uint16(packet.Options[offset : offset+2]))
 		offset += 2
 	}
-	signatureLen, ok := identity.SigningKeyType().SignatureLen()
+	signingType := peer.identity.SigningKeyType()
+	signingPublic := peer.signingPublic
+	if len(signingPublic) != 0 {
+		signingType = peer.signingType
+	}
+	if packet.Flags&FlagOfflineSignature != 0 {
+		if packet.Flags&FlagFromIncluded == 0 || len(packet.Options)-offset < 6 {
+			return controlPeer{}, 0, ErrTunnelPacket
+		}
+		offlineStart := offset
+		expires := binary.BigEndian.Uint32(packet.Options[offset : offset+4])
+		transientType := foundation.SigningKeyType(binary.BigEndian.Uint16(packet.Options[offset+4 : offset+6]))
+		transientKeyLen, keyOK := transientType.PublicKeyLen()
+		offlineSignatureLen, signatureOK := peer.identity.SigningKeyType().SignatureLen()
+		offset += 6
+		if !keyOK || !signatureOK || len(packet.Options)-offset < transientKeyLen+offlineSignatureLen {
+			return controlPeer{}, 0, ErrTunnelPacket
+		}
+		transientPublic := packet.Options[offset : offset+transientKeyLen]
+		offset += transientKeyLen
+		offlineSignature := packet.Options[offset : offset+offlineSignatureLen]
+		offset += offlineSignatureLen
+		if uint64(expires) <= uint64(time.Now().Unix()) {
+			return controlPeer{}, 0, ErrTunnelSignature
+		}
+		valid, err := peer.identity.Verify(packet.Options[offlineStart:offlineStart+6+transientKeyLen], offlineSignature)
+		if err != nil || !valid {
+			return controlPeer{}, 0, ErrTunnelSignature
+		}
+		signingType = transientType
+		signingPublic = transientPublic
+	}
+	signatureLen, ok := signingType.SignatureLen()
 	if !ok || len(packet.Options)-offset != signatureLen {
-		return foundation.Identity{}, 0, ErrTunnelPacket
+		return controlPeer{}, 0, ErrTunnelPacket
 	}
 	optionStart := 17 + len(packet.NACKs) + 5
 	signatureOffset := optionStart + offset
 	if signatureOffset < 0 || signatureOffset+signatureLen > len(wire) {
-		return foundation.Identity{}, 0, ErrTunnelPacket
+		return controlPeer{}, 0, ErrTunnelPacket
 	}
 	signed := append([]byte(nil), wire...)
 	signature := append([]byte(nil), signed[signatureOffset:signatureOffset+signatureLen]...)
 	clear(signed[signatureOffset : signatureOffset+signatureLen])
-	valid, err := identity.Verify(signed, signature)
+	var valid bool
+	var err error
+	if len(signingPublic) != 0 {
+		valid, err = foundation.VerifySignature(signingType, signingPublic, nil, signed, signature)
+	} else {
+		valid, err = peer.identity.Verify(signed, signature)
+	}
 	clear(signed)
 	clear(signature)
 	if err != nil || !valid {
-		return foundation.Identity{}, 0, ErrTunnelSignature
+		return controlPeer{}, 0, ErrTunnelSignature
 	}
-	return identity, peerMaxPayloadSize, nil
+	if packet.Flags&FlagOfflineSignature != 0 {
+		peer.signingType = signingType
+		peer.signingPublic = append([]byte(nil), signingPublic...)
+	}
+	return peer, peerMaxPayloadSize, nil
 }
 
 func (c *tunnelConn) setPeerMaxPayloadSize(advertised int) {

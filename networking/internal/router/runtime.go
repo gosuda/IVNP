@@ -519,8 +519,8 @@ func (r *Router) Start(parent context.Context) error {
 // MaintainReseed starts a bounded asynchronous bootstrap attempt when the
 // routing table is below the minimum useful peer population. Concurrent startup
 // and maintenance calls share one attempt and failed attempts are backed off.
-func (r *Router) MaintainReseed(ctx context.Context) {
-	r.startReseed(ctx)
+func (r *Router) MaintainReseed(ctx context.Context) <-chan struct{} {
+	return r.startReseed(ctx)
 }
 
 type usableReseedPeerCounter interface {

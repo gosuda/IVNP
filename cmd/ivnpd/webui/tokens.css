@@ -1,0 +1,51 @@
+/* Hallmark · macrostructure: Bento Grid · tone: Grid systems manual · anchor hue: ultramarine */
+/* Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V5 */
+:root {
+	--color-paper: oklch(98.5% 0.004 255);
+	--color-paper-2: oklch(96.8% 0.006 255);
+	--color-paper-3: oklch(93.5% 0.009 255);
+	--color-ink: oklch(17% 0.014 255);
+	--color-ink-2: oklch(32% 0.014 255);
+	--color-muted: oklch(50% 0.014 255);
+	--color-rule: oklch(87% 0.010 255);
+	--color-rule-strong: oklch(68% 0.016 255);
+	--color-accent: oklch(45% 0.19 264);
+	--color-accent-soft: oklch(93% 0.035 264);
+	--color-accent-ink: oklch(98.5% 0.004 255);
+	--color-focus: var(--color-accent);
+	--color-scrim: oklch(17% 0.014 255 / 0.48);
+
+	--font-display: 'Archivo Variable', 'Arial Narrow', Arial, sans-serif;
+	--font-body: 'Archivo Variable', Arial, sans-serif;
+	--font-label: 'Archivo Variable', Arial, sans-serif;
+
+	--space-1: 0.25rem;
+	--space-2: 0.5rem;
+	--space-3: 0.75rem;
+	--space-4: 1rem;
+	--space-5: 1.25rem;
+	--space-6: 1.5rem;
+	--space-8: 2rem;
+	--space-10: 2.5rem;
+	--space-12: 3rem;
+	--space-16: 4rem;
+
+	--text-xs: 0.72rem;
+	--text-sm: 0.84rem;
+	--text-body: 0.95rem;
+	--text-lg: 1.12rem;
+	--text-xl: clamp(1.4rem, 2vw, 1.9rem);
+	--text-display: clamp(2.7rem, 8vw, 6.8rem);
+
+	--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+	--ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+	--ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+	--dur-fast: 120ms;
+	--dur-base: 190ms;
+	--dur-dialog: 240ms;
+
+	--rule-thin: 1px;
+	--rule-heavy: 2px;
+	--radius-control: 2px;
+	--radius-card: 0;
+}

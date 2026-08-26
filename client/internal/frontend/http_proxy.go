@@ -226,6 +226,7 @@ func (p *HTTPProxy) forwardRequest(w http.ResponseWriter, request *http.Request,
 	request.Close = true
 	removeHopByHopHeaders(request.Header)
 	request.Header.Del("Proxy-Authorization")
+	removeForwardingHeaders(request.Header)
 	request.Body = http.MaxBytesReader(w, request.Body, p.config.MaxRequestBytes)
 	if err := outbound.SetDeadline(time.Now().Add(p.config.ReadTimeout)); err != nil {
 		rejectHTTP(w, request, "I2P destination unavailable", http.StatusBadGateway)
@@ -257,6 +258,12 @@ func removeHopByHopHeaders(header http.Header) {
 		}
 	}
 	for _, name := range []string{"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Connection", "TE", "Trailer", "Transfer-Encoding", "Upgrade"} {
+		header.Del(name)
+	}
+}
+
+func removeForwardingHeaders(header http.Header) {
+	for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Server"} {
 		header.Del(name)
 	}
 }

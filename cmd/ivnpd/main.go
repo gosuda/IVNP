@@ -24,6 +24,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("ivnpd", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "ivnp.conf", "operating configuration path")
+	webUIEnabled := flags.Bool("webui", true, "enable the embedded WebUI")
+	webUIListen := flags.String("webui-listen", defaultWebUIListenAddress, "WebUI listen address")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -41,18 +43,42 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "ivnpd: configuration error:", err)
 		return 1
 	}
-	logger := newLogger(cfg.Log, stderr)
+	logger, level := newLogger(cfg.Log, stderr)
 	d, err := ivnp.New(cfg, ivnp.Options{Logger: logger})
 	if err != nil {
 		logger.Error("daemon initialization failed", "error", err)
 		return 1
 	}
-	defer d.Close()
+	defer func() {
+		if closeErr := d.Close(); closeErr != nil {
+			logger.Error("daemon cleanup failed", "error", closeErr)
+		}
+	}()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := d.Start(ctx); err != nil {
 		logger.Error("daemon startup failed", "error", err)
 		return 1
+	}
+	if *webUIEnabled {
+		webUI, webErr := NewWebUIServer(WebUIConfig{
+			ListenAddress: *webUIListen,
+			BearerToken:   os.Getenv("IVNPD_WEBUI_TOKEN"),
+			ConfigPath:    *configPath,
+		}, d, logger, level)
+		if webErr != nil {
+			logger.Error("WebUI configuration failed", "error", webErr)
+			return 1
+		}
+		if webErr = webUI.Start(ctx); webErr != nil {
+			logger.Error("WebUI startup failed", "error", webErr)
+			return 1
+		}
+		defer func() {
+			if closeErr := webUI.Close(); closeErr != nil {
+				logger.Error("WebUI cleanup failed", "error", closeErr)
+			}
+		}()
 	}
 	if err := d.Wait(); err != nil {
 		logger.Error("daemon stopped with error", "error", err)
@@ -61,7 +87,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func newLogger(cfg ivnp.LogConfig, output io.Writer) *slog.Logger {
+func newLogger(cfg ivnp.LogConfig, output io.Writer) (*slog.Logger, *slog.LevelVar) {
 	level := new(slog.LevelVar)
 	switch cfg.Level {
 	case "debug":
@@ -74,8 +100,11 @@ func newLogger(cfg ivnp.LogConfig, output io.Writer) *slog.Logger {
 		level.Set(slog.LevelInfo)
 	}
 	options := &slog.HandlerOptions{Level: level}
+	var logger *slog.Logger
 	if cfg.Format == "json" {
-		return slog.New(slog.NewJSONHandler(output, options))
+		logger = slog.New(slog.NewJSONHandler(output, options))
+	} else {
+		logger = slog.New(slog.NewTextHandler(output, options))
 	}
-	return slog.New(slog.NewTextHandler(output, options))
+	return logger, level
 }
