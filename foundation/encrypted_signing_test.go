@@ -66,6 +66,13 @@ func TestEncryptedLocalDestinationPrivateRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	identity, err := destination.Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.CryptoKeyType() != CryptoElGamal {
+		t.Fatalf("encrypted Destination crypto type = %d, want ElGamal identity", identity.CryptoKeyType())
+	}
 	encoded := make([]byte, destination.PrivateEncodedLen())
 	if _, err = destination.MarshalPrivateTo(encoded); err != nil {
 		t.Fatal(err)

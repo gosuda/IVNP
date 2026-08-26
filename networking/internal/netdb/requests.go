@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log/slog"
 	"sync"
 
 	"gosuda.org/ivnp/foundation"
@@ -75,6 +76,7 @@ type RequestManagerConfig struct {
 	Rand          io.Reader
 	Metrics       *observability.Registry
 	Responders    *ResponderProfiles
+	Logger        *slog.Logger
 }
 
 // LookupResult reports the terminal state of one caller's lookup. The object
@@ -136,6 +138,7 @@ type RequestManager struct {
 	now           func() uint64
 	responders    *ResponderProfiles
 	rand          io.Reader
+	logger        *slog.Logger
 	randMu        sync.Mutex
 
 	mu      sync.Mutex
@@ -188,6 +191,7 @@ func NewRequestManager(database *Database, sender RequestSender, route ReplyRout
 		timeoutMillis: config.TimeoutMillis,
 		now:           config.Now,
 		responders:    config.Responders,
+		logger:        config.Logger,
 		rand:          config.Rand,
 		pending:       make(map[requestKey]*pendingRequest, config.Capacity),
 		jobs:          make(chan sendJob, config.Capacity),
@@ -217,6 +221,14 @@ func (m *RequestManager) Lookup(ctx context.Context, typeID LookupType, key foun
 }
 
 func (m *RequestManager) lookup(ctx context.Context, typeID LookupType, key foundation.Hash, forceRefresh bool) (<-chan LookupResult, error) {
+	return m.lookupWithDispatch(ctx, typeID, key, forceRefresh, true)
+}
+
+func (m *RequestManager) lookupAsync(ctx context.Context, typeID LookupType, key foundation.Hash, forceRefresh bool) (<-chan LookupResult, error) {
+	return m.lookupWithDispatch(ctx, typeID, key, forceRefresh, false)
+}
+
+func (m *RequestManager) lookupWithDispatch(ctx context.Context, typeID LookupType, key foundation.Hash, forceRefresh, waitForSend bool) (<-chan LookupResult, error) {
 	if typeID != RouterInfoLookup && typeID != LeaseSetLookup && typeID != ExplorationLookup {
 		return nil, errors.New("netdb: unknown lookup type")
 	}
@@ -314,7 +326,16 @@ func (m *RequestManager) lookup(ctx context.Context, typeID LookupType, key foun
 	}
 	m.mu.Unlock()
 	if work != nil {
-		m.dispatch(*work, true)
+		if waitForSend {
+			m.dispatch(*work, true)
+		} else if !m.tryDispatch(*work) {
+			m.mu.Lock()
+			if current := m.pending[lookupKey]; current != nil {
+				m.completeLocked(lookupKey, current, ErrRequestManagerFull)
+			}
+			m.mu.Unlock()
+			return nil, ErrRequestManagerFull
+		}
 	}
 	return result, nil
 }
@@ -366,21 +387,27 @@ func BuildDatabaseLookup(key foundation.Hash, typeID LookupType, route ReplyRout
 }
 
 // HandleDatabaseSearchReply incorporates reachable peers from an answer to a
-// live lookup and sends the next unqueried peer. Referred RouterInfos are
-// refreshed before use so a stale local entry cannot consume the query budget.
-// Unsolicited replies cannot steer a request: From must be one of the peers
-// already queried for its key.
+// live lookup and sends the next unqueried peer. Unknown referred RouterInfos
+// are resolved before use; known floodfills remain immediately available so a
+// stalled refresh cannot block the parent LeaseSet search. Unsolicited replies
+// cannot steer a request: From must be one of the peers already queried.
 func (m *RequestManager) HandleDatabaseSearchReply(reply i2np.DatabaseSearchReplyMessage) {
 	lookupKey := requestKey{key: reply.Key}
 	var refresh []foundation.Hash
 	m.mu.Lock()
 	req := m.pending[lookupKey]
 	if req == nil {
+		if m.logger != nil {
+			m.logger.Debug("netdb search reply ignored", "reason", "not_pending", "key", foundation.EncodeI2PBase64(reply.Key[:]), "from", foundation.EncodeI2PBase64(reply.From[:]))
+		}
 		m.mu.Unlock()
 		return
 	}
 	if _, queried := req.sent[reply.From]; !queried {
 		m.mu.Unlock()
+		if m.logger != nil {
+			m.logger.Debug("netdb search reply ignored", "reason", "unexpected_sender", "key", foundation.EncodeI2PBase64(reply.Key[:]), "from", foundation.EncodeI2PBase64(reply.From[:]))
+		}
 		return
 	}
 	if m.responders != nil {
@@ -393,7 +420,7 @@ func (m *RequestManager) HandleDatabaseSearchReply(reply i2np.DatabaseSearchRepl
 		if !m.addCandidateLocked(req, peer) {
 			continue
 		}
-		if _, known := m.database.Routers().Get(peer); !known || req.typeID == LeaseSetLookup {
+		if _, known := m.database.Routers().Get(peer); !known {
 			req.refreshing[peer] = struct{}{}
 			refresh = append(refresh, peer)
 		}
@@ -401,7 +428,7 @@ func (m *RequestManager) HandleDatabaseSearchReply(reply i2np.DatabaseSearchRepl
 	var work *sendWork
 	if req.inFlight {
 		m.addWakeupLocked(req)
-	} else if req.typeID != LeaseSetLookup || len(req.refreshing) == 0 {
+	} else {
 		var terminal error
 		work, terminal = m.prepareSendLocked(lookupKey, req)
 		if terminal != nil {
@@ -410,10 +437,17 @@ func (m *RequestManager) HandleDatabaseSearchReply(reply i2np.DatabaseSearchRepl
 			m.completeLocked(lookupKey, req, nil)
 		}
 	}
+	if m.logger != nil {
+		m.logger.Debug("netdb search reply accepted", "key", foundation.EncodeI2PBase64(reply.Key[:]), "from", foundation.EncodeI2PBase64(reply.From[:]), "peers", len(reply.Peers)/foundation.HashLength)
+	}
 	m.mu.Unlock()
+	if work != nil {
+		m.dispatch(*work, true)
+		work = nil
+	}
 	var refreshFailed []foundation.Hash
 	for _, peer := range refresh {
-		if _, err := m.lookup(m.ctx, RouterInfoLookup, peer, true); err != nil {
+		if _, err := m.lookupAsync(m.ctx, RouterInfoLookup, peer, true); err != nil {
 			refreshFailed = append(refreshFailed, peer)
 		}
 	}
@@ -448,6 +482,9 @@ func (m *RequestManager) HandleDatabaseStore(store i2np.DatabaseStoreMessage) {
 	for key, req := range m.pending {
 		if req.key == store.Key && storeMatches(req.typeID, store.Type) {
 			m.completeLocked(key, req, nil)
+			if m.logger != nil {
+				m.logger.Debug("netdb lookup completed by store", "key", foundation.EncodeI2PBase64(store.Key[:]), "store_type", uint8(store.Type))
+			}
 			continue
 		}
 		if store.Type != i2np.StoreRouterInfo {
@@ -681,6 +718,23 @@ func (m *RequestManager) dispatch(work sendWork, wait bool) {
 	}
 }
 
+func (m *RequestManager) tryDispatch(work sendWork) bool {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return false
+	}
+	m.active.Add(1)
+	m.mu.Unlock()
+	select {
+	case m.jobs <- sendJob{work: work}:
+		return true
+	default:
+		m.active.Done()
+		return false
+	}
+}
+
 func (m *RequestManager) worker() {
 	defer m.workers.Done()
 	for job := range m.jobs {
@@ -699,6 +753,9 @@ func (m *RequestManager) send(work sendWork) {
 		if id, err = m.nextMessageID(); err == nil {
 			message := i2np.Message{Header: i2np.Header{Type: i2np.DatabaseLookup, ID: id, Expiration: databaseLookupExpiration(m.now())}, Payload: payload}
 			err = m.sender.Send(m.ctx, work.peer, message)
+			if m.logger != nil {
+				m.logger.Debug("netdb lookup send", "key", foundation.EncodeI2PBase64(work.key.key[:]), "lookup_type", uint8(work.typeID), "peer", foundation.EncodeI2PBase64(work.peer.Hash[:]), "exclusions", len(work.exclusions))
+			}
 		}
 	}
 	if m.metrics != nil {
@@ -707,6 +764,9 @@ func (m *RequestManager) send(work sendWork) {
 		} else {
 			m.metrics.IncNetDBLookupFailures()
 		}
+	}
+	if err != nil && m.logger != nil {
+		m.logger.Debug("netdb lookup send failed", "key", foundation.EncodeI2PBase64(work.key.key[:]), "lookup_type", uint8(work.typeID), "peer", foundation.EncodeI2PBase64(work.peer.Hash[:]), "error", err)
 	}
 	if err == nil {
 		var next *sendWork

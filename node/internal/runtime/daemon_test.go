@@ -573,6 +573,29 @@ func TestMuxRequestSenderUsesEstablishedOutboundTunnel(t *testing.T) {
 	var tag [8]byte
 	copy(tag[:], lookup.ReplyTags)
 	replyKeys.RemoveGarlicReplyKey(tag)
+	retryPayload, err := networking.NetworkDatabaseBuildDatabaseLookup(foundation.Hash{3}, networking.NetworkDatabaseLeaseSetLookup, requestReplyRouteCapture{
+		gateway: replyGateway, tunnel: 7,
+	}, []foundation.Hash{{9}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message.Payload = retryPayload
+	if err = sender.Send(context.Background(), networking.NetworkDatabaseRouterRef{Hash: target}, message); err != nil {
+		t.Fatal(err)
+	}
+	decoded, _, err = networking.I2NPParse(throughTunnel.block.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner, err = networking.GarlicECIESOpenRouterMessage(make([]byte, len(decoded.Payload)), private.Bytes(), decoded.Payload[4:], 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryLookup, err := networking.I2NPParseDatabaseLookup(inner.Payload)
+	if err != nil || retryLookup.ReplyEncrypted() || replyKeys.Len() != 0 {
+		t.Fatalf("retry lookup encryption = %#v, reply_keys=%d, %v", retryLookup, replyKeys.Len(), err)
+	}
+	message.Payload = payload
 	throughTunnel.err = errors.New("tunnel send failed")
 	if err = sender.Send(context.Background(), networking.NetworkDatabaseRouterRef{Hash: target}, message); !errors.Is(err, throughTunnel.err) || replyKeys.Len() != 0 {
 		t.Fatalf("failed send = %v, reply_keys=%d", err, replyKeys.Len())
@@ -731,6 +754,51 @@ func TestStartRollsBackWhenMetricsListenerFails(t *testing.T) {
 		t.Fatalf("Wait error = %v, want %v", err, listenErr)
 	}
 }
+func TestDaemonRotatesPersistedNonInteroperablePublicDestination(t *testing.T) {
+	cfg := daemonTestConfig(t)
+	cfg.Tunnel.Enabled = true
+	first, err := New(cfg, Options{SocketRuntime: new(recordingSockets)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	modern, err := foundation.GenerateLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHash := modern.Hash()
+	encoded, err := destinationPrivate(modern)
+	modern.ReleaseSensitive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clear(first.bundle.DestinationPrivate["default"])
+	first.bundle.DestinationPrivate["default"] = encoded
+	if err = first.store.Save(first.bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err = first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := New(cfg, Options{SocketRuntime: new(recordingSockets)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	migrated, err := foundation.ImportLocalDestination(reopened.bundle.DestinationPrivate["default"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.ReleaseSensitive()
+	identity, err := migrated.Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.CryptoKeyType() != foundation.CryptoElGamal || migrated.Hash() == oldHash {
+		t.Fatalf("migrated public destination type/hash = %d/%x", identity.CryptoKeyType(), migrated.Hash())
+	}
+}
+
 func TestDestinationAddressPoliciesPersistAndWireRemoteELS(t *testing.T) {
 	cfg := daemonTestConfig(t)
 	cfg.Tunnel.Enabled = true

@@ -157,6 +157,9 @@ func NewTunnelNetwork(config TunnelNetworkConfig) (*TunnelNetwork, error) {
 	if err != nil {
 		return nil, ErrTunnelIdentity
 	}
+	if identity.CryptoKeyType() != foundation.CryptoElGamal {
+		return nil, ErrTunnelIdentity
+	}
 	raw, localHash, sign := identity.Bytes(), config.Destination.Hash(), config.Destination.Sign
 	if config.AcceptQueue <= 0 {
 		config.AcceptQueue = DefaultTunnelAcceptQueue

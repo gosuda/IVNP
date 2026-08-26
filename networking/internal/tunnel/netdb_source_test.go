@@ -216,8 +216,10 @@ func TestNetDBBuildSourcesProbePreferredPeersAfterProfileQuarantine(t *testing.T
 	table.StoreVerified(second, false, 1)
 	table.StoreVerified(ordinary, false, 1)
 	profiles := NewPeerProfiles(PeerProfilesConfig{Window: 4})
-	profiles.Record(first.Hash(), Observation{Kind: BuildObservation})
-	profiles.Record(second.Hash(), Observation{Kind: BuildObservation})
+	for range profileBuildMinimumSamples {
+		profiles.Record(first.Hash(), Observation{Kind: BuildObservation, AtMillis: 1})
+		profiles.Record(second.Hash(), Observation{Kind: BuildObservation, AtMillis: 1})
+	}
 	preferred := []foundation.Hash{first.Hash(), second.Hash()}
 	nextTunnel := uint32(80)
 	inbound, err := NewNetDBInboundBuildSource(NetDBInboundBuildSourceConfig{

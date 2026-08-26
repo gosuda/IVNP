@@ -28,7 +28,7 @@ func TestNeutralDestinationControllerUsesDaemonOwnedIsolatedGraph(t *testing.T) 
 	defer d.Close()
 	beforeRuntime := d.clientRuntimeSnapshot()
 	beforeDurable := len(d.bundle.DestinationPrivate)
-	source, err := foundation.GenerateLocalDestination()
+	source, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -444,8 +444,8 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 		staticKeyLookup:     networking.TunnelNewNetDBBuildStaticKeyLookup(f.database.Routers()),
 		seedReplyRouterInfo: buildReplyRouterInfoSeeder(f.database, f.transport, f.now),
 	}, replyRoute, networking.NetworkDatabaseRequestManagerConfig{
-		Capacity: f.cfg.Tunnel.BuildPendingCapacity, MaxCandidates: daemonNetDBLookupCandidates, MaxWaiters: 64,
-		TimeoutMillis: daemonNetDBLookupTimeoutMillis, Now: f.now, Responders: f.responders,
+		Capacity: f.cfg.NetDB.LookupCapacity, MaxCandidates: daemonNetDBLookupCandidates, MaxWaiters: 64,
+		TimeoutMillis: daemonDestinationNetDBLookupTimeoutMillis, Now: f.now, Metrics: f.metrics, Responders: f.responders, Logger: f.logger,
 	})
 	if err != nil {
 		return nil, err
@@ -476,7 +476,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	sender, err := networking.RouterNewStreamingTunnelSender(networking.RouterStreamingTunnelSenderConfig{
 		Database: f.database, Requests: requests, Ratchet: ratchet, RemoteELS: remoteELS,
 		Tunnels: f.tunnels, Pool: pool, SeedRouterInfo: buildReplyRouterInfoSeeder(f.database, f.transport, f.now),
-		Now: f.now, NextID: randomMessageID, Limiter: bandwidth, Metrics: f.metrics,
+		Now: f.now, NextID: randomMessageID, Limiter: bandwidth, Metrics: f.metrics, Logger: f.logger,
 	})
 	if err != nil {
 		return nil, err
@@ -591,7 +591,7 @@ func (d *Daemon) CreateDestination(ctx context.Context, name string, policy Dest
 	var destination *foundation.LocalDestination
 	var err error
 	if policy.Kind == DestinationPublicLS2 {
-		destination, err = foundation.GenerateLocalDestination()
+		destination, err = foundation.GenerateLegacyLocalDestination()
 	} else {
 		destination, err = foundation.GenerateEncryptedLocalDestination()
 	}

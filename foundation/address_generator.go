@@ -59,41 +59,22 @@ func GenerateLocalDestination() (*LocalDestination, error) {
 // The legacy identity remains address-compatible with Java I2P while session
 // encryption uses the advertised modern LeaseSet key.
 func GenerateLegacyLocalDestination() (*LocalDestination, error) {
-	address, err := GenerateLocalAddress()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	x25519, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		clear(address.SigningPrivate)
-		clear(address.EncryptionPrivate[:])
-		return nil, err
-	}
-	d := &LocalDestination{
-		destination:        append([]byte(nil), address.Destination...),
-		hash:               address.Hash,
-		signingType:        SigningEdDSASHA512Ed25519,
-		signingPublic:      append(ed25519.PublicKey(nil), address.SigningPublic...),
-		signingPrivate:     append([]byte(nil), address.SigningPrivate...),
-		identityCryptoType: CryptoElGamal,
-		elgamalPrivate:     address.EncryptionPrivate,
-		cryptoCapabilities: localDestinationCryptoCapabilities,
-	}
-	copy(d.x25519Private[:], x25519.Bytes())
-	copy(d.x25519Public[:], x25519.PublicKey().Bytes())
-	clear(address.SigningPrivate)
-	clear(address.EncryptionPrivate[:])
-	return d, nil
+	return generateLegacyLocalDestination(SigningEdDSASHA512Ed25519, public, private)
 }
 
 // GenerateEncryptedLocalDestination creates a Red25519 type-11 signing
-// Destination suitable for publication as a new encrypted LeaseSet.
+// Destination with a Java-compatible ElGamal identity and an independent
+// X25519 receive key for encrypted LeaseSet2 publication.
 func GenerateEncryptedLocalDestination() (*LocalDestination, error) {
 	public, private, err := GenerateRed25519Key()
 	if err != nil {
 		return nil, err
 	}
-	return generateLocalDestination(SigningRedDSASHA512Ed25519, ed25519.PublicKey(public[:]), private[:])
+	return generateLegacyLocalDestination(SigningRedDSASHA512Ed25519, ed25519.PublicKey(public[:]), private[:])
 }
 
 func generateLocalDestination(signingType SigningKeyType, signingPublic ed25519.PublicKey, signingPrivate []byte) (*LocalDestination, error) {
@@ -137,6 +118,57 @@ func generateLocalDestination(signingType SigningKeyType, signingPublic ed25519.
 	d.destination = make([]byte, base64.NewEncoding(i2pBase64Alphabet).EncodedLen(len(raw)))
 	base64.NewEncoding(i2pBase64Alphabet).Encode(d.destination, raw)
 
+	return d, nil
+}
+
+func generateLegacyLocalDestination(signingType SigningKeyType, signingPublic ed25519.PublicKey, signingPrivate []byte) (*LocalDestination, error) {
+	if len(signingPublic) != ed25519.PublicKeySize || (signingType != SigningEdDSASHA512Ed25519 && signingType != SigningRedDSASHA512Ed25519) {
+		clear(signingPrivate)
+		return nil, ErrInvalidIdentity
+	}
+	encryptionPublic, encryptionPrivate, err := cryptography.GenerateElGamalKeyPair()
+	if err != nil {
+		clear(signingPrivate)
+		return nil, err
+	}
+	x25519, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		clear(signingPrivate)
+		clear(encryptionPrivate[:])
+		return nil, err
+	}
+	d := &LocalDestination{
+		signingType:        signingType,
+		signingPublic:      append(ed25519.PublicKey(nil), signingPublic...),
+		signingPrivate:     append([]byte(nil), signingPrivate...),
+		identityCryptoType: CryptoElGamal,
+		elgamalPrivate:     encryptionPrivate,
+		cryptoCapabilities: localDestinationCryptoCapabilities,
+	}
+	copy(d.x25519Private[:], x25519.Bytes())
+	copy(d.x25519Public[:], x25519.PublicKey().Bytes())
+	clear(signingPrivate)
+	clear(encryptionPrivate[:])
+
+	raw := make([]byte, IdentityBaseLength+CertificateHeader+4)
+	if _, err = io.ReadFull(rand.Reader, raw[:IdentityBaseLength]); err != nil {
+		d.ReleaseSensitive()
+		return nil, err
+	}
+	copy(raw[:cryptography.ElGamalPublicKeySize], encryptionPublic[:])
+	copy(raw[IdentityBaseLength-ed25519.PublicKeySize:IdentityBaseLength], d.signingPublic)
+	raw[IdentityBaseLength] = byte(CertificateKey)
+	binary.BigEndian.PutUint16(raw[IdentityBaseLength+1:IdentityBaseLength+3], 4)
+	binary.BigEndian.PutUint16(raw[IdentityBaseLength+3:IdentityBaseLength+5], uint16(signingType))
+	binary.BigEndian.PutUint16(raw[IdentityBaseLength+5:IdentityBaseLength+7], uint16(CryptoElGamal))
+	identity, consumed, parseErr := ParseIdentity(raw)
+	if parseErr != nil || consumed != len(raw) || identity.CryptoKeyType() != CryptoElGamal || identity.SigningKeyType() != signingType {
+		d.ReleaseSensitive()
+		return nil, ErrInvalidIdentity
+	}
+	d.hash = identity.Hash()
+	d.destination = make([]byte, base64.NewEncoding(i2pBase64Alphabet).EncodedLen(len(raw)))
+	base64.NewEncoding(i2pBase64Alphabet).Encode(d.destination, raw)
 	return d, nil
 }
 
@@ -444,9 +476,6 @@ func ImportLocalDestination(src []byte) (*LocalDestination, error) {
 	case SigningEdDSASHA512Ed25519:
 		privateLen = ed25519.PrivateKeySize
 	case SigningRedDSASHA512Ed25519:
-		if identity.CryptoKeyType() != CryptoX25519 {
-			return nil, ErrInvalidIdentity
-		}
 		privateLen = 32
 	default:
 		return nil, ErrInvalidIdentity

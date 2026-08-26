@@ -3,6 +3,7 @@ package streamingtunnel
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -19,6 +20,21 @@ var (
 	_ net.Conn             = (*tunnelConn)(nil)
 	_ stream.StreamNetwork = (*TunnelNetwork)(nil)
 )
+
+func TestTunnelNetworkRejectsNonInteroperableX25519DestinationIdentity(t *testing.T) {
+	destination, err := foundation.GenerateLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.ReleaseSensitive()
+	_, err = NewTunnelNetwork(TunnelNetworkConfig{
+		Destination: destination,
+		Sender:      &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)},
+	})
+	if !errors.Is(err, ErrTunnelIdentity) {
+		t.Fatalf("X25519 Destination identity error = %v, want %v", err, ErrTunnelIdentity)
+	}
+}
 
 func TestTunnelNetworkDialListenOrderedBytes(t *testing.T) {
 	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork), zeroSYNACKPorts: true}
@@ -273,7 +289,7 @@ func TestTunnelNetworkCloseRetransmitsPendingDataBeforeEOF(t *testing.T) {
 
 func TestTunnelNetworkCloseCancelsBlockedRetransmission(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		destination, err := foundation.GenerateLocalDestination()
+		destination, err := foundation.GenerateLegacyLocalDestination()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -302,7 +318,7 @@ func TestTunnelNetworkCloseCancelsBlockedRetransmission(t *testing.T) {
 }
 
 func TestTunnelNetworkCloseDrainsPacingQueue(t *testing.T) {
-	destination, err := foundation.GenerateLocalDestination()
+	destination, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,11 +449,11 @@ func TestTunnelReliabilityKarnFastRetransmitAndNACKs(t *testing.T) {
 
 func newTunnelNetworkPair(t *testing.T, fabric *streamFabric, retransmit time.Duration) (*TunnelNetwork, *TunnelNetwork) {
 	t.Helper()
-	clientDestination, err := foundation.GenerateLocalDestination()
+	clientDestination, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverDestination, err := foundation.GenerateLocalDestination()
+	serverDestination, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}

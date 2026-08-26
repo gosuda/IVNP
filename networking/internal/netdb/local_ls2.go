@@ -36,9 +36,6 @@ func NewLocalLeaseSet2WithTypes(destination *foundation.LocalDestination, reques
 	identity, err := destination.Identity()
 	newLocalLeaseSet2WithTypesRejected := err != nil || (identity.CryptoKeyType() != foundation.CryptoX25519 && identity.CryptoKeyType() != foundation.CryptoElGamal) ||
 		(identity.SigningKeyType() != foundation.SigningEdDSASHA512Ed25519 && identity.SigningKeyType() != foundation.SigningRedDSASHA512Ed25519)
-	if !newLocalLeaseSet2WithTypesRejected {
-		newLocalLeaseSet2WithTypesRejected = (identity.CryptoKeyType() == foundation.CryptoElGamal && identity.SigningKeyType() != foundation.SigningEdDSASHA512Ed25519)
-	}
 	if newLocalLeaseSet2WithTypesRejected {
 		return nil, ErrLocalLeaseSet2
 	}
@@ -57,7 +54,9 @@ func NewLocalLeaseSet2WithTypes(destination *foundation.LocalDestination, reques
 	}
 	types := append([]foundation.CryptoKeyType(nil), requested...)
 	if len(types) == 0 {
-		types = append(types, supported[:]...)
+		// X25519 is the universal Java-I2P LS2 baseline. Hybrid keys remain
+		// explicit opt-in until their deployed interoperability is equivalent.
+		types = append(types, foundation.CryptoX25519)
 	}
 	if len(types) > len(supported) {
 		return nil, ErrLocalLeaseSet2

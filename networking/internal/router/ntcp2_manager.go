@@ -882,7 +882,7 @@ func selectNTCP2AddressForNetwork(info netdb.RouterInfo, preferIPv4 bool) (ntcp2
 			return ntcp2Address{}, err
 		}
 		if !ok {
-			if found {
+			if found && !preferIPv4 {
 				return fallback, nil
 			}
 			return ntcp2Address{}, ErrNTCP2Peer

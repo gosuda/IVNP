@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"sync"
+	"time"
 
 	"gosuda.org/ivnp/foundation"
 )
@@ -66,4 +67,15 @@ func (r *BuildReservation) Release() {
 		clear(r.peers)
 		r.peers = nil
 	})
+}
+
+func (r *BuildReservation) ReleaseAfter(delay time.Duration) {
+	if r == nil {
+		return
+	}
+	if delay <= 0 {
+		r.Release()
+		return
+	}
+	time.AfterFunc(delay, r.Release)
 }

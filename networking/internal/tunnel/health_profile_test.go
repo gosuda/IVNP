@@ -21,33 +21,57 @@ func TestPeerProfilesBoundHistoryAndScoreDeterministically(t *testing.T) {
 	if !ok || profile.Samples != 2 || profile.Successes != 1 || profile.Failures != 1 || profile.MeanLatency != 10 {
 		t.Fatalf("profile = %#v, %t", profile, ok)
 	}
-	if !profiles.Eligible(peer) || profiles.Score(peer) != -10_010 {
-		t.Fatalf("eligibility=%t score=%d", profiles.Eligible(peer), profiles.Score(peer))
+	if !profiles.EligibleAt(peer, 1) || profiles.Score(peer) != -10_010 {
+		t.Fatalf("eligibility=%t score=%d", profiles.EligibleAt(peer, 1), profiles.Score(peer))
 	}
 	profiles.RecordFailure(peer)
 	profiles.RecordFailure(peer)
-	if profiles.Eligible(peer) {
-		t.Fatal("failure-majority peer remained eligible")
+	if !profiles.EligibleAt(peer, 1) {
+		t.Fatal("ambiguous delivery failures quarantined a tunnel peer")
 	}
 }
 
-func TestPeerProfilesPreserveAuthenticatedBuildCompatibilityAcrossAmbiguousDeliveryLoss(t *testing.T) {
+func TestPeerProfilesRequireAuthenticatedBuildSamplesAndCooldown(t *testing.T) {
 	profiles := NewPeerProfiles(PeerProfilesConfig{Window: 8})
 	peer := foundation.Hash{1}
-	profiles.Record(peer, Observation{Kind: BuildObservation, Success: true})
+	now := uint64(1_000)
+	profiles.Record(peer, Observation{Kind: BuildObservation, Success: true, AtMillis: now})
 	for range 4 {
-		profiles.Record(peer, Observation{Kind: DeliveryObservation})
+		profiles.Record(peer, Observation{Kind: DeliveryObservation, AtMillis: now})
 	}
-	if !profiles.Eligible(peer) {
+	if !profiles.EligibleAt(peer, now) {
 		t.Fatal("delivery loss over a multi-peer path overrode authenticated build compatibility")
 	}
-	profiles.Record(peer, Observation{Kind: BuildObservation})
-	if !profiles.Eligible(peer) {
-		t.Fatal("one build failure excluded a peer with one authenticated build success")
+	profiles.Record(peer, Observation{Kind: BuildObservation, AtMillis: now + 1})
+	if !profiles.EligibleAt(peer, now+1) {
+		t.Fatal("one build failure excluded a peer before minimum sample count")
 	}
-	profiles.Record(peer, Observation{Kind: BuildObservation})
-	if profiles.Eligible(peer) {
-		t.Fatal("authenticated build failure majority remained eligible")
+	profiles.Record(peer, Observation{Kind: BuildObservation, AtMillis: now + 2})
+	if profiles.EligibleAt(peer, now+2) {
+		t.Fatal("failure-majority authenticated build history remained eligible")
+	}
+	if !profiles.EligibleAt(peer, now+2+profileBuildCooldown) {
+		t.Fatal("build quarantine did not permit a cooldown recovery probe")
+	}
+}
+
+func TestPeerProfilesKeepTransportCooldownSeparate(t *testing.T) {
+	profiles := NewPeerProfiles(PeerProfilesConfig{})
+	peer := foundation.Hash{2}
+	now := uint64(10_000)
+	profiles.RecordTransportFailure(peer, now)
+	if profiles.EligibleAt(peer, now) {
+		t.Fatal("recent transport failure remained immediately eligible")
+	}
+	if _, ok := profiles.Snapshot(peer); ok {
+		t.Fatal("transport failure created tunnel build history")
+	}
+	if !profiles.EligibleAt(peer, now+profileTransportBaseDelay) {
+		t.Fatal("transport cooldown did not expire")
+	}
+	profiles.RecordTransportSuccess(peer, now+1)
+	if !profiles.EligibleAt(peer, now+1) {
+		t.Fatal("transport success did not clear cooldown")
 	}
 }
 

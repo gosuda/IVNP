@@ -38,11 +38,12 @@ var (
 )
 
 const (
-	daemonHealthProbeTimeoutMillis       = uint64(time.Minute / time.Millisecond)
-	daemonNetDBLookupTimeoutMillis       = uint64((30 * time.Second) / time.Millisecond)
-	daemonNetDBLookupCandidates          = 32
-	daemonNetDBExplorationBootstrapDelay = time.Second
-	daemonNetDBExplorationSteadyDelay    = 5 * time.Second
+	daemonHealthProbeTimeoutMillis            = uint64(time.Minute / time.Millisecond)
+	daemonNetDBLookupTimeoutMillis            = uint64((30 * time.Second) / time.Millisecond)
+	daemonDestinationNetDBLookupTimeoutMillis = uint64((2 * time.Minute) / time.Millisecond)
+	daemonNetDBLookupCandidates               = 32
+	daemonNetDBExplorationBootstrapDelay      = time.Second
+	daemonNetDBExplorationSteadyDelay         = 5 * time.Second
 )
 
 // Listener owns both local stream and packet listener edges used by
@@ -416,6 +417,39 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			bundle.DestinationPrivate = make(map[string][]byte)
 		}
 		migrated := false
+		for name, encoded := range bundle.DestinationPrivate {
+			if _, encrypted := bundle.EncryptedLeaseSetPolicies[name]; encrypted {
+				continue
+			}
+			local, importErr := foundation.ImportLocalDestination(encoded)
+			if importErr != nil {
+				return nil, importErr
+			}
+			identity, identityErr := local.Identity()
+			oldHash := local.Hash()
+			local.ReleaseSensitive()
+			if identityErr != nil {
+				return nil, identityErr
+			}
+			if identity.CryptoKeyType() == foundation.CryptoElGamal {
+				continue
+			}
+			replacement, generateErr := foundation.GenerateLegacyLocalDestination()
+			if generateErr != nil {
+				return nil, generateErr
+			}
+			private, privateErr := destinationPrivate(replacement)
+			newHash := replacement.Hash()
+			replacement.ReleaseSensitive()
+			if privateErr != nil {
+				return nil, privateErr
+			}
+			clear(encoded)
+			bundle.DestinationPrivate[name] = private
+			migrated = true
+			logger.Warn("rotated incompatible public destination identity", "destination", name,
+				"old_hash", foundation.EncodeI2PBase64(oldHash[:]), "new_hash", foundation.EncodeI2PBase64(newHash[:]))
+		}
 		legacyHashes := make(map[foundation.Hash]string, len(bundle.Destinations))
 		for name, address := range bundle.Destinations {
 			if previous, exists := legacyHashes[address.Hash]; exists {
@@ -424,7 +458,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			legacyHashes[address.Hash] = name
 		}
 		for name := range bundle.Destinations {
-			local, localErr := foundation.GenerateLocalDestination()
+			local, localErr := foundation.GenerateLegacyLocalDestination()
 			if localErr != nil {
 				return nil, localErr
 			}
@@ -438,7 +472,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			migrated = true
 		}
 		if len(bundle.DestinationPrivate) == 0 {
-			local, localErr := foundation.GenerateLocalDestination()
+			local, localErr := foundation.GenerateLegacyLocalDestination()
 			if localErr != nil {
 				return nil, localErr
 			}
@@ -726,7 +760,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			seedReplyRouterInfo: buildReplyRouterInfoSeeder(database, mux, now),
 		}, replyRoute, networking.NetworkDatabaseRequestManagerConfig{
 			Capacity: cfg.NetDB.LookupCapacity, MaxCandidates: daemonNetDBLookupCandidates, MaxWaiters: 64,
-			TimeoutMillis: daemonNetDBLookupTimeoutMillis, Now: now, Metrics: registry, Responders: responders,
+			TimeoutMillis: daemonNetDBLookupTimeoutMillis, Now: now, Metrics: registry, Responders: responders, Logger: logger,
 		})
 		if err != nil {
 			return nil, err
@@ -1201,6 +1235,12 @@ func (d *Daemon) observabilityLoop() {
 			return
 		case <-ticker.C:
 			d.refreshObservability()
+			now := uint64(d.clock.Now().UnixMilli())
+			for _, runtime := range d.clientRuntimeSnapshot() {
+				if runtime.active() && runtime.requests != nil {
+					runtime.requests.Expire(now)
+				}
+			}
 		}
 	}
 }
@@ -1328,11 +1368,11 @@ func (d *Daemon) maintainOnce(now uint64) {
 		d.database.Routers().Expire(now - networking.NetworkDatabaseReseedRouterInfoMaxAgeMillis)
 	}
 	d.router.MaintainReseed(d.ctx)
-	if d.maintainer != nil {
-		d.requestExploratoryMaintenance()
-	}
 	for _, runtime := range d.clientRuntimeSnapshot() {
 		d.requestDestinationMaintenance(runtime)
+	}
+	if d.maintainer != nil {
+		d.requestExploratoryMaintenance()
 	}
 	d.maintainTunnelHealth(now)
 	if d.replyKeys != nil {
@@ -1438,10 +1478,10 @@ func (d *Daemon) refreshObservability() {
 	d.registry.SetNetDBRouters(routers)
 	d.registry.SetNetDBFloodfills(floodfills)
 	if d.registry.Snapshot().Bootstrap.Stage < 3 && routers >= 50 && d.bootstrapPoolsStarted.CompareAndSwap(bootstrapPoolsIdle, bootstrapPoolsStarted) {
-		d.requestExploratoryMaintenance()
 		for _, runtime := range d.clientRuntimeSnapshot() {
 			d.requestDestinationTunnelMaintenance(runtime)
 		}
+		d.requestExploratoryMaintenance()
 	}
 	if d.localInfo.Reachability() == networking.RouterReachabilityReachable {
 		d.registry.SetRouterReachable(1)
@@ -1990,7 +2030,7 @@ func (s muxRequestSender) Send(ctx context.Context, peer networking.NetworkDatab
 	}
 	var replyTag [8]byte
 	registered := false
-	if lookup.LookupType() == uint8(networking.NetworkDatabaseLeaseSetLookup) && lookup.ReplyThroughTunnel() && !lookup.ReplyEncrypted() && s.replyKeys != nil {
+	if lookup.LookupType() == uint8(networking.NetworkDatabaseLeaseSetLookup) && lookup.ReplyThroughTunnel() && !lookup.ReplyEncrypted() && lookup.ExcludedCount() == 0 && s.replyKeys != nil {
 		var replyKey networking.TunnelGarlicReplyKey
 		if _, err = cryptorand.Read(replyKey.Key[:]); err != nil {
 			return err

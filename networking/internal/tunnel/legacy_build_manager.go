@@ -80,8 +80,7 @@ func (m *BuildManager) StartVariableOutbound(ctx context.Context, build Variable
 		return 0, err
 	}
 	replyID := ids[len(ids)-1]
-	pending := &pendingVariableBuild{build: cloneVariableOutboundBuild(build), keys: keys, positions: positions, replyID: replyID, recordCount: uint8(recordCount), deadline: min(build.ExpiresAt, now+buildRequestTimeout)}
-	pending.cancelDeadline = m.scheduleBuildDeadline(now, pending.deadline)
+	pending := &pendingVariableBuild{build: cloneVariableOutboundBuild(build), keys: keys, positions: positions, replyID: replyID, recordCount: uint8(recordCount), deadline: build.ExpiresAt}
 	m.mu.Lock()
 	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.pending[replyID] != nil || m.pendingInbound[replyID] != nil || m.pendingVariable[replyID] != nil {
 		m.mu.Unlock()
@@ -96,7 +95,19 @@ func (m *BuildManager) StartVariableOutbound(ctx context.Context, build Variable
 		m.removeVariablePending(replyID)
 		return 0, err
 	}
+	m.armVariableDeadline(replyID)
 	return replyID, nil
+}
+
+func (m *BuildManager) armVariableDeadline(replyID uint32) {
+	now := m.now()
+	m.mu.Lock()
+	pending := m.pendingVariable[replyID]
+	if pending != nil {
+		pending.deadline = min(pending.build.ExpiresAt, now+buildRequestTimeout)
+		pending.cancelDeadline = m.scheduleBuildDeadline(now, pending.deadline)
+	}
+	m.mu.Unlock()
 }
 
 func fillVariableRequest(record []byte, hop VariableBuildHop, request VariableBuildRequest, local foundation.Hash, random io.Reader, keys *VariableBuildKeys) error {

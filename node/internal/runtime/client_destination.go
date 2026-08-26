@@ -83,7 +83,7 @@ func (c clientDestinationController) CreateDestination(ctx context.Context, spec
 	} else if spec.Policy.Encrypted {
 		local, err = foundation.GenerateEncryptedLocalDestination()
 	} else {
-		local, err = foundation.GenerateLocalDestination()
+		local, err = foundation.GenerateLegacyLocalDestination()
 	}
 	if err != nil {
 		return nil, err

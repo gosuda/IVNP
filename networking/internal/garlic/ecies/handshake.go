@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ecdh"
 	"errors"
+	"fmt"
 	"io"
 
 	"gosuda.org/ivnp/cryptography"
@@ -432,7 +433,7 @@ func (h *Initiator) ParseReply(src, payloadDst []byte) ([]byte, error) {
 	empty, err := h.state.DecryptAndHash(make([]byte, 0), src[off:off+replyKeySectionLen])
 	if err != nil || len(empty) != 0 {
 		h.ReleaseSensitive()
-		return nil, handshakeError(err)
+		return nil, fmt.Errorf("%w: NSR handshake section", handshakeError(err))
 	}
 	off += replyKeySectionLen
 	if len(src)-off < 16 || len(payloadDst) < len(src)-off-16 {
@@ -458,7 +459,7 @@ func (h *Initiator) ParseReply(src, payloadDst []byte) ([]byte, error) {
 	payload, err := cryptography.OpenChaCha20Poly1305To(payloadDst, attachKey[:], nonce[:], src[off:], hash[:])
 	if err != nil {
 		h.ReleaseSensitive()
-		return nil, handshakeError(err)
+		return nil, fmt.Errorf("%w: NSR attached payload", handshakeError(err))
 	}
 	return payload, nil
 }

@@ -25,11 +25,11 @@ func TestDestinationManagerOwnsStreamSessions(t *testing.T) {
 		_ = right.Close()
 	})
 
-	leftDestination, err := foundation.GenerateLocalDestination()
+	leftDestination, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
-	rightDestination, err := foundation.GenerateLocalDestination()
+	rightDestination, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestDestinationManagerOwnsStreamSessions(t *testing.T) {
 func TestDestinationSessionDeliversSelfMessagesLocally(t *testing.T) {
 	manager := NewDestinationManager()
 	t.Cleanup(func() { _ = manager.Close() })
-	localDestination, err := foundation.GenerateLocalDestination()
+	localDestination, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestDestinationSessionDeliversSelfMessagesLocally(t *testing.T) {
 func TestDestinationSessionRejectsStaleSelfDeliveryAfterRecreate(t *testing.T) {
 	manager := NewDestinationManager()
 	t.Cleanup(func() { _ = manager.Close() })
-	original, err := foundation.GenerateLocalDestination()
+	original, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}

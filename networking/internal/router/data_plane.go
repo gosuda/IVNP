@@ -10,6 +10,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -68,6 +69,7 @@ type StreamingTunnelSenderConfig struct {
 	NextID         MessageIDSource
 	Limiter        *DestinationBandwidthLimiter
 	Metrics        *observability.Registry
+	Logger         *slog.Logger
 }
 
 // RemoteELSContext supplies the unblinded identity, blinding secret, and
@@ -99,6 +101,7 @@ type StreamingTunnelSender struct {
 	scratch        chan *streamingSenderScratch
 	scratchSlots   int
 	metrics        *observability.Registry
+	logger         *slog.Logger
 	seedMu         sync.Mutex
 	seedCache      [streamingSeedCacheCapacity]streamingSeedCacheEntry
 	seedNext       uint8
@@ -135,7 +138,7 @@ func NewStreamingTunnelSender(config StreamingTunnelSenderConfig) (*StreamingTun
 	sender := &StreamingTunnelSender{
 		database: config.Database, requests: config.Requests, garlic: config.Garlic, ratchet: config.Ratchet,
 		tunnels: config.Tunnels, pool: config.Pool, seedRouterInfo: config.SeedRouterInfo,
-		now: config.Now, nextID: config.NextID, limiter: config.Limiter, metrics: config.Metrics,
+		now: config.Now, nextID: config.NextID, limiter: config.Limiter, metrics: config.Metrics, logger: config.Logger,
 		scratch: make(chan *streamingSenderScratch, scratchSlots), scratchSlots: scratchSlots,
 	}
 	for range scratchSlots {
@@ -281,6 +284,9 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streami
 	now := s.now()
 	set2, legacy, err := s.resolveLeaseSet(ctx, delivery.To)
 	if err != nil {
+		if s.logger != nil {
+			s.logger.Debug("streaming LeaseSet resolution failed", "target", foundation.EncodeI2PBase64(delivery.To[:]), "error", err)
+		}
 		return err
 	}
 	expires := saturatingAdd(now, dataPlaneEnvelopeLifetime)
@@ -297,9 +303,12 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streami
 		if s.ratchet == nil {
 			return ErrUnsupportedEncryption
 		}
-		key, keyErr := set2.SelectUsableEncryptionKey(now, foundation.CryptoMLKEM1024X25519, foundation.CryptoMLKEM768X25519, foundation.CryptoX25519)
+		key, keyErr := set2.SelectUsableEncryptionKey(now, foundation.CryptoX25519, foundation.CryptoMLKEM1024X25519, foundation.CryptoMLKEM768X25519)
 		if keyErr != nil {
 			return keyErr
+		}
+		if s.logger != nil {
+			s.logger.Debug("streaming remote LS2 key selected", "target", foundation.EncodeI2PBase64(delivery.To[:]), "key_type", uint16(key.Type))
 		}
 		lease, err = selectLease2(*set2, now)
 		if err != nil {
@@ -339,6 +348,9 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery streami
 	err = s.sendEncryptedTo(ctx, lease, encrypted, expires, scratch.frame[:])
 	if err == nil && s.metrics != nil {
 		s.metrics.IncGarlicTunnelClovesForwarded()
+	}
+	if err != nil && s.logger != nil {
+		s.logger.Debug("streaming Garlic send failed", "target", foundation.EncodeI2PBase64(delivery.To[:]), "error", err)
 	}
 	return err
 }

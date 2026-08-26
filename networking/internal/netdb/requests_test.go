@@ -90,6 +90,44 @@ func (s *interleavingRequestTestSender) Send(ctx context.Context, peer RouterRef
 	return err
 }
 
+type blockingReferralRefreshSender struct {
+	requestTestSender
+	parentKey      foundation.Hash
+	refreshKey     foundation.Hash
+	parentSent     chan struct{}
+	refreshEntered chan struct{}
+	releaseRefresh chan struct{}
+	parentCalls    int
+	parentOnce     sync.Once
+	refreshOnce    sync.Once
+}
+
+func (s *blockingReferralRefreshSender) Send(ctx context.Context, peer RouterRef, message i2np.Message) error {
+	err := s.requestTestSender.Send(ctx, peer, message)
+	lookup, parseErr := i2np.ParseDatabaseLookup(message.Payload)
+	if parseErr != nil {
+		return parseErr
+	}
+	switch lookup.Key {
+	case s.parentKey:
+		s.requestTestSender.mu.Lock()
+		s.parentCalls++
+		parentCalls := s.parentCalls
+		s.requestTestSender.mu.Unlock()
+		if parentCalls == 2 {
+			s.parentOnce.Do(func() { close(s.parentSent) })
+		}
+	case s.refreshKey:
+		s.refreshOnce.Do(func() { close(s.refreshEntered) })
+		select {
+		case <-s.releaseRefresh:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return err
+}
+
 type cancelingRequestTestSender struct {
 	entered chan struct{}
 	once    sync.Once
@@ -196,6 +234,91 @@ func TestRequestManagerCoalescesFollowsSearchReplyAndCompletesStore(t *testing.T
 	}
 	if manager.Pending() != 0 {
 		t.Fatalf("pending = %d", manager.Pending())
+	}
+}
+
+func TestRequestManagerQueriesKnownLeaseSetReferralWithoutRefresh(t *testing.T) {
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+	first, referred, key := requestTestHash(1), requestTestHash(2), requestTestHash(9)
+	addRequestTestFloodfill(database, first)
+	addRequestTestFloodfill(database, referred)
+	sender := new(requestTestSender)
+	manager, err := NewRequestManager(database, sender, requestTestRoute{gateway: requestTestHash(8)}, RequestManagerConfig{
+		Capacity: 2, MaxCandidates: 4, TimeoutMillis: 10_000, Now: func() uint64 { return 100 },
+		Rand: &fixedReader{bytes: []byte{0, 0, 0, 1, 0, 0, 0, 2}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if _, err = manager.LookupLeaseSet(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	peers := make([]byte, foundation.HashLength)
+	copy(peers, referred[:])
+	manager.HandleDatabaseSearchReply(i2np.DatabaseSearchReplyMessage{Key: key, From: first, Peers: peers})
+	messages := sender.snapshot()
+	if len(messages) != 2 {
+		t.Fatalf("known LeaseSet referral sends = %d, want 2", len(messages))
+	}
+	followUp, err := i2np.ParseDatabaseLookup(messages[1].Payload)
+	if err != nil || followUp.ExcludedCount() != 2 {
+		t.Fatalf("known LeaseSet referral lookup = %#v, %v", followUp, err)
+	}
+}
+
+func TestRequestManagerDispatchesKnownParentBeforeBlockingUnknownReferralRefresh(t *testing.T) {
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+	first, second, unknown, key := requestTestHash(1), requestTestHash(2), requestTestHash(3), requestTestHash(9)
+	addRequestTestFloodfill(database, first)
+	addRequestTestFloodfill(database, second)
+	sender := &blockingReferralRefreshSender{
+		parentKey: key, refreshKey: unknown, parentSent: make(chan struct{}),
+		refreshEntered: make(chan struct{}), releaseRefresh: make(chan struct{}),
+	}
+	manager, err := NewRequestManager(database, sender, requestTestRoute{gateway: requestTestHash(8)}, RequestManagerConfig{
+		Capacity: 3, MaxCandidates: 4, TimeoutMillis: 10_000, Now: func() uint64 { return 100 },
+		Rand: &fixedReader{bytes: []byte{0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	defer close(sender.releaseRefresh)
+	if _, err = manager.LookupLeaseSet(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	request := manager.pending[requestKey{key: key}]
+	var initial foundation.Hash
+	for peer := range request.sent {
+		initial = peer
+	}
+	manager.mu.Unlock()
+	if initial == (foundation.Hash{}) {
+		t.Fatal("initial LeaseSet lookup did not send")
+	}
+	peers := make([]byte, foundation.HashLength)
+	copy(peers, unknown[:])
+	replyDone := make(chan struct{})
+	go func() {
+		manager.HandleDatabaseSearchReply(i2np.DatabaseSearchReplyMessage{Key: key, From: initial, Peers: peers})
+		close(replyDone)
+	}()
+	select {
+	case <-sender.parentSent:
+	case <-time.After(time.Second):
+		t.Fatal("known parent candidate was blocked behind unknown referral refresh")
+	}
+	select {
+	case <-sender.refreshEntered:
+	case <-time.After(time.Second):
+		t.Fatal("unknown referral refresh was not dispatched")
+	}
+	select {
+	case <-replyDone:
+	case <-time.After(time.Second):
+		t.Fatal("search-reply handler waited for blocking referral refresh")
 	}
 }
 
@@ -539,14 +662,22 @@ func TestRequestManagerFetchesUnknownCandidatesAndWakesDuringSend(t *testing.T) 
 	copy(discoveredPeers, firstDiscovered[:])
 	copy(discoveredPeers[foundation.HashLength:], secondDiscovered[:])
 	manager.HandleDatabaseSearchReply(i2np.DatabaseSearchReplyMessage{Key: key, From: source, Peers: discoveredPeers})
+	manager.active.Wait()
 	messages := sender.snapshot()
 	if len(messages) != 3 {
 		t.Fatalf("sends after unknown candidates = %#v", messages)
 	}
-	for index, expected := range []foundation.Hash{firstDiscovered, secondDiscovered} {
-		lookup, err := i2np.ParseDatabaseLookup(messages[index+1].Payload)
-		if err != nil || lookup.Key != expected {
-			t.Fatalf("RouterInfo fetch %d = %#v, %v", index, lookup, err)
+	discovered := make(map[foundation.Hash]bool, 2)
+	for _, message := range messages[1:] {
+		lookup, err := i2np.ParseDatabaseLookup(message.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		discovered[lookup.Key] = true
+	}
+	for _, expected := range []foundation.Hash{firstDiscovered, secondDiscovered} {
+		if !discovered[expected] {
+			t.Fatalf("RouterInfo refresh missing for %x", expected)
 		}
 	}
 
@@ -579,10 +710,13 @@ func TestRequestManagerFetchesUnknownCandidatesAndWakesDuringSend(t *testing.T) 
 	if len(messages) != 6 {
 		t.Fatalf("sends after candidate admission = %#v", messages)
 	}
-	for index, expected := range []foundation.Hash{key, firstDiscovered, secondDiscovered, key, key, key} {
+	if first, err := i2np.ParseDatabaseLookup(messages[0].Payload); err != nil || first.Key != key {
+		t.Fatalf("initial lookup = %#v, %v", first, err)
+	}
+	for index := 3; index < len(messages); index++ {
 		lookup, err := i2np.ParseDatabaseLookup(messages[index].Payload)
-		if err != nil || lookup.Key != expected {
-			t.Fatalf("send %d lookup = %#v, %v", index, lookup, err)
+		if err != nil || lookup.Key != key {
+			t.Fatalf("parent send %d lookup = %#v, %v", index, lookup, err)
 		}
 	}
 	final, err := i2np.ParseDatabaseLookup(messages[5].Payload)

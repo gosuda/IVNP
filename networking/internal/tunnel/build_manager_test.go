@@ -79,6 +79,68 @@ func (s *cancelingBuildSender) Send(ctx context.Context, _ foundation.Hash, _ i2
 	return ctx.Err()
 }
 
+type failingSessionBuildSender struct{ err error }
+
+func (s failingSessionBuildSender) Send(context.Context, foundation.Hash, i2np.Message) error {
+	return s.err
+}
+
+func (s failingSessionBuildSender) EnsureSession(context.Context, foundation.Hash) error {
+	return s.err
+}
+
+func TestBuildManagerSeparatesTransportFailureFromBuildHistory(t *testing.T) {
+	now := uint64(1_000)
+	sessionErr := errors.New("session failed")
+	profiles := NewPeerProfiles(PeerProfilesConfig{})
+	manager, err := NewBuildManager(BuildManagerConfig{
+		Runtime: NewRuntime(RuntimeConfig{}), Sender: failingSessionBuildSender{err: sessionErr},
+		ReplyKeys: newBuildReplyRegistry(), Profiles: profiles, Now: func() uint64 { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hops := []ShortBuildHop{{Router: foundation.Hash{1}}, {Router: foundation.Hash{2}}, {Router: foundation.Hash{3}}}
+	if err = manager.ensureBuildSession(context.Background(), hops[0].Router, hops, "inbound", "first_hop"); !errors.Is(err, sessionErr) {
+		t.Fatalf("session error = %v, want %v", err, sessionErr)
+	}
+	if profiles.EligibleAt(hops[0].Router, now) {
+		t.Fatal("failed transport peer skipped its cooldown")
+	}
+	for _, hop := range hops {
+		if _, ok := profiles.Snapshot(hop.Router); ok {
+			t.Fatalf("transport preflight created build history for %x", hop.Router)
+		}
+	}
+	if !profiles.EligibleAt(hops[1].Router, now) || !profiles.EligibleAt(hops[2].Router, now) {
+		t.Fatal("one transport failure quarantined unrelated path peers")
+	}
+}
+
+func TestBuildManagerAttributesAuthenticatedRejectionToOnePeer(t *testing.T) {
+	now := uint64(2_000)
+	profiles := NewPeerProfiles(PeerProfilesConfig{})
+	manager, err := NewBuildManager(BuildManagerConfig{
+		Runtime: NewRuntime(RuntimeConfig{}), Sender: discardTunnelSender{},
+		ReplyKeys: newBuildReplyRegistry(), Profiles: profiles, Now: func() uint64 { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peers := []foundation.Hash{{1}, {2}, {3}}
+	manager.recordBuildPeer(peers[1], false, 0, now)
+	for index, peer := range peers {
+		profile, ok := profiles.Snapshot(peer)
+		if index == 1 {
+			if !ok || profile.Failures != 1 {
+				t.Fatalf("rejected peer profile = %#v, %t", profile, ok)
+			}
+		} else if ok {
+			t.Fatalf("authenticated rejection poisoned peer %d: %#v", index, profile)
+		}
+	}
+}
+
 func TestBuildManagerCreatesAndInstallsOutboundTunnel(t *testing.T) {
 	const now = uint64(1_700_000_000_000)
 	sender := new(captureTunnelSender)
@@ -152,7 +214,7 @@ func TestBuildManagerCreatesAndInstallsOutboundTunnel(t *testing.T) {
 	}
 	endpointKeys := participantKeys[len(participantKeys)-1]
 	registered, ok := replyKeys.entries[endpointKeys.GarlicTag]
-	if !ok || registered.Key != endpointKeys.GarlicKey || registered.ExpiresAt != now+buildRequestTimeout {
+	if !ok || registered.Key != endpointKeys.GarlicKey || registered.ExpiresAt != build.ExpiresAt {
 		t.Fatalf("registered endpoint reply key = %#v, found %t", registered, ok)
 	}
 	consumed, consumeErr := replyKeys.consume(endpointKeys.GarlicTag)
@@ -261,31 +323,63 @@ func TestBuildManagerClearsReplyRegistryAfterReplyErrorAndExpiry(t *testing.T) {
 	if err = manager.HandleReply(i2np.Message{Header: i2np.Header{Type: i2np.OutboundTunnelBuildReply, ID: 3}, Payload: invalidAuthenticatedRecords}); err == nil {
 		t.Fatal("accepted reply with invalid authenticated records")
 	}
-	if profile, ok := profiles.Snapshot(failedPeer); !ok || profile.Failures != 1 || profiles.Eligible(failedPeer) {
-		t.Fatalf("invalid authenticated reply profile = %#v, present=%t eligible=%t", profile, ok, profiles.Eligible(failedPeer))
+	if profile, ok := profiles.Snapshot(failedPeer); ok {
+		t.Fatalf("unattributable authenticated reply error poisoned peer profile: %#v", profile)
 	}
 	if err = replyKeys.RegisterGarlicReplyKey(GarlicReplyKey{Tag: expiryTag, ExpiresAt: 2}); err != nil {
 		t.Fatal(err)
 	}
-	manager.pending[2] = &pendingOutboundBuild{replyTag: expiryTag, deadline: 2}
+	manager.pending[2] = &pendingOutboundBuild{replyTag: expiryTag, deadline: 2, build: OutboundBuild{Hops: []ShortBuildHop{{Router: failedPeer}}}}
 	if expired := manager.Expire(2); expired != 1 {
 		t.Fatalf("expired builds = %d, want 1", expired)
 	}
 	if _, ok := replyKeys.entries[expiryTag]; ok {
 		t.Fatal("reply key retained after expiry")
 	}
+	if profile, ok := profiles.Snapshot(failedPeer); ok {
+		t.Fatalf("unattributable build timeout poisoned peer profile: %#v", profile)
+	}
 }
 
-func TestBuildManagerDeadlineExpiresAndWakesOwner(t *testing.T) {
+func TestBuildManagerMultiHopTimeoutDoesNotPoisonProfiles(t *testing.T) {
+	profiles := NewPeerProfiles(PeerProfilesConfig{})
+	manager, err := NewBuildManager(BuildManagerConfig{
+		Runtime: NewRuntime(RuntimeConfig{}), Sender: discardTunnelSender{}, ReplyKeys: newBuildReplyRegistry(),
+		Profiles: profiles, Now: func() uint64 { return 10 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peers := []foundation.Hash{{1}, {2}, {3}}
+	hops := make([]ShortBuildHop, len(peers))
+	for index, peer := range peers {
+		hops[index].Router = peer
+	}
+	manager.pending[1] = &pendingOutboundBuild{deadline: 10, build: OutboundBuild{Hops: hops}}
+	if expired := manager.Expire(10); expired != 1 {
+		t.Fatalf("expired builds = %d, want 1", expired)
+	}
+	for _, peer := range peers {
+		if profile, ok := profiles.Snapshot(peer); ok {
+			t.Fatalf("multi-hop timeout poisoned peer %x profile: %#v", peer, profile)
+		}
+	}
+}
+
+func TestBuildManagerDeadlineExpiresAndWakesOwnerAfterCooldown(t *testing.T) {
 	now := uint64(1)
-	var deadlineCallback func()
+	var (
+		scheduledDuration time.Duration
+		scheduledCallback func()
+	)
 	wake := make(chan struct{}, 1)
 	metrics := observability.NewRegistry()
 	manager, err := NewBuildManager(BuildManagerConfig{
 		Runtime: NewRuntime(RuntimeConfig{}), Sender: discardTunnelSender{}, ReplyKeys: newBuildReplyRegistry(),
 		Now: func() uint64 { return now },
-		Schedule: func(_ time.Duration, callback func()) func() {
-			deadlineCallback = callback
+		Schedule: func(duration time.Duration, callback func()) func() {
+			scheduledDuration = duration
+			scheduledCallback = callback
 			return func() {}
 		},
 		OnBuildEvent: func() { wake <- struct{}{} }, Metrics: metrics,
@@ -297,14 +391,23 @@ func TestBuildManagerDeadlineExpiresAndWakesOwner(t *testing.T) {
 	pending.cancelDeadline = manager.scheduleBuildDeadline(now, pending.deadline)
 	manager.pending[1] = pending
 	now = 2
-	deadlineCallback()
+	scheduledCallback()
 	if manager.Pending() != 0 {
 		t.Fatalf("expired pending builds = %d, want 0", manager.Pending())
 	}
 	select {
 	case <-wake:
+		t.Fatal("build deadline woke owner before peer cooldown")
 	default:
-		t.Fatal("build deadline did not wake owner")
+	}
+	if scheduledDuration != buildTimeoutPathCooldown {
+		t.Fatalf("timeout wake delay = %s, want %s", scheduledDuration, buildTimeoutPathCooldown)
+	}
+	scheduledCallback()
+	select {
+	case <-wake:
+	default:
+		t.Fatal("build deadline did not wake owner after cooldown")
 	}
 	if got := metrics.Snapshot().Tunnel.ExploratoryOutboundTimeouts; got != 1 {
 		t.Fatalf("exploratory outbound timeouts = %d, want 1", got)
@@ -604,7 +707,7 @@ func TestBuildManagerRoutesOBEPReplyWithDerivedGarlicKey(t *testing.T) {
 		t.Fatalf("OBEP garlic route = %#v", replies)
 	}
 	registered, ok := replyKeys.entries[replies.key.Tag]
-	if !ok || registered.Key != replies.key.Key || registered.ExpiresAt != now+buildRequestTimeout {
+	if !ok || registered.Key != replies.key.Key || registered.ExpiresAt != now+600_000 {
 		t.Fatalf("derived garlic key = %#v, found %t", registered, ok)
 	}
 	if _, err = replyKeys.consume(replies.key.Tag); err != nil {

@@ -418,7 +418,7 @@ func retainPreferred(table *netdb.Table, hashes []foundation.Hash) []netdb.Route
 func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, excluded foundation.Hash, wanted int, nowMillis uint64) []ShortBuildHop {
 	candidates := make([]hopCandidate, 0, len(refs))
 	for _, ref := range refs {
-		if ref.Hash == local || ref.Hash == excluded || !profiles.Eligible(ref.Hash) || netdb.RouterInfoFresh(ref.Info, nowMillis) != nil {
+		if ref.Hash == local || ref.Hash == excluded || !profiles.EligibleAt(ref.Hash, nowMillis) || netdb.RouterInfoFresh(ref.Info, nowMillis) != nil {
 			continue
 		}
 		key, ok := x25519StaticKey(ref.Info)

@@ -29,6 +29,7 @@ const (
 	shortBuildReplayLifetime = 10 * 60_000
 	buildMessageLifetime     = 60_000
 	buildRetryDelay          = 5 * time.Second
+	buildTimeoutPathCooldown = 30 * time.Second
 	buildRequestTimeout      = 5_000 // Java BuildRequestor.REQUEST_TIMEOUT
 )
 
@@ -474,7 +475,9 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 	if m.seedReplyRouterInfo != nil {
 		endpoint := build.Hops[len(build.Hops)-1].Router
 		if err = m.seedReplyRouterInfo(ctx, endpoint, build.ReplyRouter); err != nil {
-			m.recordShortBuild(build.Hops[len(build.Hops)-1:], false, 0)
+			if m.profiles != nil {
+				m.profiles.RecordTransportFailure(endpoint, now)
+			}
 			if m.metrics != nil {
 				m.metrics.IncTunnelBuildFailures()
 			}
@@ -494,9 +497,8 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 	}
 	pending := &pendingOutboundBuild{
 		build: cloneOutboundBuild(build), keys: keys, positions: positions, replyID: replyID, replyTag: endpointKeys.GarlicTag,
-		recordCount: uint8(recordCount), startedAt: now, deadline: min(build.ExpiresAt, now+buildRequestTimeout),
+		recordCount: uint8(recordCount), startedAt: now, deadline: build.ExpiresAt,
 	}
-	pending.cancelDeadline = m.scheduleBuildDeadline(now, pending.deadline)
 	m.mu.Lock()
 	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.pending[replyID] != nil || m.pendingInbound[replyID] != nil || m.pendingVariable[replyID] != nil {
 		m.mu.Unlock()
@@ -523,7 +525,9 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 	message := i2np.Message{Header: i2np.Header{Type: i2np.ShortTunnelBuild, ID: messageIDs[0], Expiration: now + buildMessageLifetime}, Payload: payload}
 	if err = m.sender.Send(ctx, build.Hops[0].Router, message); err != nil {
 		m.removePending(replyID)
-		m.recordShortBuild(build.Hops, false, 0)
+		if m.profiles != nil {
+			m.profiles.RecordTransportFailure(build.Hops[0].Router, m.now())
+		}
 		if m.metrics != nil {
 			m.metrics.IncTunnelBuildFailures()
 		}
@@ -533,6 +537,7 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		m.scheduleBuildRetry()
 		return 0, err
 	}
+	m.armOutboundDeadline(replyID)
 	return replyID, nil
 }
 
@@ -596,23 +601,12 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 		}
 	}
 	if build.Hops[len(build.Hops)-1].Router != build.Hops[0].Router {
-		if ensurer, ok := m.sender.(SessionEnsurer); ok {
-			replyPeer := build.Hops[len(build.Hops)-1].Router
-			if err := ensurer.EnsureSession(ctx, replyPeer); err != nil {
-				m.recordShortBuild(build.Hops, false, 0)
-				if m.metrics != nil {
-					m.metrics.IncTunnelBuilds()
-					m.metrics.IncTunnelBuildFailures()
-				}
-				if m.logger != nil {
-					m.logger.Warn("tunnel build reply session failed", "direction", "inbound", "peer", foundation.EncodeI2PBase64(replyPeer[:]), "error", err)
-				}
-				m.scheduleBuildRetry()
-				return 0, err
-			}
-			if m.logger != nil {
-				m.logger.Debug("tunnel build reply session ready", "direction", "inbound", "peer", foundation.EncodeI2PBase64(replyPeer[:]))
-			}
+		replyPeer := build.Hops[len(build.Hops)-1].Router
+		if err := m.ensureBuildSession(ctx, replyPeer, build.Hops, "inbound", "reply_endpoint"); err != nil {
+			return 0, err
+		}
+		if m.logger != nil {
+			m.logger.Debug("tunnel build reply session ready", "direction", "inbound", "peer", foundation.EncodeI2PBase64(replyPeer[:]))
 		}
 	}
 	var messageIDStorage [i2np.MaxVariableBuildRecords + 1]uint32
@@ -695,9 +689,8 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 	pending := &pendingInboundBuild{
 		build: cloneInboundBuild(build), keys: keys, positions: positions, replyID: replyID,
 		recordCount: uint8(recordCount), fakePosition: fakePosition, fakeHash: fakeHash,
-		startedAt: now, deadline: min(build.ExpiresAt, now+buildRequestTimeout),
+		startedAt: now, deadline: build.ExpiresAt,
 	}
-	pending.cancelDeadline = m.scheduleBuildDeadline(now, pending.deadline)
 	m.mu.Lock()
 	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.pendingInbound[replyID] != nil || m.pending[replyID] != nil || m.pendingVariable[replyID] != nil {
 		m.mu.Unlock()
@@ -718,7 +711,9 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 	if build.OutboundTunnelID == 0 {
 		if err = m.sender.Send(ctx, build.Hops[0].Router, message); err != nil {
 			m.removeInboundPending(replyID)
-			m.recordShortBuild(build.Hops, false, 0)
+			if m.profiles != nil {
+				m.profiles.RecordTransportFailure(build.Hops[0].Router, m.now())
+			}
 			if m.metrics != nil {
 				m.metrics.IncTunnelBuildFailures()
 			}
@@ -728,6 +723,7 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 			m.scheduleBuildRetry()
 			return 0, err
 		}
+		m.armInboundDeadline(replyID)
 		return replyID, nil
 	}
 	frameMessage := message
@@ -750,13 +746,13 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 	}
 	if err = m.runtime.SendBlock(ctx, build.OutboundTunnelID, Block{Delivery: DeliveryRouter, Gateway: build.Hops[0].Router, Last: true, Data: frame}); err != nil {
 		m.removeInboundPending(replyID)
-		m.recordShortBuild(build.Hops, false, 0)
 		m.scheduleBuildRetry()
 		return 0, err
 	}
 	if m.logger != nil {
 		m.logger.Debug("tunnel build sent", "direction", "inbound", "reply_id", replyID, "phase", "outbound_carrier")
 	}
+	m.armInboundDeadline(replyID)
 	return replyID, nil
 }
 
@@ -818,15 +814,8 @@ func (m *BuildManager) handleInboundReply(message i2np.Message) error {
 	defer m.notifyBuildEvent()
 	defer pending.build.reservation.Release()
 	success := false
-	peerFailure := false
 	defer func() {
-		if success {
-			return
-		}
-		if peerFailure {
-			m.recordShortBuild(pending.build.Hops, false, 0)
-		}
-		if m.metrics != nil {
+		if !success && m.metrics != nil {
 			m.metrics.IncTunnelBuildFailures()
 		}
 	}()
@@ -858,7 +847,7 @@ func (m *BuildManager) handleInboundReply(message i2np.Message) error {
 	}
 	for hop := range pending.keys {
 		if replies[(hop+1)*ShortBuildReplyPlainSize-1] != 0 {
-			peerFailure = true
+			m.recordBuildPeer(pending.build.Hops[hop].Router, false, 0, now)
 			return ErrBuildRejected
 		}
 	}
@@ -897,7 +886,7 @@ func (m *BuildManager) handleInboundReply(message i2np.Message) error {
 	if replaced {
 		m.runtime.RemoveCircuit(retired.ID)
 	}
-	m.recordShortBuild(pending.build.Hops, true, now-pending.startedAt)
+	m.recordBuildSuccess(pending.build.Hops, now-pending.startedAt)
 	success = true
 	if m.metrics != nil {
 		m.metrics.IncTunnelBuildSuccesses()
@@ -1164,15 +1153,8 @@ func (m *BuildManager) HandleReply(message i2np.Message) error {
 	m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
 	defer clearBuildKeys(pending.keys)
 	success := false
-	peerFailure := false
 	defer func() {
-		if success {
-			return
-		}
-		if peerFailure {
-			m.recordShortBuild(pending.build.Hops, false, 0)
-		}
-		if m.metrics != nil {
+		if !success && m.metrics != nil {
 			m.metrics.IncTunnelBuildFailures()
 		}
 	}()
@@ -1185,18 +1167,13 @@ func (m *BuildManager) HandleReply(message i2np.Message) error {
 		return ErrBuildPending
 	}
 	replies := make([]byte, len(pending.keys)*ShortBuildReplyPlainSize)
-	// Outbound replies reach this method only after the one-time garlic reply
-	// key authenticated the selected endpoint. A structurally valid response
-	// that fails the per-record authenticator is therefore attributable to the
-	// endpoint, while errors after records open are local installation errors.
-	peerFailure = true
+	defer clear(replies)
 	if err = OpenShortBuildReplies(records.Records, pending.keys, pending.positions, replies); err != nil {
 		return err
 	}
-	peerFailure = false
 	for hop := range pending.keys {
 		if replies[(hop+1)*ShortBuildReplyPlainSize-1] != 0 {
-			peerFailure = true
+			m.recordBuildPeer(pending.build.Hops[hop].Router, false, 0, now)
 			return ErrBuildRejected
 		}
 	}
@@ -1236,7 +1213,7 @@ func (m *BuildManager) HandleReply(message i2np.Message) error {
 	if replaced {
 		m.runtime.RemoveCircuit(retired.ID)
 	}
-	m.recordShortBuild(pending.build.Hops, true, now-pending.startedAt)
+	m.recordBuildSuccess(pending.build.Hops, now-pending.startedAt)
 	success = true
 	if m.metrics != nil {
 		m.metrics.IncTunnelBuildSuccesses()
@@ -1300,22 +1277,24 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 	for _, pending := range expired {
 		cancelBuildDeadline(pending.cancelDeadline)
 		m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
-		pending.build.reservation.Release()
+		pending.build.reservation.ReleaseAfter(buildTimeoutPathCooldown)
 		clearBuildKeys(pending.keys)
-		m.recordShortBuild(pending.build.Hops, false, 0)
 	}
 	for _, pending := range expiredInbound {
 		cancelBuildDeadline(pending.cancelDeadline)
 		clearBuildKeys(pending.keys)
-		pending.build.reservation.Release()
-		m.recordShortBuild(pending.build.Hops, false, 0)
+		pending.build.reservation.ReleaseAfter(buildTimeoutPathCooldown)
 	}
 	for _, pending := range expiredVariable {
 		cancelBuildDeadline(pending.cancelDeadline)
 		clearVariableBuildKeys(pending.keys)
 	}
 	if expiredCount != 0 {
-		m.notifyBuildEvent()
+		m.schedule(buildTimeoutPathCooldown, func() {
+			if m.ctx.Err() == nil {
+				m.notifyBuildEvent()
+			}
+		})
 	}
 	return len(expired) + len(expiredInbound) + len(expiredVariable)
 }
@@ -1552,13 +1531,13 @@ func (m *BuildManager) removeInboundPending(id uint32) {
 	}
 }
 
-func (m *BuildManager) recordShortBuild(hops []ShortBuildHop, success bool, latency uint64) {
+func (m *BuildManager) recordBuildSuccess(hops []ShortBuildHop, latency uint64) {
 	if m.profiles == nil {
 		return
 	}
 	now := m.now()
 	for _, hop := range hops {
-		m.profiles.Record(hop.Router, Observation{Kind: BuildObservation, Success: success, LatencyMillis: latency, AtMillis: now})
+		m.recordBuildPeer(hop.Router, true, latency, now)
 	}
 }
 
@@ -1592,10 +1571,8 @@ func (m *BuildManager) ensureBuildSession(ctx context.Context, peer foundation.H
 		return nil
 	}
 	if err := ensurer.EnsureSession(ctx, peer); err != nil {
-		m.recordShortBuild(hops, false, 0)
-		if m.metrics != nil {
-			m.metrics.IncTunnelBuilds()
-			m.metrics.IncTunnelBuildFailures()
+		if m.profiles != nil {
+			m.profiles.RecordTransportFailure(peer, m.now())
 		}
 		if m.logger != nil {
 			m.logger.Warn("tunnel build session failed", "direction", direction, "role", role, "peer", foundation.EncodeI2PBase64(peer[:]), "error", err)
@@ -1603,7 +1580,17 @@ func (m *BuildManager) ensureBuildSession(ctx context.Context, peer foundation.H
 		m.scheduleBuildRetry()
 		return err
 	}
+	if m.profiles != nil {
+		m.profiles.RecordTransportSuccess(peer, m.now())
+	}
 	return nil
+}
+
+func (m *BuildManager) recordBuildPeer(peer foundation.Hash, success bool, latency, now uint64) {
+	if m.profiles == nil {
+		return
+	}
+	m.profiles.Record(peer, Observation{Kind: BuildObservation, Success: success, LatencyMillis: latency, AtMillis: now})
 }
 
 func buildPeerDiagnostics(hops []ShortBuildHop) []string {
@@ -1612,6 +1599,28 @@ func buildPeerDiagnostics(hops []ShortBuildHop) []string {
 		peers[index] = foundation.EncodeI2PBase64(hops[index].Router[:])
 	}
 	return peers
+}
+
+func (m *BuildManager) armOutboundDeadline(replyID uint32) {
+	now := m.now()
+	m.mu.Lock()
+	pending := m.pending[replyID]
+	if pending != nil {
+		pending.deadline = min(pending.build.ExpiresAt, now+buildRequestTimeout)
+		pending.cancelDeadline = m.scheduleBuildDeadline(now, pending.deadline)
+	}
+	m.mu.Unlock()
+}
+
+func (m *BuildManager) armInboundDeadline(replyID uint32) {
+	now := m.now()
+	m.mu.Lock()
+	pending := m.pendingInbound[replyID]
+	if pending != nil {
+		pending.deadline = min(pending.build.ExpiresAt, now+buildRequestTimeout)
+		pending.cancelDeadline = m.scheduleBuildDeadline(now, pending.deadline)
+	}
+	m.mu.Unlock()
 }
 
 func (m *BuildManager) scheduleBuildDeadline(now, deadline uint64) func() {

@@ -38,12 +38,12 @@ func TestLocalLeaseSet2BuildsVerifiedECIESAdvertisement(t *testing.T) {
 	if ok, err := set.Verify(); err != nil || !ok {
 		t.Fatalf("verified LS2 = %t, %v", ok, err)
 	}
-	if set.KeyCount() != 3 {
-		t.Fatalf("advertised key count = %d, want 3", set.KeyCount())
+	if set.KeyCount() != 1 {
+		t.Fatalf("advertised key count = %d, want 1", set.KeyCount())
 	}
-	key, err := set.SelectEncryptionKey(foundation.CryptoMLKEM1024X25519, foundation.CryptoMLKEM768X25519, foundation.CryptoX25519)
-	if err != nil || key.Type != foundation.CryptoMLKEM1024X25519 {
-		t.Fatalf("preferred locally usable key = %+v, %v", key, err)
+	key, err := set.SelectEncryptionKey(foundation.CryptoX25519)
+	if err != nil || key.Type != foundation.CryptoX25519 {
+		t.Fatalf("default interoperable key = %+v, %v", key, err)
 	}
 	leases := set.Leases()
 	lease, ok, err := leases.Next()

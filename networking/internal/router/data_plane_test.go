@@ -151,11 +151,11 @@ func TestDestinationDataUsesI2CPGzipHeader(t *testing.T) {
 
 func TestStreamingTunnelSenderLeaseSetGarlicTunnelDestination(t *testing.T) {
 	const now = uint64(1_000)
-	clientDestination, err := foundation.GenerateLocalDestination()
+	clientDestination, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverDestination, err := foundation.GenerateLocalDestination()
+	serverDestination, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,11 +294,11 @@ func TestStreamingTunnelSenderLeaseSetGarlicTunnelDestination(t *testing.T) {
 
 func TestGarlicReceiverDeliversNewSessionReplyAndEstablishesExistingSession(t *testing.T) {
 	const now = uint64(1_000_000)
-	initiator, err := foundation.GenerateLocalDestination()
+	initiator, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
-	responder, err := foundation.GenerateLocalDestination()
+	responder, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,11 +538,11 @@ func (r dataPlaneReplyPath) NetDBReplyPath() (foundation.Hash, uint32, bool) {
 
 func TestProductionDestinationDataPlaneOverConfirmedLS2(t *testing.T) {
 	const now = uint64(1_000_000)
-	aDestination, err := foundation.GenerateLocalDestination()
+	aDestination, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
-	bDestination, err := foundation.GenerateLocalDestination()
+	bDestination, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -932,7 +932,7 @@ func TestGarlicReceiverConstructorFailureDoesNotReturnSensitiveOwner(t *testing.
 	}
 }
 func TestGarlicReceiverUnregisterWaitsForInflightAndReleasesStaticKey(t *testing.T) {
-	local, err := foundation.GenerateLocalDestination()
+	local, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1022,7 +1022,7 @@ func TestGarlicReceiverUnregisterWaitsForInflightAndReleasesStaticKey(t *testing
 }
 
 func TestStreamingTunnelSenderReleaseClearsRemoteELSContext(t *testing.T) {
-	remote, err := foundation.GenerateLocalDestination()
+	remote, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
