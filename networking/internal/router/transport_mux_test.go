@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"errors"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,14 @@ import (
 	"gosuda.org/ivnp/networking/internal/netdb"
 	"gosuda.org/ivnp/observability"
 )
+
+type muxIPv4Listener struct{}
+
+func (muxIPv4Listener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+func (muxIPv4Listener) Close() error              { return nil }
+func (muxIPv4Listener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}
+}
 
 type muxTestTransport struct {
 	mu sync.Mutex
@@ -243,6 +252,12 @@ func TestTransportMuxRoutesFirewalledSSU2PeerThroughManager(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !mux.CanSend(peer) {
+		t.Fatal("introduced SSU2 peer was unavailable for ordinary delivery")
+	}
+	if mux.CanBuildTunnel(peer) {
+		t.Fatal("introduced-only SSU2 peer was eligible for tunnel construction")
+	}
 	if err = mux.Send(context.Background(), peer, i2np.Message{Payload: []byte("introduced")}); err != nil {
 		t.Fatalf("Send to firewalled SSU2 peer: %v", err)
 	}
@@ -250,6 +265,50 @@ func TestTransportMuxRoutesFirewalledSSU2PeerThroughManager(t *testing.T) {
 	_, _, _, ntcpSends := ntcp2.counts()
 	if ssuSends != 1 || ntcpSends != 0 {
 		t.Fatalf("send calls = SSU2 %d, NTCP2 %d; want 1, 0", ssuSends, ntcpSends)
+	}
+}
+
+func TestTransportMuxTunnelEligibilityAcceptsDirectPeer(t *testing.T) {
+	database, peer := muxTestPeer(t, true, true)
+	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: newMuxSessionTransport(), SSU2: newMuxSessionTransport()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mux.CanBuildTunnel(peer) {
+		t.Fatal("direct NTCP2 and SSU2 peer was ineligible for tunnel construction")
+	}
+}
+
+func TestTransportMuxTunnelEligibilityUsesSSU2OnlyWithoutNTCP2(t *testing.T) {
+	database, peer := muxTestPeer(t, false, true)
+	ssuOnly, err := NewTransportMux(TransportMuxConfig{Database: database, SSU2: newMuxSessionTransport()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ssuOnly.CanBuildTunnel(peer) {
+		t.Fatal("direct SSU2 peer was ineligible on an SSU2-only node")
+	}
+	withNTCP2, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: newMuxSessionTransport(), SSU2: newMuxSessionTransport()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withNTCP2.CanBuildTunnel(peer) {
+		t.Fatal("SSU2-only peer was eligible while reliable NTCP2 tunnel construction was configured")
+	}
+}
+
+func TestTransportMuxTunnelEligibilityMatchesIPv4Binding(t *testing.T) {
+	database, peer := muxTestPeerAtHost(t, true, false, "2001:db8::1")
+	manager := &NTCP2Manager{bindings: TransportBindings{NTCP2: muxIPv4Listener{}}}
+	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mux.CanSend(peer) {
+		t.Fatal("generic send capability did not expose the IPv6 NTCP2 address")
+	}
+	if mux.CanBuildTunnel(peer) {
+		t.Fatal("IPv6-only peer was eligible for an IPv4-bound tunnel builder")
 	}
 }
 
@@ -404,6 +463,10 @@ func TestTransportMuxUsableCountRejectsExpiredAddress(t *testing.T) {
 }
 
 func muxTestPeer(t *testing.T, ntcp2, ssu2 bool) (*netdb.Database, foundation.Hash) {
+	return muxTestPeerAtHost(t, ntcp2, ssu2, "127.0.0.1")
+}
+
+func muxTestPeerAtHost(t *testing.T, ntcp2, ssu2 bool, host string) (*netdb.Database, foundation.Hash) {
 	t.Helper()
 	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
@@ -416,7 +479,7 @@ func muxTestPeer(t *testing.T, ntcp2, ssu2 bool) (*netdb.Database, foundation.Ha
 	addresses := make([]PublishedAddress, 0, 2)
 	if ntcp2 {
 		addresses = append(addresses, PublishedAddress{Transport: "NTCP2", Options: []MappingOption{
-			{Key: "host", Value: "127.0.0.1"},
+			{Key: "host", Value: host},
 			{Key: "i", Value: foundation.EncodeI2PBase64(make([]byte, 16))},
 			{Key: "port", Value: "12345"},
 			{Key: "s", Value: foundation.EncodeI2PBase64(make([]byte, 32))},
@@ -425,7 +488,7 @@ func muxTestPeer(t *testing.T, ntcp2, ssu2 bool) (*netdb.Database, foundation.Ha
 	}
 	if ssu2 {
 		addresses = append(addresses, PublishedAddress{Transport: "SSU", Options: []MappingOption{
-			{Key: "host", Value: "127.0.0.1"},
+			{Key: "host", Value: host},
 			{Key: "i", Value: foundation.EncodeI2PBase64(make([]byte, 32))},
 			{Key: "port", Value: "12346"},
 			{Key: "s", Value: foundation.EncodeI2PBase64(make([]byte, 32))},

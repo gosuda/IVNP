@@ -394,8 +394,6 @@ func TestTunnelNetworkRejectsTamperedSynchronize(t *testing.T) {
 	packet := Packet{
 		ReceiveStreamID: 1,
 		Sequence:        0,
-		NACKCount:       8,
-		NACKs:           server.localHash[:],
 		Flags:           FlagSynchronize | FlagNoACK,
 	}
 	wire, err := client.signedControl(packet, controlOptions{includeFrom: true, includeMax: true})
@@ -406,6 +404,60 @@ func TestTunnelNetworkRejectsTamperedSynchronize(t *testing.T) {
 	err = server.HandleDelivery(context.Background(), Delivery{From: client.localHash, To: server.localHash, FromPort: 1, ToPort: 2, Protocol: ProtocolStreaming, Payload: wire})
 	if err == nil {
 		t.Fatal("tampered synchronized packet was accepted")
+	}
+}
+
+func TestTunnelNetworkAcceptsJavaSynchronizePayload(t *testing.T) {
+	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
+	client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
+	server.sender = discardTunnelSender{}
+	listener, err := server.ListenI2P(context.Background(), ":80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	payload := []byte("GET / HTTP/1.1\r\n\r\n")
+	packet := Packet{ReceiveStreamID: 1, Sequence: 0, NACKCount: 8, NACKs: server.localHash[:], Flags: FlagSynchronize | FlagNoACK, Payload: payload}
+	wire, err := client.signedControl(packet, controlOptions{includeFrom: true, includeMax: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = server.HandleDelivery(context.Background(), Delivery{From: client.localHash, To: server.localHash, FromPort: 1234, ToPort: 80, Protocol: ProtocolStreaming, Payload: wire})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { connection.(*tunnelConn).abort(false) })
+	got := make([]byte, len(payload))
+	if _, err = io.ReadFull(connection, got); err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("SYN payload = %q, %v", got, err)
+	}
+}
+
+func TestTunnelNetworkAcceptsJavaSynchronizeReplyPayload(t *testing.T) {
+	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
+	client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
+	connection := client.newConn(1, 0, server.localHash, foundation.Identity{}, 1234, 80, true)
+	if err := client.register(connection); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { connection.abort(false) })
+	payload := []byte("HTTP/1.1 200 OK\r\n\r\n")
+	packet := Packet{SendStreamID: 1, ReceiveStreamID: 2, Sequence: 0, Flags: FlagSynchronize, Payload: payload}
+	wire, err := server.signedControl(packet, controlOptions{includeFrom: true, includeMax: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.HandleDelivery(context.Background(), Delivery{From: server.localHash, To: client.localHash, FromPort: 80, ToPort: 1234, Protocol: ProtocolStreaming, Payload: wire})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(payload))
+	if _, err = io.ReadFull(connection, got); err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("SYN-ACK payload = %q, %v", got, err)
 	}
 }
 
@@ -487,6 +539,10 @@ type streamFabric struct {
 	initialACKs     int
 	zeroSYNACKPorts bool
 }
+
+type discardTunnelSender struct{}
+
+func (discardTunnelSender) SendTunnel(context.Context, Delivery) error { return nil }
 
 type blockingTunnelSender struct{ started chan struct{} }
 

@@ -418,6 +418,34 @@ func (m *TransportMux) CanSend(peer foundation.Hash) bool {
 	return ok
 }
 
+// CanBuildTunnel reports whether the peer has a directly reachable address
+// suitable for latency-bounded tunnel construction. When NTCP2 is configured,
+// its reliable stream path is required; SSU2 is the direct-only fallback for
+// SSU2-only nodes. Introducer-only SSU2 remains valid for ordinary delivery.
+func (m *TransportMux) CanBuildTunnel(peer foundation.Hash) bool {
+	if m == nil {
+		return false
+	}
+	ref, ok := m.database.Routers().Get(peer)
+	if !ok {
+		return false
+	}
+	now := time.Now()
+	nowMillis := uint64(now.UnixMilli())
+	if m.ntcp2 != nil {
+		if !ntcp2RouterInfoCapable(ref.Info, nowMillis) {
+			return false
+		}
+		manager, concrete := m.ntcp2.(*NTCP2Manager)
+		if !concrete {
+			return true
+		}
+		_, err := selectNTCP2AddressForNetwork(ref.Info, ntcp2IPv4Only(manager.currentBindings().NTCP2))
+		return err == nil
+	}
+	return m.ssu2 != nil && ssu2DirectRouterInfoCapable(ref.Info, uint64(now.Unix()))
+}
+
 func (m *TransportMux) selectManagers(peer foundation.Hash) (TransportManager, TransportManager, bool) {
 	capabilities, ok := m.capabilities(peer)
 	if !ok {

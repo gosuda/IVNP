@@ -457,6 +457,67 @@ func TestNewRejectsDestinationBoundsAndDuplicateIdentities(t *testing.T) {
 	})
 }
 
+func TestDataPlaneReadyDoesNotRequireOptionalAccelerationOrPublicReachability(t *testing.T) {
+	ready := client.ClientReadinessDetails{
+		NetDBRouters:               50,
+		RouterInfoPublications:     1,
+		LeaseSet2Publications:      1,
+		ExploratoryInboundTunnels:  1,
+		ExploratoryOutboundTunnels: 1,
+		ClientInboundTunnels:       1,
+		ClientOutboundTunnels:      1,
+	}
+	if !dataPlaneReady(ready) {
+		t.Fatal("operational firewalled router with portable SSU2 I/O was not ready")
+	}
+	required := []struct {
+		name   string
+		mutate func(*client.ClientReadinessDetails)
+	}{
+		{"netdb", func(value *client.ClientReadinessDetails) { value.NetDBRouters = 49 }},
+		{"router publication", func(value *client.ClientReadinessDetails) { value.RouterInfoPublications = 0 }},
+		{"lease set publication", func(value *client.ClientReadinessDetails) { value.LeaseSet2Publications = 0 }},
+		{"exploratory inbound", func(value *client.ClientReadinessDetails) { value.ExploratoryInboundTunnels = 0 }},
+		{"exploratory outbound", func(value *client.ClientReadinessDetails) { value.ExploratoryOutboundTunnels = 0 }},
+		{"client inbound", func(value *client.ClientReadinessDetails) { value.ClientInboundTunnels = 0 }},
+		{"client outbound", func(value *client.ClientReadinessDetails) { value.ClientOutboundTunnels = 0 }},
+	}
+	for _, test := range required {
+		t.Run(test.name, func(t *testing.T) {
+			value := ready
+			test.mutate(&value)
+			if dataPlaneReady(value) {
+				t.Fatal("incomplete data plane reported ready")
+			}
+		})
+	}
+}
+
+func TestRequestAllTunnelMaintenanceQueuesEveryPool(t *testing.T) {
+	cfg := daemonTestConfig(t)
+	cfg.Tunnel.Enabled = true
+	d, err := New(cfg, Options{SocketRuntime: new(recordingSockets)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	runtimes := d.clientRuntimeSnapshot()
+	if len(runtimes) != 1 {
+		t.Fatalf("client runtimes = %d, want 1", len(runtimes))
+	}
+	d.requestAllTunnelMaintenance()
+	if len(d.tunnelWake) != 1 || len(d.destinationTunnelWake) != 1 {
+		t.Fatalf("queued maintenance = exploratory %d destination %d", len(d.tunnelWake), len(d.destinationTunnelWake))
+	}
+	if !runtimes[0].tunnelMaintenanceDirty.Load() || !runtimes[0].tunnelMaintenanceQueued.Load() {
+		t.Fatal("destination maintenance state was not queued")
+	}
+	d.requestAllTunnelMaintenance()
+	if len(d.tunnelWake) != 1 || len(d.destinationTunnelWake) != 1 {
+		t.Fatalf("duplicate wake was not coalesced: exploratory %d destination %d", len(d.tunnelWake), len(d.destinationTunnelWake))
+	}
+}
+
 func TestTunnelCompositionUsesLiveInboundGatewayRoute(t *testing.T) {
 	cfg := daemonTestConfig(t)
 	cfg.Tunnel.Enabled = true
@@ -467,10 +528,13 @@ func TestTunnelCompositionUsesLiveInboundGatewayRoute(t *testing.T) {
 	defer d.Close()
 	tunnelCompositionUsesLiveInboundGatewayRouteRejected := d.service == nil || d.tunnels == nil || d.pool == nil || d.buildManager == nil || d.requests == nil || d.replyKeys == nil
 	if !tunnelCompositionUsesLiveInboundGatewayRouteRejected {
-		tunnelCompositionUsesLiveInboundGatewayRouteRejected = d.maintainer == nil
+		tunnelCompositionUsesLiveInboundGatewayRouteRejected = d.maintainer == nil || d.destinationFactory == nil || d.destinationFactory.eligible == nil
 	}
 	if tunnelCompositionUsesLiveInboundGatewayRouteRejected {
 		t.Fatal("native tunnel data plane is incomplete")
+	}
+	if d.destinationFactory.eligible(foundation.Hash{255}) {
+		t.Fatal("unknown RouterInfo was eligible for tunnel selection")
 	}
 	if len(d.bundle.DestinationPrivate["default"]) == 0 || len(d.clientRuntimeSnapshot()) != 1 {
 		t.Fatal("tunnel-only daemon did not create its default destination runtime")
@@ -488,6 +552,9 @@ func TestTunnelCompositionUsesLiveInboundGatewayRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	clientRuntime := d.clientRuntimeSnapshot()[0]
+	if clientRuntime.profiles != d.profiles {
+		t.Fatal("destination pool did not share router-wide peer reliability profiles")
+	}
 	owner := clientRuntime.local.Hash()
 	if err := clientRuntime.pool.Add(networking.TunnelEntry{ID: 3, Direction: networking.TunnelOutbound, Expires: now + 30_000, Owner: owner}, now); err != nil {
 		t.Fatal(err)

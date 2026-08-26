@@ -346,6 +346,10 @@ func TestLeaseSetPublisherDoesNotRepublishWhileDiscoveryPending(t *testing.T) {
 	if len(lookupSender.snapshot()) != 1 {
 		t.Fatal("publication did not start routing-key discovery")
 	}
+	lookup, err := i2np.ParseDatabaseLookup(lookupSender.snapshot()[0].Payload)
+	if err != nil || LookupType(lookup.LookupType()) != LeaseSetLookup {
+		t.Fatalf("publication discovery lookup = %#v, %v; want LeaseSet lookup", lookup, err)
+	}
 	now++
 	if sent, err := publisher.Maintain(context.Background()); err != nil || sent != 0 {
 		t.Fatalf("pending-discovery Maintain() = %d, %v", sent, err)

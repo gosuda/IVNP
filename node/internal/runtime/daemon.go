@@ -42,6 +42,7 @@ const (
 	daemonNetDBLookupTimeoutMillis            = uint64((30 * time.Second) / time.Millisecond)
 	daemonDestinationNetDBLookupTimeoutMillis = uint64((2 * time.Minute) / time.Millisecond)
 	daemonNetDBLookupCandidates               = 32
+	daemonTunnelBuildCandidates               = 512
 	daemonNetDBExplorationBootstrapDelay      = time.Second
 	daemonNetDBExplorationSteadyDelay         = 5 * time.Second
 )
@@ -694,6 +695,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		profiles = networking.TunnelNewPeerProfiles(networking.TunnelPeerProfilesConfig{})
 		reservations = networking.TunnelNewBuildReservations()
 		responders = networking.NetworkDatabaseNewResponderProfiles(0)
+		eligible := transportPeerEligibility(mux)
 		for _, peer := range bootstrapPeers {
 			responders.Record(peer)
 		}
@@ -714,7 +716,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			Now:           now, MaxPending: cfg.Tunnel.BuildPendingCapacity, Profiles: profiles, Logger: logger, Metrics: registry,
 			OnBuildEvent: func() {
 				if d != nil {
-					d.requestExploratoryMaintenance()
+					d.requestAllTunnelMaintenance()
 				}
 			},
 		})
@@ -724,20 +726,20 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		inboundSource, sourceErr := networking.TunnelNewNetDBInboundBuildSource(networking.TunnelNetDBInboundBuildSourceConfig{
 			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: cfg.Tunnel.Hops,
 			PreferredPeers: bootstrapPeers, Lifetime: uint64(cfg.Tunnel.Lifetime / time.Millisecond),
-			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
-			Reservations: reservations,
+			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
+			Eligible: eligible, Reservations: reservations,
 		})
 		if sourceErr != nil {
-			return nil, sourceErr
+			return nil, fmt.Errorf("create exploratory inbound build source: %w", sourceErr)
 		}
 		outboundSource, sourceErr := networking.TunnelNewNetDBOutboundBuildSource(networking.TunnelNetDBOutboundBuildSourceConfig{
 			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: cfg.Tunnel.Hops,
 			PreferredPeers: bootstrapPeers, Lifetime: uint64(cfg.Tunnel.Lifetime / time.Millisecond),
-			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
-			Reservations: reservations,
+			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
+			Eligible: eligible, Reservations: reservations,
 		})
 		if sourceErr != nil {
-			return nil, sourceErr
+			return nil, fmt.Errorf("create exploratory outbound build source: %w", sourceErr)
 		}
 		maintainer, err = networking.TunnelNewPairedPoolMaintainer(networking.TunnelPairedPoolMaintainerConfig{
 			Pool: pool, Runtime: tunnels, Builder: buildManager, InboundSource: inboundSource, OutboundSource: outboundSource,
@@ -789,8 +791,8 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			cfg: cfg, database: database, service: service, tunnels: tunnels, destinations: destinations,
 			replyKeys: replyKeys, replySender: replySender, transport: mux,
 			localRouter: bundle.Router.Hash, staticPrivate: bundle.Router.X25519Private[:],
-			reservations: reservations,
-			now:          now, clockNow: clock.Now, garlicReceiver: garlicReceiver, status: statusMux,
+			reservations: reservations, profiles: profiles, eligible: eligible,
+			now: now, clockNow: clock.Now, garlicReceiver: garlicReceiver, status: statusMux,
 			buildReplies: buildReplies, requests: requestHandlers, publishers: destinationPublishers,
 			publicationTokens: publicationTokens,
 			preferredPeers:    append([]foundation.Hash(nil), bootstrapPeers...),
@@ -890,7 +892,10 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		clientRuntime.onRelease = d.removeClientRuntime
 	}
 	if destinationFactory != nil {
-		destinationFactory.requestTunnelMaintenance = d.requestDestinationTunnelMaintenance
+		destinationFactory.requestTunnelMaintenance = func(runtime *destinationRuntime) {
+			d.requestDestinationTunnelMaintenance(runtime)
+			d.requestExploratoryMaintenance()
+		}
 	}
 	if cfg.AddressBook.Enabled {
 		d.addressBook, err = client.AddressBookNewService(client.AddressBookConfig{
@@ -1174,6 +1179,16 @@ func (d *Daemon) requestExploratoryMaintenance() {
 	select {
 	case d.tunnelWake <- struct{}{}:
 	default:
+	}
+}
+
+func (d *Daemon) requestAllTunnelMaintenance() {
+	if d == nil {
+		return
+	}
+	d.requestExploratoryMaintenance()
+	for _, runtime := range d.clientRuntimeSnapshot() {
+		d.requestDestinationTunnelMaintenance(runtime)
 	}
 }
 
@@ -1478,10 +1493,7 @@ func (d *Daemon) refreshObservability() {
 	d.registry.SetNetDBRouters(routers)
 	d.registry.SetNetDBFloodfills(floodfills)
 	if d.registry.Snapshot().Bootstrap.Stage < 3 && routers >= 50 && d.bootstrapPoolsStarted.CompareAndSwap(bootstrapPoolsIdle, bootstrapPoolsStarted) {
-		for _, runtime := range d.clientRuntimeSnapshot() {
-			d.requestDestinationTunnelMaintenance(runtime)
-		}
-		d.requestExploratoryMaintenance()
+		d.requestAllTunnelMaintenance()
 	}
 	if d.localInfo.Reachability() == networking.RouterReachabilityReachable {
 		d.registry.SetRouterReachable(1)
@@ -1508,37 +1520,32 @@ func (d *Daemon) refreshObservability() {
 	}
 	snapshot := d.registry.Snapshot()
 	stage := snapshot.Bootstrap.Stage
-	refreshObservabilitySelected := stage < 3 &&
-		routers >= 50 &&
-		snapshot.Publication.RouterInfoSuccesses != 0 &&
-		snapshot.Publication.LeaseSet2Successes != 0 &&
-		snapshot.Tunnel.ExploratoryInboundActive != 0 &&
-		snapshot.Tunnel.ExploratoryOutboundActive != 0 &&
-		snapshot.Tunnel.ClientInboundActive != 0 &&
-		snapshot.Tunnel.ClientOutboundActive != 0 &&
-		snapshot.SSU2.VectorIOEnabled != 0
-	if refreshObservabilitySelected {
-		refreshObservabilitySelected = snapshot.SSU2.KernelDropAccounting != 0
-	}
-	if refreshObservabilitySelected {
+	operational := dataPlaneReady(client.ClientReadinessDetails{
+		NetDBRouters:               snapshot.NetDB.Routers,
+		RouterInfoPublications:     snapshot.Publication.RouterInfoSuccesses,
+		LeaseSet2Publications:      snapshot.Publication.LeaseSet2Successes,
+		ExploratoryInboundTunnels:  snapshot.Tunnel.ExploratoryInboundActive,
+		ExploratoryOutboundTunnels: snapshot.Tunnel.ExploratoryOutboundActive,
+		ClientInboundTunnels:       snapshot.Tunnel.ClientInboundActive,
+		ClientOutboundTunnels:      snapshot.Tunnel.ClientOutboundActive,
+	})
+	if stage < 3 && operational {
 		stage = 3
 	}
-	refreshObservabilitySelected = stage == 3 &&
-		snapshot.Publication.RouterInfoSuccesses != 0 &&
-		snapshot.Publication.LeaseSet2Successes != 0 &&
-		snapshot.Tunnel.ExploratoryInboundActive != 0 &&
-		snapshot.Tunnel.ExploratoryOutboundActive != 0 &&
-		snapshot.Tunnel.ClientInboundActive != 0 &&
-		snapshot.Tunnel.ClientOutboundActive != 0 &&
-		snapshot.SSU2.VectorIOEnabled != 0 &&
-		snapshot.SSU2.KernelDropAccounting != 0
-	if refreshObservabilitySelected {
-		refreshObservabilitySelected = snapshot.Bootstrap.RouterReachable != 0
-	}
-	if refreshObservabilitySelected {
+	if stage == 3 && operational && snapshot.Bootstrap.RouterReachable != 0 {
 		stage = 4
 	}
 	d.registry.SetBootstrapStage(stage)
+}
+
+func dataPlaneReady(readiness client.ClientReadinessDetails) bool {
+	return readiness.NetDBRouters >= 50 &&
+		readiness.RouterInfoPublications != 0 &&
+		readiness.LeaseSet2Publications != 0 &&
+		readiness.ExploratoryInboundTunnels != 0 &&
+		readiness.ExploratoryOutboundTunnels != 0 &&
+		readiness.ClientInboundTunnels != 0 &&
+		readiness.ClientOutboundTunnels != 0
 }
 
 func (d *Daemon) recordMaintenanceError(err error) {
@@ -1741,7 +1748,7 @@ func (d *Daemon) ClientStatus(context.Context) (client.ClientStatus, error) {
 		ProcessHeapObjects:         snapshot.Process.HeapObjects,
 	}
 	return client.ClientStatus{
-		Ready:      status.Running && snapshot.Bootstrap.Stage >= 4,
+		Ready:      status.Running && dataPlaneReady(readiness),
 		State:      routerStateString(status.Router.State),
 		RouterHash: foundation.EncodeI2PBase64(routerHash[:]),
 		Readiness:  readiness,
@@ -2128,6 +2135,9 @@ func sendNetDBThroughPair(ctx context.Context, peer networking.NetworkDatabaseRo
 }
 
 func transportPeerEligibility(sender networking.TunnelSender) func(foundation.Hash) bool {
+	if selector, ok := sender.(interface{ CanBuildTunnel(foundation.Hash) bool }); ok {
+		return selector.CanBuildTunnel
+	}
 	selector, ok := sender.(interface{ CanSend(foundation.Hash) bool })
 	if !ok {
 		return nil

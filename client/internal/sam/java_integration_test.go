@@ -3,7 +3,9 @@
 package sam
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -15,17 +17,18 @@ import (
 	"gosuda.org/ivnp/interfaces/stream"
 )
 
-// TestJavaI2PHTTPProxyB32Integration proves the public net.Listener-shaped
-// SAM backend can serve HTTP at its generated b32 and that the official Java
-// router's HTTP proxy reaches it. It is opt-in because initial router reseed
-// and tunnel construction require a live I2P network and may take minutes.
+const javaI2PIntegrationTimeout = 10 * time.Minute
+
+// TestJavaI2PHTTPProxyB32Integration proves an IVNP-hosted HTTP service is
+// reachable through the Java I2P HTTP proxy. IVNP_SAM_ADDRESS selects whether
+// the destination uses Java's SAM bridge or an independently running ivnpd.
 func TestJavaI2PHTTPProxyB32Integration(t *testing.T) {
 	if os.Getenv("IVNP_SAM_INTEGRATION") != "1" {
 		t.Skip("set IVNP_SAM_INTEGRATION=1 with Java I2P SAM/HTTP proxy available")
 	}
-	context, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	context, cancel := context.WithTimeout(context.Background(), javaI2PIntegrationTimeout)
 	defer cancel()
-	network, err := New(Config{Address: "127.0.0.1:7656"})
+	network, err := New(Config{Address: integrationSAMAddress()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +53,7 @@ func TestJavaI2PHTTPProxyB32Integration(t *testing.T) {
 		_ = server.Shutdown(context)
 		select {
 		case err := <-serveErr:
-			if err != nil && err != http.ErrServerClosed {
+			if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 				t.Error(err)
 			}
 		case <-time.After(time.Second):
@@ -58,12 +61,67 @@ func TestJavaI2PHTTPProxyB32Integration(t *testing.T) {
 		}
 	}()
 
-	proxy, err := url.Parse("http://127.0.0.1:4444")
+	proxy, err := url.Parse(integrationHTTPProxyURL())
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: 4 * time.Minute}
-	response, err := client.Get("http://" + network.B32() + "/ivnp-e2e")
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: 30 * time.Second}
+	targetURL := "http://" + network.B32() + "/ivnp-e2e"
+	if os.Getenv("IVNP_JAVA_ADDRESS_HELPER") == "1" {
+		helperHost := "ivnp-e2e-" + network.B32()[:8] + ".i2p"
+		targetURL = "http://" + helperHost + "/ivnp-e2e?i2paddresshelper=" + url.QueryEscape(network.PublicDestination())
+	}
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	var lastStatus int
+	var lastBody []byte
+	for {
+		response, requestErr := client.Get(targetURL)
+		if requestErr == nil {
+			lastStatus = response.StatusCode
+			lastBody, requestErr = io.ReadAll(response.Body)
+			_ = response.Body.Close()
+			if requestErr == nil && lastStatus == http.StatusOK && string(lastBody) == "ivnp-java-i2p-e2e" {
+				return
+			}
+		}
+		select {
+		case <-context.Done():
+			t.Fatalf("Java proxy did not reach IVNP eepsite: status=%d body=%q error=%v: %v", lastStatus, lastBody, requestErr, context.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// TestJavaI2PEepsiteReachedByIVNPIntegration proves the IVNP SAM backend can
+// reach an HTTP server tunnel hosted by the Java I2P router.
+func TestJavaI2PEepsiteReachedByIVNPIntegration(t *testing.T) {
+	if os.Getenv("IVNP_SAM_INTEGRATION") != "1" {
+		t.Skip("set IVNP_SAM_INTEGRATION=1 with Java I2P SAM available")
+	}
+	host := os.Getenv("IVNP_JAVA_EEPSITE_B32")
+	if host == "" {
+		t.Skip("set IVNP_JAVA_EEPSITE_B32 to a Java I2P-hosted HTTP server tunnel")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), javaI2PIntegrationTimeout)
+	defer cancel()
+	network, err := New(Config{Address: integrationSAMAddress()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer network.Close()
+	if err = network.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := network.DialI2P(ctx, net.JoinHostPort(host, "80"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, err = io.WriteString(connection, "GET / HTTP/1.1\r\nHost: "+host+"\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,25 +130,55 @@ func TestJavaI2PHTTPProxyB32Integration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || string(body) != "ivnp-java-i2p-e2e" {
-		t.Fatalf("proxy response = %d %q", response.StatusCode, body)
+	if response.StatusCode != http.StatusOK || len(body) == 0 {
+		t.Fatalf("Java eepsite response = %d, %d bytes", response.StatusCode, len(body))
 	}
 }
 
-// TestJavaI2PStreamDialIntegration proves Dialer and ListenerConfig establish
-// a real I2P stream between two IVNP SAM sessions through the Java router.
+// TestJavaI2PEepsiteReachedByIVNPHTTPProxyIntegration proves an independently
+// running ivnpd data plane can reach a Java I2P-hosted HTTP server tunnel.
+func TestJavaI2PEepsiteReachedByIVNPHTTPProxyIntegration(t *testing.T) {
+	if os.Getenv("IVNP_SAM_INTEGRATION") != "1" {
+		t.Skip("set IVNP_SAM_INTEGRATION=1 with Java I2P and ivnpd available")
+	}
+	host := os.Getenv("IVNP_JAVA_EEPSITE_B32")
+	proxyRaw := os.Getenv("IVNP_HTTP_PROXY")
+	if host == "" || proxyRaw == "" {
+		t.Skip("set IVNP_JAVA_EEPSITE_B32 and IVNP_HTTP_PROXY")
+	}
+	proxy, err := url.Parse(proxyRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: javaI2PIntegrationTimeout}
+	response, err := client.Get("http://" + host + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || len(body) == 0 {
+		t.Fatalf("Java eepsite through IVNP proxy = %d, %d bytes", response.StatusCode, len(body))
+	}
+}
+
+// TestJavaI2PStreamDialIntegration proves two sessions on the configured SAM
+// backend establish a real I2P stream.
 func TestJavaI2PStreamDialIntegration(t *testing.T) {
 	if os.Getenv("IVNP_SAM_INTEGRATION") != "1" {
 		t.Skip("set IVNP_SAM_INTEGRATION=1 with Java I2P SAM available")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), javaI2PIntegrationTimeout)
 	defer cancel()
-	serverNetwork, err := New(Config{Address: "127.0.0.1:7656"})
+	serverNetwork, err := New(Config{Address: integrationSAMAddress()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer serverNetwork.Close()
-	clientNetwork, err := New(Config{Address: "127.0.0.1:7656"})
+	clientNetwork, err := New(Config{Address: integrationSAMAddress()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +238,20 @@ func TestJavaI2PStreamDialIntegration(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
+}
+
+func integrationSAMAddress() string {
+	if address := os.Getenv("IVNP_SAM_ADDRESS"); address != "" {
+		return address
+	}
+	return "127.0.0.1:7656"
+}
+
+func integrationHTTPProxyURL() string {
+	if address := os.Getenv("IVNP_JAVA_HTTP_PROXY"); address != "" {
+		return address
+	}
+	return "http://127.0.0.1:4444"
 }
 
 type streamIntegrationError struct{ got string }

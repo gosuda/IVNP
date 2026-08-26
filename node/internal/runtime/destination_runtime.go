@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -313,6 +314,8 @@ type destinationRuntimeFactory struct {
 	staticPrivate            []byte
 	preferredPeers           []foundation.Hash
 	reservations             *networking.TunnelBuildReservations
+	profiles                 *networking.TunnelPeerProfiles
+	eligible                 func(foundation.Hash) bool
 	responders               *networking.NetworkDatabaseResponderProfiles
 	now                      func() uint64
 	clockNow                 func() time.Time
@@ -328,7 +331,7 @@ type destinationRuntimeFactory struct {
 }
 
 func (f *destinationRuntimeFactory) create(name string, destination *foundation.LocalDestination, policy *state.SecureStateEncryptedLeaseSetPolicy, remotePolicies []state.SecureStateRemoteELSAuthorization, requestedCrypto []uint16) (*destinationRuntime, error) {
-	createSelected := f == nil || destination == nil || f.database == nil || f.service == nil || f.tunnels == nil || f.destinations == nil || f.replyKeys == nil || f.replySender == nil || f.transport == nil || f.now == nil || f.clockNow == nil || f.garlicReceiver == nil || f.status == nil || f.buildReplies == nil || f.requests == nil
+	createSelected := f == nil || destination == nil || f.database == nil || f.service == nil || f.tunnels == nil || f.destinations == nil || f.replyKeys == nil || f.replySender == nil || f.transport == nil || f.profiles == nil || f.now == nil || f.clockNow == nil || f.garlicReceiver == nil || f.status == nil || f.buildReplies == nil || f.requests == nil
 	if !createSelected {
 		createSelected = f.publishers == nil
 	}
@@ -369,7 +372,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	}
 	pool := networking.TunnelNewOwnedPool(owner, f.cfg.Tunnel.ClientPoolCapacity)
 	var runtime *destinationRuntime
-	profiles := networking.TunnelNewPeerProfiles(networking.TunnelPeerProfilesConfig{})
+	profiles := f.profiles
 	build, err := networking.TunnelNewBuildManager(networking.TunnelBuildManagerConfig{
 		Runtime: f.tunnels, Pool: pool, Sender: f.transport, ReplyKeys: f.replyKeys, ReplySender: f.replySender,
 		LocalRouter: f.localRouter, StaticPrivate: f.staticPrivate,
@@ -397,19 +400,19 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	}()
 	inboundSource, err := networking.TunnelNewNetDBInboundBuildSource(networking.TunnelNetDBInboundBuildSourceConfig{
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: f.cfg.Tunnel.Hops,
-		PreferredPeers: preferredPeers, Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
-		Reservations: f.reservations,
+		PreferredPeers: preferredPeers, Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
+		Eligible: f.eligible, Reservations: f.reservations,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create destination inbound build source: %w", err)
 	}
 	outboundSource, err := networking.TunnelNewNetDBOutboundBuildSource(networking.TunnelNetDBOutboundBuildSourceConfig{
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: f.cfg.Tunnel.Hops,
-		PreferredPeers: preferredPeers, Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
-		Reservations: f.reservations,
+		PreferredPeers: preferredPeers, Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
+		Eligible: f.eligible, Reservations: f.reservations,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create destination outbound build source: %w", err)
 	}
 	maintainer, err := networking.TunnelNewPairedPoolMaintainer(networking.TunnelPairedPoolMaintainerConfig{
 		Pool: pool, Runtime: f.tunnels, Builder: build, InboundSource: inboundSource, OutboundSource: outboundSource,

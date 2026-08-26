@@ -333,13 +333,13 @@ func (n *TunnelNetwork) HandleDelivery(ctx context.Context, delivery Delivery) e
 		return err
 	}
 	if packet.Flags&^streamingKnownFlags != 0 {
-		return ErrTunnelPacket
+		return invalidTunnelPacket("unknown flags", packet)
 	}
 	if packet.SendStreamID == 0 && packet.Flags&FlagSynchronize != 0 {
 		return n.handleSynchronize(ctx, delivery, packet)
 	}
 	if packet.SendStreamID == 0 || packet.ReceiveStreamID == 0 {
-		return ErrTunnelPacket
+		return invalidTunnelPacket("missing stream ID", packet)
 	}
 	n.mu.RLock()
 	// After SYN, the sender writes the stream ID chosen by the packet
@@ -351,9 +351,15 @@ func (n *TunnelNetwork) HandleDelivery(ctx context.Context, delivery Delivery) e
 	}
 	n.mu.RUnlock()
 	if connection == nil {
-		return ErrTunnelPacket
+		return invalidTunnelPacket("unknown stream", packet)
 	}
 	return connection.handle(ctx, delivery, packet)
+}
+
+func invalidTunnelPacket(reason string, packet Packet) error {
+	return fmt.Errorf("%w: %s flags=%#x send=%d receive=%d sequence=%d ack=%d nacks=%d payload=%d options=%d",
+		ErrTunnelPacket, reason, packet.Flags, packet.SendStreamID, packet.ReceiveStreamID,
+		packet.Sequence, packet.AckThrough, packet.NACKCount, len(packet.Payload), len(packet.Options))
 }
 
 // Close unregisters listeners and connections, then stops the single
@@ -385,21 +391,19 @@ func (n *TunnelNetwork) Close() error {
 }
 
 func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery, packet Packet) error {
-	handleSynchronizeRejected := packet.ReceiveStreamID == 0 || packet.Sequence != 0 || packet.Flags&FlagNoACK == 0 || len(packet.Payload) != 0 || packet.NACKCount != 8
-	if !handleSynchronizeRejected {
-		handleSynchronizeRejected = len(packet.NACKs) != foundation.HashLength
+	validNACKs := packet.NACKCount == 0 && len(packet.NACKs) == 0
+	if packet.NACKCount == 8 && len(packet.NACKs) == foundation.HashLength {
+		var target foundation.Hash
+		copy(target[:], packet.NACKs)
+		validNACKs = target == n.localHash
 	}
+	handleSynchronizeRejected := packet.ReceiveStreamID == 0 || packet.Sequence != 0 || packet.Flags&FlagNoACK == 0 || !validNACKs
 	if handleSynchronizeRejected {
-		return ErrTunnelPacket
-	}
-	var target foundation.Hash
-	copy(target[:], packet.NACKs)
-	if target != n.localHash {
-		return ErrTunnelDestination
+		return invalidTunnelPacket("invalid SYN", packet)
 	}
 	identity, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, nil, true)
 	if err != nil {
-		return err
+		return fmt.Errorf("streaming SYN control: %w", err)
 	}
 	key := inboundKey{from: delivery.From, id: packet.ReceiveStreamID}
 	n.mu.RLock()
@@ -422,6 +426,15 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 		return err
 	}
 	connection := n.newConn(localID, packet.ReceiveStreamID, delivery.From, identity, delivery.ToPort, delivery.FromPort, false)
+	if len(packet.Payload) != 0 {
+		connection.mu.Lock()
+		queued := connection.enqueuePayloadLocked(packet.Payload)
+		connection.mu.Unlock()
+		if !queued {
+			connection.abort(false)
+			return ErrTunnelBackpressure
+		}
+	}
 	connection.setPeerMaxPayloadSize(peerMaxPayloadSize)
 	if err = n.registerInbound(key, connection); err != nil {
 		return err
@@ -872,7 +885,7 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 func (c *tunnelConn) preparePeerLocked(delivery Delivery, packet Packet) error {
 	if c.remoteID != 0 {
 		if packet.SendStreamID != c.localID || packet.ReceiveStreamID != c.remoteID {
-			return ErrTunnelPacket
+			return invalidTunnelPacket("stream ID mismatch", packet)
 		}
 		if packet.Flags&(FlagSynchronize|FlagClose|FlagReset) == 0 {
 			return nil
@@ -886,13 +899,16 @@ func (c *tunnelConn) preparePeerLocked(delivery Delivery, packet Packet) error {
 	}
 	invalidSynchronize := packet.Flags&FlagSynchronize == 0 || packet.Flags&FlagNoACK != 0 ||
 		packet.SendStreamID != c.localID || packet.ReceiveStreamID == 0 ||
-		packet.Sequence != 0 || packet.NACKCount != 0 || len(packet.Payload) != 0
+		packet.Sequence != 0 || packet.NACKCount != 0
 	if invalidSynchronize {
-		return ErrTunnelPacket
+		return invalidTunnelPacket("invalid SYN reply", packet)
 	}
 	identity, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, nil, true)
 	if err != nil {
-		return err
+		return fmt.Errorf("streaming SYN reply control: %w", err)
+	}
+	if !c.enqueuePayloadLocked(packet.Payload) {
+		return ErrTunnelBackpressure
 	}
 	c.peerIdentity = identity
 	c.updatePeerMaxPayloadSizeLocked(peerMaxPayloadSize)
@@ -1560,7 +1576,11 @@ func (n *TunnelNetwork) signedControl(packet Packet, options controlOptions) ([]
 	if err != nil || len(signature) != streamingSignatureSize {
 		return nil, ErrTunnelIdentity
 	}
-	copy(wire[len(wire)-len(signature):], signature)
+	signatureOffset := 17 + len(packet.NACKs) + 5 + len(packet.Options) - len(signature)
+	if signatureOffset < 0 || signatureOffset+len(signature) > len(wire) {
+		return nil, ErrTunnelPacket
+	}
+	copy(wire[signatureOffset:signatureOffset+len(signature)], signature)
 	return wire, nil
 }
 

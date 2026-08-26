@@ -63,8 +63,8 @@ type LeaseSetPublisherConfig struct {
 	Database      *Database
 	InboundLeases InboundLeaseSource
 	Sender        LeaseSetPublishSender
-	// Discovery iteratively learns floodfills near the daily routing key before
-	// and during publication. Publication still proceeds while discovery runs.
+	// Discovery uses a forced LeaseSet lookup so referrals contain floodfills
+	// near the daily routing key. Publication still proceeds while it runs.
 	Discovery        *RequestManager
 	EncryptionKey    []byte
 	SigningKey       []byte
@@ -444,7 +444,7 @@ func (p *LeaseSetPublisher) maintainDiscovery(ctx context.Context, now uint64) b
 	if p.discoveryDay == day || now < p.discoveryRetryAt {
 		return false
 	}
-	result, err := p.discovery.Explore(ctx, p.hash)
+	result, err := p.discovery.lookup(ctx, LeaseSetLookup, p.hash, true)
 	if err != nil {
 		p.discoveryRetryAt = saturatingAdd(now, databaseLookupAttemptTimeout)
 		return false
