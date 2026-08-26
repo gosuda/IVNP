@@ -470,6 +470,15 @@ func TestDataPlaneReadyDoesNotRequireOptionalAccelerationOrPublicReachability(t 
 	if !dataPlaneReady(ready) {
 		t.Fatal("operational firewalled router with portable SSU2 I/O was not ready")
 	}
+	floodfill := ready
+	floodfill.FloodfillConfigured = true
+	if dataPlaneReady(floodfill) {
+		t.Fatal("configured floodfill reported ready before advertising its role")
+	}
+	floodfill.FloodfillAdvertised = true
+	if !dataPlaneReady(floodfill) {
+		t.Fatal("advertised floodfill with an operational data plane was not ready")
+	}
 	required := []struct {
 		name   string
 		mutate func(*client.ClientReadinessDetails)

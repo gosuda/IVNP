@@ -35,6 +35,8 @@ type ReadinessDetails struct {
 	ExploratoryOutboundTunnels uint64 `json:"exploratory_outbound_tunnels"`
 	ClientInboundTunnels       uint64 `json:"client_inbound_tunnels"`
 	ClientOutboundTunnels      uint64 `json:"client_outbound_tunnels"`
+	FloodfillConfigured        bool   `json:"floodfill_configured"`
+	FloodfillAdvertised        bool   `json:"floodfill_advertised"`
 	RouterReachable            bool   `json:"router_reachable"`
 	SSU2VectorIO               bool   `json:"ssu2_vector_io"`
 	SSU2KernelDropAccounting   bool   `json:"ssu2_kernel_drop_accounting"`

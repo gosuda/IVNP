@@ -165,6 +165,7 @@ type TunnelBuildReplyHandler interface {
 // lookup result.
 type NetDBRequestHandler interface {
 	HandleDatabaseSearchReply(i2np.DatabaseSearchReplyMessage)
+	ExpectsDatabaseStore(i2np.DatabaseStoreMessage) bool
 	HandleDatabaseStore(i2np.DatabaseStoreMessage)
 }
 
@@ -192,6 +193,8 @@ type Dependencies struct {
 	RequestHandler NetDBRequestHandler
 	// LookupResponder owns bounded DatabaseLookup reply work.
 	LookupResponder *netdb.LookupResponder
+	// StoreFlooder owns bounded DatabaseStore propagation for floodfill nodes.
+	StoreFlooder *netdb.StoreFlooder
 	// DeliveryStatusMux correlates confirmed publication and health tokens.
 	DeliveryStatusMux *DeliveryStatusMux
 	// TunnelTest handles live tunnel health probes.
@@ -321,9 +324,18 @@ func New(cfg Config, deps Dependencies) (*Router, error) {
 			return nil
 		})
 		deps.Service.SetDatabaseStoreCompletedSink(deps.RequestHandler.HandleDatabaseStore)
+		deps.Service.SetDatabaseStoreExpectedSink(deps.RequestHandler.ExpectsDatabaseStore)
 	}
 	if deps.LookupResponder != nil {
 		deps.Service.SetDatabaseLookupSink(deps.LookupResponder.Enqueue)
+	}
+	if deps.StoreFlooder != nil {
+		deps.Service.SetDatabaseStoreFloodSink(func(source I2NPSource, store i2np.DatabaseStoreMessage) error {
+			return deps.StoreFlooder.Enqueue(source.Peer, store)
+		})
+	}
+	if deps.DatabaseStoreReply != nil {
+		deps.Service.SetDatabaseStoreReplySink(deps.DatabaseStoreReply)
 	}
 	if deps.DeliveryStatusMux != nil {
 		deps.Service.SetDeliveryStatusSink(deps.DeliveryStatusMux.Sink)
@@ -452,6 +464,13 @@ func (r *Router) Start(parent context.Context) error {
 	r.mu.Unlock()
 	if r.deps.LookupResponder != nil {
 		if err := r.deps.LookupResponder.Start(ctx); err != nil {
+			r.stop(err, false)
+			<-r.done
+			return err
+		}
+	}
+	if r.deps.StoreFlooder != nil {
+		if err := r.deps.StoreFlooder.Start(ctx); err != nil {
 			r.stop(err, false)
 			<-r.done
 			return err
@@ -688,6 +707,9 @@ func (r *Router) stop(cause error, fatal bool) {
 
 		if r.deps.LookupResponder != nil {
 			r.recordCloseError(r.deps.LookupResponder.Close())
+		}
+		if r.deps.StoreFlooder != nil {
+			r.recordCloseError(r.deps.StoreFlooder.Close())
 		}
 		if destinations != nil {
 			r.recordCloseError(destinations.Close())

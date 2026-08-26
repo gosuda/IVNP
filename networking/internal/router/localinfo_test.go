@@ -62,8 +62,8 @@ func TestLocalRouterInfoPublishesRouterLifecycleState(t *testing.T) {
 	if valid, err := info.Verify(); err != nil || !valid {
 		t.Fatalf("snapshot signature = %t, %v", valid, err)
 	}
-	if got := mappingValue(t, info.Options, "caps"); got != "R" {
-		t.Fatalf("reachable caps = %q, want R", got)
+	if got := mappingValue(t, info.Options, "caps"); got != "KR" {
+		t.Fatalf("reachable caps = %q, want KR", got)
 	}
 	if got := mappingValue(t, info.Options, "netId"); got != "2" {
 		t.Fatalf("netId = %q, want 2", got)
@@ -88,8 +88,63 @@ func TestLocalRouterInfoPublishesRouterLifecycleState(t *testing.T) {
 	if err = owner.Publish(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := mappingValue(t, owner.Snapshot().Options, "caps"); got != "U" {
-		t.Fatalf("firewalled caps = %q, want U", got)
+	if got := mappingValue(t, owner.Snapshot().Options, "caps"); got != "KU" {
+		t.Fatalf("firewalled caps = %q, want KU", got)
+	}
+}
+
+func TestLocalRouterInfoAdvertisesConfiguredFloodfillWithReachabilityState(t *testing.T) {
+	local, err := foundation.GenerateLocalAddress()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{Local: local, Floodfill: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = owner.Publish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if netdb.IsFloodfill(owner.Snapshot()) {
+		t.Fatal("unknown-reachability router advertised floodfill capability")
+	}
+	owner.SetReachability(ReachabilityFirewalled)
+	if err = owner.Publish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if info := owner.Snapshot(); !netdb.IsFloodfill(info) || mappingValue(t, info.Options, "caps") != "KfU" {
+		t.Fatalf("firewalled floodfill caps = %q, want KfU", mappingValue(t, info.Options, "caps"))
+	}
+	owner.SetReachability(ReachabilityReachable)
+	if err = owner.Publish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	info := owner.Snapshot()
+	if !netdb.IsFloodfill(info) {
+		t.Fatal("reachable configured router omitted floodfill capability")
+	}
+	if got := mappingValue(t, info.Options, "caps"); got != "KfR" {
+		t.Fatalf("floodfill caps = %q, want KfR", got)
+	}
+}
+
+func TestLocalRouterBandwidthCapabilityMatchesJavaThresholds(t *testing.T) {
+	for _, test := range []struct {
+		bytesPerSecond int
+		want           byte
+	}{
+		{0, 'K'},
+		{12 * 1024, 'L'},
+		{48 * 1024, 'L'},
+		{49 * 1024, 'M'},
+		{65 * 1024, 'N'},
+		{129 * 1024, 'O'},
+		{257 * 1024, 'P'},
+		{2001 * 1024, 'X'},
+	} {
+		if got := localRouterBandwidthCapability(test.bytesPerSecond); got != test.want {
+			t.Fatalf("localRouterBandwidthCapability(%d) = %q, want %q", test.bytesPerSecond, got, test.want)
+		}
 	}
 }
 

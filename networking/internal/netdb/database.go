@@ -18,6 +18,10 @@ const (
 	RouterInfoMaxAgeMillis       = uint64((90 * time.Minute) / time.Millisecond)
 	ReseedRouterInfoMaxAgeMillis = uint64((24 * time.Hour) / time.Millisecond)
 	RouterInfoMaxFutureMillis    = uint64((2 * time.Minute) / time.Millisecond)
+	LeaseSetMaxPastMillis        = uint64((10 * time.Minute) / time.Millisecond)
+	LeaseSetClockFudgeMillis     = uint64(time.Minute / time.Millisecond)
+	LeaseSetMaxFutureMillis      = uint64((15 * time.Minute) / time.Millisecond)
+	MetaLeaseSetMaxFutureMillis  = uint64((65_535 * time.Second) / time.Millisecond)
 )
 
 var (
@@ -26,6 +30,8 @@ var (
 	ErrRouterInfoTooLarge = errors.New("netdb: decompressed RouterInfo exceeds Java I2P 4 KiB limit")
 	ErrRouterInfoStale    = errors.New("netdb: RouterInfo publication is stale")
 	ErrRouterInfoFuture   = errors.New("netdb: RouterInfo publication is too far in the future")
+	ErrLeaseSetExpired    = errors.New("netdb: LeaseSet is expired or too old")
+	ErrLeaseSetFuture     = errors.New("netdb: LeaseSet expires too far in the future")
 )
 
 type leaseEntry struct {
@@ -35,6 +41,7 @@ type leaseEntry struct {
 	encrypted EncryptedLeaseSet
 	version   uint64
 	expires   uint64
+	published bool
 	typeID    i2np.StoreType
 }
 
@@ -159,18 +166,24 @@ func (d *Database) admitRouterInfo(info RouterInfo, seenAt, maxAgeMillis uint64)
 // RouterInfo compression is expanded under a strict 62,690-byte cap before
 // parsing, preventing gzip bombs from becoming live heap pressure.
 func (d *Database) HandleDatabaseStore(store i2np.DatabaseStoreMessage, floodfill bool, seenAt uint64) error {
+	return d.HandleDatabaseStoreAsPublished(store, floodfill, seenAt, true)
+}
+
+// HandleDatabaseStoreAsPublished distinguishes unsolicited/flooded LeaseSets
+// from lookup replies. Floodfill responders only expose published entries.
+func (d *Database) HandleDatabaseStoreAsPublished(store i2np.DatabaseStoreMessage, floodfill bool, seenAt uint64, published bool) error {
 	var err error
 	switch store.Type {
 	case i2np.StoreRouterInfo:
 		err = d.storeRouterInfo(store, floodfill, seenAt)
 	case i2np.StoreLeaseSet:
-		err = d.storeLeaseSet(store)
+		err = d.storeLeaseSet(store, seenAt, published)
 	case i2np.StoreLeaseSet2:
-		err = d.storeLeaseSet2(store)
+		err = d.storeLeaseSet2(store, seenAt, published)
 	case i2np.StoreMetaLeaseSet:
-		err = d.storeMetaLeaseSet(store)
+		err = d.storeMetaLeaseSet(store, seenAt, published)
 	case i2np.StoreEncryptedLeaseSet:
-		err = d.storeEncryptedLeaseSet(store, seenAt)
+		err = d.storeEncryptedLeaseSet(store, seenAt, published)
 	default:
 		err = ErrStoreUnsupported
 	}
@@ -182,6 +195,45 @@ func (d *Database) HandleDatabaseStore(store i2np.DatabaseStoreMessage, floodfil
 		}
 	}
 	return err
+}
+
+// StoreMatchesCurrent reports whether an admitted store is the exact newest
+// generation retained for its key. Floodfill propagation uses it to avoid
+// reflooding stale but otherwise valid stores.
+func (d *Database) StoreMatchesCurrent(store i2np.DatabaseStoreMessage) bool {
+	if store.Type == i2np.StoreRouterInfo {
+		inflated, err := d.inflateRouterInfo(store.Data)
+		if err != nil {
+			return false
+		}
+		defer pool.Release(inflated)
+		incoming, err := ParseRouterInfo(inflated)
+		if err != nil {
+			return false
+		}
+		current, ok := d.routers.Get(store.Key)
+		return ok && current.Info.Published == incoming.Published && bytes.Equal(current.Info.Bytes(), incoming.Bytes())
+	}
+	d.leasesMu.RLock()
+	entry, ok := d.leases[store.Key]
+	if !ok || entry.typeID != store.Type {
+		d.leasesMu.RUnlock()
+		return false
+	}
+	var data []byte
+	switch entry.typeID {
+	case i2np.StoreLeaseSet:
+		data = entry.legacy.Bytes()
+	case i2np.StoreLeaseSet2:
+		data = entry.v2.Bytes()
+	case i2np.StoreMetaLeaseSet:
+		data = entry.meta.Bytes()
+	case i2np.StoreEncryptedLeaseSet:
+		data = entry.encrypted.Bytes()
+	}
+	matches := bytes.Equal(data, store.Data)
+	d.leasesMu.RUnlock()
+	return matches
 }
 
 func (d *Database) storeRouterInfo(store i2np.DatabaseStoreMessage, floodfill bool, seenAt uint64) error {
@@ -200,7 +252,7 @@ func (d *Database) storeRouterInfo(store i2np.DatabaseStoreMessage, floodfill bo
 	return d.AdmitRouterInfo(parsed, floodfill, seenAt)
 }
 
-func (d *Database) storeLeaseSet(store i2np.DatabaseStoreMessage) error {
+func (d *Database) storeLeaseSet(store i2np.DatabaseStoreMessage, seenAt uint64, published bool) error {
 	parsed, err := ParseLeaseSet(store.Data)
 	if err != nil {
 		return err
@@ -215,25 +267,32 @@ func (d *Database) storeLeaseSet(store i2np.DatabaseStoreMessage) error {
 	if !valid {
 		return ErrInvalidSignature
 	}
+	earliest, latest, err := legacyLeaseRange(parsed)
+	if err != nil {
+		return err
+	}
+	if err = validateLeaseSetRange(earliest, latest, seenAt, LeaseSetMaxFutureMillis); err != nil {
+		return err
+	}
 	owned := append([]byte(nil), store.Data...)
 	parsed, err = ParseLeaseSet(owned)
 	if err != nil {
 		return err
 	}
-	version, err := earliestLeaseEnd(parsed)
-	if err != nil {
-		return err
-	}
 	d.leasesMu.Lock()
 	defer d.leasesMu.Unlock()
-	if old, exists := d.leases[store.Key]; exists && old.version >= version {
+	if old, exists := d.leases[store.Key]; exists && old.version >= earliest {
+		if published && !old.published {
+			old.published = true
+			d.leases[store.Key] = old
+		}
 		return nil
 	}
-	d.storeLeaseEntry(store.Key, leaseEntry{legacy: parsed, version: version, expires: version, typeID: store.Type})
+	d.storeLeaseEntry(store.Key, leaseEntry{legacy: parsed, version: earliest, expires: latest, published: published, typeID: store.Type})
 	return nil
 }
 
-func (d *Database) storeLeaseSet2(store i2np.DatabaseStoreMessage) error {
+func (d *Database) storeLeaseSet2(store i2np.DatabaseStoreMessage, seenAt uint64, published bool) error {
 	parsed, err := ParseLeaseSet2(store.Data)
 	if err != nil {
 		return err
@@ -248,21 +307,34 @@ func (d *Database) storeLeaseSet2(store i2np.DatabaseStoreMessage) error {
 	if !valid {
 		return ErrInvalidSignature
 	}
+	earliest, latest, err := leaseSet2Range(parsed)
+	if err != nil {
+		return err
+	}
+	if err = validateLeaseSetRange(earliest, latest, seenAt, LeaseSetMaxFutureMillis); err != nil {
+		return err
+	}
 	owned := append([]byte(nil), store.Data...)
 	parsed, err = ParseLeaseSet2(owned)
 	if err != nil {
 		return err
 	}
+	version := uint64(parsed.Header.Published)
+	expires := (uint64(parsed.Header.Published) + uint64(parsed.Header.Expires)) * 1000
 	d.leasesMu.Lock()
 	defer d.leasesMu.Unlock()
-	if old, exists := d.leases[store.Key]; exists && old.version >= uint64(parsed.Header.Published) {
+	if old, exists := d.leases[store.Key]; exists && old.version >= version {
+		if published && !old.published {
+			old.published = true
+			d.leases[store.Key] = old
+		}
 		return nil
 	}
-	d.storeLeaseEntry(store.Key, leaseEntry{v2: parsed, version: uint64(parsed.Header.Published), expires: uint64(parsed.Header.Published+uint32(parsed.Header.Expires)) * 1000, typeID: store.Type})
+	d.storeLeaseEntry(store.Key, leaseEntry{v2: parsed, version: version, expires: expires, published: published, typeID: store.Type})
 	return nil
 }
 
-func (d *Database) storeMetaLeaseSet(store i2np.DatabaseStoreMessage) error {
+func (d *Database) storeMetaLeaseSet(store i2np.DatabaseStoreMessage, seenAt uint64, published bool) error {
 	parsed, err := ParseMetaLeaseSet(store.Data)
 	if err != nil {
 		return err
@@ -277,27 +349,45 @@ func (d *Database) storeMetaLeaseSet(store i2np.DatabaseStoreMessage) error {
 	if !valid {
 		return ErrInvalidSignature
 	}
+	earliest, latest, err := metaLeaseSetRange(parsed)
+	if err != nil {
+		return err
+	}
+	headerExpires := (uint64(parsed.Header.Published) + uint64(parsed.Header.Expires)) * 1000
+	if headerExpires < latest {
+		latest = headerExpires
+	}
+	if err = validateLeaseSetRange(earliest, latest, seenAt, MetaLeaseSetMaxFutureMillis); err != nil {
+		return err
+	}
 	owned := append([]byte(nil), store.Data...)
 	parsed, err = ParseMetaLeaseSet(owned)
 	if err != nil {
 		return err
 	}
+	version := uint64(parsed.Header.Published)
 	d.leasesMu.Lock()
 	defer d.leasesMu.Unlock()
-	if old, exists := d.leases[store.Key]; exists && old.version >= uint64(parsed.Header.Published) {
+	if old, exists := d.leases[store.Key]; exists && old.version >= version {
+		if published && !old.published {
+			old.published = true
+			d.leases[store.Key] = old
+		}
 		return nil
 	}
-	d.storeLeaseEntry(store.Key, leaseEntry{meta: parsed, version: uint64(parsed.Header.Published), expires: uint64(parsed.Header.Published+uint32(parsed.Header.Expires)) * 1000, typeID: store.Type})
+	d.storeLeaseEntry(store.Key, leaseEntry{meta: parsed, version: version, expires: headerExpires, published: published, typeID: store.Type})
 	return nil
 }
 
-func (d *Database) storeEncryptedLeaseSet(store i2np.DatabaseStoreMessage, seenAt uint64) error {
+func (d *Database) storeEncryptedLeaseSet(store i2np.DatabaseStoreMessage, seenAt uint64, published bool) error {
 	parsed, err := ParseEncryptedLeaseSet(store.Data)
 	if err != nil {
 		return err
 	}
-	if parsed.Expires != 0 && (seenAt/1000 < uint64(parsed.Published) || seenAt/1000 >= uint64(parsed.Published)+uint64(parsed.Expires)) {
-		return ErrELSExpired
+	earliest := uint64(parsed.Published) * 1000
+	latest := (uint64(parsed.Published) + uint64(parsed.Expires)) * 1000
+	if err = validateLeaseSetRange(earliest, latest, seenAt, LeaseSetMaxFutureMillis); err != nil {
+		return err
 	}
 	if parsed.Hash() != store.Key {
 		return ErrStoreKeyMismatch
@@ -314,12 +404,97 @@ func (d *Database) storeEncryptedLeaseSet(store i2np.DatabaseStoreMessage, seenA
 	if err != nil {
 		return err
 	}
+	version := uint64(parsed.Published)
 	d.leasesMu.Lock()
 	defer d.leasesMu.Unlock()
-	if old, exists := d.leases[store.Key]; exists && old.version >= uint64(parsed.Published) {
+	if old, exists := d.leases[store.Key]; exists && old.version >= version {
+		if published && !old.published {
+			old.published = true
+			d.leases[store.Key] = old
+		}
 		return nil
 	}
-	d.storeLeaseEntry(store.Key, leaseEntry{encrypted: parsed, version: uint64(parsed.Published), expires: uint64(parsed.Published+uint32(parsed.Expires)) * 1000, typeID: store.Type})
+	d.storeLeaseEntry(store.Key, leaseEntry{encrypted: parsed, version: version, expires: latest, published: published, typeID: store.Type})
+	return nil
+}
+
+func legacyLeaseRange(set LeaseSet) (uint64, uint64, error) {
+	leases := set.Leases()
+	earliest, latest := ^uint64(0), uint64(0)
+	for {
+		lease, ok, err := leases.Next()
+		if err != nil {
+			return 0, 0, err
+		}
+		if !ok {
+			break
+		}
+		earliest = min(earliest, lease.EndDate)
+		latest = max(latest, lease.EndDate)
+	}
+	if latest == 0 {
+		return 0, 0, ErrLeaseSetExpired
+	}
+	return earliest, latest, nil
+}
+
+func leaseSet2Range(set LeaseSet2) (uint64, uint64, error) {
+	leases := set.Leases()
+	earliest, latest := ^uint64(0), uint64(0)
+	for {
+		lease, ok, err := leases.Next()
+		if err != nil {
+			return 0, 0, err
+		}
+		if !ok {
+			break
+		}
+		end := uint64(lease.EndDate) * 1000
+		earliest = min(earliest, end)
+		latest = max(latest, end)
+	}
+	if latest == 0 {
+		return 0, 0, ErrLeaseSetExpired
+	}
+	return earliest, latest, nil
+}
+
+func metaLeaseSetRange(set MetaLeaseSet) (uint64, uint64, error) {
+	leases := set.Leases()
+	earliest, latest := ^uint64(0), uint64(0)
+	for {
+		lease, ok, err := leases.Next()
+		if err != nil {
+			return 0, 0, err
+		}
+		if !ok {
+			break
+		}
+		end := uint64(lease.EndDate) * 1000
+		earliest = min(earliest, end)
+		latest = max(latest, end)
+	}
+	if latest == 0 {
+		return 0, 0, ErrLeaseSetExpired
+	}
+	return earliest, latest, nil
+}
+
+func validateLeaseSetRange(earliest, latest, now, maxFuture uint64) error {
+	oldestAllowed := uint64(0)
+	if now > LeaseSetMaxPastMillis {
+		oldestAllowed = now - LeaseSetMaxPastMillis
+	}
+	currentCutoff := uint64(0)
+	if now > LeaseSetClockFudgeMillis {
+		currentCutoff = now - LeaseSetClockFudgeMillis
+	}
+	if earliest <= oldestAllowed || latest <= currentCutoff {
+		return ErrLeaseSetExpired
+	}
+	if latest > saturatingAdd(now, LeaseSetClockFudgeMillis+maxFuture) {
+		return ErrLeaseSetFuture
+	}
 	return nil
 }
 
@@ -439,21 +614,4 @@ func (d *Database) inflateRouterInfo(compressed []byte) ([]byte, error) {
 	}
 	d.gzipPool.Put(reader)
 	return output[:used], nil
-}
-
-func earliestLeaseEnd(set LeaseSet) (uint64, error) {
-	iterator := set.Leases()
-	var earliest uint64
-	for {
-		lease, ok, err := iterator.Next()
-		if err != nil {
-			return 0, err
-		}
-		if !ok {
-			return earliest, nil
-		}
-		if earliest == 0 || lease.EndDate < earliest {
-			earliest = lease.EndDate
-		}
-	}
 }

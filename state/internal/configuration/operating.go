@@ -55,9 +55,12 @@ type Network struct {
 	IPv6 bool
 }
 
-// Router contains identity-related public RouterInfo settings.
+// Router contains identity-related public RouterInfo settings. Floodfill is an
+// explicit participant override equivalent to Java I2P's
+// router.floodfillParticipant=true; IVNP does not auto-volunteer.
 type Router struct {
 	IdentityType string
+	Floodfill    bool
 	Family       string
 	Version      string
 }
@@ -486,6 +489,13 @@ func applyRouter(operating *Operating, values map[entryKey]string) error {
 			return invalid("router", "identity_type")
 		}
 		operating.Router.IdentityType = value
+	}
+	if value, ok := valueOf(values, "router", "floodfill"); ok {
+		parsed, err := parseBool(value)
+		if err != nil {
+			return invalid("router", "floodfill")
+		}
+		operating.Router.Floodfill = parsed
 	}
 	if value, ok := valueOf(values, "router", "family"); ok {
 		if !validLabel(value, 64) {
@@ -1147,7 +1157,7 @@ func knownOperatingKey(section, key string) bool {
 var operatingKeys = map[string]map[string]bool{
 	"paths":       {"data_dir": true, "state_dir": true, "state_path": true, "key_path": true},
 	"network":     {"id": true, "ipv4": true, "ipv6": true},
-	"router":      {"identity_type": true, "family": true, "version": true},
+	"router":      {"identity_type": true, "floodfill": true, "family": true, "version": true},
 	"state":       {"max_bytes": true, "max_destinations": true, "max_name_bytes": true},
 	"netdb":       {"bucket_capacity": true, "lookup_capacity": true, "bootstrap_router_info_files": true},
 	"tunnel":      {"enabled": true, "hops": true, "exploratory_inbound_target": true, "exploratory_outbound_target": true, "exploratory_pool_capacity": true, "client_inbound_target": true, "client_outbound_target": true, "client_pool_capacity": true, "build_pending_capacity": true, "lifetime": true, "renew_before": true, "maintenance_interval": true, "bandwidth_rate_bytes_per_second": true, "bandwidth_burst_bytes": true},

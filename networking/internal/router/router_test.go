@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"os"
 	"testing"
 
 	"gosuda.org/ivnp/foundation"
@@ -184,6 +185,134 @@ func TestServiceAcknowledgesSuccessfulDatabaseStoreOnce(t *testing.T) {
 	}
 }
 
+func TestServiceAcknowledgesInvalidDatabaseStoreWithoutFlooding(t *testing.T) {
+	const now = uint64(1_000)
+	database := netdb.NewDatabase(foundation.Hash{}, netdb.DefaultBucketCapacity)
+	payload, key := testEncryptedDatabaseStore(t, 78, 9)
+	payload[len(payload)-1] ^= 1
+	replies, floods := 0, 0
+	service := NewWithSinks(database, Sinks{
+		DatabaseStoreFlood: func(I2NPSource, i2np.DatabaseStoreMessage) error {
+			floods++
+			return nil
+		},
+		DatabaseStoreReply: func(foundation.Hash, uint32, i2np.DeliveryStatusMessage) error {
+			replies++
+			return nil
+		},
+	})
+	message := i2np.Message{Header: i2np.Header{Type: i2np.DatabaseStore, ID: 3, Expiration: now}, Payload: payload}
+	if err := service.HandleI2NP(message, now, false); err != nil {
+		t.Fatal(err)
+	}
+	if replies != 1 || floods != 0 {
+		t.Fatalf("invalid store replies/floods = %d/%d, want 1/0", replies, floods)
+	}
+	if _, found := database.EncryptedLeaseSet(key); found {
+		t.Fatal("invalid store entered NetDB")
+	}
+}
+
+func TestServiceClassifiesLookupLeaseSetAsUnpublished(t *testing.T) {
+	const now = uint64(2_000)
+	database := netdb.NewDatabase(foundation.Hash{}, netdb.DefaultBucketCapacity)
+	payload, key := testEncryptedDatabaseStore(t, 79, 9)
+	service := NewWithSinks(database, Sinks{
+		DatabaseStoreExpected: func(i2np.DatabaseStoreMessage) bool { return true },
+		DatabaseStoreReply:    func(foundation.Hash, uint32, i2np.DeliveryStatusMessage) error { return nil },
+	})
+	message := i2np.Message{Header: i2np.Header{Type: i2np.DatabaseStore, ID: 4, Expiration: now}, Payload: payload}
+	if err := service.HandleI2NP(message, now, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, published := database.StoredPublishedLeaseSet(key, now); published {
+		t.Fatal("lookup-derived LeaseSet was exposed as a floodfill publication")
+	}
+	if _, retained := database.EncryptedLeaseSet(key); !retained {
+		t.Fatal("lookup-derived LeaseSet was not retained for local routing")
+	}
+}
+
+func TestServiceFloodsAdmittedReplyRequestBeforeAcknowledgement(t *testing.T) {
+	const now = uint64(2_000)
+	database := netdb.NewDatabase(foundation.Hash{}, netdb.DefaultBucketCapacity)
+	payload, key := testEncryptedDatabaseStore(t, 81, 12)
+	peer := foundation.Hash{7}
+	order := make([]string, 0, 2)
+	service := NewWithSinks(database, Sinks{
+		DatabaseStoreFlood: func(source I2NPSource, store i2np.DatabaseStoreMessage) error {
+			if source != (I2NPSource{Peer: peer, Direct: true}) || store.Key != key || store.ReplyToken != 81 {
+				t.Fatalf("flood source/store = %#v / %#v", source, store)
+			}
+			if _, found := database.EncryptedLeaseSet(key); !found {
+				t.Fatal("store was flooded before admission")
+			}
+			order = append(order, "flood")
+			return nil
+		},
+		DatabaseStoreReply: func(foundation.Hash, uint32, i2np.DeliveryStatusMessage) error {
+			order = append(order, "ack")
+			return nil
+		},
+	})
+	message := i2np.Message{Header: i2np.Header{Type: i2np.DatabaseStore, ID: 2, Expiration: now}, Payload: payload}
+	if err := service.HandleI2NPFrom(peer, message, now, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(order) != 2 || order[0] != "flood" || order[1] != "ack" {
+		t.Fatalf("store handling order = %v", order)
+	}
+}
+
+func TestFloodfillServiceAcceptsJavaLeaseSet2Corpus(t *testing.T) {
+	corpus, err := os.ReadFile("../netdb/testdata/java-fda1ced/database-store-ls2-over-4k.corpus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(corpus) < 4 {
+		t.Fatal("Java LeaseSet2 corpus is truncated")
+	}
+	length := int(binary.BigEndian.Uint32(corpus[:4]))
+	if length > len(corpus)-4 {
+		t.Fatal("Java LeaseSet2 corpus record is truncated")
+	}
+	message, used, err := i2np.Parse(corpus[4 : 4+length])
+	if err != nil || used != length {
+		t.Fatalf("parse Java DatabaseStore frame = %d/%d, %v", used, length, err)
+	}
+	store, err := i2np.ParseDatabaseStore(message.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseSet, err := netdb.ParseLeaseSet2(store.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := uint64(leaseSet.Header.Published)*1000 + 1_000
+	payload, err := netdb.MarshalDatabaseStore(store.Key, store.Type, store.Data, 77, foundation.Hash{1}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message.Header.ID = 99
+	message.Header.Expiration = now + 60_000
+	message.Payload = payload
+	database := netdb.NewDatabase(foundation.Hash{}, netdb.DefaultBucketCapacity)
+	flooded := false
+	service := NewWithSinks(database, Sinks{
+		DatabaseStoreFlood: func(I2NPSource, i2np.DatabaseStoreMessage) error {
+			flooded = true
+			return nil
+		},
+		DatabaseStoreReply: func(foundation.Hash, uint32, i2np.DeliveryStatusMessage) error { return nil },
+	})
+	if err = service.HandleI2NPFrom(foundation.Hash{2}, message, now, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := database.LeaseSet2(store.Key); !found || !flooded {
+		t.Fatalf("Java LeaseSet2 admission/flood = %t/%t", found, flooded)
+	}
+}
+
 func testEncryptedDatabaseStore(t *testing.T, replyToken, replyTunnelID uint32) ([]byte, foundation.Hash) {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -193,6 +322,8 @@ func testEncryptedDatabaseStore(t *testing.T, replyToken, replyTunnelID uint32) 
 	unsigned := make([]byte, 2+len(public)+4+2+2+2+netdb.MinEncryptedLeaseSetDataBytes)
 	binary.BigEndian.PutUint16(unsigned[:2], uint16(foundation.SigningRedDSASHA512Ed25519))
 	copy(unsigned[2:], public)
+	binary.BigEndian.PutUint32(unsigned[2+len(public):2+len(public)+4], 1)
+	binary.BigEndian.PutUint16(unsigned[2+len(public)+4:2+len(public)+6], 600)
 	offset := 2 + len(public) + 4 + 2 + 2
 	binary.BigEndian.PutUint16(unsigned[offset:offset+2], netdb.MinEncryptedLeaseSetDataBytes)
 	unsigned[offset+2] = 7

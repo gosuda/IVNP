@@ -35,6 +35,26 @@ func TestRoutingKeyMatchesI2PDUTCDateTransform(t *testing.T) {
 	}
 }
 
+func TestLeaseSetRangeMatchesJavaFloodfillBounds(t *testing.T) {
+	now := uint64(1_700_000_000_000)
+	for _, test := range []struct {
+		name             string
+		earliest, latest uint64
+		want             error
+	}{
+		{"current", now + 1, now + 10*60_000, nil},
+		{"old earliest lease", now - LeaseSetMaxPastMillis, now + 1, ErrLeaseSetExpired},
+		{"expired latest lease", now + 1, now - LeaseSetClockFudgeMillis, ErrLeaseSetExpired},
+		{"future latest lease", now + LeaseSetClockFudgeMillis + LeaseSetMaxFutureMillis + 1, now + LeaseSetClockFudgeMillis + LeaseSetMaxFutureMillis + 1, ErrLeaseSetFuture},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateLeaseSetRange(test.earliest, test.latest, now, LeaseSetMaxFutureMillis); !errors.Is(err, test.want) {
+				t.Fatalf("validateLeaseSetRange() error = %v, want %v", err, test.want)
+			}
+		})
+	}
+}
+
 func TestInflateRouterInfoExactBoundary(t *testing.T) {
 	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	exact := make([]byte, MaxRouterInfoBytes)

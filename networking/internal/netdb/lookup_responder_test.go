@@ -156,6 +156,76 @@ func TestLookupResponderExplorationAppliesExclusionsBeforeLimit(t *testing.T) {
 	}
 }
 
+func TestLookupResponderAnswersOnlyPublishedLeaseSet(t *testing.T) {
+	now := uint64(1_700_000_000_000)
+	destination, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.ReleaseSensitive()
+	local, err := NewLocalLeaseSet2(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = local.ReplaceInboundLeases([]Lease{{Gateway: foundation.Hash{9}, TunnelID: 10, EndDate: now + 10*60_000}}); err != nil {
+		t.Fatal(err)
+	}
+	wire := make([]byte, MaxLeaseSetBytes)
+	n, err := local.MarshalTo(wire, now, destination.Sign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := destination.Hash()
+	store := i2np.DatabaseStoreMessage{Key: key, Type: i2np.StoreLeaseSet2, Data: wire[:n]}
+	database := NewDatabase(foundation.Hash{1}, DefaultBucketCapacity)
+	if err = database.HandleDatabaseStoreAsPublished(store, false, now, false); err != nil {
+		t.Fatal(err)
+	}
+	capture := &lookupReplyCapture{ready: make(chan struct{}, 2)}
+	responder, err := NewLookupResponder(LookupResponderConfig{
+		Database: database, Sender: capture, Local: foundation.Hash{1},
+		Now: func() uint64 { return now }, Random: func() uint32 { return 7 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := i2np.DatabaseLookupMessage{Key: key, From: foundation.Hash{2}, Flags: uint8(LeaseSetLookup << 2)}
+	if err = responder.respond(context.Background(), lookup); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.messages) != 1 || capture.messages[0].Header.Type != i2np.DatabaseSearchReply {
+		t.Fatalf("lookup-derived LeaseSet reply = %#v", capture.messages)
+	}
+	if err = database.HandleDatabaseStoreAsPublished(store, false, now, true); err != nil {
+		t.Fatal(err)
+	}
+	if err = responder.respond(context.Background(), lookup); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.messages) != 2 || capture.messages[1].Header.Type != i2np.DatabaseStore {
+		t.Fatalf("published LeaseSet reply = %#v", capture.messages)
+	}
+}
+
+func TestLookupResponderRouterInfoFreshnessMatchesJavaHour(t *testing.T) {
+	now := uint64(1_700_000_000_000)
+	for _, test := range []struct {
+		name      string
+		published uint64
+		current   bool
+	}{
+		{"current boundary", now - lookupResponderRouterInfoMaxAgeMillis, true},
+		{"stale", now - lookupResponderRouterInfoMaxAgeMillis - 1, false},
+		{"future", now + 1, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := routerInfoCurrentForLookup(RouterInfo{Published: test.published}, now); got != test.current {
+				t.Fatalf("routerInfoCurrentForLookup() = %t, want %t", got, test.current)
+			}
+		})
+	}
+}
+
 func TestLookupResponderRejectsEncryptedReplyWithoutWrapper(t *testing.T) {
 	capture := &lookupReplyCapture{ready: make(chan struct{}, 1)}
 	local, from := foundation.Hash{1}, foundation.Hash{2}

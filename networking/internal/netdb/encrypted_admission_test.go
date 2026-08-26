@@ -18,6 +18,8 @@ func TestEncryptedLeaseSetRedDSAAdmission(t *testing.T) {
 	unsigned := make([]byte, 2+len(public)+4+2+2+2+MinEncryptedLeaseSetDataBytes)
 	binary.BigEndian.PutUint16(unsigned[:2], uint16(foundation.SigningRedDSASHA512Ed25519))
 	copy(unsigned[2:], public)
+	binary.BigEndian.PutUint32(unsigned[2+len(public):2+len(public)+4], 1)
+	binary.BigEndian.PutUint16(unsigned[2+len(public)+4:2+len(public)+6], 600)
 	offset := 2 + len(public) + 4 + 2 + 2
 	binary.BigEndian.PutUint16(unsigned[offset:offset+2], MinEncryptedLeaseSetDataBytes)
 	unsigned[offset+2] = 7

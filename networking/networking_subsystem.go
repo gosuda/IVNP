@@ -54,6 +54,7 @@ type (
 	NetworkDatabaseLeaseSetPublisherConfig             = netdb.LeaseSetPublisherConfig
 	NetworkDatabaseLocalEncryptedLeaseSet              = netdb.LocalEncryptedLeaseSet
 	NetworkDatabaseLookupResponderConfig               = netdb.LookupResponderConfig
+	NetworkDatabaseLookupResponder                     = netdb.LookupResponder
 	NetworkDatabaseLookupResult                        = netdb.LookupResult
 	NetworkDatabaseMetaLeaseSet                        = netdb.MetaLeaseSet
 	NetworkDatabasePublicationTokenRegistry            = netdb.PublicationTokenRegistry
@@ -65,6 +66,8 @@ type (
 	NetworkDatabaseRouterInfoPublisherConfig           = netdb.RouterInfoPublisherConfig
 	NetworkDatabaseRouterInfoStore                     = netdb.RouterInfoStore
 	NetworkDatabaseRouterInfoStoreConfig               = netdb.RouterInfoStoreConfig
+	NetworkDatabaseStoreFlooder                        = netdb.StoreFlooder
+	NetworkDatabaseStoreFlooderConfig                  = netdb.StoreFlooderConfig
 	NetworkDatabaseRouterRef                           = netdb.RouterRef
 	ReseedClient                                       = reseed.Client
 	Router                                             = router.Router
@@ -200,6 +203,7 @@ var (
 	NetworkDatabaseCompressRouterInfo             = netdb.CompressRouterInfo
 	NetworkDatabaseErrNoFloodfill                 = netdb.ErrNoFloodfill
 	NetworkDatabaseErrRequestManagerClosed        = netdb.ErrRequestManagerClosed
+	NetworkDatabaseIsFloodfill                    = netdb.IsFloodfill
 	NetworkDatabaseLoadStaticRouterInfos          = netdb.LoadStaticRouterInfos
 	NetworkDatabaseMarshalDatabaseStore           = netdb.MarshalDatabaseStore
 	NetworkDatabaseNewDatabase                    = netdb.NewDatabase
@@ -213,6 +217,7 @@ var (
 	NetworkDatabaseNewResponderProfiles           = netdb.NewResponderProfiles
 	NetworkDatabaseNewRouterInfoPublisher         = netdb.NewRouterInfoPublisher
 	NetworkDatabaseNewRouterInfoStore             = netdb.NewRouterInfoStore
+	NetworkDatabaseNewStoreFlooder                = netdb.NewStoreFlooder
 	NetworkDatabaseParseEncryptedLeaseSet         = netdb.ParseEncryptedLeaseSet
 	NetworkDatabaseParseLeaseSet                  = netdb.ParseLeaseSet
 	NetworkDatabaseParseLeaseSet2                 = netdb.ParseLeaseSet2
@@ -223,6 +228,7 @@ var (
 	RouterErrDataPlaneConfig                      = router.ErrDataPlaneConfig
 	RouterErrDefaultDestination                   = router.ErrDefaultDestination
 	RouterErrDestinationNotFound                  = router.ErrDestinationNotFound
+	RouterErrUnhandledI2NP                        = router.ErrUnhandledI2NP
 	RouterErrTransportUnavailable                 = router.ErrTransportUnavailable
 	RouterIsRetryableTransportError               = router.IsRetryableTransportError
 	RouterNew                                     = router.New

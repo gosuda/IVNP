@@ -67,7 +67,13 @@ type Sinks struct {
 	// DatabaseStoreCompleted observes a store only after Database admitted and
 	// verified it. RequestManager uses this to complete coalesced lookups.
 	DatabaseStoreCompleted func(i2np.DatabaseStoreMessage)
-	DeliveryStatus         func(i2np.DeliveryStatusMessage) error
+	// DatabaseStoreExpected classifies a store as a live lookup reply before
+	// admission so floodfill responses never expose lookup-derived LeaseSets.
+	DatabaseStoreExpected func(i2np.DatabaseStoreMessage) bool
+	// DatabaseStoreFlood hands an admitted reply-requesting store to the
+	// optional floodfill propagation worker with its authenticated source.
+	DatabaseStoreFlood func(I2NPSource, i2np.DatabaseStoreMessage) error
+	DeliveryStatus     func(i2np.DeliveryStatusMessage) error
 	// DatabaseStoreReply delivers a successful DatabaseStore acknowledgement
 	// through the reply gateway and optional tunnel specified by the store.
 	DatabaseStoreReply       func(foundation.Hash, uint32, i2np.DeliveryStatusMessage) error
@@ -145,6 +151,16 @@ func (s *Service) SetDatabaseSearchReplySink(sink func(i2np.DatabaseSearchReplyM
 // SetDatabaseStoreCompletedSink installs the post-admission NetDB store hook.
 func (s *Service) SetDatabaseStoreCompletedSink(sink func(i2np.DatabaseStoreMessage)) {
 	s.sinks.DatabaseStoreCompleted = sink
+}
+
+// SetDatabaseStoreExpectedSink installs lookup-reply classification.
+func (s *Service) SetDatabaseStoreExpectedSink(sink func(i2np.DatabaseStoreMessage) bool) {
+	s.sinks.DatabaseStoreExpected = sink
+}
+
+// SetDatabaseStoreFloodSink installs the bounded floodfill propagation route.
+func (s *Service) SetDatabaseStoreFloodSink(sink func(I2NPSource, i2np.DatabaseStoreMessage) error) {
+	s.sinks.DatabaseStoreFlood = sink
 }
 
 // SetDatabaseStoreReplySink installs the DatabaseStore acknowledgement route.
@@ -375,8 +391,12 @@ func (s *Service) prepareI2NP(message i2np.Message, nowMillis uint64, requireSin
 func (s *Service) dispatchPreparedI2NP(source I2NPSource, message i2np.Message, prepared preparedI2NP, nowMillis uint64, fromFloodfill bool) error {
 	switch message.Header.Type {
 	case i2np.DatabaseStore:
-		if err := s.database.HandleDatabaseStore(prepared.store, fromFloodfill, nowMillis); err != nil {
-			return err
+		published := s.sinks.DatabaseStoreExpected == nil || !s.sinks.DatabaseStoreExpected(prepared.store)
+		if err := s.database.HandleDatabaseStoreAsPublished(prepared.store, fromFloodfill, nowMillis, published); err != nil {
+			if prepared.store.ReplyToken == 0 {
+				return err
+			}
+			return s.sendDatabaseStoreReply(prepared.store, nowMillis)
 		}
 		if s.sinks.DatabaseStoreCompleted != nil {
 			s.sinks.DatabaseStoreCompleted(prepared.store)
@@ -384,10 +404,12 @@ func (s *Service) dispatchPreparedI2NP(source I2NPSource, message i2np.Message, 
 		if prepared.store.ReplyToken == 0 {
 			return nil
 		}
-		return s.sinks.DatabaseStoreReply(prepared.store.ReplyGateway, prepared.store.ReplyTunnelID, i2np.DeliveryStatusMessage{
-			MessageID: prepared.store.ReplyToken,
-			Timestamp: nowMillis,
-		})
+		var floodErr error
+		if s.sinks.DatabaseStoreFlood != nil {
+			floodErr = s.sinks.DatabaseStoreFlood(source, prepared.store)
+		}
+		replyErr := s.sendDatabaseStoreReply(prepared.store, nowMillis)
+		return errors.Join(floodErr, replyErr)
 	case i2np.DatabaseLookup:
 		return s.sinks.DatabaseLookup(prepared.lookup)
 	case i2np.DatabaseSearchReply:
@@ -408,6 +430,13 @@ func (s *Service) dispatchPreparedI2NP(source I2NPSource, message i2np.Message, 
 		return s.sinks.TunnelTest(prepared.status)
 	}
 	return ErrUnhandledI2NP
+}
+
+func (s *Service) sendDatabaseStoreReply(store i2np.DatabaseStoreMessage, nowMillis uint64) error {
+	return s.sinks.DatabaseStoreReply(store.ReplyGateway, store.ReplyTunnelID, i2np.DeliveryStatusMessage{
+		MessageID: store.ReplyToken,
+		Timestamp: nowMillis,
+	})
 }
 
 // HandleGarlicCloveSet routes already decrypted legacy garlic cloves through

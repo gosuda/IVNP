@@ -473,6 +473,20 @@ func (m *RequestManager) HandleDatabaseSearchReply(reply i2np.DatabaseSearchRepl
 	}
 }
 
+// ExpectsDatabaseStore reports whether store can complete a live lookup.
+// Callers use it before admission to keep lookup replies out of floodfill
+// published-entry responses.
+func (m *RequestManager) ExpectsDatabaseStore(store i2np.DatabaseStoreMessage) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, req := range m.pending {
+		if req.key == store.Key && storeMatches(req.typeID, store.Type) {
+			return true
+		}
+	}
+	return false
+}
+
 // HandleDatabaseStore completes a matching request after the caller has
 // verified and admitted the store into Database. A RouterInfo store also wakes
 // lookups that learned its hash from a DatabaseSearchReply.

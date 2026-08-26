@@ -521,7 +521,8 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		logger.Info("loaded verified static bootstrap RouterInfos", "count", len(bootstrapPeers))
 	}
 	localInfo, err := networking.RouterNewLocalRouterInfo(networking.RouterLocalRouterInfoConfig{
-		Local: bundle.Router, Database: database, Clock: clock, NetworkID: cfg.Network.ID, Metrics: registry,
+		Local: bundle.Router, Database: database, Clock: clock, NetworkID: cfg.Network.ID, Floodfill: cfg.Router.Floodfill,
+		BandwidthRateBytesPerSecond: cfg.Tunnel.BandwidthRateBytesPerSecond, Metrics: registry,
 		RouterVersion: cfg.Router.Version,
 		Options:       routerFamilyOption(cfg.Router.Family),
 	})
@@ -586,16 +587,27 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 	}
 	now := nowFromClock(clock)
 	publicationTokens := networking.NetworkDatabaseNewPublicationTokenRegistry(now, randomNonZeroID)
-	lookupResponder, err := networking.NetworkDatabaseNewLookupResponder(networking.NetworkDatabaseLookupResponderConfig{
-		Database: database,
-		Sender:   daemonReplySender{sender: mux, now: now},
-		Local:    bundle.Router.Hash,
-		Now:      now,
-		Random:   randomNonZeroID,
-		Wrapper:  networking.GarlicDatabaseLookupReplyWrapper{MessageID: randomNonZeroID},
-	})
-	if err != nil {
-		return nil, err
+	var lookupResponder *networking.NetworkDatabaseLookupResponder
+	var storeFlooder *networking.NetworkDatabaseStoreFlooder
+	if cfg.Router.Floodfill {
+		lookupResponder, err = networking.NetworkDatabaseNewLookupResponder(networking.NetworkDatabaseLookupResponderConfig{
+			Database: database,
+			Sender:   daemonReplySender{sender: mux, now: now},
+			Local:    bundle.Router.Hash,
+			Now:      now,
+			Random:   randomNonZeroID,
+			Wrapper:  networking.GarlicDatabaseLookupReplyWrapper{MessageID: randomNonZeroID},
+		})
+		if err != nil {
+			return nil, err
+		}
+		storeFlooder, err = networking.NetworkDatabaseNewStoreFlooder(networking.NetworkDatabaseStoreFlooderConfig{
+			Database: database, Sender: directStoreFloodSender{sender: mux}, Local: bundle.Router.Hash,
+			Now: now, Random: randomNonZeroID, Logger: logger,
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	routerPublisher, err := networking.NetworkDatabaseNewRouterInfoPublisher(networking.NetworkDatabaseRouterInfoPublisherConfig{
 		Local: localInfo, Database: database, Sender: muxLeaseSetSender{sender: mux},
@@ -840,7 +852,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		ReseedOutcome: func(err error) { d.recordReseedOutcome(err) },
 		StreamBackend: destinations, Destinations: destinations, Tunnels: tunnels, BuildManager: buildManager,
 		ClientBuildReplies: buildReplies, RequestHandler: requestHandlers,
-		LookupResponder: lookupResponder, DeliveryStatusMux: statusMux, TunnelTest: tunnelTest, GarlicReceiver: garlicReceiver,
+		LookupResponder: lookupResponder, StoreFlooder: storeFlooder, DeliveryStatusMux: statusMux, TunnelTest: tunnelTest, GarlicReceiver: garlicReceiver,
 		RouterDelivery: func(target foundation.Hash, message networking.I2NPMessage) error {
 			if target == (foundation.Hash{}) || target == bundle.Router.Hash {
 				return networking.RouterErrDataPlaneConfig
@@ -1528,6 +1540,8 @@ func (d *Daemon) refreshObservability() {
 		ExploratoryOutboundTunnels: snapshot.Tunnel.ExploratoryOutboundActive,
 		ClientInboundTunnels:       snapshot.Tunnel.ClientInboundActive,
 		ClientOutboundTunnels:      snapshot.Tunnel.ClientOutboundActive,
+		FloodfillConfigured:        d.config.Router.Floodfill,
+		FloodfillAdvertised:        networking.NetworkDatabaseIsFloodfill(d.localInfo.Snapshot()),
 	})
 	if stage < 3 && operational {
 		stage = 3
@@ -1545,7 +1559,8 @@ func dataPlaneReady(readiness client.ClientReadinessDetails) bool {
 		readiness.ExploratoryInboundTunnels != 0 &&
 		readiness.ExploratoryOutboundTunnels != 0 &&
 		readiness.ClientInboundTunnels != 0 &&
-		readiness.ClientOutboundTunnels != 0
+		readiness.ClientOutboundTunnels != 0 &&
+		(!readiness.FloodfillConfigured || readiness.FloodfillAdvertised)
 }
 
 func (d *Daemon) recordMaintenanceError(err error) {
@@ -1740,6 +1755,8 @@ func (d *Daemon) ClientStatus(context.Context) (client.ClientStatus, error) {
 		ExploratoryOutboundTunnels: snapshot.Tunnel.ExploratoryOutboundActive,
 		ClientInboundTunnels:       snapshot.Tunnel.ClientInboundActive,
 		ClientOutboundTunnels:      snapshot.Tunnel.ClientOutboundActive,
+		FloodfillConfigured:        d.config.Router.Floodfill,
+		FloodfillAdvertised:        networking.NetworkDatabaseIsFloodfill(d.localInfo.Snapshot()),
 		RouterReachable:            snapshot.Bootstrap.RouterReachable != 0,
 		SSU2VectorIO:               snapshot.SSU2.VectorIOEnabled != 0,
 		SSU2KernelDropAccounting:   snapshot.SSU2.KernelDropAccounting != 0,
@@ -2064,6 +2081,16 @@ func (s muxRequestSender) Send(ctx context.Context, peer networking.NetworkDatab
 		s.replyKeys.RemoveGarlicReplyKey(replyTag)
 	}
 	return err
+}
+
+type directStoreFloodSender struct{ sender networking.TunnelSender }
+
+func (s directStoreFloodSender) Send(ctx context.Context, peer networking.NetworkDatabaseRouterRef, message networking.I2NPMessage) error {
+	return s.sender.Send(ctx, peer.Hash, message)
+}
+func (s directStoreFloodSender) Eligible(peer networking.NetworkDatabaseRouterRef) bool {
+	eligible := transportPeerEligibility(s.sender)
+	return eligible == nil || eligible(peer.Hash)
 }
 
 type muxLeaseSetSender struct {

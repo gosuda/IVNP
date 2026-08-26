@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
@@ -17,7 +18,10 @@ var (
 	ErrLookupReplyEncryptionUnsupported = errors.New("netdb: encrypted lookup reply is unsupported")
 )
 
-const lookupResponderQueue = 64
+const (
+	lookupResponderQueue                  = 64
+	lookupResponderRouterInfoMaxAgeMillis = uint64(time.Hour / time.Millisecond)
+)
 
 // ReplySender owns the selected direct or tunnel route for a NetDB reply.
 type ReplySender interface {
@@ -175,7 +179,7 @@ func (r *LookupResponder) respond(ctx context.Context, lookup i2np.DatabaseLooku
 	switch LookupType(lookup.LookupType()) {
 	case RouterInfoLookup:
 		ref, ok := r.database.Routers().Get(lookup.Key)
-		if ok {
+		if ok && routerInfoCurrentForLookup(ref.Info, r.now()) {
 			compressed, err := CompressRouterInfo(ref.Info.Bytes())
 			if err != nil {
 				return err
@@ -186,7 +190,7 @@ func (r *LookupResponder) respond(ctx context.Context, lookup i2np.DatabaseLooku
 			}
 		}
 	case LeaseSetLookup:
-		typeID, data, ok := r.database.StoredLeaseSet(lookup.Key)
+		typeID, data, ok := r.database.StoredPublishedLeaseSet(lookup.Key, r.now())
 		if ok {
 			var err error
 			payload, err = MarshalDatabaseStore(lookup.Key, typeID, data, 0, foundation.Hash{}, 0)
@@ -195,7 +199,7 @@ func (r *LookupResponder) respond(ctx context.Context, lookup i2np.DatabaseLooku
 			}
 		}
 	case 0: // legacy Any: prefer RouterInfo then a retained LeaseSet.
-		if ref, ok := r.database.Routers().Get(lookup.Key); ok {
+		if ref, ok := r.database.Routers().Get(lookup.Key); ok && routerInfoCurrentForLookup(ref.Info, r.now()) {
 			compressed, err := CompressRouterInfo(ref.Info.Bytes())
 			if err != nil {
 				return err
@@ -204,7 +208,7 @@ func (r *LookupResponder) respond(ctx context.Context, lookup i2np.DatabaseLooku
 			if err != nil {
 				return err
 			}
-		} else if typeID, data, ok := r.database.StoredLeaseSet(lookup.Key); ok {
+		} else if typeID, data, ok := r.database.StoredPublishedLeaseSet(lookup.Key, r.now()); ok {
 			var err error
 			payload, err = MarshalDatabaseStore(lookup.Key, typeID, data, 0, foundation.Hash{}, 0)
 			if err != nil {
@@ -236,6 +240,10 @@ func (r *LookupResponder) respond(ctx context.Context, lookup i2np.DatabaseLooku
 		tunnelID = lookup.ReplyTunnelID
 	}
 	return r.sender.SendNetDBReply(ctx, lookup.From, tunnelID, message)
+}
+
+func routerInfoCurrentForLookup(info RouterInfo, now uint64) bool {
+	return info.Published <= now && now-info.Published <= lookupResponderRouterInfoMaxAgeMillis
 }
 
 func (r *LookupResponder) searchReply(lookup i2np.DatabaseLookupMessage) []byte {

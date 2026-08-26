@@ -86,9 +86,23 @@ func CompressRouterInfo(raw []byte) ([]byte, error) {
 // StoredLeaseSet returns an immutable copy of the currently retained lease
 // object so responders never retain or expose mutable database storage.
 func (d *Database) StoredLeaseSet(key foundation.Hash) (i2np.StoreType, []byte, bool) {
+	return d.storedLeaseSet(key, 0, false)
+}
+
+// StoredPublishedLeaseSet returns only an unsolicited or flooded LeaseSet that
+// remains current at now. Lookup-derived entries stay private to local routing.
+func (d *Database) StoredPublishedLeaseSet(key foundation.Hash, now uint64) (i2np.StoreType, []byte, bool) {
+	return d.storedLeaseSet(key, now, true)
+}
+
+func (d *Database) storedLeaseSet(key foundation.Hash, now uint64, publishedOnly bool) (i2np.StoreType, []byte, bool) {
 	d.leasesMu.RLock()
 	entry, ok := d.leases[key]
-	if !ok {
+	unavailable := !ok
+	if publishedOnly {
+		unavailable = unavailable || !entry.published || leaseEntryExpired(entry, now)
+	}
+	if unavailable {
 		d.leasesMu.RUnlock()
 		return 0, nil, false
 	}
@@ -107,4 +121,12 @@ func (d *Database) StoredLeaseSet(key foundation.Hash) (i2np.StoreType, []byte, 
 	typeID := entry.typeID
 	d.leasesMu.RUnlock()
 	return typeID, owned, len(owned) != 0
+}
+
+func leaseEntryExpired(entry leaseEntry, now uint64) bool {
+	cutoff := uint64(0)
+	if now > LeaseSetClockFudgeMillis {
+		cutoff = now - LeaseSetClockFudgeMillis
+	}
+	return entry.expires != 0 && entry.expires <= cutoff
 }

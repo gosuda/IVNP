@@ -33,14 +33,16 @@ type SSU2Introducer struct {
 // Options extend the generated netId and optional router.version properties;
 // callers must not supply duplicate property keys.
 type LocalRouterInfoConfig struct {
-	Local         foundation.LocalIdentityOwner
-	Database      *netdb.Database
-	Clock         Clock
-	NetworkID     uint32
-	RouterVersion string
-	Peers         []foundation.Hash
-	Options       []MappingOption
-	Metrics       *observability.Registry
+	Local                       foundation.LocalIdentityOwner
+	Database                    *netdb.Database
+	Clock                       Clock
+	NetworkID                   uint32
+	Floodfill                   bool
+	BandwidthRateBytesPerSecond int
+	RouterVersion               string
+	Peers                       []foundation.Hash
+	Options                     []MappingOption
+	Metrics                     *observability.Registry
 }
 
 // LocalRouterInfo is a concrete local RouterInfo owner. It atomically turns
@@ -57,6 +59,8 @@ type LocalRouterInfo struct {
 	addresses    []PublishedAddress
 	peers        []foundation.Hash
 	baseOptions  []foundation.MappingEntry
+	floodfill    bool
+	bandwidth    byte
 	reachability Reachability
 }
 
@@ -91,6 +95,8 @@ func NewLocalRouterInfo(config LocalRouterInfoConfig) (*LocalRouterInfo, error) 
 		clock:       config.Clock,
 		metrics:     config.Metrics,
 		peers:       append([]foundation.Hash(nil), config.Peers...),
+		floodfill:   config.Floodfill,
+		bandwidth:   localRouterBandwidthCapability(config.BandwidthRateBytesPerSecond),
 		baseOptions: cloneI2PMappingEntries(baseOptions),
 	}, nil
 }
@@ -276,7 +282,7 @@ func (l *LocalRouterInfo) UpdateSSU2Introducers(ctx context.Context, leases []SS
 }
 
 func (l *LocalRouterInfo) contactsLocked(addresses []PublishedAddress, reachability Reachability) (netdb.RouterInfoContacts, error) {
-	options, err := localRouterCapabilities(l.baseOptions, reachability)
+	options, err := localRouterCapabilities(l.baseOptions, reachability, l.floodfill, l.bandwidth)
 	if err != nil {
 		return netdb.RouterInfoContacts{}, err
 	}
@@ -317,17 +323,43 @@ func localRouterBaseOptions(networkID uint32, version string, options []MappingO
 	return canonicalMappingEntries(entries)
 }
 
-func localRouterCapabilities(base []foundation.MappingEntry, reachability Reachability) ([]foundation.MappingEntry, error) {
+func localRouterCapabilities(base []foundation.MappingEntry, reachability Reachability, floodfill bool, bandwidth byte) ([]foundation.MappingEntry, error) {
 	entries := cloneI2PMappingEntries(base)
 	if reachability == ReachabilityUnknown {
 		return entries, nil
 	}
-	capability := byte('R')
-	if reachability == ReachabilityFirewalled {
-		capability = 'U'
+	capabilities := make([]byte, 0, 3)
+	capabilities = append(capabilities, bandwidth)
+	if floodfill {
+		capabilities = append(capabilities, 'f')
 	}
-	entries = append(entries, foundation.MappingEntry{Key: []byte("caps"), Value: []byte{capability}})
+	if reachability == ReachabilityFirewalled {
+		capabilities = append(capabilities, 'U')
+	} else {
+		capabilities = append(capabilities, 'R')
+	}
+	entries = append(entries, foundation.MappingEntry{Key: []byte("caps"), Value: capabilities})
 	return canonicalMappingEntries(entries)
+}
+
+func localRouterBandwidthCapability(bytesPerSecond int) byte {
+	kibibytes := bytesPerSecond / 1024
+	switch {
+	case kibibytes < 12:
+		return 'K'
+	case kibibytes <= 48:
+		return 'L'
+	case kibibytes <= 64:
+		return 'M'
+	case kibibytes <= 128:
+		return 'N'
+	case kibibytes <= 256:
+		return 'O'
+	case kibibytes <= 2000:
+		return 'P'
+	default:
+		return 'X'
+	}
 }
 
 func mappingOptions(options []MappingOption) ([]foundation.MappingEntry, error) {

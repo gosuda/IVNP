@@ -280,7 +280,7 @@ func TestEncryptedLeaseSetPublisherUsesConfirmedStoreType(t *testing.T) {
 		Encrypted: encrypted,
 		Database:  database,
 		InboundLeases: InboundLeaseSourceFunc(func(uint64) []Lease {
-			return []Lease{{Gateway: foundation.Hash{1}, TunnelID: 7, EndDate: now + 3_600_000}}
+			return []Lease{{Gateway: foundation.Hash{1}, TunnelID: 7, EndDate: now + 10*60_000}}
 		}),
 		Sender:         LeaseSetPublishSenderFunc(func(_ context.Context, _ RouterRef, _ i2np.Message) error { return nil }),
 		Now:            func() uint64 { return now },

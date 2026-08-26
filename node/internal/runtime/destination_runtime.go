@@ -205,6 +205,20 @@ func (r *destinationRequestRegistry) HandleDatabaseSearchReply(reply networking.
 	}
 }
 
+func (r *destinationRequestRegistry) ExpectsDatabaseStore(store networking.I2NPDatabaseStoreMessage) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, registration := range r.handlers {
+		if registration.handler.ExpectsDatabaseStore(store) {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *destinationRequestRegistry) HandleDatabaseStore(store networking.I2NPDatabaseStoreMessage) {
 	if r == nil {
 		return

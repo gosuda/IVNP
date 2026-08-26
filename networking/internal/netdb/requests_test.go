@@ -629,12 +629,36 @@ func TestRequestManagerBoundsDistinctRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := manager.LookupRouterInfo(context.Background(), requestTestHash(2)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := manager.LookupRouterInfo(context.Background(), requestTestHash(3)); !errors.Is(err, ErrRequestManagerFull) {
 		t.Fatalf("capacity error = %v", err)
 	}
+}
+func TestRequestManagerClassifiesExpectedDatabaseStore(t *testing.T) {
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+	addRequestTestFloodfill(database, requestTestHash(1))
+	manager, err := NewRequestManager(database, new(requestTestSender), requestTestRoute{gateway: requestTestHash(8)}, RequestManagerConfig{
+		Capacity: 1, MaxCandidates: 4, TimeoutMillis: 10_000, Now: func() uint64 { return 100 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := requestTestHash(9)
+	if _, err = manager.LookupLeaseSet(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	store := i2np.DatabaseStoreMessage{Key: key, Type: i2np.StoreLeaseSet2}
+	if !manager.ExpectsDatabaseStore(store) {
+		t.Fatal("live LeaseSet lookup did not classify its DatabaseStore reply")
+	}
+	manager.HandleDatabaseStore(store)
+	if manager.ExpectsDatabaseStore(store) {
+		t.Fatal("completed lookup continued classifying DatabaseStore replies")
+	}
+	manager.Close()
 }
 
 func TestRequestManagerFetchesUnknownCandidatesAndWakesDuringSend(t *testing.T) {
