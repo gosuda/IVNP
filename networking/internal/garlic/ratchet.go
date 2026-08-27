@@ -14,6 +14,14 @@ type RatchetOptions = garlicecies.RatchetOptions
 type RatchetResult = garlicecies.RatchetResult
 type RatchetACK = garlicecies.ACK
 type RatchetStats = garlicecies.RatchetStats
+type NewSessionCandidate = garlicecies.NewSessionCandidate
+type NewSessionCommit = garlicecies.NewSessionCommit
+
+const (
+	NewSessionInstalled = garlicecies.NewSessionInstalled
+	NewSessionRetained  = garlicecies.NewSessionRetained
+	NewSessionReplaced  = garlicecies.NewSessionReplaced
+)
 
 var (
 	ErrRatchet          = garlicecies.ErrRatchet
@@ -96,14 +104,6 @@ func (m *RatchetManager) locatePeerLocked(peer foundation.Hash) (int, bool) {
 	}
 	return 0, false
 }
-func (m *RatchetManager) ownsPeerOutsideLocked(peer foundation.Hash, owner int) bool {
-	for index, shard := range m.shards {
-		if index != owner && shard.HasPeer(peer) {
-			return true
-		}
-	}
-	return false
-}
 
 func (m *RatchetManager) peerShardLocked(peer foundation.Hash) (int, *garlicecies.RatchetManager) {
 	if index, ok := m.locatePeerLocked(peer); ok {
@@ -139,23 +139,17 @@ func (m *RatchetManager) packetShard(packet []byte) (int, *garlicecies.RatchetMa
 	return shardIndex, m.shards[shardIndex]
 }
 
-func (m *RatchetManager) BindPeer(observed, peer foundation.Hash) error {
-	if m == nil || observed == (foundation.Hash{}) || peer == (foundation.Hash{}) {
-		return ErrRatchet
+// CommitNew admits an authenticated bound New Session only after its
+// Destination has been verified. Admission and shard selection are serialized
+// so retained duplicates cannot consume session or tag capacity.
+func (m *RatchetManager) CommitNew(candidate *NewSessionCandidate, peer foundation.Hash, now uint64) (NewSessionCommit, error) {
+	if m == nil || candidate == nil || peer == (foundation.Hash{}) {
+		return 0, ErrRatchet
 	}
 	m.routeMu.Lock()
 	defer m.routeMu.Unlock()
-	observedIndex, observedExists := m.locatePeerLocked(observed)
-	if !observedExists {
-		return ErrRatchetNoSession
-	}
-	if m.ownsPeerOutsideLocked(peer, observedIndex) {
-		return ErrRatchet
-	}
-	if err := m.shards[observedIndex].BindPeer(observed, peer); err != nil {
-		return err
-	}
-	return nil
+	_, shard := m.peerShardLocked(peer)
+	return shard.CommitNewSession(candidate, peer, now)
 }
 
 func (m *RatchetManager) Stats() RatchetStats {
@@ -234,19 +228,8 @@ func (m *RatchetManager) Receive(dst, replyDst, packet []byte, now uint64) (Ratc
 	if m == nil || len(m.shards) == 0 {
 		return RatchetResult{}, ErrRatchetClosed
 	}
-	index, shard := m.packetShard(packet)
-	result, err := shard.Receive(dst, replyDst, packet, now)
-	if err != nil || result.Peer == (foundation.Hash{}) {
-		return result, err
-	}
-	m.routeMu.Lock()
-	if m.ownsPeerOutsideLocked(result.Peer, index) {
-		shard.DiscardPeer(result.Peer)
-		m.routeMu.Unlock()
-		return RatchetResult{}, ErrRatchet
-	}
-	m.routeMu.Unlock()
-	return result, nil
+	_, shard := m.packetShard(packet)
+	return shard.Receive(dst, replyDst, packet, now)
 }
 
 func (m *RatchetManager) ReleaseSensitive() {

@@ -487,7 +487,7 @@ func TestStreamingTunnelSenderReleasesScratchBeforeTunnelIO(t *testing.T) {
 	}
 }
 
-func TestGarlicReceiverDeliversNewSessionReplyAndEstablishesExistingSession(t *testing.T) {
+func TestGarlicReceiverDeliversConcurrentNewSessionPayloads(t *testing.T) {
 	const now = uint64(1_000_000)
 	initiator, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {
@@ -519,7 +519,6 @@ func TestGarlicReceiverDeliversNewSessionReplyAndEstablishesExistingSession(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := i2np.Message{Header: i2np.Header{Type: i2np.Data, ID: 1, Expiration: now + 1_000}, Payload: data}
 	local, err := netdb.NewLocalLeaseSet2(initiator)
 	if err != nil {
 		t.Fatal(err)
@@ -549,33 +548,48 @@ func TestGarlicReceiverDeliversNewSessionReplyAndEstablishesExistingSession(t *t
 	if _, targetErr := ratchetReplyTarget([]garlic.Clove{{Delivery: garlic.Delivery{Type: garlic.DeliveryLocal}, Message: forged}}, observed); !errors.Is(targetErr, ErrGarlicPacket) {
 		t.Fatalf("forged LS2 binding error = %v, want %v", targetErr, ErrGarlicPacket)
 	}
-	payload := make([]byte, 2*netdb.MaxLeaseSetBytes)
-	first, err := appendRatchetGarlicClove(payload, garlic.Delivery{Type: garlic.DeliveryLocal}, store)
-	if err != nil {
-		t.Fatal(err)
+	newPacket := func(storeID, dataID uint32) []byte {
+		t.Helper()
+		packetStore := store
+		packetStore.Header.ID = storeID
+		message := i2np.Message{Header: i2np.Header{Type: i2np.Data, ID: dataID, Expiration: now + 1_000}, Payload: data}
+		payload := make([]byte, 2*netdb.MaxLeaseSetBytes)
+		first, appendErr := appendRatchetGarlicClove(payload, garlic.Delivery{Type: garlic.DeliveryLocal}, packetStore)
+		if appendErr != nil {
+			t.Fatal(appendErr)
+		}
+		second, appendErr := appendRatchetGarlicClove(payload[len(first):], garlic.Delivery{Type: garlic.DeliveryDestination, To: responderHash}, message)
+		if appendErr != nil {
+			t.Fatal(appendErr)
+		}
+		payload = payload[:len(first)+len(second)]
+		packet, encryptErr := left.Encrypt(make([]byte, i2np.I2PDMaxPayload-4), responderHash, responderKey[:], uint16(foundation.CryptoX25519), payload, now)
+		if encryptErr != nil {
+			t.Fatal(encryptErr)
+		}
+		return packet
 	}
-	second, err := appendRatchetGarlicClove(payload[len(first):], garlic.Delivery{Type: garlic.DeliveryDestination, To: responderHash}, message)
-	if err != nil {
-		t.Fatal(err)
+	wrap := func(packet []byte) i2np.Message {
+		payload := make([]byte, 4+len(packet))
+		binary.BigEndian.PutUint32(payload[:4], uint32(len(packet)))
+		copy(payload[4:], packet)
+		return i2np.Message{Header: i2np.Header{Type: i2np.Garlic}, Payload: payload}
 	}
-	payload = payload[:len(first)+len(second)]
-
-	packet, err := left.Encrypt(make([]byte, i2np.I2PDMaxPayload-4), responderHash, responderKey[:], uint16(foundation.CryptoX25519), payload, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	outer := make([]byte, 4+len(packet))
-	binary.BigEndian.PutUint32(outer[:4], uint32(len(packet)))
-	copy(outer[4:], packet)
 	service := NewService(netdb.NewDatabase(foundation.Hash{}, netdb.DefaultBucketCapacity))
-	service.SetDestinationSink(func(foundation.Hash, foundation.Hash, i2np.Message) error { return nil })
+	delivered := make([]uint32, 0, 2)
+	service.SetDestinationSink(func(_ foundation.Hash, _ foundation.Hash, message i2np.Message) error {
+		delivered = append(delivered, message.Header.ID)
+		return nil
+	})
 	var replyTarget foundation.Hash
 	var reply []byte
+	replies := 0
 	receiver, err := NewGarlicReceiver(GarlicReceiverConfig{
 		Service: service, ReplyKeys: garlic.NewReplyKeyRegistry(1), Now: func() uint64 { return now },
 		Destinations: map[foundation.Hash]GarlicDestination{responderHash: {
 			Ratchet: right,
 			SendRatchetReply: func(_ context.Context, target foundation.Hash, packet []byte) error {
+				replies++
 				replyTarget, reply = target, append([]byte(nil), packet...)
 				return nil
 			},
@@ -584,11 +598,19 @@ func TestGarlicReceiverDeliversNewSessionReplyAndEstablishesExistingSession(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = receiver.HandleGarlic(i2np.Message{Header: i2np.Header{Type: i2np.Garlic}, Payload: outer}); err != nil {
-		t.Fatal(err)
+	for _, message := range []i2np.Message{wrap(newPacket(2, 1)), wrap(newPacket(4, 3))} {
+		if err = receiver.HandleGarlic(message); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if replyTarget != initiatorHash || len(reply) == 0 {
-		t.Fatal("authenticated New Session Reply was not routed to the initiator")
+	if len(delivered) != 2 || delivered[0] != 1 || delivered[1] != 3 {
+		t.Fatalf("delivered Data IDs = %v, want [1 3]", delivered)
+	}
+	if replies != 1 || replyTarget != initiatorHash || len(reply) == 0 {
+		t.Fatalf("New Session replies = %d to %x with %d bytes, want one reply to %x", replies, replyTarget, len(reply), initiatorHash)
+	}
+	if stats := right.Stats(); stats.Sessions != 1 {
+		t.Fatalf("responder sessions = %d, want 1", stats.Sessions)
 	}
 	if _, err = left.Receive(make([]byte, len(reply)), make([]byte, len(reply)), reply, now); err != nil {
 		t.Fatalf("initiator did not transition to Existing Session: %v", err)

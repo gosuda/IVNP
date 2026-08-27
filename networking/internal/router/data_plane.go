@@ -1173,6 +1173,9 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message i2np.Messag
 			destination.scratch <- scratch
 			continue
 		}
+		if result.Candidate != nil {
+			defer result.Candidate.Discard()
+		}
 		if destination.Limiter != nil && !destination.Limiter.TryAcquire(uint64(len(outer.Encrypted))) {
 			clear(scratch.plaintext[:])
 			clear(scratch.reply[:])
@@ -1221,38 +1224,43 @@ func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState
 	if err != nil {
 		return err
 	}
-	if len(result.Reply) != 0 {
-		target, targetErr := ratchetReplyTarget(cloves, result.Peer)
-		if targetErr != nil {
-			return targetErr
-		}
-		remaining := cloves[:0]
+	if result.Candidate == nil {
+		var dispatchErr error
 		for _, clove := range cloves {
-			if clove.Delivery.Type == garlic.DeliveryLocal && clove.Message.Header.Type == i2np.DatabaseStore {
-				if err = r.service.dispatchClove(foundation.Hash{}, clove.Delivery, clove.Message, now, false); err != nil {
-					return err
-				}
-				continue
-			}
-			remaining = append(remaining, clove)
+			dispatchErr = appendError(dispatchErr, r.service.dispatchClove(result.Peer, clove.Delivery, clove.Message, now, false))
 		}
-		cloves = remaining
-		if bindErr := destination.Ratchet.BindPeer(result.Peer, target); bindErr != nil {
-			return bindErr
-		}
-		result.Peer = target
-		if destination.SendRatchetReply == nil {
-			return ErrGarlicDestination
-		}
-		if sendErr := destination.SendRatchetReply(context.Background(), target, result.Reply); sendErr != nil {
-			return sendErr
-		}
-		if r.metrics != nil {
-			r.metrics.IncGarlicECIESNewSessionSent()
-		}
+		return dispatchErr
 	}
+	target, targetErr := ratchetReplyTarget(cloves, result.Peer)
+	if targetErr != nil {
+		return targetErr
+	}
+	commit, err := destination.Ratchet.CommitNew(result.Candidate, target, now)
+	if err != nil {
+		return err
+	}
+	result.Peer = target
+	remaining := cloves[:0]
 	var dispatchErr error
 	for _, clove := range cloves {
+		if clove.Delivery.Type == garlic.DeliveryLocal && clove.Message.Header.Type == i2np.DatabaseStore {
+			dispatchErr = appendError(dispatchErr, r.service.dispatchClove(foundation.Hash{}, clove.Delivery, clove.Message, now, false))
+			continue
+		}
+		remaining = append(remaining, clove)
+	}
+	if commit != garlic.NewSessionRetained {
+		if destination.SendRatchetReply == nil {
+			dispatchErr = appendError(dispatchErr, ErrGarlicDestination)
+		} else {
+			sendErr := destination.SendRatchetReply(context.Background(), result.Peer, result.Reply)
+			dispatchErr = appendError(dispatchErr, sendErr)
+			if sendErr == nil && r.metrics != nil {
+				r.metrics.IncGarlicECIESNewSessionSent()
+			}
+		}
+	}
+	for _, clove := range remaining {
 		dispatchErr = appendError(dispatchErr, r.service.dispatchClove(result.Peer, clove.Delivery, clove.Message, now, false))
 	}
 	return dispatchErr

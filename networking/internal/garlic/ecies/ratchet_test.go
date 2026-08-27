@@ -59,8 +59,11 @@ func establishRatchet(t testing.TB, a, b *RatchetManager, aPeer, bPeer foundatio
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.NewSession || len(got.Payload) != 0 || len(got.Reply) == 0 {
+	if !got.NewSession || got.Candidate == nil || len(got.Payload) != 0 || len(got.Reply) == 0 {
 		t.Fatalf("new session result = %#v", got)
+	}
+	if commit, commitErr := b.CommitNewSession(got.Candidate, got.Peer, now); commitErr != nil || commit != NewSessionInstalled {
+		t.Fatalf("new session commit = %v, %v", commit, commitErr)
 	}
 	if _, err = a.Receive(make([]byte, 2048), make([]byte, 1), got.Reply, now); err != nil {
 		t.Fatal(err)
@@ -80,11 +83,36 @@ func TestRatchetUnboundNewSessionDeliversWithoutReplyState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.NewSession || len(result.Reply) != 0 || result.Peer != (foundation.Hash{}) || string(result.Payload) != string(payload) {
+	if !result.NewSession || result.Candidate != nil || len(result.Reply) != 0 || result.Peer != (foundation.Hash{}) || string(result.Payload) != string(payload) {
 		t.Fatalf("unbound result = %#v", result)
 	}
 	if stats := b.Stats(); stats.Sessions != 0 || stats.Pending != 0 {
 		t.Fatalf("unbound retained session state = %+v", stats)
+	}
+}
+
+func TestRatchetBoundNewSessionDoesNotInstallBeforeCommit(t *testing.T) {
+	a, b, _, bPeer, now := ratchetPair(t)
+	defer a.ReleaseSensitive()
+	defer b.ReleaseSensitive()
+	packet, err := a.Encrypt(make([]byte, 2048), bPeer, ratchetPublic(t, b), 4, clove("prepared"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := b.Receive(make([]byte, 2048), make([]byte, 2048), packet, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Candidate == nil {
+		t.Fatal("bound New Session did not return an admission candidate")
+	}
+	if stats := b.Stats(); stats.Sessions != 0 || stats.InboundTags != 0 || stats.NewSessions != 1 {
+		t.Fatalf("Receive installed candidate state: %+v", stats)
+	}
+	result.Candidate.Discard()
+	result.Candidate.Discard()
+	if stats := b.Stats(); stats.Sessions != 0 || stats.InboundTags != 0 {
+		t.Fatalf("discarded candidate retained live state: %+v", stats)
 	}
 }
 
@@ -177,7 +205,7 @@ func TestRatchetProductionEncryptAutomaticallyAdvancesDH(t *testing.T) {
 	}
 }
 
-func TestRatchetProductionEncryptReplacesExhaustedSession(t *testing.T) {
+func TestRatchetProductionEncryptReplacesRestartableSession(t *testing.T) {
 	a, b, aPeer, bPeer, now := ratchetPair(t)
 	defer a.ReleaseSensitive()
 	defer b.ReleaseSensitive()
@@ -185,13 +213,17 @@ func TestRatchetProductionEncryptReplacesExhaustedSession(t *testing.T) {
 	a.mu.Lock()
 	a.sessions[bPeer].outbound.next = 1 << 16
 	a.mu.Unlock()
-	packet, err := a.Encrypt(make([]byte, 2048), bPeer, ratchetPublic(t, b), 4, clove("replacement"), now+1)
+	restartNow := now + newSessionRestartAge + 1
+	packet, err := a.Encrypt(make([]byte, 2048), bPeer, ratchetPublic(t, b), 4, clove("replacement"), restartNow)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := b.Receive(make([]byte, 2048), make([]byte, 2048), packet, now+1)
-	if err != nil || !result.NewSession {
+	result, err := b.Receive(make([]byte, 2048), make([]byte, 2048), packet, restartNow)
+	if err != nil || !result.NewSession || result.Candidate == nil {
 		t.Fatalf("replacement new session = %#v, %v", result, err)
+	}
+	if commit, commitErr := b.CommitNewSession(result.Candidate, result.Peer, restartNow); commitErr != nil || commit != NewSessionReplaced {
+		t.Fatalf("replacement commit = %v, %v", commit, commitErr)
 	}
 }
 
@@ -667,9 +699,14 @@ func TestRatchetRejectsNewSessionReplayAndClockSkew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = b.Receive(make([]byte, 2048), make([]byte, 2048), ns, now); err != nil {
+	result, err := b.Receive(make([]byte, 2048), make([]byte, 2048), ns, now)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if result.Candidate == nil {
+		t.Fatal("authenticated New Session did not return a candidate")
+	}
+	defer result.Candidate.Discard()
 	if _, err = b.Receive(make([]byte, 2048), make([]byte, 2048), ns, now); !errors.Is(err, ErrRatchetReplay) {
 		t.Fatalf("new-session replay = %v", err)
 	}
@@ -714,8 +751,11 @@ func TestRatchetDefaultReceiverNegotiatesEveryProductionCryptoType(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !result.NewSession || string(result.Payload) != string(clove("hybrid")) || len(result.Reply) == 0 {
+			if !result.NewSession || result.Candidate == nil || string(result.Payload) != string(clove("hybrid")) || len(result.Reply) == 0 {
 				t.Fatalf("crypto type %d result = %#v", cryptoType, result)
+			}
+			if commit, commitErr := b.CommitNewSession(result.Candidate, result.Peer, now); commitErr != nil || commit != NewSessionInstalled {
+				t.Fatalf("crypto type %d commit = %v, %v", cryptoType, commit, commitErr)
 			}
 			if _, err = a.Receive(make([]byte, 4096), nil, result.Reply, now); err != nil {
 				t.Fatal(err)
@@ -742,9 +782,11 @@ func TestRatchetNewSessionCommitIsAtomicAfterReplyFailure(t *testing.T) {
 	if stats := b.Stats(); stats.Sessions != 0 || stats.NewSessions != 0 {
 		t.Fatalf("failed transition committed state: %+v", stats)
 	}
-	if _, err = b.Receive(make([]byte, 4096), make([]byte, 4096), ns, now); err != nil {
+	result, err := b.Receive(make([]byte, 4096), make([]byte, 4096), ns, now)
+	if err != nil {
 		t.Fatalf("retry after terminal failure = %v", err)
 	}
+	result.Candidate.Discard()
 }
 
 func TestReleaseSensitiveClearsPendingDHSecret(t *testing.T) {

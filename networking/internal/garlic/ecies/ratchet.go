@@ -30,6 +30,7 @@ const (
 	defaultReplayLife          = 5 * 60 * 1000
 	previousSetLife            = 3 * 60 * 1000
 	automaticDHRatchetMessages = 4096
+	newSessionRestartAge       = 2 * 60 * 1000
 )
 
 var (
@@ -66,12 +67,14 @@ type RatchetOptions struct {
 	RequestDH  bool
 }
 
-// RatchetResult aliases caller buffers. Reply is populated for authenticated
-// New Sessions; callers may defer sending it to coalesce higher-layer traffic.
+// RatchetResult aliases caller buffers. A non-nil Candidate owns an
+// authenticated bound New Session until CommitNewSession or Discard consumes
+// it. Callers must consume every candidate before releasing the aliased buffers.
 type RatchetResult struct {
 	Payload     []byte
 	Reply       []byte
 	Peer        foundation.Hash
+	Candidate   *NewSessionCandidate
 	NewSession  bool
 	Terminated  bool
 	ACKs        []ACK
@@ -87,6 +90,54 @@ type SessionTag [ratchetTagLen]byte
 type TagObserver interface {
 	TagAdded(SessionTag)
 	TagRemoved(SessionTag)
+}
+
+// NewSessionCommit reports the final admission decision for an authenticated
+// bound New Session.
+type NewSessionCommit uint8
+
+const (
+	newSessionCommitInvalid NewSessionCommit = iota
+	NewSessionInstalled
+	NewSessionRetained
+	NewSessionReplaced
+)
+
+// NewSessionCandidate owns derived ratchet state which is not visible through
+// any session or tag map. Discard is idempotent and becomes a no-op after a
+// successful or retained CommitNewSession decision.
+type NewSessionCandidate struct {
+	mu      sync.Mutex
+	owner   foundation.Hash
+	session *session
+}
+
+// Discard clears an uncommitted New Session candidate.
+func (c *NewSessionCandidate) Discard() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	session := c.session
+	c.session = nil
+	c.owner = foundation.Hash{}
+	c.mu.Unlock()
+	releaseSession(session)
+}
+
+func (c *NewSessionCandidate) take(owner foundation.Hash) (*session, error) {
+	if c == nil || owner == (foundation.Hash{}) {
+		return nil, ErrRatchet
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.session == nil || c.owner != owner {
+		return nil, ErrRatchet
+	}
+	session := c.session
+	c.session = nil
+	c.owner = foundation.Hash{}
+	return session, nil
 }
 
 type tagEntry struct {
@@ -126,6 +177,7 @@ type session struct {
 	replyDH            bool
 	terminateAfterDH   bool
 	dhSecret           [32]byte
+	created            uint64
 	expires            uint64
 	terminated         bool
 }
@@ -153,6 +205,7 @@ type RatchetStats struct {
 // forgery can never be retried as either an Existing or New Session.
 type RatchetManager struct {
 	mu          sync.Mutex
+	owner       foundation.Hash
 	private     [32]byte
 	cryptoTypes [3]uint16
 	cryptoCount int
@@ -231,7 +284,7 @@ func newRatchetManager(local *foundation.LocalDestination, config RatchetConfig,
 	}
 	cryptoCount := len(config.CryptoTypes)
 	config.CryptoTypes = nil
-	return &RatchetManager{private: private, cryptoTypes: cryptoTypes, cryptoCount: cryptoCount, config: config, metrics: config.Metrics, tagObserver: observer, sessions: make(map[foundation.Hash]*session), inbound: make(map[[ratchetTagLen]byte]tagEntry), pending: make(map[[ratchetTagLen]byte]pendingInitiator), replays: make(map[[32]byte]uint64)}, nil
+	return &RatchetManager{owner: local.Hash(), private: private, cryptoTypes: cryptoTypes, cryptoCount: cryptoCount, config: config, metrics: config.Metrics, tagObserver: observer, sessions: make(map[foundation.Hash]*session), inbound: make(map[[ratchetTagLen]byte]tagEntry), pending: make(map[[ratchetTagLen]byte]pendingInitiator), replays: make(map[[32]byte]uint64)}, nil
 }
 func (m *RatchetManager) addInboundTagLocked(entry tagEntry) {
 	m.inbound[entry.tag] = entry
@@ -267,32 +320,37 @@ func (m *RatchetManager) removePendingTagLocked(tag [ratchetTagLen]byte) {
 	}
 }
 
-// BindPeer replaces the encryption-key-derived responder identifier with the
-// authenticated Destination hash carried by the first routed clove. This lets
-// responder state be reused by callers that address peers by Destination hash.
-func (m *RatchetManager) BindPeer(observed, peer foundation.Hash) error {
-	if m == nil || observed == (foundation.Hash{}) || peer == (foundation.Hash{}) {
-		return ErrRatchet
+// CommitNewSession atomically retains a recent session or installs the
+// authenticated candidate under peer. The candidate is consumed on every
+// decision made for a matching local destination.
+func (m *RatchetManager) CommitNewSession(candidate *NewSessionCandidate, peer foundation.Hash, now uint64) (NewSessionCommit, error) {
+	if m == nil || candidate == nil || peer == (foundation.Hash{}) {
+		return newSessionCommitInvalid, ErrRatchet
+	}
+	session, err := candidate.take(m.owner)
+	if err != nil {
+		return newSessionCommitInvalid, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.checkLocked(0); err != nil {
-		return err
+	if err = m.checkLocked(now); err != nil {
+		releaseSession(session)
+		return newSessionCommitInvalid, err
 	}
-	if observed == peer {
-		return nil
+	old := m.sessions[peer]
+	if old != nil && now >= old.created && now-old.created <= newSessionRestartAge {
+		releaseSession(session)
+		return NewSessionRetained, nil
 	}
-	session := m.sessions[observed]
-	if session == nil {
-		return ErrRatchetNoSession
-	}
-	if existing := m.sessions[peer]; existing != nil && existing != session {
-		return ErrRatchet
-	}
-	delete(m.sessions, observed)
 	session.peer = peer
-	m.sessions[peer] = session
-	return nil
+	if err = m.installSessionLocked(session, now); err != nil {
+		releaseSession(session)
+		return newSessionCommitInvalid, err
+	}
+	if old != nil {
+		return NewSessionReplaced, nil
+	}
+	return NewSessionInstalled, nil
 }
 
 // OwnsTag reports whether tag currently addresses an inbound or pending
@@ -321,18 +379,6 @@ func (m *RatchetManager) HasPeer(peer foundation.Hash) bool {
 	owned := !m.closed && session != nil && !session.terminated
 	m.mu.Unlock()
 	return owned
-}
-
-// DiscardPeer removes and clears one established peer session.
-func (m *RatchetManager) DiscardPeer(peer foundation.Hash) {
-	if m == nil {
-		return
-	}
-	m.mu.Lock()
-	if session := m.sessions[peer]; session != nil {
-		m.discardSessionLocked(peer, session)
-	}
-	m.mu.Unlock()
 }
 
 // Stats returns bounded state counts without exposing ratchet keys or tags.
@@ -633,8 +679,9 @@ func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, 
 }
 
 // Receive authenticates New Session, New Session Reply, or Existing Session.
-// dst receives the plaintext and replyDst receives a required NSR reply. A
-// duplicate authenticated New Session is rejected before it can create state.
+// dst receives plaintext and replyDst receives a required NSR reply. Bound New
+// Sessions return an uninstalled Candidate which the caller must commit or
+// discard; Receive never evicts live session capacity for that candidate.
 func (m *RatchetManager) Receive(dst, replyDst, packet []byte, now uint64) (RatchetResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -765,14 +812,12 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 	if err != nil {
 		return RatchetResult{}, err
 	}
-	if err = m.installSessionLocked(s, now); err != nil {
-		releaseSession(s)
-		return RatchetResult{}, err
-	}
-	// Replay and session state commit together only after every handshake,
-	// reply, split, tag-lookahead, and capacity operation has succeeded.
+	candidate := &NewSessionCandidate{owner: m.owner, session: s}
+	// Authentication and replay reservation complete together, while session
+	// and tag admission remain deferred until the authenticated Destination is
+	// known to the caller.
 	m.replays[ephemeral] = now + m.config.ReplayLifetime
-	return RatchetResult{Payload: application, Reply: replyDst[:n], Peer: peer, NewSession: true}, nil
+	return RatchetResult{Payload: application, Reply: replyDst[:n], Peer: peer, Candidate: candidate, NewSession: true}, nil
 }
 
 func (m *RatchetManager) receiveExistingLocked(dst, packet []byte, tag [ratchetTagLen]byte, entry tagEntry, now uint64) (RatchetResult, error) {
@@ -1051,7 +1096,7 @@ func (m *RatchetManager) sessionFromCiphers(peer foundation.Hash, root [32]byte,
 	if err != nil {
 		return nil, err
 	}
-	s := &session{peer: peer, outbound: out, inbound: in, expires: now + m.config.SessionLifetime}
+	s := &session{peer: peer, outbound: out, inbound: in, created: now, expires: now + m.config.SessionLifetime}
 	out.owner, in.owner = s, s
 	return s, nil
 }
