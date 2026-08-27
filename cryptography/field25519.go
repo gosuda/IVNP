@@ -22,6 +22,7 @@ var (
 )
 
 func fieldLoad(in []byte) field25519 {
+	_ = in[31] // One length check eliminates bounds checks for every byte load below.
 	return field25519{
 		uint64(in[0]) | uint64(in[1])<<8 | uint64(in[2])<<16 | uint64(in[3])<<24 | uint64(in[4])<<32 | uint64(in[5])<<40 | uint64(in[6])<<48 | uint64(in[7])<<56,
 		uint64(in[8]) | uint64(in[9])<<8 | uint64(in[10])<<16 | uint64(in[11])<<24 | uint64(in[12])<<32 | uint64(in[13])<<40 | uint64(in[14])<<48 | uint64(in[15])<<56,
@@ -31,6 +32,7 @@ func fieldLoad(in []byte) field25519 {
 }
 
 func (z field25519) store(out []byte) {
+	_ = out[31] // One length check eliminates bounds checks for every byte store below.
 	for i, word := range z {
 		off := 8 * i
 		out[off] = byte(word)

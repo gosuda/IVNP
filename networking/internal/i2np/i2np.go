@@ -144,6 +144,7 @@ func marshalStandard(dst []byte, header Header, payload []byte, payloadLimit int
 	if len(dst) < StandardHeaderLen+len(payload) {
 		return 0, wire.ErrShortBuffer
 	}
+	_ = dst[StandardHeaderLen-1] // Collapse fixed-header bounds checks into one.
 	dst[0] = byte(header.Type)
 	binary.BigEndian.PutUint32(dst[1:5], header.ID)
 	binary.BigEndian.PutUint64(dst[5:13], header.Expiration)
