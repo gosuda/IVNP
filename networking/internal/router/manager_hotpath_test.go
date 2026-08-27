@@ -29,6 +29,19 @@ func TestManagerHotPathAllocationBudgets(t *testing.T) {
 	}); got != 0 {
 		t.Fatalf("NTCP2 caller-buffer marshal allocations = %v, want 0", got)
 	}
+	direction, err := ntcp2.NewDirection(make([]byte, 32), make([]byte, 16), make([]byte, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := ntcp2.NewSession(&managerHotPathStreamConn{}, direction, nil)
+	defer func() { _ = session.Close() }()
+	if got := testing.AllocsPerRun(100, func() {
+		if err := writeNTCP2I2NP(session, message); err != nil {
+			t.Fatal(err)
+		}
+	}); got != 0 {
+		t.Fatalf("NTCP2 framed write allocations = %v, want 0", got)
+	}
 
 	var ssuFrame [ssu2.MaxIPv4PacketLen]byte
 	if got := testing.AllocsPerRun(100, func() {
@@ -406,6 +419,25 @@ func BenchmarkNTCP2ManagerMarshalFrame(b *testing.B) {
 		}
 	}
 }
+func BenchmarkNTCP2ManagerWriteFrame(b *testing.B) {
+	message := managerHotPathMessage()
+	message.Payload = make([]byte, 1024)
+	direction, err := ntcp2.NewDirection(make([]byte, 32), make([]byte, 16), make([]byte, 8))
+	if err != nil {
+		b.Fatal(err)
+	}
+	connection := &managerHotPathStreamConn{}
+	session := ntcp2.NewSession(connection, direction, nil)
+	b.Cleanup(func() { _ = session.Close() })
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if err := writeNTCP2I2NP(session, message); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkNTCP2ReplayAdmission(b *testing.B) {
 	manager := &NTCP2Manager{replaySeen: make(map[[32]byte]struct{}, ntcp2ReplayEntries)}
 	for index := range ntcp2ReplayEntries {
@@ -433,6 +465,17 @@ var managerHotPathFrame []byte
 func managerHotPathMessage() i2np.Message {
 	return i2np.Message{Header: i2np.Header{Type: i2np.DeliveryStatus, ID: 7, Expiration: 60_000}, Payload: make([]byte, 64)}
 }
+
+type managerHotPathStreamConn struct{}
+
+func (*managerHotPathStreamConn) Read([]byte) (int, error)         { return 0, net.ErrClosed }
+func (*managerHotPathStreamConn) Write(frame []byte) (int, error)  { return len(frame), nil }
+func (*managerHotPathStreamConn) Close() error                     { return nil }
+func (*managerHotPathStreamConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (*managerHotPathStreamConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (*managerHotPathStreamConn) SetDeadline(time.Time) error      { return nil }
+func (*managerHotPathStreamConn) SetReadDeadline(time.Time) error  { return nil }
+func (*managerHotPathStreamConn) SetWriteDeadline(time.Time) error { return nil }
 
 type managerHotPathPacketConn struct {
 	writes int

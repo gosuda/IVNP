@@ -21,6 +21,7 @@ import (
 
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/ingress"
+	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/netdb"
 	"gosuda.org/ivnp/networking/internal/transport/ntcp2"
@@ -1016,7 +1017,16 @@ func writeNTCP2I2NP(session *ntcp2.Session, message i2np.Message) error {
 	if len(message.Payload) > i2np.I2PDMaxPayload {
 		return i2np.ErrPayloadTooLarge
 	}
-	plaintext := make([]byte, ntcp2.BlockHeaderLen+i2np.TransportHeaderLen+len(message.Payload))
+	plaintextLen := ntcp2.BlockHeaderLen + i2np.TransportHeaderLen + len(message.Payload)
+	lease, ok := pool.AcquireLease(plaintextLen)
+	if !ok {
+		return i2np.ErrPayloadTooLarge
+	}
+	defer lease.Release()
+	plaintext, ok := lease.Bytes(plaintextLen)
+	if !ok {
+		return io.ErrShortBuffer
+	}
 	plaintext[0] = ntcp2.BlockI2NP
 	binary.BigEndian.PutUint16(plaintext[1:3], uint16(len(plaintext)-ntcp2.BlockHeaderLen))
 	if err := marshalNTCP2I2NPTo(plaintext[ntcp2.BlockHeaderLen:], message); err != nil {
