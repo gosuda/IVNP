@@ -272,23 +272,38 @@ func (l ntcp2PreferenceListener) Accept() (net.Conn, error) { return nil, net.Er
 func (l ntcp2PreferenceListener) Close() error              { return nil }
 func (l ntcp2PreferenceListener) Addr() net.Addr            { return l.address }
 
-func TestNTCP2WildcardDualStackPrefersReachableIPv4Peers(t *testing.T) {
+func TestNTCP2AddressSelectionDistinguishesPreferenceAndRequirement(t *testing.T) {
 	tests := []struct {
 		name     string
 		listener net.Listener
-		want     bool
+		want     ntcp2AddressMode
 	}{
-		{"outbound only", nil, true},
-		{"IPv4", ntcp2PreferenceListener{address: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}}, true},
-		{"dual stack wildcard", ntcp2PreferenceListener{address: &net.TCPAddr{IP: net.IPv6unspecified}}, true},
-		{"specific IPv6", ntcp2PreferenceListener{address: &net.TCPAddr{IP: net.ParseIP("2001:db8::1")}}, false},
+		{"outbound only", nil, ntcp2AddressPreferIPv4},
+		{"IPv4", ntcp2PreferenceListener{address: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}}, ntcp2AddressRequireIPv4},
+		{"dual stack wildcard", ntcp2PreferenceListener{address: &net.TCPAddr{IP: net.IPv6unspecified}}, ntcp2AddressPreferIPv4},
+		{"specific IPv6", ntcp2PreferenceListener{address: &net.TCPAddr{IP: net.ParseIP("2001:db8::1")}}, ntcp2AddressAny},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := ntcp2PreferIPv4(test.listener); got != test.want {
-				t.Fatalf("prefer IPv4 = %t, want %t", got, test.want)
+			if got := ntcp2AddressSelection(test.listener); got != test.want {
+				t.Fatalf("address selection = %d, want %d", got, test.want)
 			}
 		})
+	}
+}
+
+func TestSelectNTCP2AddressIPv4PreferenceFallsBackToIPv6(t *testing.T) {
+	owner, _, _ := newNTCP2TestLocal(t, "[2001:db8::1]:12345")
+	info := owner.Snapshot()
+	selected, err := selectNTCP2AddressForNetwork(info, ntcp2AddressPreferIPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.host != "2001:db8::1" || selected.port != 12345 {
+		t.Fatalf("IPv6 fallback = %s:%d", selected.host, selected.port)
+	}
+	if _, err = selectNTCP2AddressForNetwork(info, ntcp2AddressRequireIPv4); !errors.Is(err, ErrNTCP2Peer) {
+		t.Fatalf("strict IPv4 selection error = %v, want %v", err, ErrNTCP2Peer)
 	}
 }
 

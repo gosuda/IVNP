@@ -474,7 +474,7 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer foundation.Hash) e
 	if err := netdb.ReseedRouterInfoFresh(ref.Info, uint64(bindings.Clock.Now().UnixMilli())); err != nil {
 		return fmt.Errorf("%w: %v", ErrNTCP2Peer, err)
 	}
-	remote, err := selectNTCP2AddressForNetwork(ref.Info, ntcp2PreferIPv4(bindings.NTCP2))
+	remote, err := selectNTCP2AddressForNetwork(ref.Info, ntcp2AddressSelection(bindings.NTCP2))
 	if err != nil {
 		return err
 	}
@@ -868,11 +868,19 @@ type ntcp2Address struct {
 	iv     [aes.BlockSize]byte
 }
 
+type ntcp2AddressMode uint8
+
+const (
+	ntcp2AddressAny ntcp2AddressMode = iota
+	ntcp2AddressPreferIPv4
+	ntcp2AddressRequireIPv4
+)
+
 func selectNTCP2Address(info netdb.RouterInfo) (ntcp2Address, error) {
-	return selectNTCP2AddressForNetwork(info, false)
+	return selectNTCP2AddressForNetwork(info, ntcp2AddressAny)
 }
 
-func selectNTCP2AddressForNetwork(info netdb.RouterInfo, preferIPv4 bool) (ntcp2Address, error) {
+func selectNTCP2AddressForNetwork(info netdb.RouterInfo, mode ntcp2AddressMode) (ntcp2Address, error) {
 	var fallback ntcp2Address
 	found := false
 	addresses := info.Addresses()
@@ -882,7 +890,7 @@ func selectNTCP2AddressForNetwork(info netdb.RouterInfo, preferIPv4 bool) (ntcp2
 			return ntcp2Address{}, err
 		}
 		if !ok {
-			if found && !preferIPv4 {
+			if found && mode != ntcp2AddressRequireIPv4 {
 				return fallback, nil
 			}
 			return ntcp2Address{}, ErrNTCP2Peer
@@ -926,18 +934,27 @@ func selectNTCP2AddressForNetwork(info netdb.RouterInfo, preferIPv4 bool) (ntcp2
 		if !found {
 			fallback, found = selected, true
 		}
-		if !preferIPv4 || net.ParseIP(host).To4() != nil {
+		if mode == ntcp2AddressAny || net.ParseIP(host).To4() != nil {
 			return selected, nil
 		}
 	}
 }
 
-func ntcp2PreferIPv4(listener net.Listener) bool {
+func ntcp2AddressSelection(listener net.Listener) ntcp2AddressMode {
 	if listener == nil {
-		return true
+		return ntcp2AddressPreferIPv4
 	}
 	address, ok := listener.Addr().(*net.TCPAddr)
-	return ok && (address.IP.IsUnspecified() || address.IP.To4() != nil)
+	if !ok {
+		return ntcp2AddressAny
+	}
+	if address.IP.To4() != nil {
+		return ntcp2AddressRequireIPv4
+	}
+	if address.IP.IsUnspecified() {
+		return ntcp2AddressPreferIPv4
+	}
+	return ntcp2AddressAny
 }
 
 func supportsNTCP2Version(version string) bool {
