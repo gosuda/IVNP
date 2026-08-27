@@ -189,6 +189,115 @@ func TestDestinationDataUsesI2CPGzipHeader(t *testing.T) {
 	}
 }
 
+func TestHandleDestinationDataAcceptsDelayedStreamingSYN(t *testing.T) {
+	clientDestination, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverDestination, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		clientDestination.ReleaseSensitive()
+		serverDestination.ReleaseSensitive()
+	})
+
+	serverDestinations := NewDestinationManager()
+	t.Cleanup(func() { _ = serverDestinations.Close() })
+	serverSession, err := serverDestinations.Create(DestinationSessionConfig{
+		Default: true,
+		Streaming: streamingtunnel.TunnelNetworkConfig{
+			Destination: serverDestination,
+			Sender: dataPlaneDirectSender(func(context.Context, streamingtunnel.Delivery) error {
+				return nil
+			}),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := serverSession.ListenI2P(context.Background(), ":80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	serverHash := serverDestination.Hash()
+	serverGarlic := garlic.NewSessionManager(garlic.SessionManagerConfig{})
+	t.Cleanup(func() { _ = serverGarlic.Close() })
+	receiver, err := NewGarlicReceiver(GarlicReceiverConfig{
+		Service: NewService(netdb.NewDatabase(serverHash, netdb.DefaultBucketCapacity)),
+		Destinations: map[foundation.Hash]GarlicDestination{
+			serverHash: {Sessions: serverGarlic},
+		},
+		ReplyKeys: garlic.NewReplyKeyRegistry(1),
+		Now:       func() uint64 { return 1_000 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(receiver.ReleaseSensitive)
+
+	clientIdentity, err := clientDestination.Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientRaw := append([]byte(nil), clientIdentity.Bytes()...)
+	signatureLen, ok := clientDestination.SigningKeyType().SignatureLen()
+	if !ok {
+		t.Fatal("client signing type has no signature length")
+	}
+	options := make([]byte, 0, 2+len(clientRaw)+2+signatureLen)
+	options = append(options, 0, 0)
+	options = append(options, clientRaw...)
+	options = append(options, 0x06, 0xc2)
+	options = append(options, make([]byte, signatureLen)...)
+	packet := streaming.Packet{
+		ReceiveStreamID: 1,
+		Sequence:        0,
+		NACKCount:       8,
+		NACKs:           append([]byte(nil), serverHash[:]...),
+		Flags: streamingtunnel.FlagSynchronize | streamingtunnel.FlagNoACK |
+			streamingtunnel.FlagDelayRequested | streamingtunnel.FlagFromIncluded |
+			streamingtunnel.FlagMaxPacketSize | streamingtunnel.FlagSignatureIncluded,
+		Options: options,
+	}
+	wire := make([]byte, packet.EncodedLen())
+	if _, err = packet.MarshalTo(wire); err != nil {
+		t.Fatal(err)
+	}
+	signature, err := clientDestination.Sign(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signatureOffset := streaming.HeaderLen + len(packet.NACKs) + 2 + len(clientRaw) + 2
+	copy(wire[signatureOffset:signatureOffset+len(signature)], signature)
+
+	data, err := marshalDestinationDataTo(make([]byte, i2np.I2PDMaxPayload), streamingtunnel.Delivery{
+		Protocol: streamingtunnel.ProtocolStreaming,
+		FromPort: 1234,
+		ToPort:   80,
+		Payload:  wire,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = receiver.HandleDestinationData(clientDestination.Hash(), serverHash, i2np.Message{
+		Header:  i2np.Header{Type: i2np.Data},
+		Payload: data,
+	}, serverDestinations); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection == nil {
+		t.Fatal("delayed SYN did not create a stream")
+	}
+}
+
 func TestStreamingTunnelSenderLeaseSetGarlicTunnelDestination(t *testing.T) {
 	const now = uint64(1_000)
 	clientDestination, err := foundation.GenerateLegacyLocalDestination()

@@ -1375,7 +1375,14 @@ func (r *GarlicReceiver) HandleDestinationData(from, to foundation.Hash, message
 			return parseErr
 		}
 		if packet.Flags&streamingtunnel.FlagFromIncluded != 0 {
-			identity, _, identityErr := foundation.ParseIdentity(packet.Options)
+			options := packet.Options
+			if packet.Flags&streamingtunnel.FlagDelayRequested != 0 {
+				if len(options) < 2 {
+					return streamingtunnel.ErrTunnelPacket
+				}
+				options = options[2:]
+			}
+			identity, _, identityErr := foundation.ParseIdentity(options)
 			if identityErr != nil {
 				return identityErr
 			}

@@ -2,8 +2,8 @@ package ivnp_test
 
 import (
 	"context"
-	cryptorand "crypto/rand"
 	"crypto/ed25519"
+	cryptorand "crypto/rand"
 	"encoding/binary"
 	"errors"
 	"io"

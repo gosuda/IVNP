@@ -20,6 +20,7 @@ const (
 	defaultMaxConnections   = 64
 	defaultMaxHeaderBytes   = 32 << 10
 	defaultMaxRequestBytes  = 8 << 20
+	i2pHTTPUserAgent        = "MYOB/6.66 (AN/ON)"
 )
 
 // HTTPProxyConfig configures a local HTTP CONNECT and absolute-form proxy.
@@ -227,6 +228,7 @@ func (p *HTTPProxy) forwardRequest(w http.ResponseWriter, request *http.Request,
 	removeHopByHopHeaders(request.Header)
 	request.Header.Del("Proxy-Authorization")
 	removeForwardingHeaders(request.Header)
+	request.Header.Set("User-Agent", i2pHTTPUserAgent)
 	request.Body = http.MaxBytesReader(w, request.Body, p.config.MaxRequestBytes)
 	if err := outbound.SetDeadline(time.Now().Add(p.config.ReadTimeout)); err != nil {
 		rejectHTTP(w, request, "I2P destination unavailable", http.StatusBadGateway)
