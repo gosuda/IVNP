@@ -307,7 +307,23 @@ func TestSelectNTCP2AddressIPv4PreferenceFallsBackToIPv6(t *testing.T) {
 	}
 }
 
+func TestSelectNTCP2AddressIPv4PreferenceSkipsEarlierIPv6(t *testing.T) {
+	owner, _, _ := newNTCP2TestLocalWithEndpoints(t, "[2001:db8::1]:12345", "192.0.2.1:23456")
+	selected, err := selectNTCP2AddressForNetwork(owner.Snapshot(), ntcp2AddressPreferIPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.host != "192.0.2.1" || selected.port != 23456 {
+		t.Fatalf("preferred address = %s:%d, want 192.0.2.1:23456", selected.host, selected.port)
+	}
+}
+
 func newNTCP2TestLocal(t *testing.T, endpoint string) (*LocalRouterInfo, []byte, []byte) {
+	t.Helper()
+	return newNTCP2TestLocalWithEndpoints(t, endpoint)
+}
+
+func newNTCP2TestLocalWithEndpoints(t *testing.T, endpoints ...string) (*LocalRouterInfo, []byte, []byte) {
 	t.Helper()
 	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
@@ -321,25 +337,29 @@ func newNTCP2TestLocal(t *testing.T, endpoint string) (*LocalRouterInfo, []byte,
 	if _, err = rand.Read(iv); err != nil {
 		t.Fatal(err)
 	}
-	host, port, err := net.SplitHostPort(endpoint)
-	if err != nil {
-		t.Fatal(err)
-	}
 	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{Local: local, RouterVersion: "0.9.66"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = owner.ReplaceAddresses([]PublishedAddress{{
-		Transport: "NTCP2",
-		Cost:      3,
-		Options: []MappingOption{
-			{Key: "host", Value: host},
-			{Key: "i", Value: foundation.EncodeI2PBase64(iv)},
-			{Key: "port", Value: port},
-			{Key: "s", Value: foundation.EncodeI2PBase64(static.PublicKey().Bytes())},
-			{Key: "v", Value: "2"},
-		},
-	}}); err != nil {
+	addresses := make([]PublishedAddress, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		host, port, splitErr := net.SplitHostPort(endpoint)
+		if splitErr != nil {
+			t.Fatal(splitErr)
+		}
+		addresses = append(addresses, PublishedAddress{
+			Transport: "NTCP2",
+			Cost:      3,
+			Options: []MappingOption{
+				{Key: "host", Value: host},
+				{Key: "i", Value: foundation.EncodeI2PBase64(iv)},
+				{Key: "port", Value: port},
+				{Key: "s", Value: foundation.EncodeI2PBase64(static.PublicKey().Bytes())},
+				{Key: "v", Value: "2"},
+			},
+		})
+	}
+	if err = owner.ReplaceAddresses(addresses); err != nil {
 		t.Fatal(err)
 	}
 	owner.SetReachability(ReachabilityReachable)
