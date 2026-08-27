@@ -474,7 +474,7 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer foundation.Hash) e
 	if err := netdb.ReseedRouterInfoFresh(ref.Info, uint64(bindings.Clock.Now().UnixMilli())); err != nil {
 		return fmt.Errorf("%w: %v", ErrNTCP2Peer, err)
 	}
-	remote, err := selectNTCP2AddressForNetwork(ref.Info, ntcp2IPv4Only(bindings.NTCP2))
+	remote, err := selectNTCP2AddressForNetwork(ref.Info, ntcp2PreferIPv4(bindings.NTCP2))
 	if err != nil {
 		return err
 	}
@@ -932,12 +932,12 @@ func selectNTCP2AddressForNetwork(info netdb.RouterInfo, preferIPv4 bool) (ntcp2
 	}
 }
 
-func ntcp2IPv4Only(listener net.Listener) bool {
+func ntcp2PreferIPv4(listener net.Listener) bool {
 	if listener == nil {
 		return true
 	}
 	address, ok := listener.Addr().(*net.TCPAddr)
-	return ok && address.IP.To4() != nil
+	return ok && (address.IP.IsUnspecified() || address.IP.To4() != nil)
 }
 
 func supportsNTCP2Version(version string) bool {

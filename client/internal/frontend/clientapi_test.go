@@ -24,6 +24,12 @@ func (r fixedDestinationResolver) ResolveDestination(context.Context, string) (s
 	return string(r), nil
 }
 
+type destinationResolverFunc func(context.Context, string) (string, error)
+
+func (resolve destinationResolverFunc) ResolveDestination(ctx context.Context, name string) (string, error) {
+	return resolve(ctx, name)
+}
+
 type testNetwork struct {
 	mu        sync.Mutex
 	addresses []string
@@ -57,7 +63,7 @@ func pipeNetwork(handler func(net.Conn)) *testNetwork {
 
 func startHTTPProxy(t *testing.T, network *testNetwork) *HTTPProxy {
 	t.Helper()
-	proxy, err := NewHTTPProxy(HTTPProxyConfig{Network: network, ListenAddress: "127.0.0.1:0"})
+	proxy, err := NewHTTPProxy(HTTPProxyConfig{Network: network, ListenAddress: "127.0.0.1:0", Outproxies: []string{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +175,7 @@ func TestHTTPProxyRejectsClearnet(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusBadRequest || len(network.calls()) != 0 {
+	if response.StatusCode != http.StatusBadGateway || len(network.calls()) != 0 {
 		t.Fatalf("clearnet response = %d, calls = %d", response.StatusCode, len(network.calls()))
 	}
 }
@@ -182,7 +188,7 @@ func TestHTTPProxyResolvesI2PHostnames(t *testing.T) {
 		}
 	})
 	proxy, err := NewHTTPProxy(HTTPProxyConfig{
-		Network: network, Resolver: fixedDestinationResolver(testB32), ListenAddress: "127.0.0.1:0",
+		Network: network, Resolver: fixedDestinationResolver(testB32), ListenAddress: "127.0.0.1:0", Outproxies: []string{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -210,6 +216,265 @@ func TestHTTPProxyResolvesI2PHostnames(t *testing.T) {
 	}
 	if calls := network.calls(); len(calls) != 1 || calls[0] != testB32+":80" {
 		t.Fatalf("resolved dials = %q", calls)
+	}
+}
+
+func TestHTTPProxyRoutesClearnetThroughOutproxy(t *testing.T) {
+	warmed := make(chan struct{})
+	handled := make(chan string, 1)
+	var dials atomic.Int32
+	network := pipeNetwork(func(connection net.Conn) {
+		defer connection.Close()
+		if dials.Add(1) == 1 {
+			close(warmed)
+			_, _ = io.Copy(io.Discard, connection)
+			return
+		}
+		request, err := http.ReadRequest(bufio.NewReader(connection))
+		if err != nil {
+			handled <- err.Error()
+			return
+		}
+		if request.RequestURI != "http://example.com/path?value=1" || request.Host != "example.com" {
+			handled <- "outproxy request was not absolute-form"
+			return
+		}
+		if request.Header.Get("User-Agent") != outproxyHTTPUserAgent || request.Header.Get("Proxy-Authorization") != "" || request.Header.Get("X-Forwarded-For") != "" {
+			handled <- "outproxy request leaked identifying proxy headers"
+			return
+		}
+		handled <- ""
+		_, _ = io.WriteString(connection, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+	})
+	proxy, err := NewHTTPProxy(HTTPProxyConfig{
+		Network: network, Resolver: fixedDestinationResolver(testB32), ListenAddress: "127.0.0.1:0",
+		Outproxies: []string{"exit.stormycloud.i2p"}, OutproxyWarmupInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = proxy.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = proxy.Close()
+		_ = proxy.Wait()
+	})
+	select {
+	case <-warmed:
+	case <-time.After(time.Second):
+		t.Fatal("outproxy warmup did not dial immediately")
+	}
+
+	connection, err := net.Dial("tcp", proxy.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	_, _ = io.WriteString(connection, "GET http://example.com/path?value=1 HTTP/1.1\r\nHost: example.com\r\nUser-Agent: identifying-client/1.0\r\nProxy-Authorization: secret\r\nX-Forwarded-For: 192.0.2.1\r\n\r\n")
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil || response.StatusCode != http.StatusOK || string(body) != "ok" {
+		t.Fatalf("outproxy HTTP response = %d, %q, %v", response.StatusCode, body, err)
+	}
+	if failure := <-handled; failure != "" {
+		t.Fatal(failure)
+	}
+	if calls := network.calls(); len(calls) != 2 || calls[0] != testB32+":80" || calls[1] != testB32+":80" {
+		t.Fatalf("outproxy dials = %q", calls)
+	}
+}
+
+func TestHTTPProxyRoutesConnectThroughOutproxy(t *testing.T) {
+	warmed := make(chan struct{})
+	handled := make(chan string, 1)
+	var dials atomic.Int32
+	network := pipeNetwork(func(connection net.Conn) {
+		defer connection.Close()
+		if dials.Add(1) == 1 {
+			close(warmed)
+			_, _ = io.Copy(io.Discard, connection)
+			return
+		}
+		request, err := http.ReadRequest(bufio.NewReader(connection))
+		if err != nil {
+			handled <- err.Error()
+			return
+		}
+		if request.Method != http.MethodConnect || request.RequestURI != "example.com:443" || request.Host != "example.com:443" {
+			handled <- "outproxy CONNECT request was malformed"
+			return
+		}
+		if request.Header.Get("User-Agent") != outproxyHTTPUserAgent {
+			handled <- "outproxy CONNECT user agent was not normalized"
+			return
+		}
+		if _, err = io.WriteString(connection, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+			handled <- err.Error()
+			return
+		}
+		buffer := make([]byte, 4)
+		if _, err = io.ReadFull(connection, buffer); err != nil || string(buffer) != "ping" {
+			handled <- "outproxy CONNECT relay did not receive payload"
+			return
+		}
+		handled <- ""
+		_, _ = io.WriteString(connection, "pong")
+	})
+	proxy, err := NewHTTPProxy(HTTPProxyConfig{
+		Network: network, Resolver: fixedDestinationResolver(testB32), ListenAddress: "127.0.0.1:0",
+		Outproxies: []string{"exit.stormycloud.i2p"}, OutproxyWarmupInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = proxy.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = proxy.Close()
+		_ = proxy.Wait()
+	})
+	select {
+	case <-warmed:
+	case <-time.After(time.Second):
+		t.Fatal("outproxy warmup did not dial immediately")
+	}
+
+	connection, err := net.Dial("tcp", proxy.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	_, _ = io.WriteString(connection, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("outproxy CONNECT response = %v, %v", response, err)
+	}
+	_, _ = io.WriteString(connection, "ping")
+	buffer := make([]byte, 4)
+	if _, err = io.ReadFull(connection, buffer); err != nil || string(buffer) != "pong" {
+		t.Fatalf("outproxy CONNECT relay = %q, %v", buffer, err)
+	}
+	if failure := <-handled; failure != "" {
+		t.Fatal(failure)
+	}
+}
+
+func TestHTTPProxyOutproxyFailover(t *testing.T) {
+	const secondB32 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.b32.i2p"
+	network := &testNetwork{dial: func(_ context.Context, address string) (net.Conn, error) {
+		if address == testB32+":80" {
+			return nil, errors.New("first outproxy unavailable")
+		}
+		client, server := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	}}
+	resolver := destinationResolverFunc(func(_ context.Context, name string) (string, error) {
+		if name == "first.i2p" {
+			return testB32, nil
+		}
+		return secondB32, nil
+	})
+	proxy, err := NewHTTPProxy(HTTPProxyConfig{Network: network, Resolver: resolver, Outproxies: []string{"first.i2p", "second.i2p"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := proxy.dialOutproxy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = connection.Close()
+	if calls := network.calls(); len(calls) != 2 || calls[0] != testB32+":80" || calls[1] != secondB32+":80" {
+		t.Fatalf("outproxy failover dials = %q", calls)
+	}
+}
+
+func TestHTTPProxyRetriesOutproxyWarmup(t *testing.T) {
+	attempted := make(chan struct{}, 2)
+	network := &testNetwork{dial: func(context.Context, string) (net.Conn, error) {
+		attempted <- struct{}{}
+		return nil, errors.New("warming outproxy failed")
+	}}
+	proxy, err := NewHTTPProxy(HTTPProxyConfig{
+		Network: network, Resolver: fixedDestinationResolver(testB32), ListenAddress: "127.0.0.1:0",
+		Outproxies: []string{"exit.stormycloud.i2p"}, OutproxyWarmupInterval: time.Hour,
+		OutproxyWarmupRetryInterval: 10 * time.Millisecond, OutproxyWarmupTimeout: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = proxy.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		select {
+		case <-attempted:
+		case <-time.After(time.Second):
+			t.Fatal("outproxy warmup was not retried")
+		}
+	}
+	if err = proxy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = proxy.Wait(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHTTPProxyWaitsForDataPlaneBeforeWarmup(t *testing.T) {
+	readyChecked := make(chan struct{})
+	releaseReady := make(chan struct{})
+	dialed := make(chan struct{}, 1)
+	var (
+		ready       atomic.Bool
+		checkedOnce sync.Once
+		releaseOnce sync.Once
+	)
+	network := &testNetwork{dial: func(context.Context, string) (net.Conn, error) {
+		dialed <- struct{}{}
+		client, server := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	}}
+	proxy, err := NewHTTPProxy(HTTPProxyConfig{
+		Network: network, Resolver: fixedDestinationResolver(testB32), ListenAddress: "127.0.0.1:0",
+		Outproxies: []string{"exit.stormycloud.i2p"}, OutproxyWarmupInterval: time.Hour,
+		OutproxyWarmupRetryInterval: 10 * time.Millisecond,
+		OutproxyWarmupReady: func() bool {
+			checkedOnce.Do(func() { close(readyChecked) })
+			<-releaseReady
+			return ready.Load()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = proxy.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseReady) })
+		_ = proxy.Close()
+		if waitErr := proxy.Wait(); waitErr != nil {
+			t.Error(waitErr)
+		}
+	})
+	<-readyChecked
+	if calls := network.calls(); len(calls) != 0 {
+		t.Fatalf("warmup dialed before readiness: %q", calls)
+	}
+	ready.Store(true)
+	releaseOnce.Do(func() { close(releaseReady) })
+	select {
+	case <-dialed:
+	case <-time.After(time.Second):
+		t.Fatal("warmup did not dial after readiness")
 	}
 }
 
@@ -520,7 +785,7 @@ func TestHTTPProxyRejectsWithConnectionClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusBadRequest || !response.Close {
+	if response.StatusCode != http.StatusBadGateway || !response.Close {
 		t.Fatalf("response = %d, close = %t", response.StatusCode, response.Close)
 	}
 }

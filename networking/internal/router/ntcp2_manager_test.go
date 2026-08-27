@@ -266,6 +266,32 @@ func TestNTCP2InboundRouterInfoPolicyRejectsStaleFutureAndRotationDowngrade(t *t
 	}
 }
 
+type ntcp2PreferenceListener struct{ address net.Addr }
+
+func (l ntcp2PreferenceListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+func (l ntcp2PreferenceListener) Close() error              { return nil }
+func (l ntcp2PreferenceListener) Addr() net.Addr            { return l.address }
+
+func TestNTCP2WildcardDualStackPrefersReachableIPv4Peers(t *testing.T) {
+	tests := []struct {
+		name     string
+		listener net.Listener
+		want     bool
+	}{
+		{"outbound only", nil, true},
+		{"IPv4", ntcp2PreferenceListener{address: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}}, true},
+		{"dual stack wildcard", ntcp2PreferenceListener{address: &net.TCPAddr{IP: net.IPv6unspecified}}, true},
+		{"specific IPv6", ntcp2PreferenceListener{address: &net.TCPAddr{IP: net.ParseIP("2001:db8::1")}}, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ntcp2PreferIPv4(test.listener); got != test.want {
+				t.Fatalf("prefer IPv4 = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func newNTCP2TestLocal(t *testing.T, endpoint string) (*LocalRouterInfo, []byte, []byte) {
 	t.Helper()
 	local, err := foundation.GenerateLocalAddress()

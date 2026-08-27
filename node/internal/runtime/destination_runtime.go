@@ -376,11 +376,9 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	owner := destination.Hash()
 	preferredPeers := append([]foundation.Hash(nil), f.preferredPeers...)
 	if len(preferredPeers) > 1 {
-		// Keep destination-owned pool maintenance from racing the router's
-		// exploratory pool for the same first bootstrap peer. Concurrent NTCP2
-		// handshakes to one peer replace each other in native routers and can
-		// discard a just-sent build. Every destination deterministically starts
-		// at a nonzero offset while retaining the complete verified set.
+		// Spread destination LeaseSet publication across the verified bootstrap
+		// responders instead of making every destination target the same
+		// floodfill first.
 		offset := 1 + int(owner[0])%(len(preferredPeers)-1)
 		preferredPeers = append(preferredPeers[offset:], preferredPeers[:offset]...)
 	}
@@ -414,7 +412,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	}()
 	inboundSource, err := networking.TunnelNewNetDBInboundBuildSource(networking.TunnelNetDBInboundBuildSourceConfig{
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: f.cfg.Tunnel.Hops,
-		PreferredPeers: preferredPeers, Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
+		Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
 		Eligible: f.eligible, Reservations: f.reservations,
 	})
 	if err != nil {
@@ -422,7 +420,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	}
 	outboundSource, err := networking.TunnelNewNetDBOutboundBuildSource(networking.TunnelNetDBOutboundBuildSourceConfig{
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: f.cfg.Tunnel.Hops,
-		PreferredPeers: preferredPeers, Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
+		Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
 		Eligible: f.eligible, Reservations: f.reservations,
 	})
 	if err != nil {

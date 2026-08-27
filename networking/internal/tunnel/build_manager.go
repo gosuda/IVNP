@@ -478,9 +478,6 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 			if m.profiles != nil {
 				m.profiles.RecordTransportFailure(endpoint, now)
 			}
-			if m.metrics != nil {
-				m.metrics.IncTunnelBuildFailures()
-			}
 			if m.logger != nil {
 				m.logger.Warn("tunnel build reply RouterInfo seed failed", "direction", "outbound", "endpoint", foundation.EncodeI2PBase64(endpoint[:]), "error", err)
 			}

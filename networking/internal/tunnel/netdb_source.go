@@ -18,8 +18,6 @@ var (
 	ErrNoEligiblePeers        = errors.New("tunnel: insufficient eligible netdb peers")
 )
 
-const preferredRecoveryProbeInterval uint64 = 4
-
 // NetDBOutboundBuildSourceConfig supplies deterministic control-plane inputs
 // for selecting an outbound build path from already verified netdb entries.
 type NetDBOutboundBuildSourceConfig struct {
@@ -29,7 +27,6 @@ type NetDBOutboundBuildSourceConfig struct {
 	ReplyRouter    foundation.Hash
 	ReplyTunnelID  uint32
 	Hops           int
-	PreferredPeers []foundation.Hash
 	CandidateLimit int
 	Lifetime       uint64
 	CircuitID      func() uint32
@@ -43,22 +40,20 @@ type NetDBOutboundBuildSourceConfig struct {
 // verified during netdb admission. It deliberately has no network I/O and is
 // invoked only by Rotator maintenance.
 type NetDBOutboundBuildSource struct {
-	table            *netdb.Table
-	profiles         *PeerProfiles
-	local            foundation.Hash
-	replyRouter      foundation.Hash
-	replyTunnelID    uint32
-	hops             int
-	candidateLimit   int
-	lifetime         uint64
-	preferred        []netdb.RouterRef
-	circuitID        func() uint32
-	tunnelID         func() uint32
-	target           func(uint64) foundation.Hash
-	eligible         func(foundation.Hash) bool
-	reservations     *BuildReservations
-	sequence         atomic.Uint64
-	recoverySequence atomic.Uint64
+	table          *netdb.Table
+	profiles       *PeerProfiles
+	local          foundation.Hash
+	replyRouter    foundation.Hash
+	replyTunnelID  uint32
+	hops           int
+	candidateLimit int
+	lifetime       uint64
+	circuitID      func() uint32
+	tunnelID       func() uint32
+	target         func(uint64) foundation.Hash
+	eligible       func(foundation.Hash) bool
+	reservations   *BuildReservations
+	sequence       atomic.Uint64
 }
 
 func NewNetDBOutboundBuildSource(config NetDBOutboundBuildSourceConfig) (*NetDBOutboundBuildSource, error) {
@@ -80,7 +75,6 @@ func NewNetDBOutboundBuildSource(config NetDBOutboundBuildSourceConfig) (*NetDBO
 		replyRouter: config.ReplyRouter, replyTunnelID: config.ReplyTunnelID,
 		hops: config.Hops, candidateLimit: config.CandidateLimit, lifetime: config.Lifetime,
 		circuitID: config.CircuitID, tunnelID: config.TunnelID, target: config.Target, eligible: config.Eligible, reservations: config.Reservations,
-		preferred: retainPreferred(config.Table, config.PreferredPeers),
 	}, nil
 }
 
@@ -116,19 +110,9 @@ func (s *NetDBOutboundBuildSource) NextOutboundForReply(ctx context.Context, now
 		}
 		candidates = eligible
 	}
-	hops := preferredHops(s.table, availablePreferred(s.preferred, s.reservations), s.profiles, s.local, route.Gateway, s.hops, nowMillis)
-	// Failure-majority profiles quarantine preferred peers without making the
-	// quarantine permanent. Probe that bounded set periodically; on intervening
-	// attempts use healthy verified routers so one broken explicit peer cannot
-	// create a tight rebuild loop.
-	if len(hops) < s.hops && s.recoverySequence.Add(1)%preferredRecoveryProbeInterval == 1 {
-		hops = preferredHops(s.table, s.preferred, nil, s.local, route.Gateway, s.hops, nowMillis)
-	}
+	hops := selectDiverseHops(candidates, s.profiles, s.local, route.Gateway, s.hops, nowMillis, s.eligible != nil)
 	if len(hops) < s.hops {
-		hops = selectDiverseHops(candidates, s.profiles, s.local, route.Gateway, s.hops, nowMillis)
-	}
-	if len(hops) < s.hops {
-		hops = selectDiverseHops(candidates, nil, s.local, route.Gateway, s.hops, nowMillis)
+		hops = selectDiverseHops(candidates, nil, s.local, route.Gateway, s.hops, nowMillis, s.eligible != nil)
 	}
 	if len(hops) < s.hops {
 		return OutboundBuild{}, ErrNoEligiblePeers
@@ -193,7 +177,6 @@ type NetDBInboundBuildSourceConfig struct {
 	Profiles       *PeerProfiles
 	LocalRouter    foundation.Hash
 	Hops           int
-	PreferredPeers []foundation.Hash
 	CandidateLimit int
 	Lifetime       uint64
 	CircuitID      func() uint32
@@ -206,20 +189,18 @@ type NetDBInboundBuildSourceConfig struct {
 // NetDBInboundBuildSource selects distinct ECIES-X25519 routers for an
 // inbound path. Selection is synchronous and has no transport side effects.
 type NetDBInboundBuildSource struct {
-	table            *netdb.Table
-	profiles         *PeerProfiles
-	local            foundation.Hash
-	hops             int
-	preferred        []netdb.RouterRef
-	candidateLimit   int
-	lifetime         uint64
-	circuitID        func() uint32
-	tunnelID         func() uint32
-	target           func(uint64) foundation.Hash
-	eligible         func(foundation.Hash) bool
-	reservations     *BuildReservations
-	sequence         atomic.Uint64
-	recoverySequence atomic.Uint64
+	table          *netdb.Table
+	profiles       *PeerProfiles
+	local          foundation.Hash
+	hops           int
+	candidateLimit int
+	lifetime       uint64
+	circuitID      func() uint32
+	tunnelID       func() uint32
+	target         func(uint64) foundation.Hash
+	eligible       func(foundation.Hash) bool
+	reservations   *BuildReservations
+	sequence       atomic.Uint64
 }
 
 func NewNetDBInboundBuildSource(config NetDBInboundBuildSourceConfig) (*NetDBInboundBuildSource, error) {
@@ -240,7 +221,6 @@ func NewNetDBInboundBuildSource(config NetDBInboundBuildSourceConfig) (*NetDBInb
 		table: config.Table, profiles: config.Profiles, local: config.LocalRouter,
 		hops: config.Hops, candidateLimit: config.CandidateLimit, lifetime: config.Lifetime,
 		circuitID: config.CircuitID, tunnelID: config.TunnelID, target: config.Target, eligible: config.Eligible, reservations: config.Reservations,
-		preferred: retainPreferred(config.Table, config.PreferredPeers),
 	}, nil
 }
 
@@ -263,17 +243,9 @@ func (s *NetDBInboundBuildSource) NextInbound(ctx context.Context, nowMillis uin
 		}
 		candidates = eligible
 	}
-	hops := preferredHops(s.table, availablePreferred(s.preferred, s.reservations), s.profiles, s.local, foundation.Hash{}, s.hops, nowMillis)
-	// Keep a full pool expiry recoverable without retrying a quarantined
-	// preferred peer on every maintenance tick.
-	if len(hops) < s.hops && s.recoverySequence.Add(1)%preferredRecoveryProbeInterval == 1 {
-		hops = preferredHops(s.table, s.preferred, nil, s.local, foundation.Hash{}, s.hops, nowMillis)
-	}
+	hops := selectDiverseHops(candidates, s.profiles, s.local, foundation.Hash{}, s.hops, nowMillis, s.eligible != nil)
 	if len(hops) < s.hops {
-		hops = selectDiverseHops(candidates, s.profiles, s.local, foundation.Hash{}, s.hops, nowMillis)
-	}
-	if len(hops) < s.hops {
-		hops = selectDiverseHops(candidates, nil, s.local, foundation.Hash{}, s.hops, nowMillis)
+		hops = selectDiverseHops(candidates, nil, s.local, foundation.Hash{}, s.hops, nowMillis, s.eligible != nil)
 	}
 	if len(hops) < s.hops {
 		return InboundBuild{}, ErrNoEligiblePeers
@@ -371,62 +343,48 @@ func x25519StaticKey(info netdb.RouterInfo) ([32]byte, bool) {
 	return key, true
 }
 
+type tunnelTransportMask uint8
+
+const (
+	tunnelNTCP2V4 tunnelTransportMask = 1 << iota
+	tunnelNTCP2V6
+	tunnelSSU2V4
+	tunnelSSU2V6
+)
+
 type hopCandidate struct {
-	hop    ShortBuildHop
-	family string
-	v4     []uint16
-	v6     [][6]byte
-	score  int64
-}
-
-func preferredHops(table *netdb.Table, preferred []netdb.RouterRef, profiles *PeerProfiles, local, excluded foundation.Hash, wanted int, nowMillis uint64) []ShortBuildHop {
-	if len(preferred) == 0 {
-		return nil
-	}
-	refs := make([]netdb.RouterRef, 0, len(preferred))
-	for _, retained := range preferred {
-		ref := retained
-		if current, ok := table.Get(retained.Hash); ok && current.Info.Published >= retained.Info.Published {
-			ref = current
-		}
-		refs = append(refs, ref)
-		if wanted == 1 {
-			if hops := selectDiverseHops(refs[len(refs)-1:], profiles, local, excluded, 1, nowMillis); len(hops) == 1 {
-				return hops
-			}
-		}
-	}
-	if wanted == 1 {
-		return nil
-	}
-	return selectDiverseHops(refs, profiles, local, excluded, wanted, nowMillis)
-}
-
-func retainPreferred(table *netdb.Table, hashes []foundation.Hash) []netdb.RouterRef {
-	refs := make([]netdb.RouterRef, 0, len(hashes))
-	for _, hash := range hashes {
-		if ref, ok := table.Get(hash); ok {
-			refs = append(refs, ref)
-		}
-	}
-	return refs
+	hop        ShortBuildHop
+	family     string
+	v4         []uint16
+	v6         [][6]byte
+	transports tunnelTransportMask
+	score      int64
 }
 
 // selectDiverseHops makes strict correlation avoidance win over score. It
 // relaxes address-prefix conflicts first, then the signed router family only
-// when the bounded candidate set cannot fill the requested path.
-func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, excluded foundation.Hash, wanted int, nowMillis uint64) []ShortBuildHop {
+// when the bounded candidate set cannot fill the requested path. An injected
+// eligibility policy is authoritative when test or embedded transports do not
+// publish an address mask.
+func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, excluded foundation.Hash, wanted int, nowMillis uint64, allowUnknownTransports bool) []ShortBuildHop {
 	candidates := make([]hopCandidate, 0, len(refs))
 	for _, ref := range refs {
-		if ref.Hash == local || ref.Hash == excluded || !profiles.EligibleAt(ref.Hash, nowMillis) || netdb.RouterInfoFresh(ref.Info, nowMillis) != nil {
+		if ref.Hash == local || ref.Hash == excluded || !profiles.EligibleAt(ref.Hash, nowMillis) || netdb.RouterInfoFresh(ref.Info, nowMillis) != nil || !tunnelPeerCapsAllowed(ref.Info) {
 			continue
 		}
 		key, ok := x25519StaticKey(ref.Info)
 		if !ok {
 			continue
 		}
+		transports := tunnelPeerTransportMask(ref.Info)
+		if transports == 0 && !allowUnknownTransports {
+			continue
+		}
 		family, v4, v6 := routerMetadata(ref.Info)
-		candidates = append(candidates, hopCandidate{hop: ShortBuildHop{Router: ref.Hash, StaticKey: key}, family: family, v4: v4, v6: v6, score: profiles.Score(ref.Hash)})
+		candidates = append(candidates, hopCandidate{
+			hop: ShortBuildHop{Router: ref.Hash, StaticKey: key}, family: family,
+			v4: v4, v6: v6, transports: transports, score: profiles.Score(ref.Hash),
+		})
 	}
 	slices.SortFunc(candidates, func(left, right hopCandidate) int {
 		if left.score > right.score {
@@ -451,6 +409,9 @@ func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, ex
 			haveV4, haveV6 := selectedAddressFamilies(selected)
 			for index, candidate := range candidates {
 				if selectedContains(selected, candidate.hop.Router) {
+					continue
+				}
+				if !tunnelPathCompatible(selected, candidate) {
 					continue
 				}
 				if tier < 2 && familyConflict(selected, candidate) {
@@ -478,6 +439,88 @@ func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, ex
 		hops[index] = selected[index].hop
 	}
 	return hops
+}
+
+func tunnelPathCompatible(selected []hopCandidate, candidate hopCandidate) bool {
+	if len(selected) == 0 || selected[len(selected)-1].transports == 0 || candidate.transports == 0 {
+		return true
+	}
+	return selected[len(selected)-1].transports&candidate.transports != 0
+}
+
+func tunnelPeerCapsAllowed(info netdb.RouterInfo) bool {
+	options := info.Options.Iterator()
+	for {
+		key, value, ok, err := options.Next()
+		if err != nil || !ok {
+			return err == nil
+		}
+		if !bytes.Equal(key, []byte("caps")) {
+			continue
+		}
+		for _, capability := range value {
+			switch capability {
+			case 'H', 'U', 'K', 'E', 'G':
+				return false
+			}
+		}
+		return true
+	}
+}
+
+func tunnelPeerTransportMask(info netdb.RouterInfo) tunnelTransportMask {
+	var mask tunnelTransportMask
+	addresses := info.Addresses()
+	for {
+		address, ok, err := addresses.Next()
+		if err != nil || !ok {
+			return mask
+		}
+		var host, caps, version []byte
+		options := address.Options.Iterator()
+		for {
+			key, value, optionOK, optionErr := options.Next()
+			if optionErr != nil || !optionOK {
+				break
+			}
+			switch {
+			case bytes.Equal(key, []byte("host")):
+				host = value
+			case bytes.Equal(key, []byte("caps")):
+				caps = value
+			case bytes.Equal(key, []byte("v")):
+				version = value
+			}
+		}
+		v4, v6 := tunnelAddressFamilies(host, caps)
+		switch {
+		case bytes.Equal(address.TransportStyle, []byte("NTCP2")):
+			if v4 {
+				mask |= tunnelNTCP2V4
+			}
+			if v6 {
+				mask |= tunnelNTCP2V6
+			}
+		case bytes.Equal(address.TransportStyle, []byte("SSU2")) ||
+			bytes.Equal(address.TransportStyle, []byte("SSU")) && bytes.IndexByte(version, '2') >= 0:
+			if v4 {
+				mask |= tunnelSSU2V4
+			}
+			if v6 {
+				mask |= tunnelSSU2V6
+			}
+		}
+	}
+}
+
+func tunnelAddressFamilies(host, caps []byte) (v4, v6 bool) {
+	if len(host) != 0 {
+		if bytes.IndexByte(host, ':') >= 0 {
+			return false, true
+		}
+		return true, false
+	}
+	return bytes.IndexByte(caps, '4') >= 0, bytes.IndexByte(caps, '6') >= 0
 }
 
 func selectedContains(selected []hopCandidate, hash foundation.Hash) bool {

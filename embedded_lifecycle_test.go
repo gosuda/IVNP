@@ -274,6 +274,7 @@ func embeddedTestConfig(t *testing.T) ivnp.Config {
 	cfg.Tunnel.Lifetime = 10 * time.Minute
 	cfg.Tunnel.RenewBefore = 10 * time.Second
 	cfg.Tunnel.MaintenanceInterval = 100 * time.Millisecond
+	cfg.Tunnel.BandwidthRateBytesPerSecond = 64 * 1024
 	return cfg
 }
 

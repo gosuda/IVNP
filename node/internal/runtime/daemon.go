@@ -745,7 +745,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		}
 		inboundSource, sourceErr := networking.TunnelNewNetDBInboundBuildSource(networking.TunnelNetDBInboundBuildSourceConfig{
 			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: cfg.Tunnel.Hops,
-			PreferredPeers: bootstrapPeers, Lifetime: uint64(cfg.Tunnel.Lifetime / time.Millisecond),
+			Lifetime:  uint64(cfg.Tunnel.Lifetime / time.Millisecond),
 			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
 			Eligible: eligible, Reservations: reservations,
 		})
@@ -754,7 +754,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		}
 		outboundSource, sourceErr := networking.TunnelNewNetDBOutboundBuildSource(networking.TunnelNetDBOutboundBuildSourceConfig{
 			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: cfg.Tunnel.Hops,
-			PreferredPeers: bootstrapPeers, Lifetime: uint64(cfg.Tunnel.Lifetime / time.Millisecond),
+			Lifetime:  uint64(cfg.Tunnel.Lifetime / time.Millisecond),
 			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
 			Eligible: eligible, Reservations: reservations,
 		})
@@ -964,7 +964,13 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			return nil, networking.RouterErrDefaultDestination
 		}
 		d.httpProxy, err = client.ClientNewHTTPProxy(client.ClientHTTPProxyConfig{
-			Network: destinations, Resolver: d.addressBook,
+			Network: destinations, Resolver: d.addressBook, Outproxies: cfg.HTTPProxy.Outproxies,
+			OutproxyWarmupReady: func() bool {
+				runtimeStatus := d.Status()
+				status, statusErr := d.ClientStatus(context.Background())
+				return runtimeStatus.Running && runtimeStatus.Error == nil && statusErr == nil &&
+					outproxyWarmupReady(status.Readiness, uint64(cfg.Tunnel.ExploratoryInboundTarget), uint64(cfg.Tunnel.ExploratoryOutboundTarget))
+			},
 			ListenAddress: cfg.HTTPProxy.Address.String(), MaxConnections: cfg.HTTPProxy.MaxConnections,
 			Listen: listener.Listen, PanicReporter: reporter,
 		})
@@ -1571,14 +1577,19 @@ func dataPlaneReady(readiness client.ClientReadinessDetails) bool {
 		(!readiness.FloodfillConfigured || readiness.FloodfillAdvertised)
 }
 
+func outproxyWarmupReady(readiness client.ClientReadinessDetails, inboundTarget, outboundTarget uint64) bool {
+	return readiness.NetDBRouters >= 50 &&
+		readiness.RouterInfoPublications != 0 &&
+		readiness.ExploratoryInboundTunnels >= inboundTarget &&
+		readiness.ExploratoryOutboundTunnels >= outboundTarget
+}
+
 func (d *Daemon) recordMaintenanceError(err error) {
 	if errors.Is(err, networking.TunnelErrNoEligiblePeers) {
-		d.registry.IncTunnelBuildFailures()
 		d.logger.Debug("tunnel bootstrap waiting for eligible peers", "error", err)
 		return
 	}
 	if networking.RouterIsRetryableTransportError(err) {
-		d.registry.IncTunnelBuildFailures()
 		d.logger.Debug("tunnel bootstrap transport attempt failed", "error", err)
 		return
 	}
@@ -2272,12 +2283,13 @@ func transportPeerEligibility(sender networking.TunnelSender) func(foundation.Ha
 	if selector, ok := sender.(interface{ CanBuildTunnel(foundation.Hash) bool }); ok {
 		return selector.CanBuildTunnel
 	}
-	selector, ok := sender.(interface{ CanSend(foundation.Hash) bool })
-	if !ok {
-		return nil
+	if selector, ok := sender.(interface{ CanSend(foundation.Hash) bool }); ok {
+		return selector.CanSend
 	}
-	return selector.CanSend
+	return transportAcceptsAnyPeer
 }
+
+func transportAcceptsAnyPeer(foundation.Hash) bool { return true }
 
 type daemonReplyRoute struct {
 	local      foundation.Hash

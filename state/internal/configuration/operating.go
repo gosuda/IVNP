@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -40,7 +41,7 @@ type Operating struct {
 	NAT    NAT
 
 	Control     Listener
-	HTTPProxy   Listener
+	HTTPProxy   HTTPProxy
 	SOCKS5      Listener
 	Metrics     Listener
 	SAM         Listener
@@ -150,6 +151,15 @@ type Listener struct {
 	MaxSessionQueueBytes int64
 	MaxServerQueueBytes  int64
 }
+
+// HTTPProxy controls the local HTTP proxy and its ordered I2P outproxy
+// candidates. A non-I2P request is never sent directly to the public network.
+type HTTPProxy struct {
+	Listener
+	Outproxies []string
+}
+
+func (p HTTPProxy) String() string { return p.Listener.String() }
 
 // AddressBook configures the local hosts resolver and bounded remote refresh.
 // An explicitly empty Subscriptions list selects local-hosts-only operation.
@@ -332,7 +342,7 @@ func ParseOperating(text, path string) (Operating, error) {
 	if err := applyListener(&operating.Control, "control", values); err != nil {
 		return Operating{}, err
 	}
-	if err := applyListener(&operating.HTTPProxy, "http_proxy", values); err != nil {
+	if err := applyHTTPProxy(&operating.HTTPProxy, values); err != nil {
 		return Operating{}, err
 	}
 	if err := applyListener(&operating.SOCKS5, "socks5", values); err != nil {
@@ -368,6 +378,8 @@ var defaultReseedEndpoints = []string{
 	"https://i2pseed.creativecowpat.net:8443/i2pseeds.su3?netid=2",
 	"https://reseed.onion.im/i2pseeds.su3?netid=2",
 }
+
+var defaultHTTPOutproxies = []string{"exit.stormycloud.i2p"}
 
 var defaultAddressBookSubscriptions = []string{
 	"https://raw.githubusercontent.com/i2p/i2p.i2p/master/installer/resources/hosts.txt",
@@ -405,7 +417,7 @@ func defaultOperating(base string) Operating {
 			MaxEntries: 100_000, MaxFileBytes: 8 << 20, MaxResponseBytes: 16 << 20, MaxRedirects: 3,
 		},
 		Control:   defaultListener(7650),
-		HTTPProxy: defaultListener(4444),
+		HTTPProxy: HTTPProxy{Listener: defaultListener(4444), Outproxies: append([]string(nil), defaultHTTPOutproxies...)},
 		SOCKS5:    defaultListener(4447),
 		Metrics:   defaultListener(9090),
 		Log:       Log{Level: "info", Format: "text"},
@@ -858,6 +870,56 @@ func applyListener(listener *Listener, section string, values map[entryKey]strin
 	return nil
 }
 
+func applyHTTPProxy(proxy *HTTPProxy, values map[entryKey]string) error {
+	if err := applyListener(&proxy.Listener, "http_proxy", values); err != nil {
+		return err
+	}
+	value, ok := valueOf(values, "http_proxy", "outproxies")
+	if !ok {
+		return nil
+	}
+	raw := strings.Split(value, ",")
+	outproxies := make([]string, 0, len(raw))
+	for _, candidate := range raw {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		if candidate == "" {
+			continue
+		}
+		if !validI2PHostname(candidate) || slices.Contains(outproxies, candidate) {
+			return invalid("http_proxy", "outproxies")
+		}
+		outproxies = append(outproxies, candidate)
+	}
+	if len(outproxies) > 16 {
+		return invalid("http_proxy", "outproxies")
+	}
+	proxy.Outproxies = outproxies
+	return nil
+}
+
+func validI2PHostname(host string) bool {
+	if len(host) < len("a.i2p") || len(host) > 253 || !strings.HasSuffix(host, ".i2p") {
+		return false
+	}
+	for label := range strings.SplitSeq(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if !validHostnameCharacter(character) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validHostnameCharacter(character rune) bool {
+	isLetter := character >= 'a' && character <= 'z'
+	isDigit := character >= '0' && character <= '9'
+	return isLetter || isDigit || character == '-'
+}
+
 func applyAddressBook(book *AddressBook, values map[entryKey]string, base string) error {
 	if value, ok := valueOf(values, "addressbook", "enabled"); ok {
 		parsed, err := parseBool(value)
@@ -1166,7 +1228,7 @@ var operatingKeys = map[string]map[string]bool{
 	"nat":         {"natpmp_endpoint": true, "upnp_endpoint": true},
 	"reseed":      {"enabled": true, "required": true, "endpoints": true, "timeout": true, "max_archive_bytes": true, "max_router_infos": true, "max_total_bytes": true},
 	"control":     {"enabled": true, "listen_host": true, "listen_port": true, "bearer_token": true, "max_connections": true},
-	"http_proxy":  {"enabled": true, "listen_host": true, "listen_port": true, "bearer_token": true, "max_connections": true},
+	"http_proxy":  {"enabled": true, "listen_host": true, "listen_port": true, "bearer_token": true, "max_connections": true, "outproxies": true},
 	"socks5":      {"enabled": true, "listen_host": true, "listen_port": true, "bearer_token": true, "max_connections": true},
 	"metrics":     {"enabled": true, "listen_host": true, "listen_port": true, "bearer_token": true, "max_connections": true},
 	"sam":         {"enabled": true, "listen_host": true, "listen_port": true, "udp_host": true, "udp_port": true, "bearer_token": true, "max_connections": true, "readiness_timeout": true, "session_queue": true, "max_session_queue_bytes": true, "max_server_queue_bytes": true},

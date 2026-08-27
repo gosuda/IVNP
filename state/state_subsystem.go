@@ -11,6 +11,7 @@ type (
 	ConfigurationAddressBook              = configuration.AddressBook
 	ConfigurationEndpoint                 = configuration.Endpoint
 	ConfigurationListener                 = configuration.Listener
+	ConfigurationHTTPProxy                = configuration.HTTPProxy
 	ConfigurationLog                      = configuration.Log
 	ConfigurationNetDB                    = configuration.NetDB
 	ConfigurationNetwork                  = configuration.Network

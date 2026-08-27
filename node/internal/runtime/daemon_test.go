@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"gosuda.org/ivnp/client"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking"
+	"gosuda.org/ivnp/observability"
 	"gosuda.org/ivnp/state"
 )
 
@@ -336,6 +338,7 @@ func daemonTestConfig(t *testing.T) state.ConfigurationOperating {
 			ExploratoryInboundTarget: 1, ExploratoryOutboundTarget: 1, ExploratoryPoolCapacity: 4,
 			ClientInboundTarget: 1, ClientOutboundTarget: 1, ClientPoolCapacity: 4, BuildPendingCapacity: 4,
 			Lifetime: 10 * time.Minute, RenewBefore: 10 * time.Second, MaintenanceInterval: time.Minute,
+			BandwidthRateBytesPerSecond: 64 * 1024,
 		},
 		NTCP2: state.ConfigurationTransport{Enabled: true, Bind: state.ConfigurationEndpoint{Host: "127.0.0.1", Port: 12345}, MaxSessions: 4},
 	}
@@ -499,6 +502,39 @@ func TestDataPlaneReadyDoesNotRequireOptionalAccelerationOrPublicReachability(t 
 				t.Fatal("incomplete data plane reported ready")
 			}
 		})
+	}
+}
+
+func TestOutproxyWarmupReadinessDoesNotWaitOnTheDestinationItCreates(t *testing.T) {
+	ready := client.ClientReadinessDetails{
+		NetDBRouters:               50,
+		RouterInfoPublications:     1,
+		ExploratoryInboundTunnels:  1,
+		ExploratoryOutboundTunnels: 1,
+	}
+	if !outproxyWarmupReady(ready, 1, 1) {
+		t.Fatal("operational exploratory plane did not release outproxy warmup")
+	}
+	required := []struct {
+		name   string
+		mutate func(*client.ClientReadinessDetails)
+	}{
+		{"netdb", func(value *client.ClientReadinessDetails) { value.NetDBRouters = 49 }},
+		{"router publication", func(value *client.ClientReadinessDetails) { value.RouterInfoPublications = 0 }},
+		{"exploratory inbound", func(value *client.ClientReadinessDetails) { value.ExploratoryInboundTunnels = 0 }},
+		{"exploratory outbound", func(value *client.ClientReadinessDetails) { value.ExploratoryOutboundTunnels = 0 }},
+	}
+	for _, test := range required {
+		t.Run(test.name, func(t *testing.T) {
+			value := ready
+			test.mutate(&value)
+			if outproxyWarmupReady(value, 1, 1) {
+				t.Fatal("incomplete exploratory plane released outproxy warmup")
+			}
+		})
+	}
+	if outproxyWarmupReady(ready, 2, 1) || outproxyWarmupReady(ready, 1, 2) {
+		t.Fatal("partial exploratory pool released outproxy warmup")
 	}
 }
 
@@ -785,7 +821,7 @@ func TestStartServesAllLocalListenersAndCloses(t *testing.T) {
 	cfg := daemonTestConfig(t)
 	cfg.Tunnel.Enabled = true
 	cfg.Control = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, BearerToken: "test-token", MaxConnections: 4}
-	cfg.HTTPProxy = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 4}
+	cfg.HTTPProxy = state.ConfigurationHTTPProxy{Listener: state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 4}, Outproxies: []string{}}
 	cfg.SOCKS5 = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 4}
 	cfg.Metrics = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 4}
 	d, err := New(cfg, Options{SocketRuntime: loopbackSockets{}})
@@ -1929,7 +1965,7 @@ func TestOptionsListenOwnsEveryClientListener(t *testing.T) {
 	cfg := daemonTestConfig(t)
 	cfg.Tunnel.Enabled = true
 	cfg.Control = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, BearerToken: "control-token", MaxConnections: 1}
-	cfg.HTTPProxy = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 1}
+	cfg.HTTPProxy = state.ConfigurationHTTPProxy{Listener: state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 1}, Outproxies: []string{}}
 	cfg.SOCKS5 = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 1}
 	cfg.Metrics = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 1}
 	var calls int
@@ -2109,6 +2145,20 @@ func TestReseedOutcomesAreObservableWithoutMakingOptionalFailureFatal(t *testing
 			t.Fatal("Wait = nil after required reseed failure")
 		}
 	})
+}
+
+func TestMaintenancePreflightErrorsDoNotDistortTunnelBuildRate(t *testing.T) {
+	registry := observability.NewRegistry()
+	daemon := &Daemon{
+		registry: registry,
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	daemon.recordMaintenanceError(networking.TunnelErrNoEligiblePeers)
+	daemon.recordMaintenanceError(networking.RouterErrTransportUnavailable)
+	snapshot := registry.Snapshot().Tunnel
+	if snapshot.Builds != 0 || snapshot.BuildFailures != 0 {
+		t.Fatalf("preflight build metrics = builds %d, failures %d", snapshot.Builds, snapshot.BuildFailures)
+	}
 }
 
 func TestRemoteELSContextFailureAndReleaseCleanup(t *testing.T) {

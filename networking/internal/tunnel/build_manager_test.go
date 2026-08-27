@@ -271,6 +271,23 @@ func TestBuildManagerCreatesAndInstallsOutboundTunnel(t *testing.T) {
 	if delivered.Header.Type != i2np.DeliveryStatus || delivered.Header.ID != 7 {
 		t.Fatalf("delivered message = %#v", delivered)
 	}
+	metrics := observability.NewRegistry()
+	seedErr := errors.New("reply path unavailable")
+	failed, err := NewBuildManager(BuildManagerConfig{
+		Runtime: NewRuntime(RuntimeConfig{}), Sender: new(captureTunnelSender), ReplyKeys: newBuildReplyRegistry(),
+		Now: func() uint64 { return now }, Random: new(buildCounterReader), Metrics: metrics,
+		SeedReplyRouterInfo: func(context.Context, foundation.Hash, foundation.Hash) error { return seedErr },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = failed.StartOutbound(context.Background(), build); !errors.Is(err, seedErr) {
+		t.Fatalf("reply path seed error = %v, want %v", err, seedErr)
+	}
+	snapshot := metrics.Snapshot().Tunnel
+	if snapshot.Builds != 0 || snapshot.BuildFailures != 0 {
+		t.Fatalf("unsent build metrics = builds %d, failures %d", snapshot.Builds, snapshot.BuildFailures)
+	}
 }
 
 func TestBuildManagerRejectsExpiredAndUnknownReplies(t *testing.T) {

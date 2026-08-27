@@ -411,7 +411,7 @@ func (m *TransportMux) CanBuildTunnel(peer foundation.Hash) bool {
 		if !concrete {
 			return true
 		}
-		_, err := selectNTCP2AddressForNetwork(ref.Info, ntcp2IPv4Only(manager.currentBindings().NTCP2))
+		_, err := selectNTCP2AddressForNetwork(ref.Info, ntcp2PreferIPv4(manager.currentBindings().NTCP2))
 		return err == nil
 	}
 	return m.ssu2 != nil && ssu2DirectRouterInfoCapable(ref.Info, uint64(now.Unix()))

@@ -29,6 +29,9 @@ func TestParseOperatingDefaults(t *testing.T) {
 	if config.Control.Enabled || config.HTTPProxy.Enabled || config.SOCKS5.Enabled || config.Metrics.Enabled {
 		t.Fatalf("listeners must default disabled: %#v", config)
 	}
+	if len(config.HTTPProxy.Outproxies) != 1 || config.HTTPProxy.Outproxies[0] != "exit.stormycloud.i2p" {
+		t.Fatalf("default HTTP outproxies = %q", config.HTTPProxy.Outproxies)
+	}
 	if !config.Reseed.Enabled || len(config.Reseed.Endpoints) == 0 || config.Reseed.Timeout != 30*time.Second || config.Log != (Log{Level: "info", Format: "text"}) {
 		t.Fatalf("defaults = %#v", config)
 	}
@@ -259,6 +262,28 @@ func TestParseOperatingListenerAuthenticationPolicy(t *testing.T) {
 	loopback, err := ParseOperating("[http_proxy]\nenabled = true\n", "/etc/ivnp/ivnp.conf")
 	if err != nil || !loopback.HTTPProxy.Enabled || loopback.HTTPProxy.BearerToken != "" {
 		t.Fatalf("loopback listener = %#v, %v", loopback.HTTPProxy, err)
+	}
+}
+
+func TestParseOperatingHTTPOutproxies(t *testing.T) {
+	config, err := ParseOperating("[http_proxy]\noutproxies = EXIT.STORMYCLOUD.I2P, outproxy.bandura.i2p\n", "/etc/ivnp/ivnp.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.HTTPProxy.Outproxies) != 2 || config.HTTPProxy.Outproxies[0] != "exit.stormycloud.i2p" || config.HTTPProxy.Outproxies[1] != "outproxy.bandura.i2p" {
+		t.Fatalf("HTTP outproxies = %q", config.HTTPProxy.Outproxies)
+	}
+	disabled, err := ParseOperating("[http_proxy]\noutproxies =\n", "/etc/ivnp/ivnp.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disabled.HTTPProxy.Outproxies == nil || len(disabled.HTTPProxy.Outproxies) != 0 {
+		t.Fatalf("explicitly disabled HTTP outproxies = %#v", disabled.HTTPProxy.Outproxies)
+	}
+	for _, value := range []string{"example.com", "-bad.i2p", "bad_.i2p", "exit.stormycloud.i2p,exit.stormycloud.i2p"} {
+		if _, err := ParseOperating("[http_proxy]\noutproxies = "+value+"\n", "/etc/ivnp/ivnp.conf"); !errors.Is(err, ErrInvalidOperating) {
+			t.Fatalf("outproxies %q error = %v", value, err)
+		}
 	}
 }
 
