@@ -127,8 +127,8 @@ func TestDialerErrorsWithoutStreamNetwork(t *testing.T) {
 		},
 	} {
 		err := dial()
-		if !errors.Is(err, errStreamNetworkRequired) {
-			t.Fatalf("dial error = %v, want errStreamNetworkRequired", err)
+		if !errors.Is(err, ErrStreamNetworkRequired) {
+			t.Fatalf("dial error = %v, want ErrStreamNetworkRequired", err)
 		}
 	}
 }
@@ -177,7 +177,7 @@ func TestDelegatesStreamNetworkErrors(t *testing.T) {
 }
 
 func TestListenerConfigErrorsWithoutStreamNetwork(t *testing.T) {
-	if _, err := (ListenerConfig{}).Listen(context.Background(), "service.i2p"); !errors.Is(err, errStreamNetworkRequired) {
-		t.Fatalf("Listen() error = %v, want errStreamNetworkRequired", err)
+	if _, err := (ListenerConfig{}).Listen(context.Background(), "service.i2p"); !errors.Is(err, ErrStreamNetworkRequired) {
+		t.Fatalf("Listen() error = %v, want ErrStreamNetworkRequired", err)
 	}
 }

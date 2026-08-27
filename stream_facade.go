@@ -10,7 +10,6 @@ var (
 	ErrAddressUnavailable    = stream.ErrAddressUnavailable
 	ErrAddressInvalid        = stream.ErrAddressInvalid
 	ErrStreamNetworkRequired = stream.ErrStreamNetworkRequired
-	errStreamNetworkRequired = ErrStreamNetworkRequired
 )
 
 type (

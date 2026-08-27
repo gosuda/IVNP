@@ -22,8 +22,9 @@ import (
 
 func createTestNode(t *testing.T) (*ivnp.Node, string, *slog.LevelVar) {
 	t.Helper()
-	configPath := filepath.Join(t.TempDir(), "ivnp.conf")
-	configText := "[network]\nid = 2\n\n[router]\nfloodfill = false\n\n[log]\nlevel = info\n"
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "ivnp.conf")
+	configText := "[paths]\ndata_dir = data\n\n[network]\nid = 2\n\n[router]\nfloodfill = false\n\n[log]\nlevel = info\n"
 	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
 		t.Fatalf("write test config: %v", err)
 	}

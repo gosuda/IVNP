@@ -386,11 +386,13 @@ var defaultAddressBookSubscriptions = []string{
 }
 
 func defaultOperating(base string) Operating {
+	dataDir := "./data"
+	stateDir := filepath.Join(dataDir, "state")
 	return Operating{
-		DataDir:   filepath.Join(base, "data"),
-		StateDir:  filepath.Join(base, "state"),
-		StatePath: filepath.Join(base, "state", "router.state"),
-		KeyPath:   filepath.Join(base, "state", "router.keys"),
+		DataDir:   dataDir,
+		StateDir:  stateDir,
+		StatePath: filepath.Join(stateDir, "router.state"),
+		KeyPath:   filepath.Join(stateDir, "router.keys"),
 		Network:   Network{ID: 2, IPv4: true},
 		Router:    Router{IdentityType: "ed25519", Version: "2.13.0"},
 		State:     State{MaxBytes: 16 << 20, MaxDestinations: 64, MaxNameBytes: 255},
@@ -411,7 +413,7 @@ func defaultOperating(base string) Operating {
 			MaxConnections: 128, ReadinessTimeout: 2 * time.Minute, SessionQueue: 64, MaxSessionQueueBytes: 4 << 20, MaxServerQueueBytes: 64 << 20,
 		},
 		AddressBook: AddressBook{
-			Enabled: true, PrivateHostsPath: filepath.Join(base, "privatehosts.txt"), UserHostsPath: filepath.Join(base, "userhosts.txt"), HostsPath: filepath.Join(base, "hosts.txt"), StatePath: filepath.Join(base, "state", "addressbook.json"),
+			Enabled: true, PrivateHostsPath: filepath.Join(base, "privatehosts.txt"), UserHostsPath: filepath.Join(base, "userhosts.txt"), HostsPath: filepath.Join(base, "hosts.txt"), StatePath: filepath.Join(stateDir, "addressbook.json"),
 			Subscriptions:   append([]string(nil), defaultAddressBookSubscriptions...),
 			RefreshInterval: 12 * time.Hour, RetryInterval: 5 * time.Minute, RequestTimeout: 30 * time.Second,
 			MaxEntries: 100_000, MaxFileBytes: 8 << 20, MaxResponseBytes: 16 << 20, MaxRedirects: 3,
@@ -434,24 +436,28 @@ func defaultListener(port uint16) Listener {
 
 func applyPaths(operating *Operating, values map[entryKey]string, base string) error {
 	var err error
+	dataConfigured := false
 	if value, ok := valueOf(values, "paths", "data_dir"); ok {
 		operating.DataDir, err = resolvePath(value, base)
 		if err != nil {
 			return invalid("paths", "data_dir")
 		}
+		dataConfigured = true
 	}
 	if value, ok := valueOf(values, "paths", "state_dir"); ok {
 		operating.StateDir, err = resolvePath(value, base)
 		if err != nil {
 			return invalid("paths", "state_dir")
 		}
+	} else if dataConfigured {
+		operating.StateDir = filepath.Join(operating.DataDir, "state")
 	}
 	if value, ok := valueOf(values, "paths", "state_path"); ok {
 		operating.StatePath, err = resolvePath(value, base)
 		if err != nil {
 			return invalid("paths", "state_path")
 		}
-	} else if _, stateConfigured := valueOf(values, "paths", "state_dir"); stateConfigured {
+	} else if _, stateConfigured := valueOf(values, "paths", "state_dir"); stateConfigured || dataConfigured {
 		operating.StatePath = filepath.Join(operating.StateDir, "router.state")
 	}
 	if value, ok := valueOf(values, "paths", "key_path"); ok {
@@ -459,10 +465,10 @@ func applyPaths(operating *Operating, values map[entryKey]string, base string) e
 		if err != nil {
 			return invalid("paths", "key_path")
 		}
-	} else if _, stateConfigured := valueOf(values, "paths", "state_dir"); stateConfigured {
+	} else if _, stateConfigured := valueOf(values, "paths", "state_dir"); stateConfigured || dataConfigured {
 		operating.KeyPath = filepath.Join(operating.StateDir, "router.keys")
 	}
-	if _, stateConfigured := valueOf(values, "paths", "state_dir"); stateConfigured {
+	if _, stateConfigured := valueOf(values, "paths", "state_dir"); stateConfigured || dataConfigured {
 		operating.AddressBook.StatePath = filepath.Join(operating.StateDir, "addressbook.json")
 	}
 	return nil

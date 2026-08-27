@@ -16,7 +16,7 @@ func TestParseOperatingDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.DataDir != "/etc/ivnp/data" || config.StateDir != "/etc/ivnp/state" || config.StatePath != "/etc/ivnp/state/router.state" || config.KeyPath != "/etc/ivnp/state/router.keys" {
+	if config.DataDir != "./data" || config.StateDir != "data/state" || config.StatePath != "data/state/router.state" || config.KeyPath != "data/state/router.keys" {
 		t.Fatalf("paths = %#v", config)
 	}
 	if config.Network.ID != 2 || !config.Network.IPv4 || config.Network.IPv6 {

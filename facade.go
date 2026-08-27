@@ -185,16 +185,23 @@ func NewGarlicReplyKeyRegistry(maximum int) *networking.GarlicReplyKeyRegistry {
 }
 
 type (
-	SAMNetwork      = client.SimpleAnonymousMessagingNetwork
-	SAMConfig       = client.SimpleAnonymousMessagingConfig
-	SAMServer       = client.SimpleAnonymousMessagingServer
-	SAMServerConfig = client.SimpleAnonymousMessagingServerConfig
-	HTTPProxy       = client.ClientHTTPProxy
-	HTTPProxyConfig = client.ClientHTTPProxyConfig
-	SOCKS5Proxy     = client.ClientSOCKS5Proxy
-	SOCKS5Config    = client.ClientSOCKS5Config
-	ControlServer   = client.ClientControl
-	ControlConfig   = client.ClientControlConfig
+	SAMNetwork         = client.SimpleAnonymousMessagingNetwork
+	SAMConfig          = client.SimpleAnonymousMessagingConfig
+	SAMServer          = client.SimpleAnonymousMessagingServer
+	SAMServerConfig    = client.SimpleAnonymousMessagingServerConfig
+	HTTPProxy          = client.ClientHTTPProxy
+	HTTPProxyConfig    = client.ClientHTTPProxyConfig
+	SOCKS5Proxy        = client.ClientSOCKS5Proxy
+	SOCKS5Config       = client.ClientSOCKS5Config
+	ControlServer      = client.ClientControl
+	ControlConfig      = client.ClientControlConfig
+	RegistrationSigner = client.RegistrationSigner
+)
+
+var (
+	ErrRegistrationDomain      = client.RegistrationErrDomain
+	RegistrationAuthentication = client.RegistrationAuthentication
+	RegistrationEd25519Signer  = client.RegistrationEd25519Signer
 )
 
 func NewSAMNetwork(cfg SAMConfig) (*SAMNetwork, error) {

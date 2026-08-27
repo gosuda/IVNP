@@ -4,6 +4,7 @@ package client
 import (
 	"gosuda.org/ivnp/client/internal/addressbook"
 	"gosuda.org/ivnp/client/internal/frontend"
+	"gosuda.org/ivnp/client/internal/registration"
 	"gosuda.org/ivnp/client/internal/sam"
 )
 
@@ -28,6 +29,7 @@ type (
 	ClientSOCKS5Proxy                        = frontend.SOCKS5Proxy
 	ClientStatus                             = frontend.Status
 	ClientStatusProvider                     = frontend.StatusProvider
+	RegistrationSigner                       = registration.Signer
 	SimpleAnonymousMessagingConfig           = sam.Config
 	SimpleAnonymousMessagingListenFunc       = sam.ListenFunc
 	SimpleAnonymousMessagingListenPacketFunc = sam.ListenPacketFunc
@@ -45,6 +47,9 @@ var (
 	ClientNewControl                   = frontend.NewControl
 	ClientNewHTTPProxy                 = frontend.NewHTTPProxy
 	ClientNewSOCKS5Proxy               = frontend.NewSOCKS5Proxy
+	RegistrationAuthentication         = registration.Authentication
+	RegistrationEd25519Signer          = registration.Ed25519Signer
+	RegistrationErrDomain              = registration.ErrDomain
 	SimpleAnonymousMessagingNew        = sam.New
 	SimpleAnonymousMessagingNewServer  = sam.NewServer
 )

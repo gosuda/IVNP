@@ -4,6 +4,7 @@ netdb.routers
 state.bundle
 addressbook.json
 *.log
+data/
 
 # Binaries & test artifacts
 /ivnpd
