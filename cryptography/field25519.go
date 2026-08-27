@@ -4,8 +4,7 @@ import (
 	"math/bits"
 )
 
-// field25519 is GF(2^255-19) in little-endian radix 2^64. Every operation
-// returns its canonical representative and is safe when its inputs alias.
+// field25519 represents an element in GF(2^255-19) in 4x64-bit little-endian limbs.
 type field25519 [4]uint64
 
 const fieldTopMask uint64 = 0x7fffffffffffffff
@@ -83,18 +82,18 @@ func (z field25519) canonical() field25519 {
 	return fieldSelect(field25519{d0, d1, d2, d3}, z, ^(0 - borrow))
 }
 
-// fieldFold reduces a value with a possible 2^256 carry, then folds bit 255.
+// fieldFold reduces a value with carry into the canonical field range.
 func fieldFold(z field25519, carry uint64) field25519 {
 	z[0], carry = bits.Add64(z[0], 38*carry, 0)
 	z[1], carry = bits.Add64(z[1], 0, carry)
 	z[2], carry = bits.Add64(z[2], 0, carry)
 	z[3], carry = bits.Add64(z[3], 0, carry)
-	// A carry here is another 2^256. This fixed second fold handles it.
+	// Handle additional 2^256 carry
 	z[0], carry = bits.Add64(z[0], 38*carry, 0)
 	z[1], carry = bits.Add64(z[1], 0, carry)
 	z[2], carry = bits.Add64(z[2], 0, carry)
 	z[3], _ = bits.Add64(z[3], 0, carry)
-	for range 2 { // 2^255 = 19 mod p; two folds cover the worst carry pattern.
+	for range 2 { // 2^255 = 19 mod p
 		high := z[3] >> 63
 		z[3] &= fieldTopMask
 		z[0], carry = bits.Add64(z[0], 19*high, 0)
@@ -133,8 +132,6 @@ func (z field25519) neg() field25519 {
 
 func (z field25519) mul(x field25519) field25519 {
 	var t [9]uint64
-	// Fixed 4x4 schoolbook product. The carry propagation has a fixed bound and
-	// never depends on field values.
 	for i := range 4 {
 		for j := range 4 {
 			hi, lo := bits.Mul64(z[i], x[j])
@@ -148,8 +145,7 @@ func (z field25519) mul(x field25519) field25519 {
 		}
 	}
 
-	// Split at bit 255. Since 2^255 = 19 (mod p), adding 19 times the high
-	// half brings a 512-bit product below 2^261.
+	// 2^255 = 19 (mod p)
 	h := [5]uint64{t[3]>>63 | t[4]<<1, t[4]>>63 | t[5]<<1, t[5]>>63 | t[6]<<1, t[6]>>63 | t[7]<<1, t[7]>>63 | t[8]<<1}
 	r := [6]uint64{t[0], t[1], t[2], t[3] & fieldTopMask}
 	var carry uint64
@@ -162,7 +158,6 @@ func (z field25519) mul(x field25519) field25519 {
 	}
 	r[5] = carry
 
-	// r is below 2^261, so its second high half fits in a single word.
 	high := r[3]>>63 | r[4]<<1
 	q := field25519{r[0], r[1], r[2], r[3] & fieldTopMask}
 	hi, lo := bits.Mul64(high, 19)
@@ -197,8 +192,8 @@ func (z field25519) pow(exponent field25519) field25519 {
 func (z field25519) invert() field25519   { return z.pow(fieldPMinus2) }
 func (z field25519) pow22523() field25519 { return z.pow(fieldPow22523) }
 
-// fieldSqrtRatio returns a square root of u/v and an all-ones mask when u/v
-// is square. Its root is normalized into the half-range used by I2P Elligator2.
+// fieldSqrtRatio computes sqrt(u/v) and returns an all-ones mask if u/v is a quadratic residue.
+// The candidate root is normalized into the Elligator2 half-range.
 func fieldSqrtRatio(u, v field25519) (field25519, uint64) {
 	v2 := v.square()
 	uv3 := u.mul(v2).mul(v)

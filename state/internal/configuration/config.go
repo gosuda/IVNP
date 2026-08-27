@@ -1,4 +1,4 @@
-// Package configuration parses bounded i2pd-style INI configuration files.
+// Package configuration parses INI configuration files.
 package configuration
 
 import (
@@ -20,7 +20,7 @@ var ErrMalformed = errors.New("config: malformed configuration")
 
 type Entry struct{ Section, Key, Value string }
 
-// Parse handles global keys, [section] keys, comments, and quoted values.
+// Parse parses INI configuration text into a list of section/key/value entries.
 func Parse(text string) ([]Entry, error) {
 	if len(text) > maxConfigBytes {
 		return nil, ErrMalformed

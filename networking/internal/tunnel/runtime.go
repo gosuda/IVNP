@@ -31,37 +31,25 @@ var (
 	ErrDeliveryHandler  = errors.New("tunnel: local delivery handler unavailable")
 )
 
-// Sender sends a standard I2NP message to a directly connected router. The
-// message payload is borrowed and is valid only until Send returns. Senders
-// that queue or otherwise retain a message must copy its payload before return.
-// This permits the tunnel hot path to return packet slabs to its pool after a
-// synchronous transport hand-off rather than allocate one heap object per hop.
+// Sender sends an I2NP message to a directly connected router.
 type Sender interface {
 	Send(context.Context, foundation.Hash, i2np.Message) error
 }
 
-// SessionEnsurer authenticates a bidirectional peer session without sending an
-// application message. Inbound tunnel builders use it for the terminal hop so
-// firewalled creators can receive the build reply over an existing session.
+// SessionEnsurer ensures an authenticated session with a peer router.
 type SessionEnsurer interface {
 	EnsureSession(context.Context, foundation.Hash) error
 }
 
-// Forward identifies the next participant for a transit tunnel. The next
-// tunnel ID replaces the receive ID after the configured layer transform.
+// Forward identifies the next hop in a transit tunnel.
 type Forward struct {
 	Peer     foundation.Hash
 	TunnelID uint32
 }
 
-// OutboundCircuit describes an already established local tunnel gateway.
-// Transforms are applied in order to its 1,024-byte payload region. A tunnel
-// builder installs the exact negotiated transform sequence. ExpiresAt is a
-// Unix-millisecond deadline; zero retains manual-circuit behavior indefinitely.
+// OutboundCircuit represents the local gateway for an outbound tunnel.
 type OutboundCircuit struct {
-	ID uint32
-	// Owner is the creator-pool identity. Zero denotes the router's own
-	// exploratory circuits; transit circuits use no creator owner.
+	ID           uint32
 	Owner        foundation.Hash
 	FirstHop     foundation.Hash
 	NextTunnelID uint32
@@ -69,14 +57,9 @@ type OutboundCircuit struct {
 	ExpiresAt    uint64
 }
 
-// InboundCircuit describes either a transit participant or a tunnel endpoint.
-// Exactly one of Forward and Endpoint must be set. Local sees a borrowed I2NP
-// message and must not retain it after returning. ExpiresAt is a
-// Unix-millisecond deadline; zero retains manual-circuit behavior indefinitely.
+// InboundCircuit represents either a transit participant or local endpoint inbound tunnel.
 type InboundCircuit struct {
-	ID uint32
-	// Owner is the creator-pool identity for local endpoint circuits. It is
-	// zero for transit forwarding circuits.
+	ID         uint32
 	Owner      foundation.Hash
 	Transforms []LayerCipher
 	Forward    *Forward
@@ -112,9 +95,7 @@ type circuitShard struct {
 
 type senderBox struct{ sender Sender }
 
-// RuntimeConfig controls a tunnel Runtime. Now returns Unix milliseconds and
-// is injectable so message expiration is deterministic in tests. Gateway is
-// optional; a random-padded gateway is constructed when omitted.
+// RuntimeConfig configures a tunnel Runtime instance.
 type RuntimeConfig struct {
 	Sender  Sender
 	Gateway *Gateway
@@ -122,14 +103,7 @@ type RuntimeConfig struct {
 	Metrics *observability.Registry
 }
 
-// Runtime owns bounded, explicitly registered circuit state. Its circuit
-// registry is sharded by tunnel ID, so unrelated high-throughput circuits do
-// not serialize behind a global lock. Packet buffers and delivery slices are
-// pooled, AES schedules are precomputed in LayerCipher, and the steady-state
-// forwarding path allocates neither packet storage nor goroutines.
-//
-// Runtime deliberately does not negotiate build records. A build manager
-// installs negotiated circuits with RegisterInbound/RegisterOutbound.
+// Runtime manages active inbound and outbound tunnel circuits and routes tunnel messages.
 type Runtime struct {
 	gateway   *Gateway
 	now       func() uint64

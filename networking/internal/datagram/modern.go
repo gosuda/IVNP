@@ -17,9 +17,7 @@ const (
 	v3AllowedFlags         = flagVersionMask | flagOptions
 )
 
-// OfflineSignature authorizes V2's transient signing key. Signed aliases its
-// expires/type/public-key wire fields; it is verified by From before the
-// transient key is trusted.
+// OfflineSignature holds a transient signing key and its authorizing signature.
 type OfflineSignature struct {
 	Expires   uint32
 	Type      foundation.SigningKeyType
@@ -39,9 +37,7 @@ type V2 struct {
 	signedRest         []byte
 }
 
-// ParseV2 parses protocol-19 Datagram2. The receiver's destination hash is
-// intentionally not available here; callers must use VerifyTarget or
-// VerifyTargetAt rather than guessing it from the sender.
+// ParseV2 parses a protocol-19 Datagram2 packet.
 func ParseV2(src []byte) (V2, error) {
 	if len(src) > MaxWireSize {
 		return V2{}, ErrDatagram
@@ -114,14 +110,12 @@ func ParseV2(src []byte) (V2, error) {
 	return out, nil
 }
 
-// VerifyTarget verifies the Datagram2 target-binding and, where present, the
-// offline-key authorization against the current Unix-second clock.
+// VerifyTarget verifies the Datagram2 target hash and offline signature against the current time.
 func (d V2) VerifyTarget(target foundation.Hash) (bool, error) {
 	return d.VerifyTargetAt(target, uint32(time.Now().Unix()))
 }
 
-// VerifyTargetAt is VerifyTarget with an injected Unix-second clock. It is
-// useful to callers that already own a protocol clock and deterministic tests.
+// VerifyTargetAt verifies the Datagram2 target hash and offline signature against a specific Unix timestamp.
 func (d V2) VerifyTargetAt(target foundation.Hash, now uint32) (bool, error) {
 	if d.Offline.Present() {
 		if now > d.Offline.Expires {
@@ -146,9 +140,7 @@ func (d V2) VerifyTargetAt(target foundation.Hash, now uint32) (bool, error) {
 	return d.From.Verify(signed, d.Signature)
 }
 
-// MarshalV2To writes a protocol-19 Datagram2 and signs the target-bound
-// fields. If flagOffline is set, offline must contain a valid authorization by
-// from and signer must sign using the authorized transient private key.
+// MarshalV2To encodes and signs a Datagram2 packet.
 func MarshalV2To(dst []byte, target foundation.Hash, from foundation.Identity, flags uint16, options foundation.Mapping, offline OfflineSignature, payload []byte, signer Signer) (int, error) {
 	if signer == nil || len(payload) > MaxSize || flags&flagVersionMask != 2 || flags&^v2AllowedFlags != 0 {
 		return 0, ErrDatagram
@@ -230,8 +222,7 @@ func MarshalV2To(dst []byte, target foundation.Hash, from foundation.Identity, f
 	return total, nil
 }
 
-// MarshalV3To writes a protocol-20 Datagram3. The sender hash is metadata,
-// not an authentication claim.
+// MarshalV3To encodes an unsigned Datagram3 packet.
 func MarshalV3To(dst []byte, from foundation.Hash, flags uint16, options foundation.Mapping, payload []byte) (int, error) {
 	if len(payload) > MaxSize || flags&flagVersionMask != 3 || flags&^v3AllowedFlags != 0 {
 		return 0, ErrDatagram
@@ -267,8 +258,7 @@ type V3 struct {
 	Payload []byte
 }
 
-// ParseV3 parses protocol-20 Datagram3. V3 is deliberately unauthenticated;
-// a parsed From hash is a routing hint, never proof of origin.
+// ParseV3 parses a protocol-20 Datagram3 packet.
 func ParseV3(src []byte) (V3, error) {
 	if len(src) > MaxWireSize {
 		return V3{}, ErrDatagram
@@ -298,8 +288,7 @@ func ParseV3(src []byte) (V3, error) {
 	return out, nil
 }
 
-// ParseRaw validates protocol-18 raw datagram policy and returns a borrowed
-// view. It never invents source, integrity, or reply semantics.
+// ParseRaw returns the raw datagram payload as a slice.
 func ParseRaw(src []byte) ([]byte, error) {
 	if len(src) > MaxWireSize {
 		return nil, ErrDatagram

@@ -13,23 +13,17 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
-// certificates contains the current Java-I2P reseed trust set from
-// installer/resources/certificates/reseed in github.com/i2p/i2p.i2p.
-//
 //go:embed certs/*.crt
 var certificates embed.FS
 
 var ErrDefaultSigners = errors.New("reseed: embedded signer set is invalid")
 
-// DefaultSU3Signers returns the pinned Java-I2P reseed signers, validating
-// their certificate lifetime at the current time.
+// DefaultSU3Signers returns the embedded set of trusted reseed signer certificates.
 func DefaultSU3Signers() (map[string]SU3Signer, error) {
 	return DefaultSU3SignersAt(time.Now())
 }
 
-// DefaultSU3SignersAt validates and returns the pinned Java-I2P reseed signers
-// at now. The explicit time keeps certificate lifetime checks deterministic for
-// callers with an injected clock.
+// DefaultSU3SignersAt returns the trusted reseed signers valid at the given time.
 func DefaultSU3SignersAt(now time.Time) (map[string]SU3Signer, error) {
 	return loadSU3Signers(certificates, now)
 }

@@ -1,4 +1,4 @@
-// Package pool owns bounded reusable byte slabs for transport and I2NP hot paths.
+// Package pool provides power-of-two reusable byte slabs for high-throughput networking paths.
 package pool
 
 import (
@@ -28,19 +28,15 @@ func init() {
 	}
 }
 
-// Lease owns one pooled slab without boxing a slice header on every Release.
-// It is intended for higher-level single-owner buffers that can retain the
-// lease until their explicit Release; Bytes aliases the lease and becomes
-// invalid after Release.
+// Lease holds a pooled slab without slice header boxing overhead on release.
+// Bytes returns a slice into the lease and becomes invalid once the lease is released.
 type Lease struct {
 	buf      []byte
 	class    int
 	released bool
 }
 
-// AcquireLease returns a single-owner slab lease sized to n writable bytes.
-// Unlike Acquire, the hot Release path puts a pointer into sync.Pool and does
-// not allocate a boxed slice header.
+// AcquireLease returns a pooled slab lease with at least n bytes of capacity.
 func AcquireLease(n int) (*Lease, bool) {
 	if n < 0 {
 		return nil, false
@@ -57,8 +53,7 @@ func AcquireLease(n int) (*Lease, bool) {
 	return lease, true
 }
 
-// Bytes returns n bytes from the leased slab. It fails rather than panicking
-// when called after Release or beyond the lease capacity.
+// Bytes returns a slice of n bytes from the leased slab.
 func (l *Lease) Bytes(n int) ([]byte, bool) {
 	if l == nil || l.released || n < 0 || n > cap(l.buf) {
 		return nil, false
@@ -66,7 +61,7 @@ func (l *Lease) Bytes(n int) ([]byte, bool) {
 	return l.buf[:n], true
 }
 
-// Release returns a leased slab to its original pool. It is idempotent.
+// Release returns the lease to its slab pool. It is safe to call multiple times.
 func (l *Lease) Release() {
 	if l == nil || l.released {
 		return
@@ -78,8 +73,7 @@ func (l *Lease) Release() {
 	leaseSlabs[l.class].Put(l)
 }
 
-// ReleaseSensitive clears the complete backing slab before returning it to its
-// original pool. It is idempotent and also clears oversized unpooled leases.
+// ReleaseSensitive zeroes the backing memory before returning the lease to the pool.
 func (l *Lease) ReleaseSensitive() {
 	if l == nil || l.released {
 		return
@@ -88,8 +82,8 @@ func (l *Lease) ReleaseSensitive() {
 	l.Release()
 }
 
-// Acquire returns n writable bytes. Requests up to 64 KiB are served by a
-// power-of-two sync.Pool class; larger requests are deliberately unpooled.
+// Acquire returns a byte slice of length n backed by a pooled slab (up to 64 KiB).
+// Slices larger than 64 KiB are allocated directly and not pooled.
 func Acquire(n int) ([]byte, bool) {
 	if n < 0 {
 		return nil, false
@@ -104,8 +98,7 @@ func Acquire(n int) ([]byte, bool) {
 	return slabs[class].Get().([]byte)[:n], true
 }
 
-// Release returns a non-sensitive slab. Callers must not retain buf after it
-// is released. Arbitrary or oversized slices are dropped instead of pooled.
+// Release returns a buffer to its corresponding slab pool.
 func Release(buf []byte) {
 	class, ok := classFor(cap(buf))
 	if !ok || cap(buf) != 1<<(minClass+class) {
@@ -114,7 +107,7 @@ func Release(buf []byte) {
 	slabs[class].Put(buf[:cap(buf)])
 }
 
-// ReleaseSensitive clears every byte in the backing slab before pooling it.
+// ReleaseSensitive zeroes the backing memory before returning the buffer to the pool.
 func ReleaseSensitive(buf []byte) {
 	if buf == nil {
 		return

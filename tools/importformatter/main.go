@@ -1,5 +1,4 @@
-// Command importformatter consolidates each tracked Go file's imports and then
-// delegates canonical grouping and ordering to goimports.
+// Command importformatter formats and consolidates Go imports canonically across the repository.
 package main
 
 import (

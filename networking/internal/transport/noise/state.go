@@ -1,5 +1,4 @@
-// Package noise implements the allocation-conscious symmetric state shared by
-// the NTCP2 and SSU2 Noise_XK_25519_ChaChaPoly_SHA256 handshakes.
+// Package noise implements symmetric state and key derivation for NTCP2 and SSU2 Noise handshakes.
 package noise
 
 import (
@@ -14,8 +13,7 @@ import (
 
 var ErrNonceExhausted = errors.New("noise: ChaCha nonce exhausted")
 
-// SymmetricState is Noise's chaining-key, handshake-hash, and optional cipher
-// state. It is a pointer-owned, single-goroutine handshake object.
+// SymmetricState manages chaining keys, running handshake hash, and cipher state during a Noise handshake.
 type SymmetricState struct {
 	chainingKey [32]byte
 	hash        [32]byte

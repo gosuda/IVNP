@@ -27,16 +27,13 @@ var (
 	ErrSU3Signature = errors.New("reseed: invalid SU3 signature")
 )
 
-// SU3Signer is a pinned reseed signing key. Current reseed SU3 deployments
-// use Java NONEwithRSA over the raw SHA-512 digest.
+// SU3Signer represents a trusted public key used to verify SU3 containers.
 type SU3Signer struct {
 	SigningType foundation.SigningKeyType
 	PublicKey   []byte
 }
 
-// VerifySU3 validates the complete container and returns the ZIP content view.
-// The returned slice aliases container. maxContent limits only signed content;
-// callers still apply their archive transport-size limit before this function.
+// VerifySU3 checks the SU3 container signature and returns the extracted payload.
 func VerifySU3(container []byte, signers map[string]SU3Signer, maxContent int64) ([]byte, error) {
 	if maxContent < 0 || len(container) < su3HeaderLen || !bytes.Equal(container[:6], []byte("I2Psu3")) ||
 		container[6] != 0 || container[7] != su3FileVersion {

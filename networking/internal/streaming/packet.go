@@ -1,4 +1,4 @@
-// Package streaming parses I2P streaming protocol packets without allocation.
+// Package streaming implements the I2P streaming transport protocol.
 package streaming
 
 import (

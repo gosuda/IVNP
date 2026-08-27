@@ -1,4 +1,4 @@
-// Package upnp discovers Internet Gateway Devices and manages their port mappings.
+// Package upnp discovers UPnP Internet Gateway Devices and manages port mappings via SOAP.
 package upnp
 
 import (
@@ -16,15 +16,13 @@ import (
 )
 
 const (
-	// SSDPMulticastAddress is the IPv4 multicast endpoint defined by SSDP.
-	SSDPMulticastAddress = "239.255.255.250:1900"
-	// InternetGatewayDevice is the device search target for UPnP IGDs.
+	SSDPMulticastAddress  = "239.255.255.250:1900"
 	InternetGatewayDevice = "urn:schemas-upnp-org:device:InternetGatewayDevice:1"
 )
 
 var ErrInvalidSSDPResponse = errors.New("upnp: invalid SSDP response")
 
-// DiscoveryResponse is one response to an SSDP M-SEARCH request.
+// DiscoveryResponse holds the response to an SSDP M-SEARCH discovery request.
 type DiscoveryResponse struct {
 	Location *url.URL
 	ST       string
@@ -32,9 +30,7 @@ type DiscoveryResponse struct {
 	Headers  http.Header
 }
 
-// Client is a zero-dependency UPnP Internet Gateway Device client. Its zero
-// value uses the standard SSDP multicast address, an MX of two seconds, and
-// http.DefaultClient.
+// Client discovers UPnP gateways and manages their port mappings.
 type Client struct {
 	HTTPClient  *http.Client
 	SSDPAddress string

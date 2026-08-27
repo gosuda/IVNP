@@ -4,13 +4,12 @@ import (
 	"errors"
 )
 
-// Sensitive is implemented by pointer-owned IVNP cryptographic state. ReleaseSensitive
-// synchronously overwrites IVNP-owned secret buffers and is safe to call repeatedly.
-// It cannot erase transient compiler, standard-library, or x/crypto internals.
+// Sensitive is implemented by types holding secret key material that should be
+// explicitly zeroed in memory upon release.
 type Sensitive interface {
 	ReleaseSensitive()
 }
 
-// ErrSensitiveReleased is returned when an operation is attempted after its
-// sensitive owner has been released.
+// ErrSensitiveReleased is returned when performing an operation on a key
+// that has already been released and cleared.
 var ErrSensitiveReleased = errors.New("cryptx: sensitive state released")

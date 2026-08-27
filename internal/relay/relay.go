@@ -1,5 +1,4 @@
-// Package relay provides the shared bounded bidirectional stream relay used by
-// local client protocols.
+// Package relay provides full-duplex stream proxying between network connections.
 package relay
 
 import (
@@ -23,16 +22,13 @@ type result struct {
 	err       error
 }
 
-// Bidirectional copies both halves using fixed pooled buffers. A clean EOF
-// half-closes the opposite writer; an error closes both endpoints to unblock
-// the sibling copy.
+// Bidirectional forwards data in both directions between left and right using pooled buffers.
+// When one direction reaches EOF, the corresponding writer is half-closed.
 func Bidirectional(left, right net.Conn, leftReader io.Reader) error {
 	return BidirectionalContained(left, right, leftReader, nil)
 }
 
-// BidirectionalContained is Bidirectional with a recovery callback around each
-// copy worker. The callback converts a recovered value to the error returned by
-// this relay; it must not panic.
+// BidirectionalContained forwards data with an optional panic recovery callback for copy workers.
 func BidirectionalContained(left, right net.Conn, leftReader io.Reader, recoverPanic func(any) error) error {
 	if leftReader ==
 		nil {

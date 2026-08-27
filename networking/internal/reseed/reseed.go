@@ -1,4 +1,4 @@
-// Package reseed imports verified RouterInfos from standard I2P reseed ZIPs.
+// Package reseed downloads, verifies, and imports bootstrap RouterInfos from SU3/ZIP reseed archives.
 package reseed
 
 import (
@@ -37,8 +37,7 @@ var (
 	ErrUnsignedArchive = errors.New("reseed: authenticated SU3 archive required")
 )
 
-// Client fetches one reseed archive at a time. Limits are enforced before
-// decompression, and each ZIP entry has an independent I2NP-size bound.
+// Client fetches and processes reseed archives.
 type Client struct {
 	HTTPClient          *http.Client
 	MaxArchiveBytes     int64
@@ -47,10 +46,7 @@ type Client struct {
 	SU3Signers          map[string]SU3Signer
 	Now                 func() time.Time
 	AllowHTTP           bool // only for controlled tests or explicit local deployments
-	// allowUnsignedZIP is deliberately package-private. Tests may enable it for
-	// hand-built RouterInfo fixtures; daemon and external production callers
-	// cannot bypass the SU3 authorization boundary.
-	allowUnsignedZIP bool
+	allowUnsignedZIP    bool
 }
 
 func (c Client) limits() (archive int64, infos int, total int64) {
@@ -131,9 +127,7 @@ func (c Client) httpClientFor(endpoint *url.URL) *http.Client {
 	return &client
 }
 
-// FetchInto downloads endpoint, verifies each RouterInfo, and retains valid
-// entries in database. Invalid peers are skipped; archive-level violations fail
-// the whole fetch because they indicate a malformed or hostile source.
+// FetchInto downloads a reseed archive, parses verified RouterInfos, and stores them in database.
 func (c Client) FetchInto(ctx context.Context, endpoint string, database *netdb.Database, seenAt uint64) (int, error) {
 	if database == nil {
 		return 0, errors.New("reseed: nil database")
@@ -308,9 +302,7 @@ func (state *fetchAnyState) launchNext(timer *time.Timer, delay time.Duration) {
 	timer.Reset(delay)
 }
 
-// FetchAny hedges slow reseed endpoints while bounding active requests by the
-// current CPU budget and endpoint backpressure. The first success cancels the
-// remaining HTTP work.
+// FetchAny hedges reseed requests across multiple endpoints until one succeeds.
 func (c Client) FetchAny(ctx context.Context, endpoints []string, database *netdb.Database, seenAt uint64) (int, error) {
 	if len(endpoints) == 0 {
 		return 0, ErrNoRouterInfos

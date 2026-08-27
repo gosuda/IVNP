@@ -23,9 +23,7 @@ var (
 	ErrRatchetNoSession = garlicecies.ErrRatchetNoSession
 )
 
-// RatchetManager shards independent peer sessions across CPU-scaled ECIES
-// managers. Packet tags route established and pending inbound work directly to
-// its owner; deterministic packet hashing routes new sessions and replays.
+// RatchetManager coordinates sharded ECIES ratchet sessions across worker routines.
 type RatchetManager struct {
 	routeMu   sync.RWMutex
 	tagMu     sync.RWMutex
@@ -57,7 +55,7 @@ func (o ratchetTagObserver) TagRemoved(tag garlicecies.SessionTag) {
 	o.manager.tagMu.Unlock()
 }
 
-// NewRatchetManager binds sharded ECIES garlic state to one LocalDestination.
+// NewRatchetManager creates a sharded RatchetManager for a local destination.
 func NewRatchetManager(local *foundation.LocalDestination, config RatchetConfig) (*RatchetManager, error) {
 	maxSessions := config.MaxSessions
 	if maxSessions <= 0 {

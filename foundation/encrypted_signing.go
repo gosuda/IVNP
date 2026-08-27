@@ -15,8 +15,7 @@ import (
 
 var ErrEncryptedSigningKey = errors.New("i2p: invalid encrypted LeaseSet signing key")
 
-// GenerateRed25519Key creates a reduced Red25519 scalar and its Edwards25519
-// public point. Unlike Ed25519 seeds, Red25519 private keys are scalars.
+// GenerateRed25519Key generates a random Red25519 scalar and its corresponding public point.
 func GenerateRed25519Key() (public, private [32]byte, err error) {
 	var uniform [64]byte
 	if _, err = io.ReadFull(rand.Reader, uniform[:]); err != nil {
@@ -32,8 +31,7 @@ func GenerateRed25519Key() (public, private [32]byte, err error) {
 	return public, private, nil
 }
 
-// Red25519Sign signs according to the RedDSA nonce derivation mandated for
-// encrypted LeaseSets. private must be a canonical, little-endian scalar.
+// Red25519Sign computes a RedDSA signature using the randomized nonce scheme specified for encrypted LeaseSets.
 func Red25519Sign(private [32]byte, message []byte) ([]byte, error) {
 	a, err := new(edwards25519.Scalar).SetCanonicalBytes(private[:])
 	if err != nil {
@@ -85,8 +83,7 @@ func encryptedKeyData(signingType SigningKeyType, public []byte) ([]byte, error)
 	return data, nil
 }
 
-// EncryptedLeaseSetAlpha derives the daily UTC blinding scalar exactly as the
-// ELS2 specification defines. date is normalized to its UTC calendar day.
+// EncryptedLeaseSetAlpha computes the blinding scalar (alpha) for the specified date and secret.
 func EncryptedLeaseSetAlpha(signingType SigningKeyType, public []byte, date time.Time, secret []byte) ([32]byte, error) {
 	var out [32]byte
 	keydata, err := encryptedKeyData(signingType, public)
@@ -117,8 +114,7 @@ func EncryptedLeaseSetAlpha(signingType SigningKeyType, public []byte, date time
 	return out, nil
 }
 
-// BlindEncryptedLeaseSetPublic derives the type-11 blinded public key from a
-// destination signing public key without access to its private material.
+// BlindEncryptedLeaseSetPublic derives the daily blinded public key from a destination signing public key.
 func BlindEncryptedLeaseSetPublic(signingType SigningKeyType, public []byte, date time.Time, secret []byte) ([32]byte, error) {
 	var blinded [32]byte
 	alphaBytes, err := EncryptedLeaseSetAlpha(signingType, public, date, secret)
@@ -139,8 +135,7 @@ func BlindEncryptedLeaseSetPublic(signingType SigningKeyType, public []byte, dat
 	return blinded, nil
 }
 
-// BlindEncryptedLeaseSetPrivate derives the daily Red25519 scalar. An Ed25519
-// input is its 32-byte seed; a Red25519 input is its canonical scalar.
+// BlindEncryptedLeaseSetPrivate derives the daily blinded private scalar for signing encrypted LeaseSets.
 func BlindEncryptedLeaseSetPrivate(signingType SigningKeyType, private []byte, public []byte, date time.Time, secret []byte) ([32]byte, error) {
 	var blinded [32]byte
 	alphaBytes, err := EncryptedLeaseSetAlpha(signingType, public, date, secret)
@@ -181,8 +176,7 @@ func BlindEncryptedLeaseSetPrivate(signingType SigningKeyType, private []byte, p
 	return blinded, nil
 }
 
-// EncryptedLeaseSetSubcredential binds ELS2 encryption keys to the unblinded
-// signing key and the daily blinded public key.
+// EncryptedLeaseSetSubcredential derives the subcredential binding the unblinded signing key to the blinded key.
 func EncryptedLeaseSetSubcredential(signingType SigningKeyType, public []byte, blinded []byte) ([32]byte, error) {
 	var subcredential [32]byte
 	keydata, err := encryptedKeyData(signingType, public)

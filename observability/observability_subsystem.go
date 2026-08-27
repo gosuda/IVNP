@@ -1,4 +1,4 @@
-// Package observability is the only public entry point for IVNP metrics and logging.
+// Package observability provides metrics, health checks, and structured logging for IVNP.
 package observability
 
 import (

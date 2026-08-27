@@ -23,8 +23,7 @@ const (
 
 type Action struct{ SendACK, SendClose, SendReset bool }
 
-// State is a bounded streaming reliability state machine. Transport code owns
-// timers and packet bytes; this type owns sequence/window transitions only.
+// State manages sequence numbers, congestion window, and acknowledgment tracking for a stream.
 type State struct {
 	Status                        Status
 	SendStreamID, ReceiveStreamID uint32

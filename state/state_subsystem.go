@@ -1,4 +1,4 @@
-// Package state is the only public entry point for IVNP configuration and durable state.
+// Package state provides persistent configuration parsing, file locking, and encrypted identity storage for IVNP.
 package state
 
 import (

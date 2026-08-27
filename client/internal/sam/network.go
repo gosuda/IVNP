@@ -1,6 +1,4 @@
-// Package sam provides a zero-dependency SAM v3 StreamNetwork adapter. It is
-// an integration backend for a running I2P router, not a substitute for IVNP's
-// embedded router/tunnel runtime.
+// Package sam provides an external SAM v3 client and embedded SAM server bridge.
 package sam
 
 import (
@@ -32,26 +30,21 @@ var (
 	ErrListener    = errors.New("sam: stream listener already exists")
 )
 
-// Config defines one long-lived SAM STREAM session. Destination is either a
-// persistent SAM private destination or empty for TRANSIENT. A persistent value
-// belongs in caller-owned encrypted storage, never in source code.
+// Config configures a SAM client STREAM session.
 type Config struct {
 	Address          string
 	ID               string
 	Destination      string
 	LeaseSetEncTypes []foundation.CryptoKeyType
-	// LeaseSetType is the I2CP LeaseSet type requested from the router. Zero
-	// leaves the router default unchanged; 3 requests LeaseSet2.
+	// LeaseSetType is the requested I2CP LeaseSet type (e.g. 3 for LeaseSet2).
 	LeaseSetType  uint8
 	SignatureType foundation.SigningKeyType
-	// SessionOptions carries validated I2CP tunnel options to the external
-	// router. It is intended for standard options such as explicitPeers and
-	// inbound/outbound length; values containing SAM token separators fail New.
+	// SessionOptions holds extra I2CP configuration options.
 	SessionOptions map[string]string
 	Dialer         net.Dialer
 }
 
-// Network implements ivnp.StreamNetwork over an external SAM v3 bridge.
+// Network dials and listens for I2P streams over an external SAM bridge.
 type Network struct {
 	cfg Config
 

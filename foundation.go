@@ -1,5 +1,4 @@
-// Package ivnp provides the stable public facade for IVNP's embedded router,
-// client services, and I2P protocol primitives.
+// Package ivnp provides the top-level public API for the IVNP embedded router and client services.
 package ivnp
 
 import (

@@ -1,5 +1,4 @@
-// Package registry provides bounded, secret-safe logging, metrics, and status
-// endpoints for IVNP processes.
+// Package registry provides logging, metric collectors, and HTTP health check handlers.
 package registry
 
 import (
@@ -16,16 +15,14 @@ var (
 	ErrInvalidLogLevel  = errors.New("observability: invalid log level")
 )
 
-// LogConfig controls a structured logger. Empty Format and Level use secure,
-// operator-friendly text and info defaults. A nil Output writes to stderr.
+// LogConfig controls structured logger formatting and output destination.
 type LogConfig struct {
 	Format string
 	Level  string
 	Output io.Writer
 }
 
-// NewLogger constructs a structured logger using only text or JSON output and
-// the four standard severity levels.
+// NewLogger creates a structured slog.Logger for text or JSON output.
 func NewLogger(config LogConfig) (*slog.Logger, error) {
 	format := config.Format
 
@@ -55,7 +52,7 @@ func NewLogger(config LogConfig) (*slog.Logger, error) {
 	}
 }
 
-// ParseLogLevel validates and parses a standard slog severity level.
+// ParseLogLevel parses string log levels ("debug", "info", "warn", "error").
 func ParseLogLevel(value string) (slog.Level, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "debug":
@@ -71,22 +68,20 @@ func ParseLogLevel(value string) (slog.Level, error) {
 	}
 }
 
-// Redacted is the fixed replacement used for values that must not reach logs.
+// Redacted is the placeholder string used for sensitive values in logs.
 const Redacted = "[REDACTED]"
 
-// Secret returns an attribute whose value is always redacted. Any supplied
-// values are intentionally discarded before logging.
+// Secret returns a log attribute whose value is always replaced with Redacted.
 func Secret(key string, _ ...any) slog.Attr {
 	return slog.String(key, Redacted)
 }
 
-// SecretBytes returns an attribute whose byte value is always redacted.
+// SecretBytes returns a log attribute for byte slices whose value is always replaced with Redacted.
 func SecretBytes(key string, _ []byte) slog.Attr {
 	return slog.String(key, Redacted)
 }
 
-// SafeError returns a redacted attribute when err is non-nil. It permits
-// callers to record that an error occurred without logging its raw text.
+// SafeError returns an attribute marking an error as redacted if non-nil.
 func SafeError(key string, err error) slog.Attr {
 	if err == nil {
 		return slog.String(key, "")

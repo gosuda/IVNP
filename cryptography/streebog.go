@@ -1,5 +1,5 @@
-// This file implements the GOST R 34.11-2012 (Streebog) hash used by
-// i2pd GOST signatures as a direct Go port of libi2pd's reference core.
+// Package cryptography implements the GOST R 34.11-2012 (Streebog) hash function
+// used for I2P GOST signatures, based on libi2pd's reference implementation.
 package cryptography
 
 type block [64]byte
@@ -65,10 +65,10 @@ func g(n, h, m block) block {
 	return out.xor(m)
 }
 
-// Sum512 returns the Streebog-512 digest.
+// Sum512 returns the 64-byte Streebog-512 digest.
 func Sum512(data []byte) (digest [64]byte) { return sum(data, 0) }
 
-// Sum256 returns the first half of the Streebog-256 state, as libi2pd does.
+// Sum256 returns the 32-byte Streebog-256 digest.
 func Sum256(data []byte) (digest [32]byte) { full := sum(data, 1); copy(digest[:], full[:32]); return }
 func sum(data []byte, iv byte) (digest [64]byte) {
 	var h, n, s block

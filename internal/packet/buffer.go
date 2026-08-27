@@ -1,4 +1,4 @@
-// Package packet provides single-owner buffers for I2NP packet construction and parsing.
+// Package packet provides packet buffer primitives for zero-allocation I2NP packet encoding and parsing.
 package packet
 
 import (
@@ -7,11 +7,8 @@ import (
 	"gosuda.org/ivnp/internal/pool"
 )
 
-// Buffer is a single-owner contiguous packet buffer. It is not safe for
-// concurrent use and must not be copied after first use.
-//
-// Slices returned by its methods are borrowed views. They are invalidated by
-// any subsequent mutation of the Buffer and by Release.
+// Buffer is a single-owner packet buffer that supports prepending headers and appending payloads.
+// It is not safe for concurrent use. Slices returned by its methods borrow the underlying memory.
 type Buffer struct {
 	buf      []byte
 	lease    *pool.Lease
@@ -22,9 +19,7 @@ type Buffer struct {
 	released bool
 }
 
-// Acquire returns an empty buffer with room for reserved header bytes and
-// payloadCapacity payload bytes. The backing slab can be larger, but the
-// buffer's logical capacity is exactly reserved + payloadCapacity.
+// Acquire gets a Buffer with headroom for reserved header bytes and payloadCapacity payload bytes.
 func Acquire(reserved, payloadCapacity int) (*Buffer, bool) {
 	if reserved < 0 || payloadCapacity < 0 || reserved > maxInt-payloadCapacity {
 		return nil, false
@@ -54,7 +49,7 @@ func Acquire(reserved, payloadCapacity int) (*Buffer, bool) {
 	return b, true
 }
 
-// Release returns the backing slab to the pool. It is idempotent.
+// Release returns the buffer and its underlying slab back to their pools.
 func (b *Buffer) Release() {
 	if b == nil || b.released {
 		return
@@ -65,8 +60,7 @@ func (b *Buffer) Release() {
 	bufferPool.Put(b)
 }
 
-// Push reserves n header bytes immediately before the current header and
-// returns them for writing.
+// Push reserves n bytes in the header headroom and returns the writable slice.
 func (b *Buffer) Push(n int) ([]byte, bool) {
 	if !b.live() || n < 0 || n > b.availableHeader() {
 		return nil, false
@@ -75,7 +69,7 @@ func (b *Buffer) Push(n int) ([]byte, bool) {
 	return b.buf[b.start : b.start+n], true
 }
 
-// Append reserves n payload bytes at the tail and returns them for writing.
+// Append reserves n bytes at the end of the payload and returns the writable slice.
 func (b *Buffer) Append(n int) ([]byte, bool) {
 	if !b.live() || n < 0 || n > b.limit-b.end {
 		return nil, false
@@ -85,8 +79,7 @@ func (b *Buffer) Append(n int) ([]byte, bool) {
 	return b.buf[start:b.end], true
 }
 
-// Consume returns the next n bytes and advances the read position. If fewer
-// than n bytes remain, it returns nil, false and leaves the position unchanged.
+// Consume advances the read cursor by n bytes and returns the consumed slice.
 func (b *Buffer) Consume(n int) ([]byte, bool) {
 	if !b.live() || n < 0 || n > b.end-b.start {
 		return nil, false
@@ -96,7 +89,7 @@ func (b *Buffer) Consume(n int) ([]byte, bool) {
 	return b.buf[start:b.start], true
 }
 
-// Header returns the unconsumed header bytes.
+// Header returns the active header bytes.
 func (b *Buffer) Header() ([]byte, bool) {
 	if !b.live() {
 		return nil, false
@@ -107,7 +100,7 @@ func (b *Buffer) Header() ([]byte, bool) {
 	return b.buf[b.start:b.reserved], true
 }
 
-// Payload returns the unconsumed payload bytes.
+// Payload returns the active payload bytes.
 func (b *Buffer) Payload() ([]byte, bool) {
 	if !b.live() {
 		return nil, false
@@ -116,7 +109,7 @@ func (b *Buffer) Payload() ([]byte, bool) {
 	return b.buf[start:b.end], true
 }
 
-// Bytes returns all unconsumed bytes in wire order.
+// Bytes returns all active bytes (headers + payload).
 func (b *Buffer) Bytes() ([]byte, bool) {
 	if !b.live() {
 		return nil, false
@@ -124,7 +117,7 @@ func (b *Buffer) Bytes() ([]byte, bool) {
 	return b.buf[b.start:b.end], true
 }
 
-// AvailableHeader returns the number of header bytes that can be pushed.
+// AvailableHeader returns remaining header headroom.
 func (b *Buffer) AvailableHeader() (int, bool) {
 	if !b.live() {
 		return 0, false
@@ -132,7 +125,7 @@ func (b *Buffer) AvailableHeader() (int, bool) {
 	return b.availableHeader(), true
 }
 
-// AvailablePayload returns the number of payload bytes that can be appended.
+// AvailablePayload returns remaining payload capacity.
 func (b *Buffer) AvailablePayload() (int, bool) {
 	if !b.live() {
 		return 0, false

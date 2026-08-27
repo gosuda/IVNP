@@ -1,5 +1,4 @@
-// Package i2np implements strict, allocation-free parsing of I2P Network
-// Protocol messages. Parsed payloads alias caller-owned input.
+// Package i2np implements zero-allocation parsing and marshaling of I2P Network Protocol messages.
 package i2np
 
 import (
@@ -16,22 +15,14 @@ const (
 	LegacyShortHeaderLen = 5
 	TransportHeaderLen   = 9
 
-	// MaxWirePayload is the mathematical maximum encoded by an I2NP standard
-	// header's uint16 size field.
 	MaxWirePayload = 1<<16 - 1
 	MaxWireFrame   = StandardHeaderLen + MaxWirePayload
 
-	// I2PDMessageBufferBytes and I2PDReservedPrefix mirror libi2pd's
-	// I2NPMessageBuffer<62708> and its two bytes reserved for transport
-	// framing. 62708 - 2 - 16 = 62690 usable standard I2NP payload bytes.
 	I2PDMessageBufferBytes = 62_708
 	I2PDReservedPrefix     = 2
 	I2PDMaxPayload         = I2PDMessageBufferBytes - I2PDReservedPrefix - StandardHeaderLen
 	I2PDMaxFrame           = StandardHeaderLen + I2PDMaxPayload
 
-	// Java I2P 2.13.0 accepts RouterInfo after decompression through 4 KiB.
-	// The compressed DatabaseStore field is bounded separately by its uint16
-	// length and the enclosing I2NP payload.
 	MaxRouterInfoBytes = 4 * 1024
 
 	TunnelDataPayloadLen     = 1024
@@ -48,9 +39,6 @@ const (
 	MaxDatabaseReplyTags      = 32
 	MaxDatabaseSearchPeers    = 255
 
-	// The largest DatabaseLookup is direct fields plus a reply tunnel, 512
-	// hashes, a 32-byte key, one tag-count byte, and 32 legacy 32-byte tags:
-	// 32 + 32 + 1 + 4 + 2 + 512*32 + 32 + 1 + 32*32 = 17,512.
 	MaxDatabaseLookupPayload      = 17_512
 	MaxDatabaseSearchReplyPayload = 32 + 1 + MaxDatabaseSearchPeers*32 + 32
 )
@@ -99,19 +87,17 @@ type Message struct {
 
 func (m Message) EncodedLen() int { return StandardHeaderLen + len(m.Payload) }
 
-// Parse validates an i2pd-compatible standard I2NP message including checksum.
+// Parse decodes a standard I2NP message with checksum verification.
 func Parse(src []byte) (Message, int, error) {
 	return parseStandard(src, I2PDMaxPayload, true)
 }
 
-// ParseWire validates a maximum-size wire-standard I2NP message. Use this for
-// forensic or gateway tooling; a libi2pd-compatible router should use Parse.
+// ParseWire decodes a standard I2NP message up to the maximum wire payload size.
 func ParseWire(src []byte) (Message, int, error) {
 	return parseStandard(src, MaxWirePayload, true)
 }
 
-// ParseUnchecked validates framing but intentionally skips the legacy checksum.
-// It is for tunnel contexts where authenticated transport already covers bytes.
+// ParseUnchecked decodes an I2NP message without validating the checksum byte.
 func ParseUnchecked(src []byte) (Message, int, error) {
 	return parseStandard(src, I2PDMaxPayload, false)
 }
@@ -141,13 +127,12 @@ func parseStandard(src []byte, payloadLimit int, checksum bool) (Message, int, e
 	}, StandardHeaderLen + payloadLen, nil
 }
 
-// MarshalTo writes a standard i2pd-compatible I2NP frame and checksum.
+// MarshalTo writes a standard I2NP frame and checksum.
 func (m Message) MarshalTo(dst []byte) (int, error) {
 	return marshalStandard(dst, m.Header, m.Payload, I2PDMaxPayload)
 }
 
-// MarshalWireTo writes a mathematically valid standard I2NP frame, allowing a
-// payload up to the uint16 wire maximum.
+// MarshalWireTo writes an I2NP frame allowing up to the uint16 maximum size.
 func (m Message) MarshalWireTo(dst []byte) (int, error) {
 	return marshalStandard(dst, m.Header, m.Payload, MaxWirePayload)
 }
@@ -200,8 +185,7 @@ func ParseTransportHeader(src []byte) (TransportHeader, error) {
 	}, nil
 }
 
-// EncodeTransportExpiration matches Java I2P's nearest-second transport
-// encoding. The bool is false when the rounded value exceeds uint32.
+// EncodeTransportExpiration rounds a millisecond timestamp to nearest seconds for transport wire encoding.
 func EncodeTransportExpiration(milliseconds uint64) (uint32, bool) {
 	const max = uint64(^uint32(0))
 	if milliseconds > max*1000+499 {
@@ -210,8 +194,7 @@ func EncodeTransportExpiration(milliseconds uint64) (uint32, bool) {
 	return uint32((milliseconds + 500) / 1000), true
 }
 
-// DecodeTransportExpiration places a seconds-only wire value at the middle of
-// its represented second, matching Java I2P's transport parser.
+// DecodeTransportExpiration converts a transport seconds timestamp to milliseconds.
 func DecodeTransportExpiration(seconds uint32) uint64 {
 	return uint64(seconds)*1000 + 500
 }
@@ -227,7 +210,7 @@ const (
 	StoreMetaLeaseSet      StoreType = 7
 )
 
-// DatabaseStoreMessage is a validated, zero-copy DatabaseStore payload.
+// DatabaseStoreMessage represents a parsed DatabaseStore payload.
 type DatabaseStoreMessage struct {
 	Key           foundation.Hash
 	Type          StoreType
@@ -238,8 +221,7 @@ type DatabaseStoreMessage struct {
 	Data          []byte
 }
 
-// ParseDatabaseStore validates all fixed fields and the RouterInfo compressed
-// size prefix. Data aliases payload.
+// ParseDatabaseStore decodes a DatabaseStore message payload.
 func ParseDatabaseStore(payload []byte) (DatabaseStoreMessage, error) {
 	if len(payload) > I2PDMaxPayload {
 		return DatabaseStoreMessage{}, ErrPayloadTooLarge
@@ -295,10 +277,7 @@ const (
 	lookupECIES     = 1 << 4
 )
 
-// DatabaseLookupMessage is a validated DatabaseLookup payload. Excluded and
-// ReplyTags are flat 32-byte or tag-length records to avoid per-record slices.
-// ReplyPublicKey is set only for Java I2P's preliminary 0x12 ECIES public-key
-// form, which carries no reply-key tag.
+// DatabaseLookupMessage represents a parsed DatabaseLookup payload.
 type DatabaseLookupMessage struct {
 	Key            foundation.Hash
 	From           foundation.Hash
@@ -319,8 +298,7 @@ func (m DatabaseLookupMessage) ReplyTagCount() int {
 	return len(m.ReplyTags) / int(m.ReplyTagLen)
 }
 
-// ReplyThroughTunnel reports whether replies must be delivered through the
-// advertised reply tunnel.
+// ReplyThroughTunnel reports whether replies must be delivered through the reply tunnel.
 func (m DatabaseLookupMessage) ReplyThroughTunnel() bool { return m.Flags&lookupDelivery != 0 }
 
 // ReplyEncrypted reports whether the lookup requires an encrypted reply.
@@ -328,19 +306,17 @@ func (m DatabaseLookupMessage) ReplyEncrypted() bool {
 	return m.Flags&(lookupEncrypted|lookupECIES) != 0
 }
 
-// ReplyUsesECIES reports whether the request supplied an existing-session
-// ChaCha20-Poly1305 key and one ratchet tag.
+// ReplyUsesECIES reports whether the request supplied an ECIES reply key and tag.
 func (m DatabaseLookupMessage) ReplyUsesECIES() bool {
 	return m.Flags&(lookupEncrypted|lookupECIES) == lookupECIES
 }
 
-// ReplyUsesECIESPublicKey reports whether both encryption flags selected Java
-// I2P's preliminary ECIES public-key form. This form has no reply-key tag.
+// ReplyUsesECIESPublicKey reports whether the request uses ECIES public key encryption.
 func (m DatabaseLookupMessage) ReplyUsesECIESPublicKey() bool {
 	return m.Flags&(lookupEncrypted|lookupECIES) == lookupEncrypted|lookupECIES
 }
 
-// ReplyEncryptionMode returns the exact reply-encryption flag combination.
+// ReplyEncryptionMode returns the reply encryption flag bits.
 func (m DatabaseLookupMessage) ReplyEncryptionMode() uint8 {
 	return m.Flags & (lookupEncrypted | lookupECIES)
 }
@@ -348,8 +324,7 @@ func (m DatabaseLookupMessage) ReplyEncryptionMode() uint8 {
 // LookupType returns the two-bit wire lookup type.
 func (m DatabaseLookupMessage) LookupType() uint8 { return (m.Flags & lookupTypeMask) >> 2 }
 
-// ParseDatabaseLookup validates every conditional field and all specification
-// counts before slicing, preventing multiplication and truncation overflows.
+// ParseDatabaseLookup decodes a DatabaseLookup message payload.
 func ParseDatabaseLookup(payload []byte) (DatabaseLookupMessage, error) {
 	if len(payload) > MaxDatabaseLookupPayload || len(payload) > I2PDMaxPayload {
 		return DatabaseLookupMessage{}, ErrPayloadTooLarge
@@ -601,9 +576,7 @@ func ParseBuildRecords(kind MessageType, payload []byte) (BuildRecords, error) {
 	return BuildRecords{Count: uint8(count), RecordLen: uint16(recordLen), Records: payload[prefix:]}, nil
 }
 
-// ValidatePayload checks the complete payload grammar for every defined I2NP
-// message type. Unknown and experimental types are intentionally rejected at
-// the router boundary rather than forwarded as unaudited opaque bytes.
+// ValidatePayload checks that the payload bytes conform to the structure of the given I2NP message type.
 func ValidatePayload(kind MessageType, payload []byte) error {
 	switch kind {
 	case DatabaseStore:

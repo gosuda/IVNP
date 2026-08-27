@@ -1,4 +1,4 @@
-// Package garlic parses authenticated/decrypted legacy Garlic clove sets.
+// Package garlic implements I2P garlic encryption, session management, and clove routing.
 package garlic
 
 import (

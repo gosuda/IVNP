@@ -1,3 +1,2 @@
-// Package foundation owns the stable I2P domain primitives shared by every IVNP subsystem.
-// Its wire parsers are views over caller-owned input and do not allocate.
+// Package foundation defines common I2P wire types, identity structures, and signature verification routines.
 package foundation

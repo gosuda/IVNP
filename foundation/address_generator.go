@@ -21,14 +21,8 @@ const i2pBase64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0
 
 const localDestinationCryptoCapabilities = byte(1<<0 | 1<<1 | 1<<2)
 
-// LocalDestination owns the persisted private/public static key and capability
-// policy for ECIES-X25519 (4), ML-KEM-768/X25519 (6), and
-// ML-KEM-1024/X25519 (7). All three formats bind the same static X25519 key;
-// hybrid handshakes add one-use ML-KEM transcript sections.
-//
-// The public Destination encoding is immutable. Private material is never
-// returned by reference and ReleaseSensitive makes all private-key operations
-// fail deterministically.
+// LocalDestination holds static private/public keys and encryption capabilities for a local I2P destination
+// (ECIES-X25519, ML-KEM-768/X25519, ML-KEM-1024/X25519).
 type LocalDestination struct {
 	mu                 sync.RWMutex
 	destination        []byte
@@ -44,8 +38,7 @@ type LocalDestination struct {
 	released           bool
 }
 
-// GenerateLocalDestination creates a public (Ed25519) ECIES-X25519
-// Destination. Use GenerateEncryptedLocalDestination for a new ELS2 service.
+// GenerateLocalDestination generates a new standard ECIES-X25519 destination with Ed25519 signing keys.
 func GenerateLocalDestination() (*LocalDestination, error) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -54,10 +47,8 @@ func GenerateLocalDestination() (*LocalDestination, error) {
 	return generateLocalDestination(SigningEdDSASHA512Ed25519, public, private)
 }
 
-// GenerateLegacyLocalDestination creates an Ed25519/ElGamal public
-// Destination with an independent X25519 receive key for LS2 publication.
-// The legacy identity remains address-compatible with Java I2P while session
-// encryption uses the advertised modern LeaseSet key.
+// GenerateLegacyLocalDestination creates a legacy ElGamal/Ed25519 destination with an X25519 key for LeaseSet2.
+// This maintains backward address compatibility with legacy Java I2P routers.
 func GenerateLegacyLocalDestination() (*LocalDestination, error) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -66,9 +57,7 @@ func GenerateLegacyLocalDestination() (*LocalDestination, error) {
 	return generateLegacyLocalDestination(SigningEdDSASHA512Ed25519, public, private)
 }
 
-// GenerateEncryptedLocalDestination creates a Red25519 type-11 signing
-// Destination with a Java-compatible ElGamal identity and an independent
-// X25519 receive key for encrypted LeaseSet2 publication.
+// GenerateEncryptedLocalDestination creates a Red25519 (type 11) destination for encrypted LeaseSet2 services.
 func GenerateEncryptedLocalDestination() (*LocalDestination, error) {
 	public, private, err := GenerateRed25519Key()
 	if err != nil {
@@ -172,7 +161,7 @@ func generateLegacyLocalDestination(signingType SigningKeyType, signingPublic ed
 	return d, nil
 }
 
-// Identity returns a parser view of the immutable public Destination.
+// Identity parses and returns the public Identity of this destination.
 func (d *LocalDestination) Identity() (Identity, error) {
 	if d == nil {
 		return Identity{}, ErrInvalidIdentity
@@ -191,12 +180,12 @@ func (d *LocalDestination) IdentityHash() Hash {
 	return d.hash
 }
 
-// Hash returns this immutable Destination's hash.
+// Hash returns the destination's SHA-256 hash.
 func (d *LocalDestination) Hash() Hash { return d.IdentityHash() }
 
 func (d *LocalDestination) B32() string { return B32(d.IdentityHash()) }
 
-// Destination returns an owned public encoding copy.
+// Destination returns a copy of the base64-encoded destination.
 func (d *LocalDestination) Destination() []byte {
 	if d == nil {
 		return nil
@@ -215,7 +204,7 @@ func (d *LocalDestination) X25519Public() [32]byte {
 	return d.x25519Public
 }
 
-// CopyX25519Private copies the private key only into caller-owned storage.
+// CopyX25519Private copies the static X25519 private key into dst.
 func (d *LocalDestination) CopyX25519Private(dst []byte) error {
 	if len(dst) != 32 {
 		return ErrDestinationSmall
@@ -232,9 +221,7 @@ func (d *LocalDestination) CopyX25519Private(dst []byte) error {
 	return nil
 }
 
-// CopyElGamalPrivate copies the legacy Destination private exponent. LS2
-// sessions retain this key for standard SAM private-Destination round trips;
-// their garlic receive key remains the independent X25519 key.
+// CopyElGamalPrivate copies the legacy ElGamal private key into dst.
 func (d *LocalDestination) CopyElGamalPrivate(dst []byte) error {
 	if len(dst) != cryptography.ElGamalPrivateKeySize {
 		return ErrDestinationSmall
@@ -254,8 +241,7 @@ func (d *LocalDestination) CopyElGamalPrivate(dst []byte) error {
 	return nil
 }
 
-// CryptoTypes reports this Destination's persisted ECIES receive and
-// publication capabilities in preference order.
+// CryptoTypes returns supported encryption algorithms in order of preference.
 func (d *LocalDestination) CryptoTypes() [3]CryptoKeyType {
 	if d == nil {
 		return [3]CryptoKeyType{}
@@ -268,8 +254,7 @@ func (d *LocalDestination) CryptoTypes() [3]CryptoKeyType {
 	return [3]CryptoKeyType{CryptoMLKEM1024X25519, CryptoMLKEM768X25519, CryptoX25519}
 }
 
-// CryptoPublic returns the persisted static public key for a supported ECIES
-// format. Hybrid ML-KEM material is one-use handshake state, not an LS2 key.
+// CryptoPublic returns the static public key for the requested crypto type.
 func (d *LocalDestination) CryptoPublic(cryptoType CryptoKeyType) ([32]byte, error) {
 	if d == nil {
 		return [32]byte{}, ErrInvalidIdentity
@@ -286,8 +271,7 @@ func (d *LocalDestination) CryptoPublic(cryptoType CryptoKeyType) ([32]byte, err
 	return d.x25519Public, nil
 }
 
-// CopyCryptoPrivate copies the persisted static private key for a supported
-// ECIES format into caller-owned storage.
+// CopyCryptoPrivate copies the static private key for the requested crypto type into dst.
 func (d *LocalDestination) CopyCryptoPrivate(cryptoType CryptoKeyType, dst []byte) error {
 	if d == nil || len(dst) != 32 {
 		return ErrDestinationSmall
@@ -338,7 +322,7 @@ func (d *LocalDestination) SigningPublic() ed25519.PublicKey {
 	return append(ed25519.PublicKey(nil), d.signingPublic...)
 }
 
-// SigningKeyType reports the immutable signing-key type in the Destination.
+// SigningKeyType returns the destination's signing key type.
 func (d *LocalDestination) SigningKeyType() SigningKeyType {
 	if d == nil {
 		return 0
@@ -348,8 +332,7 @@ func (d *LocalDestination) SigningKeyType() SigningKeyType {
 	return d.signingType
 }
 
-// EncryptedLeaseSetBlinding derives the daily type-11 signing keypair without
-// exposing this Destination's long-lived private key.
+// EncryptedLeaseSetBlinding derives blinded Red25519 signing keys for encrypted LeaseSets on the given date.
 func (d *LocalDestination) EncryptedLeaseSetBlinding(date time.Time, secret []byte) (private, public [32]byte, err error) {
 	if d == nil {
 		return private, public, cryptography.ErrSensitiveReleased
@@ -372,7 +355,7 @@ func (d *LocalDestination) EncryptedLeaseSetBlinding(date time.Time, secret []by
 	return private, public, nil
 }
 
-// Clone makes a separately releasable private-key owner.
+// Clone creates an independent copy of the local destination.
 func (d *LocalDestination) Clone() (*LocalDestination, error) {
 	if d == nil {
 		return nil, ErrInvalidIdentity
@@ -397,8 +380,7 @@ func (d *LocalDestination) Clone() (*LocalDestination, error) {
 	return clone, nil
 }
 
-// ReleaseSensitive clears IVNP-owned private material. The public identity
-// remains available for close/status paths.
+// ReleaseSensitive securely zeroes private keys and marks the destination as released.
 func (d *LocalDestination) ReleaseSensitive() {
 	if d == nil {
 		return
@@ -426,8 +408,7 @@ func (d *LocalDestination) PrivateEncodedLen() int {
 	return n
 }
 
-// MarshalPrivateTo copies the local private identity into caller storage. It
-// is intended only for the encrypted state store.
+// MarshalPrivateTo serializes the private destination for encrypted persistent storage.
 func (d *LocalDestination) MarshalPrivateTo(dst []byte) (int, error) {
 	if d == nil {
 		return 0, cryptography.ErrSensitiveReleased
@@ -455,9 +436,7 @@ func (d *LocalDestination) MarshalPrivateTo(dst []byte) (int, error) {
 	return off + 1, nil
 }
 
-// ImportLocalDestination imports the encrypted-state representation emitted by
-// MarshalPrivateTo and verifies every public/private binding before retaining
-// a separately owned key copy.
+// ImportLocalDestination reconstructs and validates a LocalDestination from serialized private state bytes.
 func ImportLocalDestination(src []byte) (*LocalDestination, error) {
 	if len(src) < 2 {
 		return nil, ErrInvalidIdentity
@@ -550,8 +529,7 @@ func ImportLocalDestination(src []byte) (*LocalDestination, error) {
 	return d, nil
 }
 
-// LocalAddress contains the private material for a locally-owned legacy
-// ElGamal/Ed25519 Destination. All fields are caller-owned.
+// LocalAddress holds key material for a local legacy ElGamal/Ed25519 destination.
 type LocalAddress struct {
 	Destination       []byte
 	Hash              Hash
@@ -561,31 +539,27 @@ type LocalAddress struct {
 	EncryptionPrivate cryptography.ElGamalPrivateKey
 }
 
-// LocalIdentityOwner supplies the private signing material for one locally
-// owned Identity. LocalAddress owns a legacy Destination; LocalRouterAddress
-// owns a RouterIdentity with a modern X25519 crypto key.
+// LocalIdentityOwner represents an identity with signing capabilities.
 type LocalIdentityOwner interface {
 	Identity() (Identity, error)
 	IdentityHash() Hash
 	SigningKeyPair() (ed25519.PublicKey, ed25519.PrivateKey)
 }
 
-// Identity decodes this legacy Destination's Identity.
+// Identity parses the destination's Identity structure.
 func (a LocalAddress) Identity() (Identity, error) {
 	return ParseDestination(a.Destination)
 }
 
-// IdentityHash returns this legacy Destination's Identity hash.
+// IdentityHash returns the destination's hash.
 func (a LocalAddress) IdentityHash() Hash { return a.Hash }
 
-// SigningKeyPair returns this Destination's Ed25519 signing keys.
+// SigningKeyPair returns the Ed25519 public and private signing keys.
 func (a LocalAddress) SigningKeyPair() (ed25519.PublicKey, ed25519.PrivateKey) {
 	return a.SigningPublic, a.SigningPrivate
 }
 
-// LocalRouterAddress contains the private material for a locally-owned modern
-// RouterIdentity. RouterIdentity is the exact raw KeysAndCert encoding with
-// Ed25519 signing and X25519 crypto keys. All fields are caller-owned.
+// LocalRouterAddress holds keys and the wire identity for a local router.
 type LocalRouterAddress struct {
 	RouterIdentity []byte
 	Hash           Hash
@@ -595,13 +569,13 @@ type LocalRouterAddress struct {
 	X25519Private  [32]byte
 }
 
-// B32 returns the canonical b32.i2p hostname for this RouterIdentity.
+// B32 returns the canonical .b32.i2p domain name for this router identity.
 func (a LocalRouterAddress) B32() string { return B32(a.Hash) }
 
-// Base64 returns the canonical padded I2P Base64 RouterIdentity encoding.
+// Base64 returns the I2P Base64-encoded router identity.
 func (a LocalRouterAddress) Base64() string { return EncodeI2PBase64(a.RouterIdentity) }
 
-// Identity parses this RouterIdentity without decoding a Destination wrapper.
+// Identity parses the raw RouterIdentity.
 func (a LocalRouterAddress) Identity() (Identity, error) {
 	identity, consumed, err := ParseIdentity(a.RouterIdentity)
 	if err != nil || consumed != len(a.RouterIdentity) {
@@ -610,32 +584,28 @@ func (a LocalRouterAddress) Identity() (Identity, error) {
 	return identity, nil
 }
 
-// IdentityHash returns this RouterIdentity's hash.
+// IdentityHash returns the router identity's hash.
 func (a LocalRouterAddress) IdentityHash() Hash { return a.Hash }
 
-// SigningKeyPair returns this RouterIdentity's Ed25519 signing keys.
+// SigningKeyPair returns the Ed25519 public and private signing keys.
 func (a LocalRouterAddress) SigningKeyPair() (ed25519.PublicKey, ed25519.PrivateKey) {
 	return a.SigningPublic, a.SigningPrivate
 }
 
-// B32 returns the canonical b32.i2p hostname for an identity hash.
+// B32 returns the canonical .b32.i2p hostname corresponding to an identity hash.
 func B32(hash Hash) string {
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(hash[:])) + ".b32.i2p"
 }
 
-// B32 returns the canonical b32.i2p hostname for this locally-owned
-// Destination.
+// B32 returns the canonical .b32.i2p hostname for this local destination.
 func (a LocalAddress) B32() string { return B32(a.Hash) }
 
-// EncodeI2PBase64 returns the canonical padded I2P `-~` Base64 encoding used
-// for Destinations and RouterInfo transport options.
+// EncodeI2PBase64 encodes data using the I2P Base64 alphabet (with - and ~).
 func EncodeI2PBase64(raw []byte) string {
 	return base64.NewEncoding(i2pBase64Alphabet).EncodeToString(raw)
 }
 
-// DecodeI2PBase64 decodes the I2P `-~` Base64 alphabet. Both canonical padded
-// values and unpadded transport option values are accepted. The result is
-// caller-owned.
+// DecodeI2PBase64 decodes data in the I2P Base64 alphabet (with or without padding).
 func DecodeI2PBase64(encoded []byte) ([]byte, error) {
 	encoding := base64.NewEncoding(i2pBase64Alphabet)
 	raw := make([]byte, encoding.DecodedLen(len(encoded)))
@@ -652,9 +622,7 @@ func DecodeI2PBase64(encoded []byte) ([]byte, error) {
 	return raw[:n], nil
 }
 
-// ParseDestination decodes an I2P-Base64 Destination and validates that it
-// contains exactly one Identity. The returned Identity aliases a new decoded
-// buffer and is therefore independent of encoded.
+// ParseDestination decodes and parses an I2P-Base64 encoded Destination string.
 func ParseDestination(encoded []byte) (Identity, error) {
 	raw, err := DecodeI2PBase64(encoded)
 	if err != nil {
@@ -667,10 +635,7 @@ func ParseDestination(encoded []byte) (Identity, error) {
 	return identity, nil
 }
 
-// GenerateAddress creates an Ed25519 key-certificate Destination. destination
-// is the exact I2P-Base64 encoding of the Destination wire bytes. The returned
-// private key can sign data for the returned public key; this function does not
-// publish a LeaseSet or create a router identity.
+// GenerateAddress generates a new Ed25519 destination and returns its encoded form, hash, and keypair.
 func GenerateAddress() (destination []byte, hash Hash, public ed25519.PublicKey, private ed25519.PrivateKey, err error) {
 	address, err := GenerateLocalAddress()
 	if err != nil {
@@ -679,9 +644,7 @@ func GenerateAddress() (destination []byte, hash Hash, public ed25519.PublicKey,
 	return address.Destination, address.Hash, address.SigningPublic, address.SigningPrivate, nil
 }
 
-// GenerateLocalAddress creates a locally-owned Ed25519 Destination and the
-// matching legacy ElGamal private material needed to receive new sessions. It
-// does not publish a LeaseSet or create a router identity.
+// GenerateLocalAddress creates a local legacy ElGamal/Ed25519 destination.
 func GenerateLocalAddress() (address LocalAddress, err error) {
 	address.SigningPublic, address.SigningPrivate, err = ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -692,9 +655,6 @@ func GenerateLocalAddress() (address LocalAddress, err error) {
 		return LocalAddress{}, err
 	}
 
-	// A key certificate retains the legacy 256-byte ElGamal public-key field
-	// and 128-byte signing-key field. Ed25519's 32-byte public key is right
-	// aligned in the latter; the remaining bytes are cryptographic padding.
 	raw := make([]byte, IdentityBaseLength+CertificateHeader+4)
 	if _, err = io.ReadFull(rand.Reader, raw[:IdentityBaseLength]); err != nil {
 		return LocalAddress{}, err
@@ -719,9 +679,7 @@ func GenerateLocalAddress() (address LocalAddress, err error) {
 	return address, nil
 }
 
-// GenerateLocalRouterAddress creates a locally-owned RouterIdentity with an
-// Ed25519 signing key and an X25519 crypto key. It does not create a legacy
-// Destination or publish a RouterInfo.
+// GenerateLocalRouterAddress generates a local RouterIdentity with Ed25519 signing and X25519 encryption keys.
 func GenerateLocalRouterAddress() (address LocalRouterAddress, err error) {
 	address.SigningPublic, address.SigningPrivate, err = ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -734,8 +692,6 @@ func GenerateLocalRouterAddress() (address LocalRouterAddress, err error) {
 	copy(address.X25519Private[:], x25519.Bytes())
 	copy(address.X25519Public[:], x25519.PublicKey().Bytes())
 
-	// Short crypto keys occupy the beginning of the legacy 256-byte crypto
-	// field. Ed25519 remains right-aligned in the legacy signing-key field.
 	raw := make([]byte, IdentityBaseLength+CertificateHeader+4)
 	if _, err = io.ReadFull(rand.Reader, raw[:IdentityBaseLength]); err != nil {
 		return LocalRouterAddress{}, err

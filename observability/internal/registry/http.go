@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	// MetricsPath is the fixed Prometheus exposition endpoint.
+	// MetricsPath is the Prometheus metrics endpoint.
 	MetricsPath = "/metrics"
-	// HealthPath is the fixed JSON health endpoint.
+	// HealthPath is the JSON health check endpoint.
 	HealthPath = "/healthz"
 
 	prometheusContentType = "text/plain; version=0.0.4; charset=utf-8"
@@ -21,7 +21,7 @@ const (
 	maxMetricsResponse    = 32768
 )
 
-// HealthStatus is the bounded status vocabulary exposed by Handler.
+// HealthStatus represents the node's health state.
 type HealthStatus string
 
 const (
@@ -30,23 +30,18 @@ const (
 	HealthUnavailable HealthStatus = "unavailable"
 )
 
-// StatusFunc supplies process health without coupling this package to a daemon.
-// It must honor ctx cancellation and must not return sensitive state.
+// StatusFunc returns the current health status of the running node.
 type StatusFunc func(ctx context.Context) HealthStatus
 
-// DefaultHealthTimeout bounds each StatusFunc call made by a Handler.
+// DefaultHealthTimeout is the default deadline for evaluating StatusFunc.
 const DefaultHealthTimeout = time.Second
 
-// HandlerConfig configures a Handler. A non-positive HealthTimeout uses
-// DefaultHealthTimeout.
+// HandlerConfig configures the observability HTTP handler.
 type HandlerConfig struct {
 	HealthTimeout time.Duration
 }
 
-// NewHandler returns a handler with exactly two GET endpoints: MetricsPath and
-// HealthPath. A nil Registry exposes zero values; a nil StatusFunc is
-// unavailable. StatusFunc receives a context bounded by HealthTimeout. The
-// handler starts no goroutines and exposes no labels.
+// NewHandler creates an http.Handler exposing /metrics and /healthz.
 func NewHandler(registry *Registry, status StatusFunc, configs ...HandlerConfig) http.Handler {
 	healthTimeout := DefaultHealthTimeout
 	if len(configs) != 0 && configs[0].HealthTimeout > 0 {
@@ -55,7 +50,7 @@ func NewHandler(registry *Registry, status StatusFunc, configs ...HandlerConfig)
 	return handler{registry: registry, status: status, healthTimeout: healthTimeout}
 }
 
-// RequireBearer wraps next with constant-time bearer-token authentication.
+// RequireBearer wraps an http.Handler with constant-time Bearer token authentication.
 func RequireBearer(next http.Handler, token string) http.Handler {
 	expected := sha256.Sum256([]byte(token))
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

@@ -15,12 +15,8 @@ import (
 )
 
 const (
-	// DefaultPort is the UDP port assigned to NAT-PMP gateways.
-	DefaultPort uint16 = 5351
-
-	// DefaultTimeout bounds one NAT-PMP request when its context has no earlier
-	// deadline.
-	DefaultTimeout = 3 * time.Second
+	DefaultPort    uint16 = 5351
+	DefaultTimeout        = 3 * time.Second
 )
 
 const (
@@ -33,29 +29,20 @@ const (
 )
 
 var (
-	// ErrGatewayRequired reports an invalid or non-IPv4 gateway address.
-	ErrGatewayRequired = errors.New("natpmp: an IPv4 gateway is required")
-	// ErrInvalidRequest reports a mapping request that cannot be represented by
-	// the NAT-PMP wire format.
-	ErrInvalidRequest = errors.New("natpmp: invalid mapping request")
-	// ErrMalformedResponse reports a packet that does not match the NAT-PMP
-	// response grammar for the request sent.
+	ErrGatewayRequired   = errors.New("natpmp: an IPv4 gateway is required")
+	ErrInvalidRequest    = errors.New("natpmp: invalid mapping request")
 	ErrMalformedResponse = errors.New("natpmp: malformed response")
 )
 
-// Protocol is the transport protocol of a NAT-PMP port mapping.
+// Protocol identifies the transport protocol (UDP or TCP) for a port mapping.
 type Protocol uint8
 
 const (
-	// UDP requests a UDP mapping.
 	UDP Protocol = 1
-	// TCP requests a TCP mapping.
 	TCP Protocol = 2
 )
 
-// MappingRequest describes the desired NAT-PMP mapping. ExternalPort may be
-// zero to let the gateway choose a port. Lifetime must be an integral number
-// of seconds and may be zero to remove an existing mapping.
+// MappingRequest describes a requested port mapping.
 type MappingRequest struct {
 	Protocol     Protocol
 	InternalPort uint16

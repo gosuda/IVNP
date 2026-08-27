@@ -14,21 +14,18 @@ var (
 	ErrStreamNetworkRequired = errors.New("i2p: StreamNetwork is required")
 )
 
-// StreamNetwork provides I2P stream dialing and listening.
-//
-// Implementations are responsible for routing streams through an I2P runtime.
+// StreamNetwork dials and listens for streaming connections over I2P.
 type StreamNetwork interface {
 	DialI2P(context.Context, string) (net.Conn, error)
 	ListenI2P(context.Context, string) (net.Listener, error)
 }
 
-// Dialer dials I2P stream addresses through Network.
+// Dialer establishes outbound I2P streaming connections.
 type Dialer struct {
 	Network StreamNetwork
 }
 
-// DialContext dials address through the configured I2P stream network.
-// network must be "i2p" or "i2p-stream".
+// DialContext connects to the target I2P address. network must be "i2p" or "i2p-stream".
 func (d Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	if network != "i2p" && network != "i2p-stream" {
 		return nil, ErrUnsupportedNetwork
@@ -39,17 +36,17 @@ func (d Dialer) DialContext(ctx context.Context, network, address string) (net.C
 	return d.Network.DialI2P(ctx, address)
 }
 
-// Dial dials address through the configured I2P stream network.
+// Dial connects to the target I2P address using a background context.
 func (d Dialer) Dial(network, address string) (net.Conn, error) {
 	return d.DialContext(context.Background(), network, address)
 }
 
-// ListenerConfig listens for I2P streams through Network.
+// ListenerConfig creates stream listeners on an I2P network.
 type ListenerConfig struct {
 	Network StreamNetwork
 }
 
-// Listen listens on address through the configured I2P stream network.
+// Listen starts listening for incoming connections on the given address.
 func (c ListenerConfig) Listen(ctx context.Context, address string) (net.Listener, error) {
 	if c.Network == nil {
 		return nil, ErrStreamNetworkRequired

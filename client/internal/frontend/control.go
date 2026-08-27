@@ -15,17 +15,16 @@ import (
 
 const defaultControlAddress = "127.0.0.1:7657"
 
-// Status is the observable router state reported by a control StatusProvider.
+// Status holds node readiness and diagnostic details.
 type Status struct {
 	Ready bool   `json:"ready"`
 	State string `json:"state,omitempty"`
-	// RouterHash is the public I2P-base64 router identity hash used to
-	// configure deliberate native-peer tunnel routes.
+	// RouterHash is the Base64-encoded router identity hash.
 	RouterHash string           `json:"router_hash,omitempty"`
 	Readiness  ReadinessDetails `json:"readiness"`
 }
 
-// ReadinessDetails is the authenticated, non-sensitive evidence behind Ready.
+// ReadinessDetails contains metrics and subsystem health indicators.
 type ReadinessDetails struct {
 	BootstrapStage             uint64 `json:"bootstrap_stage"`
 	NetDBRouters               uint64 `json:"netdb_routers"`
@@ -45,24 +44,24 @@ type ReadinessDetails struct {
 	ProcessHeapObjects         uint64 `json:"process_heap_objects"`
 }
 
-// StatusProvider supplies current state without exposing a router implementation.
+// StatusProvider provides current status and readiness information.
 type StatusProvider interface {
 	ClientStatus(context.Context) (Status, error)
 }
 
-// Destination is one publicly listable local destination.
+// Destination represents an active local I2P destination.
 type Destination struct {
 	Name    string `json:"name"`
 	Address string `json:"address"`
 	Default bool   `json:"default"`
 }
 
-// DestinationCatalog supplies destination metadata without creation or deletion.
+// DestinationCatalog lists local destinations.
 type DestinationCatalog interface {
 	ListDestinations(context.Context) ([]Destination, error)
 }
 
-// ControlConfig configures the authenticated HTTP control API.
+// ControlConfig configures the local HTTP control server.
 type ControlConfig struct {
 	ListenAddress     string
 	AllowRemote       bool
@@ -79,7 +78,7 @@ type ControlConfig struct {
 	PanicReporter     ingress.Reporter
 }
 
-// Control serves read-only readiness, status, and destination-list operations.
+// Control is an authenticated HTTP server exposing readiness and destination endpoints.
 type Control struct {
 	config ControlConfig
 	server server

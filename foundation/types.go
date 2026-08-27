@@ -25,13 +25,13 @@ var (
 	ErrDestinationSmall   = errors.New("i2p: destination buffer is too small")
 )
 
-// Hash is the SHA-256 identity used throughout I2P.
+// Hash is a 32-byte SHA-256 digest used across I2P protocols.
 type Hash [HashLength]byte
 
-// Sum returns the I2P hash of src.
+// Sum computes the SHA-256 hash of src.
 func Sum(src []byte) Hash { return sha256.Sum256(src) }
 
-// CertificateType identifies the payload in a Certificate.
+// CertificateType identifies the format and payload of an I2P Certificate.
 type CertificateType uint8
 
 const (
@@ -43,7 +43,7 @@ const (
 	CertificateKey      CertificateType = 5
 )
 
-// Certificate is a zero-copy view of a wire certificate.
+// Certificate represents a parsed I2P wire certificate.
 type Certificate struct {
 	Type    CertificateType
 	Payload []byte
@@ -51,7 +51,7 @@ type Certificate struct {
 
 func (c Certificate) EncodedLen() int { return CertificateHeader + len(c.Payload) }
 
-// MarshalTo writes c in canonical Certificate form without allocating.
+// MarshalTo writes the canonical certificate wire format into dst without heap allocations.
 func (c Certificate) MarshalTo(dst []byte) (int, error) {
 	if !validCertificate(c.Type, len(c.Payload)) {
 		return 0, ErrInvalidCertificate
@@ -65,8 +65,7 @@ func (c Certificate) MarshalTo(dst []byte) (int, error) {
 	return c.EncodedLen(), nil
 }
 
-// ParseCertificate parses exactly one certificate from src. Payload aliases
-// src; it is not safe to modify either while the Certificate is in use.
+// ParseCertificate parses a Certificate structure from src. The payload borrows from src.
 func ParseCertificate(src []byte) (Certificate, int, error) {
 	if len(src) < CertificateHeader {
 		return Certificate{}, 0, wire.ErrShortBuffer
@@ -100,7 +99,7 @@ func validCertificate(kind CertificateType, payloadLen int) bool {
 	}
 }
 
-// SigningKeyType identifies the signature and signing-public-key encoding.
+// SigningKeyType identifies the signature algorithm and public key format.
 type SigningKeyType uint16
 
 const (
@@ -118,7 +117,7 @@ const (
 	SigningRedDSASHA512Ed25519  SigningKeyType = 11
 )
 
-// PublicKeyLen returns the wire length of the signing public key.
+// PublicKeyLen returns the expected byte length for a signing public key.
 func (t SigningKeyType) PublicKeyLen() (int, bool) {
 	switch t {
 	case SigningDSASHA1:
@@ -146,7 +145,7 @@ func (t SigningKeyType) PublicKeyLen() (int, bool) {
 	}
 }
 
-// SignatureLen returns the fixed signature length for t.
+// SignatureLen returns the expected byte length for a signature of type t.
 func (t SigningKeyType) SignatureLen() (int, bool) {
 	switch t {
 	case SigningDSASHA1:
@@ -174,7 +173,7 @@ func (t SigningKeyType) SignatureLen() (int, bool) {
 	}
 }
 
-// CryptoKeyType identifies the encryption public-key encoding.
+// CryptoKeyType identifies the encryption public key format.
 type CryptoKeyType uint16
 
 const (
@@ -187,7 +186,7 @@ const (
 	CryptoMLKEM1024X25519 CryptoKeyType = 7
 )
 
-// PublicKeyLen returns the wire length of the encryption public key.
+// PublicKeyLen returns the expected byte length for an encryption public key.
 func (t CryptoKeyType) PublicKeyLen() (int, bool) {
 	switch t {
 	case CryptoElGamal:
@@ -205,9 +204,7 @@ func (t CryptoKeyType) PublicKeyLen() (int, bool) {
 	}
 }
 
-// Identity is a zero-copy parsed RouterIdentity or Destination. The full wire
-// representation remains available because all identity hashes include padding
-// and certificate data.
+// Identity represents a parsed RouterIdentity or Destination wire structure.
 type Identity struct {
 	raw          []byte
 	certificate  Certificate
@@ -219,8 +216,7 @@ type Identity struct {
 	signingRest  []byte
 }
 
-// ParseIdentity parses a KeysAndCert structure. It validates key-certificate
-// lengths and returns key material as slices into src.
+// ParseIdentity parses a KeysAndCert wire structure from src.
 func ParseIdentity(src []byte) (Identity, int, error) {
 	if len(src) < IdentityBaseLength+CertificateHeader {
 		return Identity{}, 0, wire.ErrShortBuffer
@@ -269,17 +265,16 @@ func (i Identity) Certificate() Certificate       { return i.certificate }
 func (i Identity) SigningKeyType() SigningKeyType { return i.signingType }
 func (i Identity) CryptoKeyType() CryptoKeyType   { return i.cryptoType }
 
-// CryptoKeyParts returns the inline key data followed by certificate overflow.
-// They must be concatenated only for algorithms with a key exceeding 256 bytes.
+// CryptoKeyParts returns the inline key bytes followed by any certificate overflow bytes.
 func (i Identity) CryptoKeyParts() ([]byte, []byte) { return i.cryptoFirst, i.cryptoRest }
 
-// SigningKeyParts returns the inline key data followed by certificate overflow.
+// SigningKeyParts returns the inline key bytes followed by any certificate overflow bytes.
 func (i Identity) SigningKeyParts() ([]byte, []byte) { return i.signingFirst, i.signingRest }
 
-// Hash returns SHA-256 over the complete encoded identity.
+// Hash returns the SHA-256 hash of the entire encoded identity.
 func (i Identity) Hash() Hash { return Sum(i.raw) }
 
-// MarshalTo copies the verified encoded identity into dst.
+// MarshalTo copies the encoded identity bytes into dst.
 func (i Identity) MarshalTo(dst []byte) (int, error) {
 	if len(dst) < len(i.raw) {
 		return 0, ErrDestinationSmall
@@ -288,10 +283,10 @@ func (i Identity) MarshalTo(dst []byte) (int, error) {
 	return len(i.raw), nil
 }
 
-// Mapping is a zero-copy mapping including its two-byte length prefix.
+// Mapping represents an I2P String Map (key-value pairs) with a 2-byte length header.
 type Mapping struct{ raw []byte }
 
-// ParseMapping parses a mapping and validates every wire delimiter and length.
+// ParseMapping parses and validates a Mapping structure from src.
 func ParseMapping(src []byte) (Mapping, int, error) {
 	if len(src) < 2 {
 		return Mapping{}, 0, wire.ErrShortBuffer
@@ -317,7 +312,7 @@ func ParseMapping(src []byte) (Mapping, int, error) {
 func (m Mapping) EncodedLen() int { return len(m.raw) }
 func (m Mapping) Bytes() []byte   { return m.raw }
 
-// MappingIterator walks mapping entries without creating a map or copying keys.
+// MappingIterator iterates over key/value pairs in a Mapping without allocating.
 type MappingIterator struct{ rest []byte }
 
 func (m Mapping) Iterator() MappingIterator {
@@ -327,7 +322,7 @@ func (m Mapping) Iterator() MappingIterator {
 	return MappingIterator{rest: m.raw[2:]}
 }
 
-// Next returns one key/value pair. A false ok with nil error marks exhaustion.
+// Next returns the next key/value pair. Returns ok=false when done.
 func (it *MappingIterator) Next() (key, value []byte, ok bool, err error) {
 	if len(it.rest) == 0 {
 		return nil, nil, false, nil
@@ -351,7 +346,7 @@ func (it *MappingIterator) Next() (key, value []byte, ok bool, err error) {
 	return key, value, true, nil
 }
 
-// ValidateCanonical requires strictly ascending, unique bytewise keys.
+// ValidateCanonical checks that mapping keys are unique and strictly sorted.
 func (m Mapping) ValidateCanonical() error {
 	it := m.Iterator()
 	var previous []byte
@@ -370,13 +365,13 @@ func (m Mapping) ValidateCanonical() error {
 	}
 }
 
-// MappingEntry is a caller-owned, already-sorted mapping entry.
+// MappingEntry represents a single key/value pair.
 type MappingEntry struct {
 	Key   []byte
 	Value []byte
 }
 
-// MappingEncodedLen validates entries and returns their encoded byte count.
+// MappingEncodedLen validates entries and calculates the required wire buffer length.
 func MappingEncodedLen(entries []MappingEntry) (int, error) {
 	n := 2
 	var previous []byte
@@ -397,7 +392,7 @@ func MappingEncodedLen(entries []MappingEntry) (int, error) {
 	return n, nil
 }
 
-// MarshalMappingTo writes sorted entries without allocating.
+// MarshalMappingTo serializes sorted key/value entries into dst without allocating.
 func MarshalMappingTo(dst []byte, entries []MappingEntry) (int, error) {
 	n, err := MappingEncodedLen(entries)
 	if err != nil {

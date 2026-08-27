@@ -8,7 +8,7 @@ import (
 	"gosuda.org/ivnp/state"
 )
 
-// Config is the complete embedded-node operating configuration.
+// Config represents the operating configuration for an IVNP node.
 type Config = state.ConfigurationOperating
 
 type LogConfig = state.ConfigurationLog
@@ -23,7 +23,7 @@ func ParseConfig(text, path string) (Config, error) {
 	return state.ConfigurationParseOperating(text, path)
 }
 
-// Node owns one complete embedded router and its local services.
+// Node represents an embedded IVNP router node and its associated services.
 type Node = node.Subsystem
 
 type (
@@ -42,7 +42,7 @@ const (
 	DestinationEncryptedPSK  = node.DestinationEncryptedWithPreSharedKey
 )
 
-// New constructs a complete embedded IVNP node without starting network I/O.
+// New initializes an embedded IVNP node with the given configuration and options.
 func New(cfg Config, options Options) (*Node, error) { return node.NewSubsystem(cfg, options) }
 
 type (

@@ -1,4 +1,4 @@
-// Package datagram parses I2P datagram v1 payloads.
+// Package datagram parses and serializes I2P datagram v1, v2, v3, and raw payloads.
 package datagram
 
 import (
@@ -10,25 +10,14 @@ import (
 )
 
 const (
-	// ProtocolDatagram1, ProtocolRaw, ProtocolDatagram2, and
-	// ProtocolDatagram3 select formats at the I2CP/SAM boundary. A payload's
-	// bytes never identify its format.
 	ProtocolDatagram1 uint8 = 17
 	ProtocolRaw       uint8 = 18
 	ProtocolDatagram2 uint8 = 19
 	ProtocolDatagram3 uint8 = 20
 
-	// MaxWireSize is the i2pd-compatible I2NP payload framing ceiling for
-	// parsing an incoming datagram before its enclosing Data/Garlic policy.
 	MaxWireSize = i2np.I2PDMaxPayload
-
-	// MaxI2PDSize is i2pd's DatagramDestination inflate buffer capacity.
-	// Outbound encoder defaults use this conservative peer-compatible ceiling.
 	MaxI2PDSize = 32_768
-
-	// MaxSize remains the default outbound i2pd compatibility policy. Use
-	// MaxWireSize only for inbound parsing, never to infer peer send support.
-	MaxSize = MaxI2PDSize
+	MaxSize     = MaxI2PDSize
 )
 
 var (
@@ -42,9 +31,7 @@ type V1 struct {
 	Payload   []byte
 }
 
-// Packet is a protocol-selected datagram view. Exactly the field for Protocol
-// is populated. Its bytes alias caller input and remain valid under the same
-// ownership rules as ParseV1/ParseV2/ParseV3/ParseRaw.
+// Packet represents a parsed datagram with its selected protocol format.
 type Packet struct {
 	Protocol uint8
 	Raw      []byte
@@ -53,9 +40,7 @@ type Packet struct {
 	V3       V3
 }
 
-// ParsePacket selects the format from I2CP/SAM protocol metadata. It never
-// attempts wire-content autodetection because I2P datagram formats do not
-// share a discriminating header.
+// ParsePacket decodes a datagram according to the given protocol number.
 func ParsePacket(protocol uint8, src []byte) (Packet, error) {
 	packet := Packet{Protocol: protocol}
 	switch protocol {

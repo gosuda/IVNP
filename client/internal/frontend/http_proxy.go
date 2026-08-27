@@ -30,7 +30,7 @@ const (
 	defaultHTTPOutproxy           = "exit.stormycloud.i2p"
 )
 
-// HTTPProxyConfig configures a local HTTP CONNECT and absolute-form proxy.
+// HTTPProxyConfig configures the local HTTP proxy and outproxy connections.
 type HTTPProxyConfig struct {
 	Network                     stream.StreamNetwork
 	Resolver                    DestinationResolver
@@ -53,8 +53,7 @@ type HTTPProxyConfig struct {
 	PanicReporter               ingress.Reporter
 }
 
-// HTTPProxy forwards I2P requests directly and clearnet requests only through
-// configured I2P outproxies.
+// HTTPProxy proxies HTTP requests to I2P destinations or through configured outproxies.
 type HTTPProxy struct {
 	config       HTTPProxyConfig
 	server       server

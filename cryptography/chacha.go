@@ -1,4 +1,4 @@
-// ChaCha state wrappers provide allocation-bounded encryption for I2P transports.
+// Package cryptography provides ChaCha20-Poly1305 and ChaCha20 stream primitives for I2P transports.
 package cryptography
 
 import (
@@ -25,9 +25,9 @@ const (
 	ChaChaTagSize   = chacha20poly1305.Overhead
 )
 
-// ChaCha20Poly1305 owns the IVNP copy of its session key. Its x/crypto AEAD is
-// retained solely to preserve allocation-free transport framing and is dropped
-// on release; Go does not expose a way to overwrite that opaque implementation.
+// ChaCha20Poly1305 wraps an AEAD cipher and retains a local copy of the session key.
+// The key copy allows secure zeroing on release, while the underlying AEAD handles
+// zero-allocation transport framing.
 type ChaCha20Poly1305 struct {
 	key      [ChaChaKeySize]byte
 	aead     cipher.AEAD
@@ -49,9 +49,8 @@ func NewChaCha20Poly1305(key []byte) (*ChaCha20Poly1305, error) {
 	return state, nil
 }
 
-// CopyKey copies this cipher's key into dst. It is deliberately a copy-only
-// operation so ownership remains with the cipher; callers deriving a new
-// protocol chain must clear their destination when finished.
+// CopyKey copies the cipher's key into dst. Callers deriving subkeys or
+// ratchet states are responsible for clearing dst when finished.
 func (c *ChaCha20Poly1305) CopyKey(dst []byte) error {
 	if c == nil || c.released {
 		return ErrSensitiveReleased
@@ -63,8 +62,8 @@ func (c *ChaCha20Poly1305) CopyKey(dst []byte) error {
 	return nil
 }
 
-// SealTo encrypts plaintext into dst. dst must have room for plaintext plus
-// the 16-byte tag. The returned view aliases dst and does not allocate.
+// SealTo encrypts plaintext into dst, appending the 16-byte Poly1305 tag.
+// dst must have enough capacity for plaintext plus ChaChaTagSize.
 func (c *ChaCha20Poly1305) SealTo(dst, nonce, plaintext, additionalData []byte) ([]byte, error) {
 	if c == nil || c.released {
 		return nil, ErrSensitiveReleased
@@ -78,9 +77,8 @@ func (c *ChaCha20Poly1305) SealTo(dst, nonce, plaintext, additionalData []byte) 
 	return c.aead.Seal(dst[:0], nonce, plaintext, additionalData), nil
 }
 
-// OpenTo authenticates and decrypts ciphertext into dst. dst must have room
-// for ciphertext minus the 16-byte tag. Authentication failures leave dst
-// unsuitable for use by the caller.
+// OpenTo authenticates and decrypts ciphertext into dst.
+// dst must have capacity for len(ciphertext) - ChaChaTagSize.
 func (c *ChaCha20Poly1305) OpenTo(dst, nonce, ciphertext, additionalData []byte) ([]byte, error) {
 	if c == nil || c.released {
 		return nil, ErrSensitiveReleased
@@ -94,8 +92,8 @@ func (c *ChaCha20Poly1305) OpenTo(dst, nonce, ciphertext, additionalData []byte)
 	return c.aead.Open(dst[:0], nonce, ciphertext, additionalData)
 }
 
-// SealChaCha20Poly1305To performs RFC 8439 AEAD framing with caller-owned
-// storage and no retained cipher object. It is used for one-time ratchet keys.
+// SealChaCha20Poly1305To encrypts and authenticates plaintext using one-off key material,
+// writing into dst without allocating a persistent cipher object.
 func SealChaCha20Poly1305To(dst, key, nonce, plaintext, additionalData []byte) ([]byte, error) {
 	if len(key) != ChaChaKeySize {
 		return nil, ErrKeyLength
@@ -123,7 +121,8 @@ func SealChaCha20Poly1305To(dst, key, nonce, plaintext, additionalData []byte) (
 	return dst[:len(plaintext)+ChaChaTagSize], nil
 }
 
-// OpenChaCha20Poly1305To authenticates before decrypting and aliases dst.
+// OpenChaCha20Poly1305To authenticates and decrypts ciphertext using one-off key material,
+// writing into dst without allocating a persistent cipher object.
 func OpenChaCha20Poly1305To(dst, key, nonce, ciphertext, additionalData []byte) ([]byte, error) {
 	if len(key) != ChaChaKeySize {
 		return nil, ErrKeyLength
@@ -177,8 +176,7 @@ func poly1305Tag(key [32]byte, additionalData, ciphertext []byte) [16]byte {
 	return tag
 }
 
-// ReleaseSensitive overwrites IVNP-owned session-key storage and drops the
-// opaque AEAD reference. It cannot claim erasure inside x/crypto.
+// ReleaseSensitive zeros the retained session key and drops the internal cipher reference.
 func (c *ChaCha20Poly1305) ReleaseSensitive() {
 	if c == nil || c.released {
 		return
@@ -188,9 +186,8 @@ func (c *ChaCha20Poly1305) ReleaseSensitive() {
 	c.released = true
 }
 
-// NewChaCha20Stream returns the maintained IETF ChaCha20 stream at I2P's raw
-// ChaCha block counter 1. Java I2P and i2pd use counter 1 for SSU2 header
-// protection, encrypted LeaseSets, and short-build reply layers.
+// NewChaCha20Stream returns a ChaCha20 stream cipher initialized at block counter 1.
+// I2P uses counter 1 for SSU2 header protection, encrypted LeaseSets, and short build reply records.
 func NewChaCha20Stream(key, nonce []byte) (*chacha20.Cipher, error) {
 	if len(key) != chacha20.KeySize {
 		return nil, ErrKeyLength

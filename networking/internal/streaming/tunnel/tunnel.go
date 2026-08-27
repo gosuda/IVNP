@@ -38,22 +38,15 @@ const (
 	FlagNoACK       = streaming.FlagNoACK
 )
 const (
-	// ProtocolStreaming is the I2CP protocol number for Streaming packets.
-	// The TunnelSender must preserve it when it wraps packets in Garlic and
-	// sends them through an outbound tunnel.
+	// ProtocolStreaming is the I2CP protocol number for streaming packets (6).
 	ProtocolStreaming uint8 = 6
 
-	DefaultTunnelAcceptQueue = 64
-	DefaultTunnelReadQueue   = 64
-	DefaultTunnelSendQueue   = 128
-	// DefaultRetransmitAfter is the initial RTO; every connection then adapts
-	// it from measured RTT rather than using a fixed retransmission timeout.
+	DefaultTunnelAcceptQueue  = 64
+	DefaultTunnelReadQueue    = 64
+	DefaultTunnelSendQueue    = 128
 	DefaultRetransmitAfter    = streaming.InitialRTO
 	DefaultTunnelRetries      = 8
 	gracefulDisconnectTimeout = 5 * time.Minute
-	// Java I2P interprets optionalMaxSize as payload MSS, defaults it to 1,730
-	// bytes when omitted, and clamps values below 512 bytes. IVNP's parser cap
-	// includes its fixed header, so advertise only the available payload bytes.
 	localMaxPayloadSize       = MaxPacketSize - HeaderLen
 	defaultPeerMaxPayloadSize = 1730
 	minPeerMaxPayloadSize     = 512
@@ -85,16 +78,12 @@ var (
 
 type Delivery = destination.Delivery
 
-// TunnelSender injects an I2P Streaming payload into the caller's Garlic and
-// tunnel delivery path. It deliberately has no net.Conn or raw socket surface:
-// a concrete sender resolves a LeaseSet, encrypts a Garlic clove, and sends it
-// through an outbound I2P tunnel.
+// TunnelSender wraps and delivers Streaming payloads through outbound tunnels.
 type TunnelSender interface {
 	SendTunnel(context.Context, Delivery) error
 }
 
-// TunnelNetworkConfig configures one local ECIES I2P Destination streaming
-// endpoint.
+// TunnelNetworkConfig configures a local tunnel-backed streaming network.
 type TunnelNetworkConfig struct {
 	Destination     *foundation.LocalDestination
 	Sender          TunnelSender
@@ -104,10 +93,7 @@ type TunnelNetworkConfig struct {
 	MaxRetries      int
 }
 
-// TunnelNetwork is a bounded I2P Streaming protocol endpoint. It implements
-// ivnp.StreamNetwork structurally; callers feed authenticated inbound Garlic
-// payloads to HandleDelivery and provide a sender backed by their tunnel pool.
-// One maintenance worker handles retransmission for every connection.
+// TunnelNetwork manages streaming connections routed over I2P tunnels.
 type TunnelNetwork struct {
 	localHash      foundation.Hash
 	localIdentity  foundation.Identity
@@ -137,8 +123,7 @@ type TunnelNetwork struct {
 	wg             sync.WaitGroup
 }
 
-// NetworkStats is a non-sensitive snapshot of streaming flow-control state.
-// CongestionWindow is the aggregate packet window over live connections.
+// NetworkStats holds connection count and aggregate flow-control metrics.
 type NetworkStats struct {
 	Connections        int
 	PendingPackets     int
@@ -151,9 +136,7 @@ type inboundKey struct {
 	id   uint32
 }
 
-// NewTunnelNetwork constructs a tunnel-backed streaming endpoint without
-// network I/O. It rejects any local Destination whose public signing key does
-// not match its supplied private key.
+// NewTunnelNetwork creates a TunnelNetwork with the given configuration.
 func NewTunnelNetwork(config TunnelNetworkConfig) (*TunnelNetwork, error) {
 	if config.Sender == nil {
 		return nil, ErrTunnelSender

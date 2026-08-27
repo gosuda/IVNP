@@ -13,8 +13,7 @@ import (
 
 const defaultSOCKS5Address = "127.0.0.1:4447"
 
-// SOCKS5Config configures a local SOCKS5 CONNECT proxy. Only no-authentication
-// domain-name CONNECT requests to I2P destinations are accepted.
+// SOCKS5Config configures the local SOCKS5 proxy listener.
 type SOCKS5Config struct {
 	Network           stream.StreamNetwork
 	ListenAddress     string
@@ -27,7 +26,7 @@ type SOCKS5Config struct {
 	PanicReporter     ingress.Reporter
 }
 
-// SOCKS5Proxy forwards SOCKS5 domain CONNECT requests to I2P.
+// SOCKS5Proxy forwards SOCKS5 CONNECT requests to I2P destinations.
 type SOCKS5Proxy struct {
 	config SOCKS5Config
 	server server

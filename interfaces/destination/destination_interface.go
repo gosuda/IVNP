@@ -8,41 +8,35 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
-// DestinationResolver resolves an ASCII I2P name or validates a literal full
-// Destination. Implementations return a canonical full Destination encoding.
+// DestinationResolver resolves human-readable I2P hostnames (like example.i2p) or parses full Base64 destinations.
 type DestinationResolver interface {
 	ResolveDestination(context.Context, string) (string, error)
 }
 
-// LeaseSetPolicy is the protocol-neutral publication policy used by local
-// client APIs. Authentication material is consumed during destination creation
-// and must never be returned in a status response.
+// LeaseSetPolicy defines publication and encryption options for local destinations.
 type LeaseSetPolicy struct {
 	Encrypted  bool
 	Secret     []byte
 	DHClients  [][32]byte
 	PSKClients [][32]byte
-	// CryptoTypes is an ordered preference list. The daemon rejects values it
-	// cannot publish rather than silently changing the requested policy.
+	// CryptoTypes specifies preferred encryption key types in order of priority.
 	CryptoTypes []uint16
 }
 
-// DestinationSpec describes one transient local Destination. The controller
-// takes its own sensitive clone; callers retain and must release Local.
+// DestinationSpec holds configuration and keys for creating a local destination.
+// The destination controller creates an internal copy of the key material.
 type DestinationSpec struct {
 	Local  *foundation.LocalDestination
 	Policy LeaseSetPolicy
 }
 
-// DestinationRoute identifies one I2CP protocol and local port. ToPort zero is
-// a wildcard for the protocol.
+// DestinationRoute matches an I2CP protocol and local port. Port 0 acts as a wildcard.
 type DestinationRoute struct {
 	Protocol uint8
 	ToPort   uint16
 }
 
-// Delivery is one authenticated payload routed to a local destination.
-// Implementations which retain Payload must copy it before returning.
+// Delivery represents an authenticated incoming I2CP message payload.
 type Delivery struct {
 	From, To         foundation.Hash
 	FromPort, ToPort uint16
@@ -70,27 +64,24 @@ func (m *ReceivedMessage) Release() {
 	})
 }
 
-// NewReceivedMessage transfers payload ownership to a releasable message.
-// release is invoked exactly once with the retained payload size.
+// NewReceivedMessage creates a message with a cleanup hook invoked on release.
 func NewReceivedMessage(delivery Delivery, release func(int)) *ReceivedMessage {
 	return &ReceivedMessage{Delivery: delivery, release: release, size: len(delivery.Payload)}
 }
 
-// ByteBudget is the neutral non-blocking accounting boundary used by queued
-// destination message routes.
+// ByteBudget tracks memory or bandwidth consumption without blocking.
 type ByteBudget interface {
 	TryReserve(int) bool
 	Release(int)
 }
 
-// MessageSubscription is a bounded destination-message route.
+// MessageSubscription is a stream of incoming messages matching a route.
 type MessageSubscription interface {
 	Receive(context.Context) (*ReceivedMessage, error)
 	Close() error
 }
 
-// DestinationEndpoint is the narrow client-facing view of one daemon-owned,
-// destination-isolated graph.
+// DestinationEndpoint provides network operations (dial, listen, send, subscribe) for a local destination.
 type DestinationEndpoint interface {
 	Hash() foundation.Hash
 	B32() string
@@ -103,28 +94,22 @@ type DestinationEndpoint interface {
 	Close() error
 }
 
-// SourcePortDestinationEndpoint is implemented by destination runtimes that
-// support selecting the local virtual port of an outbound Streaming connection.
-// It is optional so neutral test and external implementations remain compatible.
+// SourcePortDestinationEndpoint is an optional interface for endpoints that allow selecting the local virtual port.
 type SourcePortDestinationEndpoint interface {
 	DialI2PFromPort(context.Context, string, uint16) (net.Conn, error)
 }
 
-// BoundedDestinationEndpoint installs a route whose retained payloads are
-// charged to both a per-route limit and the supplied aggregate budget.
+// BoundedDestinationEndpoint supports subscriptions bounded by both per-route queue limits and a shared byte budget.
 type BoundedDestinationEndpoint interface {
 	SubscribeBounded(DestinationRoute, int, int64, ByteBudget) (MessageSubscription, error)
 }
 
-// ReadyDestinationEndpoint blocks until owner-bound inbound and outbound
-// tunnels are usable and the current LeaseSet publication is confirmed.
+// ReadyDestinationEndpoint blocks until the destination has active tunnels and published LeaseSets.
 type ReadyDestinationEndpoint interface {
 	WaitReady(context.Context) error
 }
 
-// DestinationController is implemented by the daemon and consumed by local
-// protocols such as SAM. The protocol package never owns pools or imports the
-// daemon. DestroyDestination is the authoritative teardown boundary.
+// DestinationController manages the lifecycle of local destinations for client protocols like SAM.
 type DestinationController interface {
 	CreateDestination(context.Context, DestinationSpec) (DestinationEndpoint, error)
 	DestroyDestination(context.Context, DestinationEndpoint) error

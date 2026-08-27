@@ -10,25 +10,19 @@ var (
 	ErrReplyKeyRegistryDuplicate = errors.New("garlic: duplicate reply-key tag")
 )
 
-// ReplyKeyRegistry is a bounded store for one-time ECIES build and encrypted
-// DatabaseLookup reply keys. Garlic's Existing Session receiver must consume
-// the tag before authentication so forgery cannot make a one-time key reusable.
-// Authenticated cloves return through the router's normal Garlic dispatch.
+// ReplyKeyRegistry stores one-time reply keys for encrypted lookups and tunnel build replies.
 type ReplyKeyRegistry struct {
 	mu      sync.Mutex
 	max     int
 	entries map[[8]byte]GarlicReplyKey
 }
 
-// ReplyKeyConsumer is the ECIES one-time Existing Session receiver seam. It
-// consumes the leading 8-byte tag before authentication, preventing a failed
-// packet from restoring a reply key.
+// ReplyKeyConsumer consumes single-use reply keys by their 8-byte tag.
 type ReplyKeyConsumer interface {
 	ConsumeGarlicReplyKey([8]byte, uint64) (GarlicReplyKey, bool)
 }
 
-// NewReplyKeyRegistry constructs a bounded registry. A non-positive limit uses
-// the maximum number of pending outbound builds supported by BuildManager.
+// NewReplyKeyRegistry creates a bounded ReplyKeyRegistry.
 func NewReplyKeyRegistry(max int) *ReplyKeyRegistry {
 	if max <= 0 {
 		max = 64
@@ -36,9 +30,7 @@ func NewReplyKeyRegistry(max int) *ReplyKeyRegistry {
 	return &ReplyKeyRegistry{max: max, entries: make(map[[8]byte]GarlicReplyKey)}
 }
 
-// RegisterGarlicReplyKey retains key until it is consumed, explicitly removed,
-// or expired. It never evicts a live reply key: callers must fail the matching
-// build rather than make its reply undecryptable.
+// RegisterGarlicReplyKey stores a reply key until it is consumed or expired.
 func (r *ReplyKeyRegistry) RegisterGarlicReplyKey(key GarlicReplyKey) error {
 	if r == nil || key.ExpiresAt == 0 {
 		return ErrReplyKeyRegistryFull
@@ -55,8 +47,7 @@ func (r *ReplyKeyRegistry) RegisterGarlicReplyKey(key GarlicReplyKey) error {
 	return nil
 }
 
-// ConsumeGarlicReplyKey returns and removes an unexpired reply key. It is
-// one-use even when subsequent packet authentication fails.
+// ConsumeGarlicReplyKey looks up, removes, and returns a single-use reply key by tag.
 func (r *ReplyKeyRegistry) ConsumeGarlicReplyKey(tag [8]byte, nowMillis uint64) (GarlicReplyKey, bool) {
 	var zero GarlicReplyKey
 	if r == nil {

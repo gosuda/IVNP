@@ -14,8 +14,7 @@ const (
 
 var ErrDispatcherClosed = errors.New("ssu2: packet dispatcher is closed")
 
-// PacketHandler processes one isolated packet. The packet Data is valid only
-// for the duration of the call and must not be retained.
+// PacketHandler processes a received datagram.
 type PacketHandler func(Datagram)
 
 type dispatchSlot struct {
@@ -23,10 +22,7 @@ type dispatchSlot struct {
 	buffer []byte
 }
 
-// Dispatcher is a fixed-worker, fixed-memory handoff queue. Dispatch copies a
-// packet into one of its preallocated slots so the receive Batch can be reused
-// immediately. When all workers and queue slots are busy, Dispatch waits for a
-// slot or returns when ctx is cancelled; it never starts another goroutine.
+// Dispatcher processes incoming packets using a bounded worker pool and preallocated slots.
 type Dispatcher struct {
 	done    chan struct{}
 	free    chan *dispatchSlot
@@ -37,8 +33,7 @@ type Dispatcher struct {
 	wg      sync.WaitGroup
 }
 
-// NewDispatcher creates workers and queue slots for packets up to packetSize.
-// Close cancels queued work and waits for any active handler to return.
+// NewDispatcher creates a Dispatcher with worker routines and preallocated slot buffers.
 func NewDispatcher(workers, queue, packetSize int, handler PacketHandler) (*Dispatcher, error) {
 	newDispatcherRejected := workers < 1 || workers > MaxDispatchWorkers || queue < 0 || queue > MaxDispatchQueue ||
 		packetSize < 1 || packetSize > MaxDatagramSize
@@ -78,9 +73,7 @@ func (d *Dispatcher) run() {
 	}
 }
 
-// Dispatch transfers a copy of packet into the bounded worker queue. packet is
-// validated before it occupies a slot. The caller retains ownership of packet
-// and may reuse its buffer as soon as Dispatch returns.
+// Dispatch enqueues a copy of the packet into an available worker slot.
 func (d *Dispatcher) Dispatch(ctx context.Context, packet Datagram) error {
 	if d == nil || packet.Len < 0 || packet.Len > len(packet.Data) {
 		return ErrInvalidDatagram
@@ -134,8 +127,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, packet Datagram) error {
 	}
 }
 
-// Close stops accepting packets, drops queued work, and waits for active
-// handlers. A handler must return for Close to complete.
+// Close stops the dispatcher and waits for all active workers to finish.
 func (d *Dispatcher) Close() {
 	if d == nil {
 		return

@@ -14,14 +14,9 @@ import (
 
 var errDestinationCryptoTypes = errors.New("daemon: unsupported destination crypto type order")
 
-// clientDestinationController is the neutral local-client boundary. It creates
-// transient graphs with the same factory used by durable daemon Destinations;
-// there is no SAM-specific pool or parallel destination owner.
 type clientDestinationController struct{ daemon *Daemon }
 
-// DestinationController returns the neutral dynamic-destination boundary used
-// by embedded client protocols. Persistent catalog mutation remains available
-// through Daemon.CreateDestination and Daemon.DestroyDestination.
+// DestinationController returns a dynamic destination controller for creating and destroying endpoints.
 func (d *Daemon) DestinationController() client.ClientDestinationController {
 	return clientDestinationController{daemon: d}
 }

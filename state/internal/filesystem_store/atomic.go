@@ -1,4 +1,4 @@
-// Package filesystemstore provides crash-safe bounded state-file updates.
+// Package filesystemstore provides atomic file writes and bounded file reads.
 package filesystemstore
 
 import (
@@ -14,7 +14,7 @@ var (
 	ErrInvalidFile = errors.New("fsstore: not a regular file")
 )
 
-// WriteAtomic persists data through a same-directory temporary file and rename.
+// WriteAtomic writes data to a temporary file and atomically renames it to path.
 func WriteAtomic(path string, data []byte, mode os.FileMode, max int) error {
 	if max >= 0 && len(data) > max {
 		return ErrTooLarge
@@ -46,8 +46,7 @@ func WriteAtomic(path string, data []byte, mode os.FileMode, max int) error {
 	return SyncDir(dir)
 }
 
-// OpenRegular opens path without following a final symlink and verifies that
-// the opened descriptor is a regular file.
+// OpenRegular opens a file without following symlinks and checks that it is a regular file.
 func OpenRegular(path string) (*os.File, os.FileInfo, error) {
 	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -65,7 +64,7 @@ func OpenRegular(path string) (*os.File, os.FileInfo, error) {
 	return file, info, nil
 }
 
-// SyncDir makes previously completed directory entry updates durable.
+// SyncDir flushes directory changes to disk.
 func SyncDir(dir string) error {
 	file, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
@@ -84,7 +83,7 @@ func ReadBounded(path string, max int64) ([]byte, error) {
 	return ReadBoundedFile(file, max)
 }
 
-// ReadBoundedFile reads from an already-open regular-file descriptor.
+// ReadBoundedFile reads file contents up to max bytes.
 func ReadBoundedFile(file *os.File, max int64) ([]byte, error) {
 	info, err := file.Stat()
 	if err != nil {

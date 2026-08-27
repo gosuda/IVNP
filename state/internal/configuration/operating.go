@@ -18,12 +18,10 @@ import (
 	filesystemstore "gosuda.org/ivnp/state/internal/filesystem_store"
 )
 
-// ErrInvalidOperating reports a syntactically valid file with an unsafe or unsupported operating value.
-
+// ErrInvalidOperating indicates a syntactically valid config with invalid or unsupported settings.
 var ErrInvalidOperating = errors.New("config: invalid operating configuration")
 
-// Operating is the complete process configuration. Paths are absolute and
-// bearer tokens are never included in its String representation.
+// Operating represents the complete configuration for an IVNP node.
 type Operating struct {
 	DataDir   string
 	StateDir  string
@@ -49,16 +47,14 @@ type Operating struct {
 	Log         Log
 }
 
-// Network selects the I2P network and supported IP families.
+// Network specifies network ID and enabled IP protocol families.
 type Network struct {
 	ID   uint32
 	IPv4 bool
 	IPv6 bool
 }
 
-// Router contains identity-related public RouterInfo settings. Floodfill is an
-// explicit participant override equivalent to Java I2P's
-// router.floodfillParticipant=true; IVNP does not auto-volunteer.
+// Router holds identity and capability settings advertised in RouterInfo.
 type Router struct {
 	IdentityType string
 	Floodfill    bool
@@ -66,18 +62,14 @@ type Router struct {
 	Version      string
 }
 
-// NetDB bounds the local RouterInfo routing-table buckets and optionally names
-// exact signed RouterInfo files to admit during startup. BootstrapRouterInfoPaths
-// is empty by default; configured files are not a replacement for reseed.
+// NetDB configures Kademlia bucket limits and optional bootstrap RouterInfo files.
 type NetDB struct {
 	BucketCapacity           int
 	BootstrapRouterInfoPaths []string
 	LookupCapacity           int
 }
 
-// Tunnel bounds router-owned exploratory and destination-owned client tunnel
-// pools independently. Each pool needs capacity for its live target plus one
-// renewing generation.
+// Tunnel configures tunnel pool targets, capacities, and build parameters.
 type Tunnel struct {
 	Enabled                     bool
 	Hops                        int
@@ -95,14 +87,14 @@ type Tunnel struct {
 	BandwidthBurstBytes         int
 }
 
-// State sets the durable-state admission limits.
+// State sets storage limits for persistent destination state.
 type State struct {
 	MaxBytes        int64
 	MaxDestinations int
 	MaxNameBytes    int
 }
 
-// Endpoint is an IP socket endpoint. Host is a canonical IP literal.
+// Endpoint represents a host:port socket address.
 type Endpoint struct {
 	Host string
 	Port uint16
@@ -110,8 +102,7 @@ type Endpoint struct {
 
 func (e Endpoint) String() string { return net.JoinHostPort(e.Host, strconv.Itoa(int(e.Port))) }
 
-// Transport controls one native I2P transport. Advertised is empty when
-// address publication is left to a later runtime mechanism.
+// Transport configures a point-to-point network transport (NTCP2 or SSU2).
 type Transport struct {
 	Enabled     bool
 	Bind        Endpoint
@@ -120,14 +111,13 @@ type Transport struct {
 	IdleTimeout time.Duration
 }
 
-// NAT optionally pins discovery endpoints. Zero values retain automatic
-// NAT-PMP gateway inference and UPnP SSDP discovery.
+// NAT configures NAT-PMP or UPnP port mapping discovery endpoints.
 type NAT struct {
 	NATPMPEndpoint netip.AddrPort
 	UPnPEndpoint   string
 }
 
-// Reseed controls bounded bootstrap imports.
+// Reseed configures SU3 reseed server URLs and limits.
 type Reseed struct {
 	Enabled         bool
 	Required        bool
@@ -138,8 +128,7 @@ type Reseed struct {
 	MaxTotalBytes   int64
 }
 
-// Listener controls one client or management listener. BearerToken is only
-// used by an owning listener implementation and is redacted by String.
+// Listener configures a local RPC, proxy, or SAM listener.
 type Listener struct {
 	Enabled              bool
 	Address              Endpoint
@@ -152,8 +141,7 @@ type Listener struct {
 	MaxServerQueueBytes  int64
 }
 
-// HTTPProxy controls the local HTTP proxy and its ordered I2P outproxy
-// candidates. A non-I2P request is never sent directly to the public network.
+// HTTPProxy configures the local HTTP outproxy listener.
 type HTTPProxy struct {
 	Listener
 	Outproxies []string
@@ -161,16 +149,14 @@ type HTTPProxy struct {
 
 func (p HTTPProxy) String() string { return p.Listener.String() }
 
-// AddressBook configures the local hosts resolver and bounded remote refresh.
-// An explicitly empty Subscriptions list selects local-hosts-only operation.
+// AddressBook configures hosts.txt name resolution and subscription feeds.
 type AddressBook struct {
 	Enabled          bool
 	PrivateHostsPath string
 	UserHostsPath    string
 	HostsPath        string
 	StatePath        string
-	// Subscriptions is ordered: earlier verified HTTPS sources win name
-	// conflicts. Setting it explicitly to empty disables remote refresh.
+	// Subscriptions lists remote hosts.txt URLs fetched during periodic refreshes.
 	Subscriptions    []string
 	RefreshInterval  time.Duration
 	RetryInterval    time.Duration
@@ -188,7 +174,7 @@ func (l Listener) String() string {
 	return "address=" + l.Address.String() + ", authenticated=" + strconv.FormatBool(l.BearerToken != "")
 }
 
-// Log controls the process log sink encoding.
+// Log configures logging level and format.
 type Log struct {
 	Level  string
 	Format string
@@ -204,10 +190,7 @@ func (o Operating) String() string {
 		o.Control, o.HTTPProxy, o.SOCKS5, o.Metrics, o.Log.Level, o.Log.Format)
 }
 
-// LoadOrCreateOperating atomically installs a private empty configuration on
-// first start, then loads it through the same ownership and regular-file checks
-// as an existing configuration. Empty configuration text selects the secure
-// defaults: control, proxy, SOCKS, and metrics listeners remain disabled.
+// LoadOrCreateOperating loads the configuration file, creating an empty one if it doesn't exist.
 func LoadOrCreateOperating(path string) (Operating, error) {
 	operating, err := LoadOperating(path)
 	if err == nil {
@@ -240,7 +223,7 @@ func LoadOrCreateOperating(path string) (Operating, error) {
 	return LoadOperating(absolute)
 }
 
-// LoadOperating reads and strictly validates an operating configuration file.
+// LoadOperating reads and validates an operating configuration file from disk.
 func LoadOperating(path string) (Operating, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
@@ -280,8 +263,7 @@ func operatingHasBearerCredentials(operating Operating) bool {
 	return operating.Control.BearerToken != "" || operating.HTTPProxy.BearerToken != "" || operating.SOCKS5.BearerToken != "" || operating.Metrics.BearerToken != ""
 }
 
-// ParseOperating validates text as an operating configuration rooted at path.
-// Relative paths in text are resolved against path's directory.
+// ParseOperating parses configuration text rooted at the specified file path.
 func ParseOperating(text, path string) (Operating, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {

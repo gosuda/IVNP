@@ -11,9 +11,7 @@ import (
 
 const DefaultWriteQueue = 16
 
-// ByteStream is the bidirectional byte transport used by Conn. A tunnel
-// backend supplies this transport; Conn does not route I2P traffic or encode
-// streaming packets.
+// ByteStream represents the underlying transport for a streaming connection.
 type ByteStream interface {
 	io.Reader
 	io.Writer
@@ -22,8 +20,7 @@ type ByteStream interface {
 	SetWriteDeadline(time.Time) error
 }
 
-// Conn adapts a tunnel-supplied ByteStream to net.Conn. Writes are serialized
-// through a bounded queue, while the streaming State is owned by this Conn.
+// Conn wraps a ByteStream as a net.Conn with bounded write queuing and state tracking.
 type Conn struct {
 	stream ByteStream
 
@@ -60,9 +57,7 @@ type writeResult struct {
 	err error
 }
 
-// NewConn wraps stream. The optional queueSize bounds queued writers; omitted
-// or non-positive values use DefaultWriteQueue. State is copied, so callers
-// cannot mutate the state owned by Conn.
+// NewConn constructs a Conn wrapping the given ByteStream and initial State.
 func NewConn(stream ByteStream, state State, queueSize ...int) *Conn {
 	size := DefaultWriteQueue
 	if len(queueSize) > 0 && queueSize[0] > 0 {
@@ -78,15 +73,14 @@ func NewConn(stream ByteStream, state State, queueSize ...int) *Conn {
 	return conn
 }
 
-// State returns a consistent snapshot of Conn's streaming state.
+// State returns a snapshot of the current streaming connection state.
 func (c *Conn) State() State {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	return c.state
 }
 
-// OnPacket applies a received streaming packet to Conn's owned state. A
-// tunnel backend calls this after it has decoded a packet from its transport.
+// OnPacket processes an incoming streaming packet and transitions the connection state.
 func (c *Conn) OnPacket(packet Packet) Action {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()

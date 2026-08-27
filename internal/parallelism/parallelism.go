@@ -4,7 +4,7 @@ import (
 	"runtime"
 )
 
-// Workers returns a CPU-scaled worker count bounded by the currently available
+// Workers returns a worker count based on the available CPUs and the amount of work to perform.
 func Workers(work int) int {
 	if work <= 0 {
 		return 0
@@ -13,7 +13,7 @@ func Workers(work int) int {
 	return workers
 }
 
-// CPUs returns the scheduler's current effective CPU parallelism.
+// CPUs returns GOMAXPROCS, ensuring at least 1.
 func CPUs() int {
 	workers := runtime.GOMAXPROCS(0)
 	if workers < 1 {

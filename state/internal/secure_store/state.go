@@ -1,4 +1,4 @@
-// Package securestore persists the long-lived private identity material of an I2P router.
+// Package securestore provides encrypted storage for router identity keys and destination secrets.
 package securestore
 
 import (
@@ -49,40 +49,30 @@ var (
 	ErrStateLocked   = errors.New("state: state directory is already locked")
 )
 
-// Bundle is the durable private identity material for one router. Runtime
-// sessions, network database records, and tunnels are intentionally absent.
+// Bundle holds persistent private key material for a router and its local destinations.
 type Bundle struct {
 	Router             foundation.LocalRouterAddress
 	NTCP2StaticPrivate []byte
 	NTCP2StaticIV      []byte
 	SSU2StaticPrivate  []byte
 	SSU2IntroKey       []byte
-	// Destinations remains the decoded legacy ElGamal representation solely so
-	// older encrypted bundles can be migrated on their next save.
+	// Destinations stores legacy ElGamal destination material for backward migration.
 	Destinations map[string]foundation.LocalAddress
-	// DestinationPrivate holds the opaque LocalDestination private encoding.
-	// It is the only persisted client-destination representation used by new
-	// daemon runtimes.
+	// DestinationPrivate holds serialized LocalDestination private key bytes.
 	DestinationPrivate        map[string][]byte
 	EncryptedLeaseSetPolicies map[string]EncryptedLeaseSetPolicy
-	// DestinationAddressPolicies holds each local destination's authorization
-	// material for remote ELS2 addresses. It is encrypted with the rest of the
-	// state bundle and is never inferred from a plaintext LS2 record.
+	// DestinationAddressPolicies holds client access credentials for remote encrypted LeaseSets.
 	DestinationAddressPolicies map[string][]RemoteELSAuthorization
 }
 
-// EncryptedLeaseSetPolicy is encrypted with the state bundle and applies to
-// the named Destination. Legacy Ed25519 destinations may opt in unchanged;
-// new type-11 destinations use the same durable policy representation.
+// EncryptedLeaseSetPolicy defines access control (secret and client keys) for a local encrypted LeaseSet.
 type EncryptedLeaseSetPolicy struct {
 	Secret     []byte
 	DHClients  [][32]byte
 	PSKClients [][32]byte
 }
 
-// RemoteELSAuthorizationKind identifies the credential required to open a
-// remote encrypted LeaseSet. None is explicit and therefore remains a
-// no-downgrade ELS2 policy rather than an absent policy.
+// RemoteELSAuthorizationKind identifies the authorization method used to decrypt a remote LeaseSet2.
 type RemoteELSAuthorizationKind uint8
 
 const (
@@ -91,9 +81,7 @@ const (
 	RemoteELSAuthorizationPSK
 )
 
-// RemoteELSAuthorization is one remote ELS2 address policy. Identity is the
-// exact unblinded destination Identity wire encoding. DH credentials must be
-// a matching X25519 key pair; PSK is the 32-byte ELS2 client key.
+// RemoteELSAuthorization holds access credentials for decrypting a remote destination's encrypted LeaseSet.
 type RemoteELSAuthorization struct {
 	Identity  []byte
 	Secret    []byte
@@ -103,9 +91,7 @@ type RemoteELSAuthorization struct {
 	PSK       [32]byte
 }
 
-// ReleaseSensitive overwrites every IVNP-owned private byte in the in-memory
-// durable bundle. Persistence is owned by Store; callers invoke this only after
-// the final successful Save and after all runtime children have stopped.
+// ReleaseSensitive zeroes all sensitive private keys in the bundle.
 func (b *Bundle) ReleaseSensitive() {
 	if b == nil {
 		return
@@ -156,9 +142,7 @@ func (b *Bundle) ReleaseSensitive() {
 	*b = Bundle{}
 }
 
-// Store configures a bounded encrypted state file and its separately stored
-// 256-bit master key. A zero limit selects the secure default; negative limits
-// are invalid.
+// Store manages AES-256-GCM encrypted persistence of a state Bundle to disk.
 type Store struct {
 	StatePath     string
 	MasterKeyPath string
@@ -170,7 +154,7 @@ type Store struct {
 	mu sync.Mutex
 }
 
-// NewStore returns a Store with secure default bounds.
+// NewStore creates a Store with default limits.
 func NewStore(statePath, masterKeyPath string) (*Store, error) {
 	store := &Store{
 		StatePath:       statePath,
@@ -185,8 +169,7 @@ func NewStore(statePath, masterKeyPath string) (*Store, error) {
 	return store, nil
 }
 
-// Load authenticates and decodes the existing bundle. It never creates or
-// replaces either file.
+// Load decrypts and deserializes the state bundle from disk.
 func (s *Store) Load() (Bundle, error) {
 	if s == nil {
 		return Bundle{}, ErrStoreConfig
@@ -196,9 +179,7 @@ func (s *Store) Load() (Bundle, error) {
 	return s.load()
 }
 
-// Save validates and atomically replaces the encrypted state. If no master key
-// exists yet, Save securely creates it. The key is never embedded in the state
-// file.
+// Save serializes and encrypts the state bundle, atomically writing it to disk.
 func (s *Store) Save(bundle Bundle) error {
 	if s == nil {
 		return ErrStoreConfig
@@ -208,9 +189,7 @@ func (s *Store) Save(bundle Bundle) error {
 	return s.save(bundle)
 }
 
-// LoadOrCreate loads an existing state bundle or creates a new identity bundle
-// only when the state file is absent. Invalid, truncated, or unauthenticated
-// existing state is always returned as an error and is never regenerated.
+// LoadOrCreate loads existing state, or generates and saves a new random identity bundle if absent.
 func (s *Store) LoadOrCreate() (Bundle, error) {
 	if s == nil {
 		return Bundle{}, ErrStoreConfig

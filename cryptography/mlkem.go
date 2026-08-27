@@ -7,9 +7,8 @@ import (
 )
 
 const (
-	// MLKEM768X25519 and MLKEM1024X25519 are I2P LeaseSet2 crypto type codes.
-	// Their advertised static key remains X25519; the KEM public key and
-	// ciphertext exist only inside the ECIES hybrid handshake.
+	// MLKEM768X25519 and MLKEM1024X25519 are I2P LeaseSet2 crypto type identifiers
+	// for hybrid post-quantum key encapsulation.
 	MLKEM768X25519  uint16 = 6
 	MLKEM1024X25519 uint16 = 7
 )
@@ -19,9 +18,7 @@ var (
 	ErrMLKEMUnsupported = errors.New("cryptx: unsupported ML-KEM parameter set")
 )
 
-// MLKEMParameters are the FIPS-203 lengths used inside the I2P ECIES hybrid
-// e1/ekem1 sections. PublicKeySize is the ephemeral KEM encapsulation key,
-// not the 32-byte static X25519 key advertised by a LeaseSet2.
+// MLKEMParameters holds key and ciphertext sizes for hybrid ECIES handshakes.
 type MLKEMParameters struct {
 	CryptoType      uint16
 	PublicKeySize   int
@@ -29,8 +26,7 @@ type MLKEMParameters struct {
 	NoiseIdentifier string
 }
 
-// Parameters returns exact I2P hybrid handshake sizes for registered
-// ML-KEM/X25519 crypto types.
+// Parameters returns handshake parameters for registered ML-KEM types.
 func Parameters(cryptoType uint16) (MLKEMParameters, bool) {
 	switch cryptoType {
 	case MLKEM768X25519:
@@ -42,9 +38,7 @@ func Parameters(cryptoType uint16) (MLKEMParameters, bool) {
 	}
 }
 
-// MLKEMPublicKey is an immutable-by-convention encoded FIPS-203 public key.
-// Bytes is copied by constructors and returned as a copy to prevent mutation
-// across handshake goroutines.
+// MLKEMPublicKey holds an encoded FIPS-203 public key.
 type MLKEMPublicKey struct {
 	cryptoType uint16
 	bytes      []byte
@@ -53,7 +47,7 @@ type MLKEMPublicKey struct {
 func (k MLKEMPublicKey) CryptoType() uint16 { return k.cryptoType }
 func (k MLKEMPublicKey) Bytes() []byte      { return append([]byte(nil), k.bytes...) }
 
-// NewMLKEMPublicKey validates and owns a FIPS-203 KEM public key.
+// NewMLKEMPublicKey parses and validates an encoded ML-KEM public key.
 func NewMLKEMPublicKey(cryptoType uint16, encoded []byte) (MLKEMPublicKey, error) {
 	params, known := Parameters(cryptoType)
 	if !known {
@@ -75,8 +69,7 @@ func NewMLKEMPublicKey(cryptoType uint16, encoded []byte) (MLKEMPublicKey, error
 	return MLKEMPublicKey{cryptoType: cryptoType, bytes: append([]byte(nil), encoded...)}, nil
 }
 
-// MLKEMPrivateKey owns the d||z seed from which a short-lived standard-library
-// decapsulation key is reconstructed for each decapsulation operation.
+// MLKEMPrivateKey stores the seed used to reconstruct standard library decapsulation keys on demand.
 type MLKEMPrivateKey struct {
 	cryptoType uint16
 	seed       [mlkem.SeedSize]byte
@@ -92,7 +85,7 @@ func (k *MLKEMPrivateKey) CryptoType() uint16 {
 	return k.cryptoType
 }
 
-// GenerateMLKEM creates a FIPS-203 KEM pair for hybrid ECIES e1.
+// GenerateMLKEM generates an ephemeral ML-KEM keypair for hybrid handshakes.
 func GenerateMLKEM(cryptoType uint16) (MLKEMPublicKey, *MLKEMPrivateKey, error) {
 	if _, known := Parameters(cryptoType); !known {
 		return MLKEMPublicKey{}, nil, ErrMLKEMUnsupported
@@ -128,7 +121,7 @@ func GenerateMLKEM(cryptoType uint16) (MLKEMPublicKey, *MLKEMPrivateKey, error) 
 	return MLKEMPublicKey{cryptoType: cryptoType, bytes: append([]byte(nil), public...)}, private, nil
 }
 
-// Encapsulate produces an ekem1 ciphertext and a fixed-size shared secret.
+// Encapsulate generates a shared secret and ciphertext for the recipient's public key.
 func Encapsulate(public MLKEMPublicKey) ([mlkem.SharedKeySize]byte, []byte, error) {
 	var shared [mlkem.SharedKeySize]byte
 	switch public.cryptoType {
@@ -155,9 +148,7 @@ func Encapsulate(public MLKEMPublicKey) ([mlkem.SharedKeySize]byte, []byte, erro
 	}
 }
 
-// Decapsulate recovers ekem1's shared secret. FIPS-203 decapsulation may
-// return a pseudorandom secret for a correctly-sized invalid ciphertext; the
-// enclosing hybrid Noise transcript authentication must reject that session.
+// Decapsulate decapsulates a ciphertext using the private key seed to derive the shared secret.
 func (k *MLKEMPrivateKey) Decapsulate(ciphertext []byte) ([mlkem.SharedKeySize]byte, error) {
 	var shared [mlkem.SharedKeySize]byte
 	if k == nil || k.released {
@@ -195,7 +186,7 @@ func (k *MLKEMPrivateKey) Decapsulate(ciphertext []byte) ([mlkem.SharedKeySize]b
 	return shared, nil
 }
 
-// ReleaseSensitive overwrites the retained seed and prevents reuse.
+// ReleaseSensitive zeroes the private seed and marks the key as released.
 func (k *MLKEMPrivateKey) ReleaseSensitive() {
 	if k == nil || k.released {
 		return

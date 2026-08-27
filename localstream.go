@@ -38,8 +38,7 @@ func (n *localStreamNetwork) DialI2P(ctx context.Context, address string) (net.C
 	}
 }
 
-// NewLocalStreamNetwork creates an in-process zero-hop StreamNetwork. It is
-// useful for embedded services and tests; it does not claim remote I2P routing.
+// NewLocalStreamNetwork returns an in-memory StreamNetwork implementation using net.Pipe.
 func NewLocalStreamNetwork() StreamNetwork {
 	return &localStreamNetwork{listeners: make(map[string]*localListener)}
 }

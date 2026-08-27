@@ -26,8 +26,7 @@ var (
 	ErrDestinationCreation = errors.New("daemon: destination creation unavailable")
 )
 
-// DestinationPolicyKind selects the durable publication format and, for ELS2,
-// its client-authorization mode.
+// DestinationPolicyKind selects the publication format (public LeaseSet2 or encrypted ELS2).
 type DestinationPolicyKind uint8
 
 const (
@@ -37,9 +36,7 @@ const (
 	DestinationEncryptedPSK
 )
 
-// DestinationPolicy is validated before identity generation or state changes.
-// Secret is the optional ELS2 blinding secret. DHClients and PSKClients contain
-// the 32-byte client public keys or pre-shared keys admitted by the publisher.
+// DestinationPolicy configures access control and publication settings for a local destination.
 type DestinationPolicy struct {
 	Kind       DestinationPolicyKind
 	Secret     []byte
@@ -47,7 +44,7 @@ type DestinationPolicy struct {
 	PSKClients [][32]byte
 }
 
-// Validate rejects ambiguous or unrepresentable LS2/ELS2 policies.
+// Validate checks whether the destination policy settings are valid.
 func (p DestinationPolicy) Validate() error {
 	if len(p.Secret) > 0xffff || len(p.DHClients) > 0xffff || len(p.PSKClients) > 0xffff {
 		return ErrDestinationPolicy
@@ -565,9 +562,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	return runtime, nil
 }
 
-// CreateDestination atomically persists a new private destination and its ELS2
-// policy before activating the production runtime. Any later construction
-// failure restores the previous durable bundle and releases all sensitive state.
+// CreateDestination creates and starts a new local destination with the given name and policy.
 func (d *Daemon) CreateDestination(ctx context.Context, name string, policy DestinationPolicy) (client.ClientDestination, error) {
 	if d == nil || d.store == nil {
 		return client.ClientDestination{}, net.ErrClosed
@@ -670,8 +665,7 @@ func (d *Daemon) CreateDestination(ctx context.Context, name string, policy Dest
 	return client.ClientDestination{Name: name, Address: runtime.local.B32(), Default: name == "default"}, nil
 }
 
-// DestroyDestination durably removes one named destination before tearing down
-// exactly its production session and owner-scoped runtime.
+// DestroyDestination removes a named destination from persistent storage and stops its runtime.
 func (d *Daemon) DestroyDestination(ctx context.Context, name string) error {
 	if d == nil || d.store == nil {
 		return net.ErrClosed

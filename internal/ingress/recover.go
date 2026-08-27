@@ -1,4 +1,4 @@
-// Package ingress contains narrow recovery helpers for untrusted worker boundaries.
+// Package ingress provides panic recovery and isolation helpers for network listener workers.
 package ingress
 
 import (
@@ -11,8 +11,7 @@ import (
 
 var ErrRecoveredPanic = errors.New("ingress: recovered panic")
 
-// Boundary identifies the worker that contained a panic without retaining
-// packet bytes, credentials, or arbitrary panic text.
+// Boundary identifies the ingress subsystem boundary where a panic was intercepted.
 type Boundary uint8
 
 const (
@@ -25,7 +24,7 @@ const (
 	BoundarySAMWorker
 )
 
-// Panic is the structured report emitted for one recovered ingress panic.
+// Panic contains diagnostic info for a recovered panic at an ingress boundary.
 type Panic struct {
 	Boundary  Boundary
 	Peer      string
@@ -33,14 +32,12 @@ type Panic struct {
 	Stack     []byte
 }
 
-// Reporter records a contained ingress panic. Implementations must not retain
-// sensitive request material and failures from Report are contained.
+// Reporter receives notifications of recovered ingress panics.
 type Reporter interface {
 	ReportRecoveredPanic(Panic)
 }
 
-// Recover is used directly in a deferred call at an untrusted worker boundary.
-// It converts a panic to ErrRecoveredPanic and contains reporter failures.
+// Recover should be called within a defer statement to catch panics and format them as errors.
 func Recover(errp *error, reporter Reporter, boundary Boundary, peer net.Addr) {
 	value := recover()
 	if value == nil {
@@ -51,9 +48,7 @@ func Recover(errp *error, reporter Reporter, boundary Boundary, peer net.Addr) {
 	}
 }
 
-// Report records a value recovered by a boundary that must also perform local
-// cleanup (for example, an HTTP handler that closes its response). It accepts
-// the recovered value rather than calling recover itself.
+// Report logs a caught panic value via the reporter and returns a wrapped ErrRecoveredPanic.
 func Report(value any, reporter Reporter, boundary Boundary, peer net.Addr) error {
 	if value == nil {
 		return nil

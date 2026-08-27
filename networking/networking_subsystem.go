@@ -1,4 +1,4 @@
-// Package networking is the only public entry point for IVNP networking implementations.
+// Package networking exports router routing engines, tunnel management, NetDB, and transport implementations.
 package networking
 
 import (

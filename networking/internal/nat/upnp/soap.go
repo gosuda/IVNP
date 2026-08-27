@@ -17,9 +17,7 @@ const soapEnvelopeNamespace = "http://schemas.xmlsoap.org/soap/envelope/"
 
 var ErrSOAPFault = errors.New("upnp: SOAP fault")
 
-// PortMapping is the input to AddPortMapping. ExternalPort and InternalPort
-// must be non-zero. Protocol is TCP or UDP. A lease duration of zero requests
-// a permanent mapping, where the gateway supports it.
+// PortMapping represents a port forwarding mapping on a UPnP gateway.
 type PortMapping struct {
 	RemoteHost     string
 	ExternalPort   uint16
@@ -31,7 +29,7 @@ type PortMapping struct {
 	LeaseDuration  uint32
 }
 
-// AddPortMapping creates a mapping at gateway.
+// AddPortMapping requests the gateway to open a new port mapping.
 func (c *Client) AddPortMapping(ctx context.Context, gateway Gateway, mapping PortMapping) error {
 	if err := validateGateway(gateway); err != nil {
 		return err

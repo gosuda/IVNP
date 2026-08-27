@@ -1,4 +1,4 @@
-// Package registration generates reg.i2p address-registration authentication strings.
+// Package registration generates reg.i2p domain authentication strings and signatures.
 package registration
 
 import (
@@ -15,9 +15,7 @@ var (
 
 type Signer func([]byte) ([]byte, error)
 
-// Authentication generates the legacy reg.i2p auth string:
-// domain.i2p=<base64 destination>#!sig=<base64 signature>.
-// The signer receives exactly the bytes before `#!sig=`.
+// Authentication generates a signed reg.i2p authentication string for domain registration.
 func Authentication(domain string, destination []byte, sign Signer) (string, error) {
 	domain, err := normalizeDomain(domain)
 	if err != nil {
@@ -34,8 +32,7 @@ func Authentication(domain string, destination []byte, sign Signer) (string, err
 	return unsigned + "#!sig=" + i2pBase64.EncodeToString(signature), nil
 }
 
-// Ed25519Signer returns a registration signer for a 32-byte Ed25519 seed or
-// a full 64-byte Ed25519 private key.
+// Ed25519Signer creates a Signer function from an Ed25519 seed or private key.
 func Ed25519Signer(private []byte) (Signer, error) {
 	var key ed25519.PrivateKey
 	switch len(private) {

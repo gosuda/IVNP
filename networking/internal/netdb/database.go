@@ -50,9 +50,7 @@ type leaseExpiry struct {
 	expires uint64
 }
 
-// Database is the bounded persistence-facing netdb core used by floodfill
-// handling. Every retained object owns exactly one wire byte slice; parsers
-// otherwise borrow packet memory and make no object graph per field.
+// Database stores verified RouterInfos and LeaseSets with memory bounds and TTL expiration.
 type Database struct {
 	routers          *Table
 	leasesMu         sync.RWMutex
@@ -71,16 +69,14 @@ func NewDatabase(local foundation.Hash, bucketCapacity int) *Database {
 	}
 }
 
-// SetMetrics installs the daemon-owned metric registry before the database is
-// published to concurrent workers.
+// SetMetrics sets the observability registry for recording NetDB metrics.
 func (d *Database) SetMetrics(metrics *observability.Registry) {
 	if d != nil {
 		d.metrics = metrics
 	}
 }
 
-// RoutingKey applies the I2P daily DHT transform SHA256(hash || YYYYMMDD).
-// The date is UTC, matching i2pd CreateRoutingKey.
+// RoutingKey computes the daily DHT routing key SHA256(hash || YYYYMMDD) in UTC.
 func RoutingKey(key foundation.Hash, nowMillis uint64) foundation.Hash {
 	date := time.UnixMilli(int64(nowMillis)).UTC()
 	year, month, day := date.Date()
@@ -97,26 +93,24 @@ func RoutingKey(key foundation.Hash, nowMillis uint64) foundation.Hash {
 	return foundation.Sum(input[:])
 }
 
-// FloodTargetsAt writes the floodfills closest to key's daily routing key.
+// FloodTargetsAt finds floodfill routers closest to the routing key at nowMillis.
 func (d *Database) FloodTargetsAt(dst []RouterRef, key foundation.Hash, nowMillis uint64) []RouterRef {
 	return d.routers.ClosestFloodfillsInto(dst, RoutingKey(key, nowMillis))
 }
 
-// FloodTargets writes the current UTC day's closest floodfill peers.
+// FloodTargets finds the current UTC day's closest floodfill routers.
 func (d *Database) FloodTargets(dst []RouterRef, key foundation.Hash) []RouterRef {
 	return d.FloodTargetsAt(dst, key, uint64(time.Now().UnixMilli()))
 }
 
 func (d *Database) Routers() *Table { return d.routers }
 
-// RouterInfoFresh reports whether info can be replayed safely at nowMillis.
-// The bounds match the native NTCP2 and SSU2 handshake admission window.
+// RouterInfoFresh checks whether a RouterInfo is fresh enough to accept at nowMillis.
 func RouterInfoFresh(info RouterInfo, nowMillis uint64) error {
 	return routerInfoFresh(info, nowMillis, RouterInfoMaxAgeMillis)
 }
 
-// ReseedRouterInfoFresh applies the standard 24-hour reseed publication bound
-// without weakening the tighter live transport admission window.
+// ReseedRouterInfoFresh checks whether a reseed RouterInfo is within the 24-hour window.
 func ReseedRouterInfoFresh(info RouterInfo, nowMillis uint64) error {
 	return routerInfoFresh(info, nowMillis, ReseedRouterInfoMaxAgeMillis)
 }
@@ -134,15 +128,12 @@ func routerInfoFresh(info RouterInfo, nowMillis, maxAgeMillis uint64) error {
 	return nil
 }
 
-// AdmitRouterInfo verifies, transport-freshness-checks, and retains an exact
-// copy of info. Parsing itself is zero-copy, but transport receive buffers are
-// short-lived.
+// AdmitRouterInfo verifies and stores a RouterInfo.
 func (d *Database) AdmitRouterInfo(info RouterInfo, _ bool, seenAt uint64) error {
 	return d.admitRouterInfo(info, seenAt, RouterInfoMaxAgeMillis)
 }
 
-// AdmitReseedRouterInfo verifies and retains an exact copy after applying the
-// bounded 24-hour freshness window required for standard reseed archives.
+// AdmitReseedRouterInfo verifies and stores a reseed RouterInfo.
 func (d *Database) AdmitReseedRouterInfo(info RouterInfo, seenAt uint64) error {
 	return d.admitRouterInfo(info, seenAt, ReseedRouterInfoMaxAgeMillis)
 }
@@ -172,15 +163,12 @@ func (d *Database) admitRouterInfo(info RouterInfo, seenAt, maxAgeMillis uint64)
 	return nil
 }
 
-// HandleDatabaseStore verifies and admits a decoded DatabaseStore payload.
-// RouterInfo compression is expanded under a strict 62,690-byte cap before
-// parsing, preventing gzip bombs from becoming live heap pressure.
+// HandleDatabaseStore verifies and stores a received DatabaseStore message.
 func (d *Database) HandleDatabaseStore(store i2np.DatabaseStoreMessage, floodfill bool, seenAt uint64) error {
 	return d.HandleDatabaseStoreAsPublished(store, floodfill, seenAt, true)
 }
 
-// HandleDatabaseStoreAsPublished distinguishes unsolicited/flooded LeaseSets
-// from lookup replies. Floodfill responders only expose published entries.
+// HandleDatabaseStoreAsPublished stores a DatabaseStore message with the given published state.
 func (d *Database) HandleDatabaseStoreAsPublished(store i2np.DatabaseStoreMessage, floodfill bool, seenAt uint64, published bool) error {
 	var err error
 	switch store.Type {
@@ -207,9 +195,7 @@ func (d *Database) HandleDatabaseStoreAsPublished(store i2np.DatabaseStoreMessag
 	return err
 }
 
-// StoreMatchesCurrent reports whether an admitted store is the exact newest
-// generation retained for its key. Floodfill propagation uses it to avoid
-// reflooding stale but otherwise valid stores.
+// StoreMatchesCurrent reports whether the store matches the newest version already in the database.
 func (d *Database) StoreMatchesCurrent(store i2np.DatabaseStoreMessage) bool {
 	if store.Type == i2np.StoreRouterInfo {
 		inflated, lease, err := d.inflateRouterInfo(store.Data)
@@ -636,8 +622,7 @@ func (d *Database) swapLeaseExpiryLocked(left, right int) {
 	d.leaseExpiryIndex[d.leaseExpiries[right].key] = right
 }
 
-// ExpireLeases releases retained lease-set wire buffers whose protocol expiry
-// has passed, bounding netdb lifetime independently of store traffic.
+// ExpireLeases removes stored lease entries that have passed their expiration time.
 func (d *Database) ExpireLeases(nowMillis uint64) int {
 	d.leasesMu.Lock()
 	defer d.leasesMu.Unlock()

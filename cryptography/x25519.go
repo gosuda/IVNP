@@ -5,8 +5,9 @@ import (
 	"io"
 )
 
-// X25519PrivateKey owns an X25519 scalar. The standard-library key is built
-// only for an individual operation so no opaque key object outlives this owner.
+// X25519PrivateKey holds an X25519 private key scalar.
+// Standard library ecdh.PrivateKey objects are instantiated on demand for each operation
+// so that sensitive material is not retained in opaque internal structs.
 type X25519PrivateKey struct {
 	scalar   [32]byte
 	released bool
@@ -14,7 +15,7 @@ type X25519PrivateKey struct {
 
 var _ Sensitive = (*X25519PrivateKey)(nil)
 
-// NewX25519PrivateKey validates and copies encoded into a new owner.
+// NewX25519PrivateKey validates and creates a new private key holder from encoded bytes.
 func NewX25519PrivateKey(encoded []byte) (*X25519PrivateKey, error) {
 	if len(encoded) != 32 {
 		return nil, ErrKeyLength
@@ -27,7 +28,7 @@ func NewX25519PrivateKey(encoded []byte) (*X25519PrivateKey, error) {
 	return key, nil
 }
 
-// GenerateX25519PrivateKey creates a new scalar using random.
+// GenerateX25519PrivateKey generates a new random X25519 private key using the given random source.
 func GenerateX25519PrivateKey(random io.Reader) (*X25519PrivateKey, error) {
 	private, err := ecdh.X25519().GenerateKey(random)
 	if err != nil {
@@ -45,7 +46,7 @@ func (k *X25519PrivateKey) privateKey() (*ecdh.PrivateKey, error) {
 	return ecdh.X25519().NewPrivateKey(k.scalar[:])
 }
 
-// PublicKey writes the encoded public key into dst.
+// PublicKey computes and writes the 32-byte public key into dst.
 func (k *X25519PrivateKey) PublicKey(dst *[32]byte) error {
 	private, err := k.privateKey()
 	if err != nil {
@@ -56,7 +57,7 @@ func (k *X25519PrivateKey) PublicKey(dst *[32]byte) error {
 	return nil
 }
 
-// ECDH writes the shared secret with peer into dst. dst is cleared on error.
+// ECDH computes the Diffie-Hellman shared secret with peer and writes it into dst.
 func (k *X25519PrivateKey) ECDH(dst *[32]byte, peer []byte) error {
 	private, err := k.privateKey()
 	if err != nil {
@@ -78,7 +79,7 @@ func (k *X25519PrivateKey) ECDH(dst *[32]byte, peer []byte) error {
 	return nil
 }
 
-// ReleaseSensitive overwrites the retained scalar and prevents future use.
+// ReleaseSensitive zeroes the private key scalar and marks the key as released.
 func (k *X25519PrivateKey) ReleaseSensitive() {
 	if k == nil || k.released {
 		return

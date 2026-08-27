@@ -12,15 +12,14 @@ import (
 
 const lockFileName = ".ivnp.lock"
 
-// Lock is an exclusive advisory ownership claim for a state directory.
+// Lock represents an advisory file lock on a state directory.
 type Lock struct {
 	file *os.File
 	once sync.Once
 	err  error
 }
 
-// AcquireLock obtains exclusive, nonblocking ownership of the state directory.
-// The lock remains held until Close.
+// AcquireLock acquires an exclusive non-blocking file lock on the state directory.
 func (s *Store) AcquireLock() (*Lock, error) {
 	if s == nil {
 		return nil, ErrStoreConfig
@@ -75,7 +74,7 @@ func (s *Store) AcquireLock() (*Lock, error) {
 	return &Lock{file: file}, nil
 }
 
-// Close releases the advisory lock and its file descriptor.
+// Close releases the file lock and closes the lock file.
 func (l *Lock) Close() error {
 	if l == nil {
 		return nil

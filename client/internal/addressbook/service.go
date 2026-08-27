@@ -1,4 +1,4 @@
-// Package addressbook provides the daemon-owned I2P hosts resolver.
+// Package addressbook provides host name resolution and subscription syncing for I2P addresses.
 package addressbook
 
 import (
@@ -24,7 +24,7 @@ var (
 	ErrMutation    = errors.New("addressbook: signed mutation commands unsupported")
 )
 
-// Config bounds local loading, persisted remote state, and subscription work.
+// Config sets limits and file paths for the addressbook service.
 type Config struct {
 	PrivateHostsPath string
 	UserHostsPath    string
@@ -43,7 +43,7 @@ type Config struct {
 
 type snapshot struct{ entries map[string]string }
 
-// Service resolves from immutable snapshots; ordinary lookups never do I/O.
+// Service resolves .i2p hostnames using in-memory snapshots of local files and remote subscriptions.
 type Service struct {
 	config   Config
 	local    map[string]string

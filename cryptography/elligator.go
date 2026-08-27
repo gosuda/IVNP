@@ -9,9 +9,9 @@ import (
 
 var ErrElligator = errors.New("cryptx: invalid Elligator2 point")
 
-// EncodeElligator2 maps an eligible 32-byte little-endian X25519 public key to
-// a uniform-looking 32-byte I2P Elligator2 representative. About half X25519
-// public keys are ineligible; callers should generate another ephemeral key.
+// EncodeElligator2 maps an eligible 32-byte X25519 public key to a uniform 32-byte
+// I2P Elligator2 representative. Roughly 50% of X25519 keys are ineligible; callers
+// must generate a new ephemeral key if encoding fails (ok=false).
 func EncodeElligator2(dst, public []byte, random io.Reader) (bool, error) {
 	if len(dst) < 32 || len(public) != 32 {
 		return false, ErrElligator
@@ -28,8 +28,7 @@ func EncodeElligator2(dst, public []byte, random io.Reader) (bool, error) {
 		return false, ErrElligator
 	}
 
-	// r0² = x/(2*(-x-A)). Check eligibility before consuming randomness: callers
-	// retry an ineligible key without advancing their RNG stream.
+	// r0² = x / (2 * (-x - A)). Check eligibility first to avoid consuming random bytes when ineligible.
 	xA := x.add(fieldA).neg()
 	r0, square := fieldSqrtRatio(x, fieldTwo.mul(xA))
 	if square != ^uint64(0) {
@@ -55,15 +54,13 @@ func EncodeElligator2(dst, public []byte, random io.Reader) (bool, error) {
 
 	var encoded [32]byte
 	r.store(encoded[:])
-	// The two unused top bits add entropy without changing the decoded field
-	// element, exactly as i2pd's Elligator2 encoder does.
+	// The two unused high bits add entropy without altering the decoded curve point.
 	encoded[31] |= entropy & 0xc0
 	copy(dst[:32], encoded[:])
 	return true, nil
 }
 
-// DecodeElligator2 maps an I2P Elligator2 representative back to the
-// little-endian X25519 public key used by Noise DH.
+// DecodeElligator2 decodes an Elligator2 representative back to an X25519 public key.
 func DecodeElligator2(dst, encoded []byte) error {
 	if len(dst) < 32 || len(encoded) != 32 {
 		return ErrElligator
@@ -84,8 +81,6 @@ func DecodeElligator2(dst, encoded []byte) error {
 	other := v.neg().sub(fieldA)
 	x := fieldSelect(v, other, fieldIsSquareNonzero(t))
 
-	// There is only one public validity decision; failed decoding does not alter
-	// the caller's destination.
 	if valid != ^uint64(0) {
 		return ErrElligator
 	}
@@ -95,9 +90,8 @@ func DecodeElligator2(dst, encoded []byte) error {
 	return nil
 }
 
-// GenerateElligator2X25519 creates an eligible ephemeral X25519 private key
-// and its encoded public representative. The retry bound makes RNG or mapping
-// failures explicit rather than creating an unbounded handshake allocation.
+// GenerateElligator2X25519 generates an ephemeral X25519 key whose public key can be
+// encoded with Elligator2, retrying until an eligible key is found (up to 128 attempts).
 func GenerateElligator2X25519(random io.Reader) (*ecdh.PrivateKey, [32]byte, error) {
 	if random ==
 		nil {

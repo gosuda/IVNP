@@ -1,4 +1,4 @@
-// Package frontend provides local client-facing I2P proxies and an authenticated control server.
+// Package frontend provides local client-facing I2P proxy listeners and an authenticated control server.
 package frontend
 
 import (
@@ -164,8 +164,7 @@ func newTrackedListener(listener net.Listener, maxConnections int) *trackedListe
 	return &trackedListener{Listener: listener, sem: make(chan struct{}, maxConnections), conns: make(map[*trackedConn]struct{})}
 }
 
-// NewConnectionLimitedListener closes active connections with its listener and
-// admits no more than maxConnections simultaneously.
+// NewConnectionLimitedListener limits the number of simultaneous active connections on listener.
 func NewConnectionLimitedListener(listener net.Listener, maxConnections int) net.Listener {
 	if maxConnections < 1 {
 		maxConnections = 1

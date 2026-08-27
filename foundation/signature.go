@@ -20,9 +20,8 @@ import (
 
 var ErrUnsupportedSignature = errors.New("i2p: signature type is not supported by the configured crypto backend")
 
-// VerifySignature verifies I2P's fixed-width wire signatures. first and rest
-// are the public-key slices returned by Identity.SigningKeyParts; rest exists
-// for key types whose public key overflows the fixed 128-byte identity field.
+// VerifySignature verifies a signature against message using the specified signing key type.
+// first contains the primary public key bytes, and rest contains extra key data stored in certificates (if any).
 func VerifySignature(kind SigningKeyType, first, rest, message, signature []byte) (bool, error) {
 	keyLen, ok := kind.PublicKeyLen()
 	if !ok || len(first)+len(rest) != keyLen {
@@ -55,8 +54,7 @@ func VerifySignature(kind SigningKeyType, first, rest, message, signature []byte
 		err := ed25519.VerifyWithOptions(ed25519.PublicKey(first), digest[:], signature, &ed25519.Options{Hash: crypto.SHA512})
 		return err == nil, nil
 	case SigningRedDSASHA512Ed25519:
-		// I2P RedDSA changes private-key and nonce generation. Its Java
-		// reference implementation inherits EdDSA verification unchanged.
+		// RedDSA uses standard Ed25519 verification rules
 		return ed25519.Verify(ed25519.PublicKey(first), message, signature), nil
 	case SigningGOSTR3410_256:
 		return cryptography.Verify256(first, message, signature[:32], signature[32:]), nil
@@ -67,9 +65,7 @@ func VerifySignature(kind SigningKeyType, first, rest, message, signature []byte
 	}
 }
 
-// VerifySignaturePrefixed verifies a signature over prefix || message. It
-// uses a bounded slab so LeaseSet2 verification does not create a transient
-// heap object proportional to an attacker-controlled netdb payload.
+// VerifySignaturePrefixed verifies a signature over prefix || message using a pooled buffer.
 func VerifySignaturePrefixed(prefix byte, kind SigningKeyType, first, rest, message, signature []byte) (bool, error) {
 	lease, ok := pool.AcquireLease(len(message) + 1)
 	if !ok {
@@ -83,7 +79,7 @@ func VerifySignaturePrefixed(prefix byte, kind SigningKeyType, first, rest, mess
 	return valid, err
 }
 
-// Verify verifies a signature using this identity's advertised signing key.
+// Verify verifies a signature against message using the identity's signing public key.
 func (i Identity) Verify(message, signature []byte) (bool, error) {
 	first, rest := i.SigningKeyParts()
 	return VerifySignature(i.SigningKeyType(), first, rest, message, signature)

@@ -1,4 +1,4 @@
-// Package client is the only public entry point for IVNP client implementations.
+// Package client provides client-facing services including SAM v3.3 bridge, HTTP/SOCKS5 proxies, and AddressBook.
 package client
 
 import (

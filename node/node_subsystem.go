@@ -1,4 +1,4 @@
-// Package node is the only public entry point for the complete IVNP node runtime.
+// Package node orchestrates the router runtime, tunnel pools, NetDB, and client services into a runnable node.
 package node
 
 import (

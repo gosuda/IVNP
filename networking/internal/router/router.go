@@ -1,7 +1,4 @@
-// Package router owns embedded runtime lifecycle and wires authenticated
-// protocol parsers into bounded netdb and tunnel-facing dispatch. Transport
-// managers own protocol sessions while Router owns their socket lifetime.
-
+// Package router coordinates I2NP message dispatch, transport managers, and router lifecycle.
 package router
 
 import (
@@ -24,9 +21,6 @@ var (
 )
 
 const (
-	// i2pd accepts I2NP expirations up to three minutes ahead and up to one
-	// minute behind its adjusted clock. Java's default one-minute expiration
-	// falls within this interoperable envelope.
 	i2npMessageClockSkewMillis uint64 = 60_000
 	i2npMessageMaxFutureMillis        = 3 * i2npMessageClockSkewMillis
 	replayBucketDurationMillis        = i2npMessageClockSkewMillis
@@ -49,10 +43,7 @@ type replayFilter struct {
 	shards []replayShard
 }
 
-// Sinks receive already validated I2NP messages according to I2P delivery
-// instructions. Message payloads are borrowed for the duration of each call;
-// sinks that retain or queue them must copy. A nil sink rejects traffic for
-// that route; accepted messages must never be silently dropped.
+// I2NPSource tracks the origin peer and transport connection type for a received message.
 type I2NPSource struct {
 	Peer   foundation.Hash
 	Direct bool
@@ -85,9 +76,7 @@ type Sinks struct {
 	TunnelGateway            func(uint32, i2np.Message) error
 }
 
-// Service provides deterministic, bounded message admission. Its replay
-// filter retains each admission-time bucket for longer than the largest
-// accepted I2NP lifetime, so identifier churn cannot evict a live replay.
+// Service provides I2NP message admission, rate limiting, replay filtering, and dispatch.
 type Service struct {
 	database *netdb.Database
 	sinks    Sinks
@@ -205,23 +194,17 @@ func (s *Service) SetDestinationSink(sink func(foundation.Hash, foundation.Hash,
 	s.sinks.Destination = sink
 }
 
-// HandleI2NP validates and dispatches a frame authenticated by its transport.
-// Callers without an authenticated peer identity retain the legacy admission
-// path; transport managers use HandleI2NPFrom to bound attacker work.
+// HandleI2NP validates and dispatches an authenticated I2NP frame.
 func (s *Service) HandleI2NP(message i2np.Message, nowMillis uint64, fromFloodfill bool) error {
 	return s.handleI2NP(message, nowMillis, fromFloodfill, I2NPSource{})
 }
 
-// HandleI2NPFrom validates and dispatches a frame from an authenticated peer.
-// Its source-scoped limits run before payload parsing and expensive sink work,
-// so one peer cannot consume another peer's admission budget.
+// HandleI2NPFrom validates and dispatches an I2NP frame from an identified peer with rate-limiting.
 func (s *Service) HandleI2NPFrom(peer foundation.Hash, message i2np.Message, nowMillis uint64, fromFloodfill bool) error {
 	return s.handleI2NP(message, nowMillis, fromFloodfill, I2NPSource{Peer: peer, Direct: true})
 }
 
-// HandleI2NPFromContext is the SSU2 delivery contract. It observes transport
-// cancellation before admission and after bounded parsing; registered sinks
-// remain synchronous and must share the router lifecycle.
+// HandleI2NPFromContext validates and dispatches an I2NP frame respecting context cancellation.
 func (s *Service) HandleI2NPFromContext(ctx context.Context, peer foundation.Hash, message i2np.Message, nowMillis uint64, fromFloodfill bool) error {
 	if ctx == nil {
 		return context.Canceled
@@ -439,9 +422,7 @@ func (s *Service) sendDatabaseStoreReply(store i2np.DatabaseStoreMessage, nowMil
 	})
 }
 
-// HandleGarlicCloveSet routes already decrypted legacy garlic cloves through
-// the same I2NP policy gate. Decryption is deliberately a separate transport
-// concern so packet parsing never retains cipher/session objects.
+// HandleGarlicCloveSet dispatches decrypted garlic cloves through I2NP replay filters and sinks.
 func (s *Service) HandleGarlicCloveSet(set garlic.CloveSet, nowMillis uint64, fromFloodfill bool) error {
 	if err := validateI2NPExpiration(set.Expiration, nowMillis); err != nil {
 		return err

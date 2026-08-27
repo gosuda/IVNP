@@ -10,12 +10,8 @@ import (
 )
 
 var (
-	ErrTunnelID = errors.New("tunnel: invalid or duplicate tunnel ID")
-	// ErrPoolFull leaves all live entries untouched unless the caller names a
-	// matching retirement candidate through Replace.
-	ErrPoolFull = errors.New("tunnel: pool is full")
-	// ErrPoolOwner prevents a circuit from being published or selected through
-	// a Destination pool that does not own it.
+	ErrTunnelID  = errors.New("tunnel: invalid or duplicate tunnel ID")
+	ErrPoolFull  = errors.New("tunnel: pool is full")
 	ErrPoolOwner = errors.New("tunnel: circuit owner does not match pool")
 )
 
@@ -43,8 +39,7 @@ type Entry struct {
 	Hops     [i2np.MaxVariableBuildRecords]foundation.Hash
 }
 
-// Pool owns bounded active tunnel metadata. Transport delivery and tunnel
-// layer crypto remain separate; pool selection never returns expired entries.
+// Pool stores active tunnel descriptors with capacity bounds and expiration tracking.
 type Pool struct {
 	mu      sync.RWMutex
 	max     int
@@ -54,8 +49,7 @@ type Pool struct {
 
 func NewPool(max int) *Pool { return NewOwnedPool(foundation.Hash{}, max) }
 
-// NewOwnedPool creates one creator-only pool. A nonzero owner denotes a local
-// Destination; zero is the separate router exploratory owner.
+// NewOwnedPool creates a Pool owned by the given Destination hash (or zero for router exploratory).
 func NewOwnedPool(owner foundation.Hash, max int) *Pool {
 	if max <= 0 {
 		max = 64
@@ -71,17 +65,13 @@ func (p *Pool) Owner() foundation.Hash {
 	return p.owner
 }
 
-// Add records a tunnel after removing entries expired at now. It never evicts
-// a live circuit to make room.
+// Add inserts a tunnel entry after expiring stale entries at now.
 func (p *Pool) Add(entry Entry, now uint64) error {
 	_, _, err := p.Replace(entry, 0, now)
 	return err
 }
 
-// Replace records entry after removing entries expired at now. When the pool
-// is at capacity, it retires only retireID; it never selects a live entry on
-// the caller's behalf. The returned entry is the one retired so a failed
-// runtime install can restore it.
+// Replace records entry, optionally replacing retireID if at capacity.
 func (p *Pool) Replace(entry Entry, retireID uint32, now uint64) (retired Entry, replaced bool, err error) {
 	if entry.ID == 0 {
 		return Entry{}, false, ErrTunnelID
@@ -111,9 +101,7 @@ func (p *Pool) Replace(entry Entry, retireID uint32, now uint64) (retired Entry,
 	return retired, true, nil
 }
 
-// RollbackReplace removes entry and restores the entry retired by Replace
-// when it remains live at now. It is used if publishing entry to Runtime
-// fails after the pool transition.
+// RollbackReplace reverts a Replace operation if the new tunnel installation failed.
 func (p *Pool) RollbackReplace(entry, retired Entry, replaced bool, now uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -135,8 +123,7 @@ func (p *Pool) Remove(id uint32) bool {
 	return true
 }
 
-// Clear removes every entry from this destination-owned pool and returns the
-// removed circuit IDs for paired runtime teardown.
+// Clear empties the pool and returns the list of removed tunnel IDs.
 func (p *Pool) Clear() []uint32 {
 	if p == nil {
 		return nil
@@ -184,9 +171,7 @@ func (p *Pool) Count(direction Direction, now uint64) int {
 	return count
 }
 
-// Snapshot returns independent live pool entries for publication and status.
-// It does not expire entries, so callers can use one supplied clock value for
-// a consistent maintenance cycle.
+// Snapshot returns a sorted slice of unexpired tunnel entries at now.
 func (p *Pool) Snapshot(now uint64) []Entry {
 	if p == nil {
 		return nil

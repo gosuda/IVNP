@@ -19,30 +19,17 @@ const (
 	defaultSessionTagLifetime        = 12 * 60 * 1000 // milliseconds
 )
 
-// ErrSessionManagerClosed reports use after Close.
 var ErrSessionManagerClosed = errors.New("garlic: session manager closed")
 
-// SessionManagerConfig bounds all state retained by a SessionManager. Times
-// passed to Encrypt, Receive, and Expire are Unix milliseconds, matching I2NP
-// expiration fields and TagStore.
+// SessionManagerConfig bounds the memory and tag counts for a SessionManager.
 type SessionManagerConfig struct {
-	// InboundTags is the one-use tag store used for received existing-session
-	// packets. If nil, the manager creates a bounded store. The manager clears
-	// this store on Close, including when it was supplied by the caller.
-	InboundTags *TagStore
-	// MaxInboundTags is used only when InboundTags is nil.
+	InboundTags    *TagStore
 	MaxInboundTags int
-	// MaxPeers and MaxTagsPerPeer bound outgoing peer state.
 	MaxPeers       int
 	MaxTagsPerPeer int
-	// TagsPerMessage is the number of fresh tags delivered with each outbound
-	// packet. It must not exceed MaxSessionTags or MaxTagsPerPeer.
 	TagsPerMessage int
-	// TagLifetime is the lifetime of generated tags in milliseconds.
-	TagLifetime uint64
-	// Random supplies generated session tags. Nil uses crypto/rand.Reader.
-	// Legacy ElGamal and CBC padding retain the codecs' crypto/rand source.
-	Random io.Reader
+	TagLifetime    uint64
+	Random         io.Reader
 }
 
 type outboundTag struct {
@@ -56,8 +43,7 @@ type outboundPeer struct {
 	pending   map[[32]byte]outboundTag
 }
 
-// SessionManager is a bounded, peer-sharded manager for legacy ElGamal/AES
-// Garlic sessions. All packet results alias the caller-provided dst buffer.
+// SessionManager tracks outbound/inbound session tags and keys for ElGamal/AES garlic encryption.
 type SessionManager struct {
 	lifecycleMu sync.RWMutex
 	randomMu    sync.Mutex
@@ -77,9 +63,7 @@ type sessionManagerShard struct {
 	maxPeers int
 }
 
-// NewSessionManager constructs a manager with bounded defaults matching Java
-// I2P's legacy session-tag policy: 40 tags per message, at most 128 per peer,
-// and a twelve-minute tag lifetime.
+// NewSessionManager creates a SessionManager initialized with default pool sizes and tag lifetimes.
 func NewSessionManager(config SessionManagerConfig) *SessionManager {
 	if config.MaxPeers <= 0 {
 		config.MaxPeers = defaultSessionManagerPeers

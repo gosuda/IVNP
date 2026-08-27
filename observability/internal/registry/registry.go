@@ -5,8 +5,7 @@ import (
 	"sync/atomic"
 )
 
-// Registry holds the process-wide, label-free operational metrics. A daemon
-// owns exactly one Registry and passes that handle to every producer.
+// Registry holds node-wide operational metrics tracked via atomic counters and gauges.
 type Registry struct{ state *registryState }
 
 type TunnelOwner uint8
@@ -82,9 +81,7 @@ type ssu2Metrics struct {
 	ingressQueueDepth, egressQueueDepth                           atomic.Uint64
 }
 
-// Snapshot is an immutable copy of Registry values. Process values are sampled
-// directly from the Go runtime at scrape time rather than maintained by a
-// second polling owner.
+// Snapshot is a point-in-time copy of all metrics in the registry.
 type Snapshot struct {
 	Lifecycle   LifecycleSnapshot
 	Reseed      ReseedSnapshot

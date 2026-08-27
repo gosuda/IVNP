@@ -1,4 +1,4 @@
-// Package noderuntime composes IVNP's durable state, native router runtime, and local services.
+// Package noderuntime composes durable configuration, encrypted state, router internals, and client proxies.
 package noderuntime
 
 import (
@@ -49,15 +49,13 @@ const (
 	daemonNetDBExplorationSteadyDelay         = 5 * time.Second
 )
 
-// Listener owns both local stream and packet listener edges used by
-// daemon-managed services.
+// Listener provides stream and packet listening interfaces for node services.
 type Listener interface {
 	Listen(context.Context, string, string) (net.Listener, error)
 	ListenPacket(context.Context, string, string) (net.PacketConn, error)
 }
 
-// ListenerFunc adapts a stream-only listener function. Packet listening fails
-// explicitly rather than bypassing the injected edge with a native socket.
+// ListenerFunc adapts a stream-only listener function to the Listener interface.
 type ListenerFunc func(context.Context, string, string) (net.Listener, error)
 
 func (f ListenerFunc) Listen(ctx context.Context, network, address string) (net.Listener, error) {
@@ -87,9 +85,7 @@ func (f ListenerFuncs) ListenPacket(ctx context.Context, network, address string
 	return f.Packet(ctx, network, address)
 }
 
-// NATRuntime owns all injectable NAT discovery and mapping dependencies.
-// Implementations must supply a coherent view of routing, interface prefixes,
-// and retry timing instead of independent callbacks that can disagree.
+// NATRuntime provides NAT-PMP and UPnP port mapping discovery interfaces.
 type NATRuntime interface {
 	NewNATPMP(netip.AddrPort) natPMPClient
 	UPnP() upnpClient
@@ -108,13 +104,11 @@ func (nativeListener) ListenPacket(ctx context.Context, network, address string)
 	return (&net.ListenConfig{}).ListenPacket(ctx, network, address)
 }
 
-// Options supplies replaceable process edges. New only uses the durable state
-// store; all network resources are opened by Start.
+// Options allows callers to inject custom dependencies (clock, logger, sockets, transports) into Daemon.
 type Options struct {
-	// SocketRuntime injects native transport sockets for deterministic tests.
+	// SocketRuntime provides low-level network socket creation.
 	SocketRuntime networking.RouterSocketRuntime
-	// Transport replaces the native NTCP2/SSU2 mux while preserving Router's
-	// production bindings and authenticated Service dispatch.
+	// Transport overrides the default NTCP2/SSU2 transport manager.
 	Transport     networking.RouterTransportManager
 	HTTPClient    *http.Client
 	Clock         networking.RouterClock
@@ -144,15 +138,14 @@ func (r metricPanicReporter) ReportRecoveredPanic(p ingress.Panic) {
 	}
 }
 
-// Status is the daemon-wide lifecycle snapshot.
+// Status represents the overall operational status of the daemon and router.
 type Status struct {
 	Running bool
 	Error   error
 	Router  networking.RouterStatus
 }
 
-// TunnelRuntimeSnapshot identifies one live creator tunnel without exposing
-// private destination material.
+// TunnelRuntimeSnapshot represents an active tunnel without exposing secret keys.
 type TunnelRuntimeSnapshot struct {
 	DestinationName string
 	Entry           networking.TunnelEntry
@@ -285,7 +278,7 @@ func (r *destinationRuntime) maintainTunnels(ctx context.Context) (int, error) {
 	return r.maintainer.Maintain(ctx)
 }
 
-// Daemon owns exactly one embedded router and its local management services.
+// Daemon manages the lifecycle of an embedded IVNP router and its associated local services.
 type Daemon struct {
 	config     state.ConfigurationOperating
 	store      *state.SecureStateStore
@@ -350,8 +343,7 @@ type Daemon struct {
 	wg           sync.WaitGroup
 }
 
-// New validates and wires the daemon without opening a network socket. It may
-// create the encrypted router state when no state exists yet.
+// New initializes a Daemon with the given configuration and optional runtime overrides.
 func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 	if cfg.Network.ID > 255 {
 		return nil, fmt.Errorf("daemon: network id %d cannot be used by native transports", cfg.Network.ID)

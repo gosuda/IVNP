@@ -5,8 +5,7 @@ import (
 	"sync"
 )
 
-// Session owns one established NTCP2 connection. Handshake completion supplies
-// directional keys; Session then serializes writes and reads framed I2NP data.
+// Session manages an established NTCP2 connection with directional encryption states.
 type Session struct {
 	conn      net.Conn
 	send      *Direction

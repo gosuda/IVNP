@@ -10,22 +10,20 @@ import (
 )
 
 const (
-	// ElGamalPublicKeySize is the wire size of an I2P legacy ElGamal public key.
+	// ElGamalPublicKeySize is the byte length of an I2P legacy ElGamal public key.
 	ElGamalPublicKeySize = 256
-	// ElGamalPrivateKeySize is the wire size of an I2P legacy ElGamal private exponent.
+	// ElGamalPrivateKeySize is the byte length of an I2P legacy ElGamal private key.
 	ElGamalPrivateKeySize = 256
-	// ElGamalPlaintextSize is the fixed plaintext size of an I2P legacy ElGamal block.
+	// ElGamalPlaintextSize is the fixed plaintext size for an I2P legacy ElGamal block.
 	ElGamalPlaintextSize = 222
-	// ElGamalCiphertextSize is the fixed ciphertext size of an I2P legacy ElGamal block.
+	// ElGamalCiphertextSize is the wire size of an encrypted I2P legacy ElGamal block.
 	ElGamalCiphertextSize = 514
 )
 
-// ElGamalPublicKey is an I2P legacy 2048-bit ElGamal public key in big-endian
-// wire format.
+// ElGamalPublicKey is a 2048-bit ElGamal public key in big-endian byte order.
 type ElGamalPublicKey [ElGamalPublicKeySize]byte
 
-// ElGamalPrivateKey is an I2P legacy 2048-bit ElGamal private exponent in
-// big-endian wire format.
+// ElGamalPrivateKey is a 2048-bit ElGamal private exponent in big-endian byte order.
 type ElGamalPrivateKey [ElGamalPrivateKeySize]byte
 
 var (
@@ -33,9 +31,8 @@ var (
 	errElGamalParameters = errors.New("cryptx: invalid static ElGamal parameters")
 )
 
-// This is RFC 3526 group 14, the fixed MODP group used by I2P legacy ElGamal.
-// Keep it encoded rather than as a package-level big.Int: big.Int values are
-// mutable, and callers must never be able to affect cryptographic parameters.
+// elGamalPrimeHex represents RFC 3526 MODP group 14, used by legacy I2P ElGamal.
+// We keep it encoded as a string literal so package consumers cannot mutate the shared big.Int.
 const elGamalPrimeHex = "" +
 	"FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74" +
 	"020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F1437" +
@@ -54,8 +51,7 @@ func elGamalParameters() (p, pMinusTwo *big.Int, err error) {
 	return p, new(big.Int).Sub(p, big.NewInt(2)), nil
 }
 
-// GenerateElGamalKeyPair creates a private exponent and its matching public
-// key for I2P legacy ElGamal.
+// GenerateElGamalKeyPair generates a random private exponent and corresponding public key.
 func GenerateElGamalKeyPair() (public ElGamalPublicKey, private ElGamalPrivateKey, err error) {
 	return generateElGamalKeyPair(rand.Reader)
 }
@@ -75,8 +71,7 @@ func generateElGamalKeyPair(random io.Reader) (public ElGamalPublicKey, private 
 	return public, private, nil
 }
 
-// ElGamalPublicFromPrivate derives and validates the public key for an I2P
-// legacy private exponent.
+// ElGamalPublicFromPrivate derives the public key from an existing private key.
 func ElGamalPublicFromPrivate(private ElGamalPrivateKey) (public ElGamalPublicKey, err error) {
 	p, pMinusTwo, err := elGamalParameters()
 	if err != nil {
@@ -90,9 +85,8 @@ func ElGamalPublicFromPrivate(private ElGamalPrivateKey) (public ElGamalPublicKe
 	return public, nil
 }
 
-// EncryptElGamal encrypts exactly 222 bytes for public using I2P's legacy
-// ElGamal layout: 0 || a[256] || 0 || b[256], where m is
-// 0xff || SHA256(plaintext) || plaintext.
+// EncryptElGamal encrypts 222 bytes of plaintext for public into dst using I2P's legacy format:
+// 0x00 || a[256] || 0x00 || b[256], where m = 0xff || SHA256(plaintext) || plaintext.
 func EncryptElGamal(dst []byte, public ElGamalPublicKey, plaintext []byte) ([]byte, error) {
 	return encryptElGamal(rand.Reader, dst, public, plaintext)
 }
@@ -132,9 +126,8 @@ func encryptElGamal(random io.Reader, dst []byte, public ElGamalPublicKey, plain
 	return out, nil
 }
 
-// DecryptElGamal validates and decrypts a fixed-size I2P legacy ElGamal block.
-// It returns a 222-byte caller-owned view only after authenticating m's prefix
-// and SHA-256 digest.
+// DecryptElGamal decrypts and validates an I2P legacy ElGamal ciphertext block.
+// It verifies the 0xff prefix and embedded SHA-256 hash before returning the 222-byte plaintext.
 func DecryptElGamal(dst []byte, private ElGamalPrivateKey, ciphertext []byte) ([]byte, error) {
 	if len(dst) < ElGamalPlaintextSize || len(ciphertext) != ElGamalCiphertextSize || ciphertext[0] != 0 || ciphertext[257] != 0 {
 		return nil, ErrElGamal
@@ -153,7 +146,7 @@ func DecryptElGamal(dst []byte, private ElGamalPrivateKey, ciphertext []byte) ([
 		return nil, ErrElGamal
 	}
 
-	// a^(p-1-x) is the modular inverse of a^x because p is prime.
+	// a^(p-1-x) = a^(-x) mod p
 	exponent := new(big.Int).Sub(p, big.NewInt(1))
 	exponent.Sub(exponent, x)
 	inverse := new(big.Int).Exp(a, exponent, p)
