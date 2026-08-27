@@ -25,6 +25,12 @@
       "skillPath": "skills/go-practices/SKILL.md",
       "computedHash": "290e978aec92e5291e87de4eb22d4a1cee7543f781009f5a0c33a2701fa7c253"
     },
+    "hallmark": {
+      "source": "nutlope/hallmark",
+      "sourceType": "github",
+      "skillPath": "skills/hallmark/SKILL.md",
+      "computedHash": "579f86b27cdd7eb972107f7aecedd537f472891c5fd7c7c821bea15f64e0fe86"
+    },
     "just-good-practices": {
       "source": "gosuda/JustGoodPractices",
       "sourceType": "github",
