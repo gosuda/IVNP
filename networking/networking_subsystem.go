@@ -246,6 +246,7 @@ var (
 	RouterValidateRemoteELSContexts               = router.ValidateRemoteELSContexts
 	StreamingProtocolNewConn                      = streaming.NewConn
 	StreamingProtocolNewState                     = streaming.NewState
+	TunnelBuildReplyKeyCapacity                   = tunnel.BuildReplyKeyCapacity
 	TunnelErrBuildPending                         = tunnel.ErrBuildPending
 	TunnelErrCircuitNotFound                      = tunnel.ErrCircuitNotFound
 	TunnelErrHealthClosed                         = tunnel.ErrHealthClosed

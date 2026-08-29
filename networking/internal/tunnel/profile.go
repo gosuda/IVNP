@@ -226,9 +226,8 @@ func (p *PeerProfiles) EligibleAt(peer foundation.Hash, now uint64) bool {
 	return now >= lastBuildFailure && now-lastBuildFailure >= profileBuildCooldown
 }
 
-// Score returns a peer's deterministic build preference. Higher values are
-// preferred. Path selection retains target-seeded candidate order when scores
-// are equal so equally ranked peers do not collapse onto one hash.
+// Score returns the deterministic profile value used to retain stronger peers
+// when the bounded profile store evicts an entry.
 func (p *PeerProfiles) Score(peer foundation.Hash) int64 {
 	profile, ok := p.Snapshot(peer)
 	if !ok {

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"sync"
@@ -23,13 +24,16 @@ import (
 )
 
 const (
-	defaultMaxPendingBuilds  = 13 // Java BuildExecutor.MAX_CONCURRENT_BUILDS
-	shortBuildPastSkew       = 8 * 60_000
-	shortBuildFutureSkew     = 5 * 60_000
-	shortBuildReplayLifetime = 10 * 60_000
-	buildMessageLifetime     = 60_000
-	buildRequestTimeout      = 5_000  // Java BuildRequestor.REQUEST_TIMEOUT
-	buildReplyGracePeriod    = 60_000 // Java BuildExecutor.GRACE_PERIOD
+	defaultMaxPendingBuilds   = 13 // Java BuildExecutor.MAX_CONCURRENT_BUILDS
+	shortBuildPastSkew        = 8 * 60_000
+	shortBuildFutureSkew      = 5 * 60_000
+	shortBuildReplayLifetime  = 10 * 60_000
+	buildMessageLifetime      = 60_000
+	nextHopSendTimeout        = 25_000
+	buildMessageFuzz          = 20_000
+	normalBuildRequestTimeout = 5_000
+	slowBuildRequestTimeout   = 10_000
+	buildReplyGracePeriod     = 60_000 // Java BuildExecutor.GRACE_PERIOD
 )
 
 var (
@@ -39,6 +43,48 @@ var (
 	ErrBuildTransit    = errors.New("tunnel: invalid transit build")
 	ErrBuildFakeRecord = errors.New("tunnel: inbound creator fake record modified")
 )
+
+func buildRequestTimeout() uint64 {
+	return buildRequestTimeoutForSystem(goruntime.GOOS, goruntime.GOARCH, goruntime.NumCPU())
+}
+
+func buildRequestTimeoutForSystem(goos, goarch string, cores int) uint64 {
+	slowARM := goarch == "arm" || goarch == "arm64" && goos != "darwin" && cores < 5
+	if goos == "android" || slowARM {
+		return slowBuildRequestTimeout
+	}
+	return normalBuildRequestTimeout
+}
+
+func saturatingDeadline(now, delay uint64) uint64 {
+	if ^uint64(0)-now < delay {
+		return ^uint64(0)
+	}
+	return now + delay
+}
+
+// BuildReplyKeyCapacity returns the maximum active and grace-retained reply
+// keys one manager can hold under the shortest Java request timeout.
+func BuildReplyKeyCapacity(maxPending int) int {
+	if maxPending <= 0 {
+		maxPending = defaultMaxPendingBuilds
+	}
+	graceBatches := int((buildReplyGracePeriod + normalBuildRequestTimeout - 1) / normalBuildRequestTimeout)
+	factor := graceBatches + 1
+	maxInt := int(^uint(0) >> 1)
+	if maxPending > maxInt/factor {
+		return maxInt
+	}
+	return maxPending * factor
+}
+
+func randomizedBuildMessageDeadline(now uint64, random io.Reader) (uint64, error) {
+	fuzz, err := randomUint32(random)
+	if err != nil {
+		return 0, err
+	}
+	return saturatingDeadline(now, buildMessageLifetime+uint64(fuzz%buildMessageFuzz)), nil
+}
 
 // ShortBuildHop is one ECIES-X25519 participant in path order.
 type ShortBuildHop struct {
@@ -132,7 +178,8 @@ func (r *synchronizedReader) Read(dst []byte) (int, error) {
 type BuildScheduleFunc func(time.Duration, func()) func()
 
 // BuildManager creates and processes short-record and compatibility variable
-// tunnel builds. Pending creator and transit replay state is bounded.
+// tunnel builds. Active creator and transit replay state is capacity-bounded;
+// timed-out creator state is retained for Java's fixed late-reply grace period.
 type BuildManager struct {
 	runtime          *Runtime
 	pool             *Pool
@@ -159,9 +206,9 @@ type BuildManager struct {
 	lifecycleMu     sync.RWMutex
 	mu              sync.Mutex
 	pending         map[uint32]*pendingOutboundBuild
-	recentPending   map[uint32]*pendingOutboundBuild
 	pendingInbound  map[uint32]*pendingInboundBuild
 	pendingVariable map[uint32]*pendingVariableBuild
+	recent          map[uint32]recentCreatorBuild
 	transit         map[uint32]uint64
 	transitRecords  map[[32]byte]uint64
 	released        bool
@@ -203,6 +250,14 @@ type pendingVariableBuild struct {
 	recordCount    uint8
 	deadline       uint64
 	cancelDeadline func()
+}
+
+type recentCreatorBuild struct {
+	replyID  uint32
+	deadline uint64
+	outbound *pendingOutboundBuild
+	inbound  *pendingInboundBuild
+	variable *pendingVariableBuild
 }
 
 // VariableOutboundBuild creates the historical 528-byte VariableTunnelBuild
@@ -282,8 +337,8 @@ func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
 		now:             config.Now,
 		random:          &synchronizedReader{reader: config.Random},
 		profiles:        config.Profiles,
-		maxPending:      config.MaxPending, pending: make(map[uint32]*pendingOutboundBuild), recentPending: make(map[uint32]*pendingOutboundBuild),
-		pendingInbound: make(map[uint32]*pendingInboundBuild), pendingVariable: make(map[uint32]*pendingVariableBuild),
+		maxPending:      config.MaxPending, pending: make(map[uint32]*pendingOutboundBuild),
+		pendingInbound: make(map[uint32]*pendingInboundBuild), pendingVariable: make(map[uint32]*pendingVariableBuild), recent: make(map[uint32]recentCreatorBuild),
 		transit: make(map[uint32]uint64), transitRecords: make(map[[32]byte]uint64), staticPrivateKey: staticPrivateKey,
 		logger: config.Logger, metrics: config.Metrics, onBuildEvent: config.OnBuildEvent, schedule: config.Schedule,
 		ctx: lifecycle, cancel: cancel,
@@ -324,15 +379,9 @@ func (m *BuildManager) ReleaseSensitive() {
 		cancelBuildDeadline(pending.cancelDeadline)
 		delete(m.pending, id)
 	}
-	for id, pending := range m.recentPending {
-		if pending.replyTag != ([8]byte{}) {
-			m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
-		}
-		clear(pending.keys)
-		clear(pending.positions)
-		clear(pending.replyTag[:])
-		cancelBuildDeadline(pending.cancelDeadline)
-		delete(m.recentPending, id)
+	for id, recent := range m.recent {
+		m.clearRecentCreatorBuild(recent)
+		delete(m.recent, id)
 	}
 	for id, pending := range m.pendingInbound {
 		clear(pending.keys)
@@ -356,6 +405,31 @@ func (m *BuildManager) ReleaseSensitive() {
 	m.mu.Unlock()
 }
 
+func (m *BuildManager) clearRecentCreatorBuild(recent recentCreatorBuild) {
+	if pending := recent.outbound; pending != nil {
+		if pending.replyTag != ([8]byte{}) {
+			m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
+		}
+		clearBuildKeys(pending.keys)
+		clear(pending.positions)
+		clear(pending.replyTag[:])
+		cancelBuildDeadline(pending.cancelDeadline)
+		return
+	}
+	if pending := recent.inbound; pending != nil {
+		clearBuildKeys(pending.keys)
+		clear(pending.positions)
+		clear(pending.fakeHash[:])
+		cancelBuildDeadline(pending.cancelDeadline)
+		return
+	}
+	if pending := recent.variable; pending != nil {
+		clearVariableBuildKeys(pending.keys)
+		clear(pending.positions)
+		cancelBuildDeadline(pending.cancelDeadline)
+	}
+}
+
 // Close cancels and joins active build work before clearing pending sensitive
 // keys. ReleaseSensitive remains the sensitive-owner spelling.
 func (m *BuildManager) Close() error {
@@ -371,6 +445,16 @@ func (m *BuildManager) isReleased() bool {
 	released := m.released
 	m.mu.Unlock()
 	return released
+}
+
+func (recent recentCreatorBuild) direction() string {
+	if recent.inbound != nil {
+		return "inbound"
+	}
+	if recent.variable != nil {
+		return "legacy"
+	}
+	return "outbound"
 }
 
 // StartOutbound creates, conceals, and sends one ShortTunnelBuild message. The
@@ -474,6 +558,11 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		clearBuildKeys(keys)
 		return 0, err
 	}
+	messageDeadline, err := randomizedBuildMessageDeadline(now, m.random)
+	if err != nil {
+		clearBuildKeys(keys)
+		return 0, err
+	}
 
 	replyID := messageIDs[len(messageIDs)-1]
 	endpointKeys := keys[len(keys)-1]
@@ -486,7 +575,7 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		recordCount: uint8(recordCount), startedAt: now, deadline: build.ExpiresAt,
 	}
 	m.mu.Lock()
-	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.pending[replyID] != nil || m.recentPending[replyID] != nil || m.pendingInbound[replyID] != nil || m.pendingVariable[replyID] != nil {
+	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.replyIDInUseLocked(replyID) {
 		m.mu.Unlock()
 		cancelBuildDeadline(pending.cancelDeadline)
 		clearBuildKeys(keys)
@@ -494,7 +583,7 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 	}
 	m.pending[replyID] = pending
 	m.mu.Unlock()
-	replyKeyExpiresAt := min(build.ExpiresAt, now+2*buildMessageLifetime)
+	replyKeyExpiresAt := saturatingDeadline(now, 2*buildMessageLifetime)
 	if err = m.replyKeys.RegisterGarlicReplyKey(GarlicReplyKey{
 		Key: endpointKeys.GarlicKey, Tag: endpointKeys.GarlicTag, ExpiresAt: replyKeyExpiresAt,
 	}); err != nil {
@@ -509,7 +598,7 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		ownerKind, owner := m.logOwner()
 		m.logger.Info("tunnel build reply stage", "stage", "creator_registered", "owner_kind", ownerKind, "owner", owner, "direction", "outbound", "reply_id", replyID, "reply_router", foundation.EncodeI2PBase64(build.ReplyRouter[:]), "reply_tunnel_id", build.ReplyTunnelID, "hop_count", len(build.Hops), "peers", buildPeerDiagnostics(build.Hops))
 	}
-	message := i2np.Message{Header: i2np.Header{Type: i2np.ShortTunnelBuild, ID: messageIDs[0], Expiration: now + buildMessageLifetime}, Payload: payload}
+	message := i2np.Message{Header: i2np.Header{Type: i2np.ShortTunnelBuild, ID: messageIDs[0], Expiration: messageDeadline}, Payload: payload}
 	if err = m.sender.Send(ctx, build.Hops[0].Router, message); err != nil {
 		m.removePending(replyID)
 		if m.profiles != nil {
@@ -665,7 +754,7 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 		startedAt: now, deadline: build.ExpiresAt,
 	}
 	m.mu.Lock()
-	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.pendingInbound[replyID] != nil || m.pending[replyID] != nil || m.pendingVariable[replyID] != nil {
+	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.replyIDInUseLocked(replyID) {
 		m.mu.Unlock()
 		cancelBuildDeadline(pending.cancelDeadline)
 		clearBuildKeys(keys)
@@ -874,9 +963,10 @@ func (m *BuildManager) handleInboundReply(message i2np.Message) error {
 
 func (m *BuildManager) hasInboundPending(id uint32) bool {
 	m.mu.Lock()
-	_, ok := m.pendingInbound[id]
+	_, active := m.pendingInbound[id]
+	recent, late := m.recent[id]
 	m.mu.Unlock()
-	return ok
+	return active || late && recent.inbound != nil
 }
 
 func (m *BuildManager) handleTransit(source BuildSource, message i2np.Message) error {
@@ -968,8 +1058,8 @@ func (m *BuildManager) handleTransit(source BuildSource, message i2np.Message) e
 			}
 			return ErrBuildRejected
 		}
-		reply := i2np.Message{Header: i2np.Header{Type: i2np.OutboundTunnelBuildReply, ID: request.NextMessageID, Expiration: now + buildMessageLifetime}, Payload: message.Payload}
-		key := GarlicReplyKey{Key: keys.GarlicKey, Tag: keys.GarlicTag, ExpiresAt: now + buildMessageLifetime}
+		reply := i2np.Message{Header: i2np.Header{Type: i2np.OutboundTunnelBuildReply, ID: request.NextMessageID, Expiration: saturatingDeadline(now, nextHopSendTimeout)}, Payload: message.Payload}
+		key := GarlicReplyKey{Key: keys.GarlicKey, Tag: keys.GarlicTag, ExpiresAt: saturatingDeadline(now, nextHopSendTimeout)}
 		if err = m.replySender.SendBuildReply(m.ctx, request.NextRouter, request.NextTunnelID, key, reply); err != nil {
 			if accept {
 				m.runtime.RemoveCircuit(request.ReceiveTunnelID)
@@ -981,7 +1071,7 @@ func (m *BuildManager) handleTransit(source BuildSource, message i2np.Message) e
 		}
 		return nil
 	}
-	forward := i2np.Message{Header: i2np.Header{Type: i2np.ShortTunnelBuild, ID: request.NextMessageID, Expiration: now + buildMessageLifetime}, Payload: message.Payload}
+	forward := i2np.Message{Header: i2np.Header{Type: i2np.ShortTunnelBuild, ID: request.NextMessageID, Expiration: saturatingDeadline(now, nextHopSendTimeout)}, Payload: message.Payload}
 	if err = m.sender.Send(m.ctx, request.NextRouter, forward); err != nil {
 		if accept {
 			m.runtime.RemoveCircuit(request.ReceiveTunnelID)
@@ -1206,45 +1296,63 @@ func (m *BuildManager) HandleReply(message i2np.Message) error {
 func (m *BuildManager) Expire(nowMillis uint64) int {
 	m.lifecycleMu.RLock()
 	defer m.lifecycleMu.RUnlock()
-	graceDeadline := nowMillis + buildReplyGracePeriod
-	if graceDeadline < nowMillis {
-		graceDeadline = ^uint64(0)
-	}
 	m.mu.Lock()
-	expired := make([]*pendingOutboundBuild, 0)
-	expiredRecent := make([]*pendingOutboundBuild, 0)
-	evictedRecent := make([]*pendingOutboundBuild, 0)
+	expiredOutbound := make([]*pendingOutboundBuild, 0)
 	expiredInbound := make([]*pendingInboundBuild, 0)
 	expiredVariable := make([]*pendingVariableBuild, 0)
-	for id, pending := range m.recentPending {
-		if pending.deadline <= nowMillis {
-			delete(m.recentPending, id)
-			expiredRecent = append(expiredRecent, pending)
+	expiredRecent := make([]recentCreatorBuild, 0)
+	for id, recent := range m.recent {
+		if recent.deadline <= nowMillis {
+			delete(m.recent, id)
+			expiredRecent = append(expiredRecent, recent)
 		}
 	}
 	for id, pending := range m.pending {
 		if pending.deadline <= nowMillis {
 			delete(m.pending, id)
 			pending.timedOut = true
+			graceDeadline := saturatingDeadline(pending.deadline, buildReplyGracePeriod)
 			pending.deadline = graceDeadline
 			cancelBuildDeadline(pending.cancelDeadline)
-			pending.cancelDeadline = m.scheduleBuildDeadline(nowMillis, graceDeadline)
-			if evicted := m.evictRecentPendingLocked(); evicted != nil {
-				evictedRecent = append(evictedRecent, evicted)
+			recent := recentCreatorBuild{replyID: id, deadline: graceDeadline, outbound: pending}
+			if graceDeadline <= nowMillis {
+				expiredRecent = append(expiredRecent, recent)
+			} else {
+				pending.cancelDeadline = m.scheduleBuildDeadline(nowMillis, graceDeadline)
+				m.recent[id] = recent
 			}
-			m.recentPending[id] = pending
-			expired = append(expired, pending)
+			expiredOutbound = append(expiredOutbound, pending)
 		}
 	}
 	for id, pending := range m.pendingInbound {
 		if pending.deadline <= nowMillis {
 			delete(m.pendingInbound, id)
+			graceDeadline := saturatingDeadline(pending.deadline, buildReplyGracePeriod)
+			pending.deadline = graceDeadline
+			cancelBuildDeadline(pending.cancelDeadline)
+			recent := recentCreatorBuild{replyID: id, deadline: graceDeadline, inbound: pending}
+			if graceDeadline <= nowMillis {
+				expiredRecent = append(expiredRecent, recent)
+			} else {
+				pending.cancelDeadline = m.scheduleBuildDeadline(nowMillis, graceDeadline)
+				m.recent[id] = recent
+			}
 			expiredInbound = append(expiredInbound, pending)
 		}
 	}
 	for id, pending := range m.pendingVariable {
 		if pending.deadline <= nowMillis {
 			delete(m.pendingVariable, id)
+			graceDeadline := saturatingDeadline(pending.deadline, buildReplyGracePeriod)
+			pending.deadline = graceDeadline
+			cancelBuildDeadline(pending.cancelDeadline)
+			recent := recentCreatorBuild{replyID: id, deadline: graceDeadline, variable: pending}
+			if graceDeadline <= nowMillis {
+				expiredRecent = append(expiredRecent, recent)
+			} else {
+				pending.cancelDeadline = m.scheduleBuildDeadline(nowMillis, graceDeadline)
+				m.recent[id] = recent
+			}
 			expiredVariable = append(expiredVariable, pending)
 		}
 	}
@@ -1259,59 +1367,45 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 		}
 	}
 	m.mu.Unlock()
-	expiredCount := len(expired) + len(expiredInbound) + len(expiredVariable)
+
+	expiredCount := len(expiredOutbound) + len(expiredInbound) + len(expiredVariable)
 	if expiredCount != 0 {
 		if m.metrics != nil {
 			for range expiredCount {
 				m.metrics.IncTunnelBuildFailures()
 			}
-			m.metrics.AddTunnelBuildTimeouts(m.metricOwner(), observability.TunnelDirectionOutbound, uint64(len(expired)+len(expiredVariable)))
+			m.metrics.AddTunnelBuildTimeouts(m.metricOwner(), observability.TunnelDirectionOutbound, uint64(len(expiredOutbound)+len(expiredVariable)))
 			m.metrics.AddTunnelBuildTimeouts(m.metricOwner(), observability.TunnelDirectionInbound, uint64(len(expiredInbound)))
 		}
 		if m.logger != nil {
 			ownerKind, owner := m.logOwner()
-			m.logger.Warn("tunnel build reply timeout", "owner_kind", ownerKind, "owner", owner, "outbound", len(expired), "inbound", len(expiredInbound), "legacy", len(expiredVariable), "now_ms", nowMillis)
-			for _, pending := range expired {
+			m.logger.Warn("tunnel build reply timeout", "owner_kind", ownerKind, "owner", owner, "outbound", len(expiredOutbound), "inbound", len(expiredInbound), "legacy", len(expiredVariable), "now_ms", nowMillis)
+			for _, pending := range expiredOutbound {
 				m.logger.Warn("tunnel build reply stage", "stage", "creator_timeout", "owner_kind", ownerKind, "owner", owner, "direction", "outbound", "reply_id", pending.replyID, "reply_router", foundation.EncodeI2PBase64(pending.build.ReplyRouter[:]), "reply_tunnel_id", pending.build.ReplyTunnelID)
 			}
 		}
 	}
-	for _, pending := range expired {
+	for _, pending := range expiredOutbound {
 		for _, hop := range pending.build.Hops {
 			m.recordBuildPeer(hop.Router, false, 0, nowMillis)
-		}
-	}
-	for _, pending := range expiredRecent {
-		cancelBuildDeadline(pending.cancelDeadline)
-		m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
-		clearBuildKeys(pending.keys)
-		if m.logger != nil {
-			ownerKind, owner := m.logOwner()
-			m.logger.Warn("tunnel build reply stage", "stage", "creator_grace_expired", "owner_kind", ownerKind, "owner", owner, "direction", "outbound", "reply_id", pending.replyID)
-		}
-	}
-	for _, pending := range evictedRecent {
-		cancelBuildDeadline(pending.cancelDeadline)
-		m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
-		clearBuildKeys(pending.keys)
-		if m.logger != nil {
-			ownerKind, owner := m.logOwner()
-			m.logger.Warn("tunnel build reply stage", "stage", "creator_grace_evicted", "owner_kind", ownerKind, "owner", owner, "direction", "outbound", "reply_id", pending.replyID)
 		}
 	}
 	for _, pending := range expiredInbound {
-		cancelBuildDeadline(pending.cancelDeadline)
 		for _, hop := range pending.build.Hops {
 			m.recordBuildPeer(hop.Router, false, 0, nowMillis)
 		}
-		clearBuildKeys(pending.keys)
 	}
 	for _, pending := range expiredVariable {
-		cancelBuildDeadline(pending.cancelDeadline)
 		for _, hop := range pending.build.Hops {
 			m.recordBuildPeer(hop.Router, false, 0, nowMillis)
 		}
-		clearVariableBuildKeys(pending.keys)
+	}
+	for _, recent := range expiredRecent {
+		m.clearRecentCreatorBuild(recent)
+		if m.logger != nil {
+			ownerKind, owner := m.logOwner()
+			m.logger.Warn("tunnel build reply stage", "stage", "creator_grace_expired", "owner_kind", ownerKind, "owner", owner, "direction", recent.direction(), "reply_id", recent.replyID)
+		}
 	}
 	if expiredCount != 0 {
 		m.scheduleBuildRetry()
@@ -1510,26 +1604,12 @@ func validateShortBuildHops(hops []ShortBuildHop) error {
 	return nil
 }
 
-func (m *BuildManager) evictRecentPendingLocked() *pendingOutboundBuild {
-	if len(m.recentPending) < m.maxPending {
-		return nil
+func (m *BuildManager) replyIDInUseLocked(id uint32) bool {
+	if m.pending[id] != nil || m.pendingInbound[id] != nil || m.pendingVariable[id] != nil {
+		return true
 	}
-	var victimID uint32
-	var victim *pendingOutboundBuild
-	for id, pending := range m.recentPending {
-		replaceVictim := victim == nil
-		if !replaceVictim {
-			replaceVictim = pending.deadline < victim.deadline
-		}
-		if !replaceVictim && pending.deadline == victim.deadline {
-			replaceVictim = id < victimID
-		}
-		if replaceVictim {
-			victimID, victim = id, pending
-		}
-	}
-	delete(m.recentPending, victimID)
-	return victim
+	_, recent := m.recent[id]
+	return recent
 }
 
 func (m *BuildManager) takePending(id uint32) *pendingOutboundBuild {
@@ -1537,8 +1617,10 @@ func (m *BuildManager) takePending(id uint32) *pendingOutboundBuild {
 	pending := m.pending[id]
 	delete(m.pending, id)
 	if pending == nil {
-		pending = m.recentPending[id]
-		delete(m.recentPending, id)
+		if recent, ok := m.recent[id]; ok && recent.outbound != nil {
+			pending = recent.outbound
+			delete(m.recent, id)
+		}
 	}
 	m.mu.Unlock()
 	if pending != nil {
@@ -1561,6 +1643,12 @@ func (m *BuildManager) takeInboundPending(id uint32) *pendingInboundBuild {
 	m.mu.Lock()
 	pending := m.pendingInbound[id]
 	delete(m.pendingInbound, id)
+	if pending == nil {
+		if recent, ok := m.recent[id]; ok && recent.inbound != nil {
+			pending = recent.inbound
+			delete(m.recent, id)
+		}
+	}
 	m.mu.Unlock()
 	if pending != nil {
 		cancelBuildDeadline(pending.cancelDeadline)
@@ -1662,7 +1750,7 @@ func (m *BuildManager) armOutboundDeadline(replyID uint32) {
 	m.mu.Lock()
 	pending := m.pending[replyID]
 	if pending != nil {
-		pending.deadline = min(pending.build.ExpiresAt, now+buildRequestTimeout)
+		pending.deadline = min(pending.build.ExpiresAt, saturatingDeadline(now, buildRequestTimeout()))
 		pending.cancelDeadline = m.scheduleBuildDeadline(now, pending.deadline)
 	}
 	m.mu.Unlock()
@@ -1673,7 +1761,7 @@ func (m *BuildManager) armInboundDeadline(replyID uint32) {
 	m.mu.Lock()
 	pending := m.pendingInbound[replyID]
 	if pending != nil {
-		pending.deadline = min(pending.build.ExpiresAt, now+buildRequestTimeout)
+		pending.deadline = min(pending.build.ExpiresAt, saturatingDeadline(now, buildRequestTimeout()))
 		pending.cancelDeadline = m.scheduleBuildDeadline(now, pending.deadline)
 	}
 	m.mu.Unlock()

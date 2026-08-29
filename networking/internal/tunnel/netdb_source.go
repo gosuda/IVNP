@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"math/bits"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -24,17 +25,20 @@ var (
 // NetDBOutboundBuildSourceConfig supplies deterministic control-plane inputs
 // for selecting an outbound build path from already verified netdb entries.
 type NetDBOutboundBuildSourceConfig struct {
-	Table                  *netdb.Table
-	Profiles               *PeerProfiles
-	LocalRouter            foundation.Hash
-	ReplyRouter            foundation.Hash
-	ReplyTunnelID          uint32
-	Hops                   int
-	CandidateLimit         int
-	Lifetime               uint64
-	CircuitID              func() uint32
-	TunnelID               func() uint32
-	Target                 func(nowMillis uint64) foundation.Hash
+	Table          *netdb.Table
+	Profiles       *PeerProfiles
+	LocalRouter    foundation.Hash
+	ReplyRouter    foundation.Hash
+	ReplyTunnelID  uint32
+	Hops           int
+	CandidateLimit int
+	Lifetime       uint64
+	CircuitID      func() uint32
+	TunnelID       func() uint32
+	Target         func(nowMillis uint64) foundation.Hash
+	// SelectionKey overrides the pool-persistent Java random key. Zero generates
+	// one when the source is constructed.
+	SelectionKey           foundation.Hash
 	Eligible               func(foundation.Hash) bool
 	Connected              func(foundation.Hash) bool
 	IPRestriction          *uint8
@@ -57,6 +61,7 @@ type NetDBOutboundBuildSource struct {
 	circuitID              func() uint32
 	tunnelID               func() uint32
 	target                 func(uint64) foundation.Hash
+	selectionKey           foundation.Hash
 	eligible               func(foundation.Hash) bool
 	connected              func(foundation.Hash) bool
 	ipRestriction          uint8
@@ -82,11 +87,15 @@ func NewNetDBOutboundBuildSource(config NetDBOutboundBuildSourceConfig) (*NetDBO
 	if config.CandidateLimit != 0 && config.CandidateLimit < config.Hops {
 		return nil, ErrNetDBBuildSourceConfig
 	}
+	selectionKey, err := newPoolSelectionKey(config.SelectionKey)
+	if err != nil {
+		return nil, err
+	}
 	return &NetDBOutboundBuildSource{
 		table: config.Table, profiles: config.Profiles, local: config.LocalRouter,
 		replyRouter: config.ReplyRouter, replyTunnelID: config.ReplyTunnelID,
 		hops: config.Hops, candidateLimit: config.CandidateLimit, lifetime: config.Lifetime,
-		circuitID: config.CircuitID, tunnelID: config.TunnelID, target: config.Target,
+		circuitID: config.CircuitID, tunnelID: config.TunnelID, target: config.Target, selectionKey: selectionKey,
 		eligible: config.Eligible, connected: config.Connected, ipRestriction: ipRestriction,
 		exploratory: config.Exploratory, allowUnknownTransports: config.AllowUnknownTransports,
 	}, nil
@@ -94,7 +103,7 @@ func NewNetDBOutboundBuildSource(config NetDBOutboundBuildSourceConfig) (*NetDBO
 
 // NextOutbound returns a fresh path whose routers and receive tunnel IDs are
 // distinct. Candidates with an unsupported static key or a recent profile
-// failure majority are excluded before deterministic score ordering.
+// failure majority are excluded before Java-compatible keyed ordering.
 func (s *NetDBOutboundBuildSource) NextOutbound(ctx context.Context, nowMillis uint64) (OutboundBuild, error) {
 	return s.NextOutboundForReply(ctx, nowMillis, ReplyRoute{Gateway: s.replyRouter, TunnelID: s.replyTunnelID})
 }
@@ -118,11 +127,8 @@ func (s *NetDBOutboundBuildSource) NextOutboundForReply(ctx context.Context, now
 		return OutboundBuild{}, err
 	}
 	_, candidates := s.table.Snapshot()
+	sortCandidatesCanonical(candidates)
 	random := newSelectionRandom(target)
-	shuffleCandidates(candidates, random)
-	if s.candidateLimit != 0 && len(candidates) > s.candidateLimit {
-		candidates = candidates[:s.candidateLimit]
-	}
 	var endpointMask tunnelTransportMask
 	if reply, ok := s.table.Get(route.Gateway); ok {
 		endpointMask = tunnelPeerTransportMask(reply.Info)
@@ -130,7 +136,7 @@ func (s *NetDBOutboundBuildSource) NextOutboundForReply(ctx context.Context, now
 	policy := peerSelectionPolicy{
 		direction: Outbound, exploratory: s.exploratory, directFirst: true,
 		eligible: s.eligible, connected: s.connected, endpointMask: endpointMask,
-		random: random, ipRestriction: s.ipRestriction,
+		random: random, selectionKey: s.selectionKey, candidateLimit: s.candidateLimit, ipRestriction: s.ipRestriction,
 		allowUnknownTransports: s.allowUnknownTransports,
 	}
 	hops := selectDiverseHops(candidates, s.profiles, s.local, route.Gateway, s.hops, nowMillis, policy)
@@ -173,6 +179,15 @@ func (s *NetDBOutboundBuildSource) selectionTarget(nowMillis uint64) (foundation
 	return target, err
 }
 
+func newPoolSelectionKey(configured foundation.Hash) (foundation.Hash, error) {
+	if configured != (foundation.Hash{}) {
+		return configured, nil
+	}
+	var key foundation.Hash
+	_, err := rand.Read(key[:])
+	return key, err
+}
+
 type selectionRandom struct {
 	seed    foundation.Hash
 	counter uint64
@@ -202,18 +217,80 @@ func (r *selectionRandom) oneIn(divisor uint64) bool {
 	return r != nil && divisor != 0 && r.nextUint64()%divisor == 0
 }
 
-func (r *selectionRandom) shuffle(refs []netdb.RouterRef) {
-	for index := len(refs) - 1; index > 0; index-- {
-		swap := int(r.nextUint64() % uint64(index+1))
-		refs[index], refs[swap] = refs[swap], refs[index]
-	}
-}
-
-func shuffleCandidates(candidates []netdb.RouterRef, random *selectionRandom) {
+func sortCandidatesCanonical(candidates []netdb.RouterRef) {
 	slices.SortFunc(candidates, func(left, right netdb.RouterRef) int {
 		return bytes.Compare(left.Hash[:], right.Hash[:])
 	})
-	random.shuffle(candidates)
+}
+
+type javaPeerSelectionKeys struct {
+	subTierK0 uint64
+	subTierK1 uint64
+	orderK0   uint64
+	orderK1   uint64
+}
+
+func newJavaPeerSelectionKeys(key foundation.Hash) javaPeerSelectionKeys {
+	return javaPeerSelectionKeys{
+		subTierK0: binary.BigEndian.Uint64(key[0:8]),
+		subTierK1: binary.BigEndian.Uint64(key[8:16]),
+		orderK0:   binary.BigEndian.Uint64(key[16:24]),
+		orderK1:   binary.BigEndian.Uint64(key[24:32]),
+	}
+}
+
+func (k javaPeerSelectionKeys) subTier(peer foundation.Hash) uint8 {
+	return uint8(sipHash24(k.subTierK0, k.subTierK1, peer[:]) & 0x03)
+}
+
+func (k javaPeerSelectionKeys) order(peer foundation.Hash) uint64 {
+	return sipHash24(k.orderK0, k.orderK1, peer[:])
+}
+
+func sipHash24(k0, k1 uint64, data []byte) uint64 {
+	v0 := uint64(0x736f6d6570736575) ^ k0
+	v1 := uint64(0x646f72616e646f6d) ^ k1
+	v2 := uint64(0x6c7967656e657261) ^ k0
+	v3 := uint64(0x7465646279746573) ^ k1
+	offset := 0
+	for ; offset+8 <= len(data); offset += 8 {
+		message := binary.LittleEndian.Uint64(data[offset : offset+8])
+		v3 ^= message
+		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+		v0 ^= message
+	}
+	last := uint64(len(data)) << 56
+	for index, value := range data[offset:] {
+		last |= uint64(value) << (8 * index)
+	}
+	v3 ^= last
+	v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+	v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+	v0 ^= last
+	v2 ^= 0xff
+	for range 4 {
+		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
+	}
+	return v0 ^ v1 ^ v2 ^ v3
+}
+
+func sipRound(v0, v1, v2, v3 uint64) (uint64, uint64, uint64, uint64) {
+	v0 += v1
+	v1 = bits.RotateLeft64(v1, 13)
+	v1 ^= v0
+	v0 = bits.RotateLeft64(v0, 32)
+	v2 += v3
+	v3 = bits.RotateLeft64(v3, 16)
+	v3 ^= v2
+	v0 += v3
+	v3 = bits.RotateLeft64(v3, 21)
+	v3 ^= v0
+	v2 += v1
+	v1 = bits.RotateLeft64(v1, 17)
+	v1 ^= v2
+	v2 = bits.RotateLeft64(v2, 32)
+	return v0, v1, v2, v3
 }
 
 // InboundBuildSource selects one inbound path and binds it to the outbound
@@ -226,15 +303,18 @@ type InboundBuildSource interface {
 // NetDBInboundBuildSourceConfig supplies deterministic control-plane inputs
 // for selecting a new inbound path from verified netdb entries.
 type NetDBInboundBuildSourceConfig struct {
-	Table                  *netdb.Table
-	Profiles               *PeerProfiles
-	LocalRouter            foundation.Hash
-	Hops                   int
-	CandidateLimit         int
-	Lifetime               uint64
-	CircuitID              func() uint32
-	TunnelID               func() uint32
-	Target                 func(nowMillis uint64) foundation.Hash
+	Table          *netdb.Table
+	Profiles       *PeerProfiles
+	LocalRouter    foundation.Hash
+	Hops           int
+	CandidateLimit int
+	Lifetime       uint64
+	CircuitID      func() uint32
+	TunnelID       func() uint32
+	Target         func(nowMillis uint64) foundation.Hash
+	// SelectionKey overrides the pool-persistent Java random key. Zero generates
+	// one when the source is constructed.
+	SelectionKey           foundation.Hash
 	Eligible               func(foundation.Hash) bool
 	Connected              func(foundation.Hash) bool
 	IPRestriction          *uint8
@@ -254,6 +334,7 @@ type NetDBInboundBuildSource struct {
 	circuitID              func() uint32
 	tunnelID               func() uint32
 	target                 func(uint64) foundation.Hash
+	selectionKey           foundation.Hash
 	eligible               func(foundation.Hash) bool
 	connected              func(foundation.Hash) bool
 	ipRestriction          uint8
@@ -279,10 +360,14 @@ func NewNetDBInboundBuildSource(config NetDBInboundBuildSourceConfig) (*NetDBInb
 	if config.CandidateLimit != 0 && config.CandidateLimit < config.Hops {
 		return nil, ErrNetDBBuildSourceConfig
 	}
+	selectionKey, err := newPoolSelectionKey(config.SelectionKey)
+	if err != nil {
+		return nil, err
+	}
 	return &NetDBInboundBuildSource{
 		table: config.Table, profiles: config.Profiles, local: config.LocalRouter,
 		hops: config.Hops, candidateLimit: config.CandidateLimit, lifetime: config.Lifetime,
-		circuitID: config.CircuitID, tunnelID: config.TunnelID, target: config.Target,
+		circuitID: config.CircuitID, tunnelID: config.TunnelID, target: config.Target, selectionKey: selectionKey,
 		eligible: config.Eligible, connected: config.Connected, ipRestriction: ipRestriction,
 		exploratory: config.Exploratory, allowUnknownTransports: config.AllowUnknownTransports,
 	}, nil
@@ -301,14 +386,12 @@ func (s *NetDBInboundBuildSource) NextInbound(ctx context.Context, nowMillis uin
 		return InboundBuild{}, err
 	}
 	_, candidates := s.table.Snapshot()
+	sortCandidatesCanonical(candidates)
 	random := newSelectionRandom(target)
-	shuffleCandidates(candidates, random)
-	if s.candidateLimit != 0 && len(candidates) > s.candidateLimit {
-		candidates = candidates[:s.candidateLimit]
-	}
 	policy := peerSelectionPolicy{
 		direction: Inbound, exploratory: s.exploratory, directFirst: outboundTunnelID == 0,
-		eligible: s.eligible, connected: s.connected, random: random, ipRestriction: s.ipRestriction,
+		eligible: s.eligible, connected: s.connected, random: random, selectionKey: s.selectionKey,
+		candidateLimit: s.candidateLimit, ipRestriction: s.ipRestriction,
 		allowUnknownTransports: s.allowUnknownTransports,
 	}
 	hops := selectDiverseHops(candidates, s.profiles, s.local, foundation.Hash{}, s.hops, nowMillis, policy)
@@ -387,6 +470,8 @@ const (
 	tunnelSSU2V6
 )
 
+const allPeerTiers = ^uint8(0)
+
 type hopCandidate struct {
 	hop        ShortBuildHop
 	family     string
@@ -394,9 +479,36 @@ type hopCandidate struct {
 	v6         [][16]byte
 	ports      []uint16
 	transports tunnelTransportMask
-	score      int64
+	membership uint64
+	order      uint64
 	tier       uint8
+	subTier    uint8
 	reachable  bool
+}
+
+func sortHopCandidates(candidates []hopCandidate) {
+	slices.SortFunc(candidates, func(left, right hopCandidate) int {
+		leftOrder, rightOrder := int64(left.order), int64(right.order)
+		if leftOrder < rightOrder {
+			return -1
+		}
+		if leftOrder > rightOrder {
+			return 1
+		}
+		return bytes.Compare(left.hop.Router[:], right.hop.Router[:])
+	})
+}
+
+func sortMembershipCandidates(candidates []hopCandidate) {
+	slices.SortFunc(candidates, func(left, right hopCandidate) int {
+		if left.membership < right.membership {
+			return -1
+		}
+		if left.membership > right.membership {
+			return 1
+		}
+		return bytes.Compare(left.hop.Router[:], right.hop.Router[:])
+	})
 }
 
 type peerSelectionPolicy struct {
@@ -408,15 +520,17 @@ type peerSelectionPolicy struct {
 	connected              func(foundation.Hash) bool
 	endpointMask           tunnelTransportMask
 	random                 *selectionRandom
+	selectionKey           foundation.Hash
+	candidateLimit         int
 	ipRestriction          uint8
 }
 
-// selectDiverseHops makes strict correlation avoidance win over score. It
-// relaxes address-prefix conflicts first, then the signed router family only
-// when the bounded candidate set cannot fill the requested path. An injected
-// eligibility policy is authoritative when test or embedded transports do not
-// publish an address mask.
+// selectDiverseHops applies Java's keyed subtiers and ordering while keeping
+// strict correlation avoidance. It relaxes address-prefix conflicts first,
+// then signed router-family conflicts when the candidate set cannot fill the
+// requested path.
 func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, excluded foundation.Hash, wanted int, nowMillis uint64, policy peerSelectionPolicy) []ShortBuildHop {
+	selectionKeys := newJavaPeerSelectionKeys(policy.selectionKey)
 	candidates := make([]hopCandidate, 0, len(refs))
 	for _, ref := range refs {
 		caps, allowed := tunnelPeerCapabilitiesAllowedWithDecisions(
@@ -441,9 +555,16 @@ func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, ex
 		candidates = append(candidates, hopCandidate{
 			hop: ShortBuildHop{Router: ref.Hash, StaticKey: key}, family: family,
 			v4: v4, v6: v6, ports: ports, transports: transports,
-			score: profiles.Score(ref.Hash), tier: profiles.selectionTier(ref.Hash, caps.highCapacity, policy.exploratory),
-			reachable: caps.reachable,
+			order:      selectionKeys.order(ref.Hash),
+			membership: policy.random.nextUint64(),
+			tier:       profiles.selectionTier(ref.Hash, caps.highCapacity, policy.exploratory),
+			subTier:    selectionKeys.subTier(ref.Hash),
+			reachable:  caps.reachable,
 		})
+	}
+	sortMembershipCandidates(candidates)
+	if policy.candidateLimit != 0 && len(candidates) > policy.candidateLimit {
+		candidates = candidates[:policy.candidateLimit]
 	}
 	selected := make([]hopCandidate, 0, wanted)
 	for relaxation := range 3 {
@@ -458,6 +579,15 @@ func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, ex
 			break
 		}
 	}
+	if policy.exploratory {
+		sortHopCandidates(selected)
+		slices.Reverse(selected)
+		for index, candidate := range selected {
+			if !peerAllowedAtPosition(candidate, index, wanted, policy) || index != 0 && !tunnelPathCompatible(selected[:index], candidate) {
+				return nil
+			}
+		}
+	}
 	hops := make([]ShortBuildHop, len(selected))
 	for index := range selected {
 		hops[index] = selected[index].hop
@@ -466,6 +596,22 @@ func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, ex
 }
 func selectDiverseHop(candidates, selected []hopCandidate, wanted, relaxation int, policy peerSelectionPolicy) int {
 	haveV4, haveV6 := selectedAddressFamilies(selected)
+	if policy.exploratory {
+		highCapacityTarget := max(0, wanted-2)
+		highCapacitySelected := 0
+		for _, candidate := range selected {
+			if candidate.tier == 0 {
+				highCapacitySelected++
+			}
+		}
+		if highCapacitySelected < highCapacityTarget {
+			choice := selectHopFromTier(candidates, selected, wanted, relaxation, 0, haveV4, haveV6, policy)
+			if choice != -1 {
+				return choice
+			}
+		}
+		return selectHopFromTier(candidates, selected, wanted, relaxation, allPeerTiers, haveV4, haveV6, policy)
+	}
 	for peerTier := uint8(0); peerTier < 3; peerTier++ {
 		choice := selectHopFromTier(candidates, selected, wanted, relaxation, peerTier, haveV4, haveV6, policy)
 		if choice != -1 {
@@ -505,7 +651,8 @@ func selectHopFromTier(candidates, selected []hopCandidate, wanted, relaxation i
 			}
 			continue
 		}
-		if candidate.score > candidates[choice].score {
+		if !policy.exploratory && len(selected) > 0 && len(selected)+1 < wanted &&
+			int64(candidate.order) > int64(candidates[choice].order) {
 			choice, choiceAddsFamily, choiceFutureOptions = index, addsFamily, futureOptions
 		}
 	}
@@ -529,7 +676,7 @@ func hopFutureOptions(candidates, selected []hopCandidate, candidate hopCandidat
 }
 
 func hopCandidateAllowed(candidate hopCandidate, selected []hopCandidate, wanted, relaxation int, peerTier uint8, policy peerSelectionPolicy) bool {
-	if candidate.tier != peerTier || selectedContains(selected, candidate.hop.Router) {
+	if (peerTier != allPeerTiers && candidate.tier != peerTier) || selectedContains(selected, candidate.hop.Router) {
 		return false
 	}
 	if !peerAllowedAtPosition(candidate, len(selected), wanted, policy) {
@@ -545,6 +692,9 @@ func hopCandidateAllowed(candidate hopCandidate, selected []hopCandidate, wanted
 }
 
 func peerAllowedAtPosition(candidate hopCandidate, selected, wanted int, policy peerSelectionPolicy) bool {
+	if !policy.exploratory && !clientSubTierAllowed(candidate.subTier, selected, wanted) {
+		return false
+	}
 	connected := policy.connected != nil && policy.connected(candidate.hop.Router)
 	if selected == 0 {
 		if policy.direction == Inbound && !candidate.reachable && !connected {
@@ -559,6 +709,26 @@ func peerAllowedAtPosition(candidate hopCandidate, selected, wanted int, policy 
 		return false
 	}
 	return true
+}
+
+func clientSubTierAllowed(subTier uint8, position, wanted int) bool {
+	if wanted <= 1 {
+		return true
+	}
+	if wanted == 2 {
+		if position == 0 {
+			return subTier >= 2
+		}
+		return subTier < 2
+	}
+	switch position {
+	case 0:
+		return subTier == 1
+	case wanted - 1:
+		return subTier == 0
+	default:
+		return subTier >= 2
+	}
 }
 
 func tunnelPathCompatible(selected []hopCandidate, candidate hopCandidate) bool {

@@ -327,6 +327,17 @@ func TestDefaultOperatingStartsOutboundNTCP2AndBoundSSU2(t *testing.T) {
 	}
 }
 
+func TestDaemonReplyKeyCapacityIncludesJavaBuildGrace(t *testing.T) {
+	const (
+		buildPending = 4
+		destinations = 16
+	)
+	const want = (destinations + 1) * buildPending * 13
+	if got := daemonReplyKeyCapacity(buildPending, destinations); got != want {
+		t.Fatalf("reply-key capacity = %d, want %d", got, want)
+	}
+}
+
 func daemonTestConfig(t *testing.T) state.ConfigurationOperating {
 	t.Helper()
 	base := t.TempDir()
@@ -715,6 +726,63 @@ func TestMuxRequestSenderUsesEstablishedOutboundTunnel(t *testing.T) {
 	throughTunnel.err = errors.New("tunnel send failed")
 	if err = sender.Send(context.Background(), networking.NetworkDatabaseRouterRef{Hash: target}, message); !errors.Is(err, throughTunnel.err) || replyKeys.Len() != 0 {
 		t.Fatalf("failed send = %v, reply_keys=%d", err, replyKeys.Len())
+	}
+}
+
+func TestRequestManagerFiveAttemptChurnDoesNotRegisterZeroExclusionReplyKeys(t *testing.T) {
+	now := uint64(1_700_000_000_000)
+	database := networking.NetworkDatabaseNewDatabase(foundation.Hash{99}, networking.NetworkDatabaseDefaultBucketCapacity)
+	for range 8 {
+		if err := database.AdmitRouterInfo(daemonProductionFloodfill(t, now), true, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	private, err := ecdh.X25519().GenerateKey(cryptorand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var staticKey [32]byte
+	copy(staticKey[:], private.PublicKey().Bytes())
+	replyKeys := networking.GarlicNewReplyKeyRegistry(1)
+	throughTunnel := new(requestTunnelCapture)
+	sender := muxRequestSender{
+		sender: new(requestDirectCapture), tunnels: throughTunnel,
+		pairs: requestPairCapture{pair: networking.TunnelCircuitPair{OutboundID: 11}},
+		now:   func() uint64 { return now }, replyKeys: replyKeys,
+		staticKeyLookup: func(foundation.Hash) ([32]byte, bool) {
+			return staticKey, true
+		},
+	}
+	manager, err := networking.NetworkDatabaseNewRequestManager(
+		database,
+		sender,
+		requestReplyRouteCapture{gateway: foundation.Hash{2}, tunnel: 7},
+		networking.NetworkDatabaseRequestManagerConfig{
+			Capacity: 1, MaxCandidates: 8, TimeoutMillis: 50_000, Now: func() uint64 { return now },
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	result, err := manager.LookupLeaseSet(context.Background(), foundation.Hash{3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if throughTunnel.calls != 1 || replyKeys.Len() != 0 {
+		t.Fatalf("initial lookup sends=%d reply_keys=%d", throughTunnel.calls, replyKeys.Len())
+	}
+	const attemptTimeout = uint64(3_000)
+	for tick := 1; tick <= 5; tick++ {
+		now += attemptTimeout
+		manager.Expire(now)
+		wantSends := min(tick+1, 5)
+		if throughTunnel.calls != wantSends || replyKeys.Len() != 0 {
+			t.Fatalf("tick %d sends=%d want=%d reply_keys=%d", tick, throughTunnel.calls, wantSends, replyKeys.Len())
+		}
+	}
+	if outcome := <-result; outcome.Err == nil {
+		t.Fatalf("five-attempt lookup outcome = %#v", outcome)
 	}
 }
 

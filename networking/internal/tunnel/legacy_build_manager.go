@@ -79,10 +79,15 @@ func (m *BuildManager) StartVariableOutbound(ctx context.Context, build Variable
 		clearVariableBuildKeys(keys)
 		return 0, err
 	}
+	messageDeadline, err := randomizedBuildMessageDeadline(now, m.random)
+	if err != nil {
+		clearVariableBuildKeys(keys)
+		return 0, err
+	}
 	replyID := ids[len(ids)-1]
 	pending := &pendingVariableBuild{build: cloneVariableOutboundBuild(build), keys: keys, positions: positions, replyID: replyID, recordCount: uint8(recordCount), deadline: build.ExpiresAt}
 	m.mu.Lock()
-	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.pending[replyID] != nil || m.pendingInbound[replyID] != nil || m.pendingVariable[replyID] != nil {
+	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.replyIDInUseLocked(replyID) {
 		m.mu.Unlock()
 		cancelBuildDeadline(pending.cancelDeadline)
 		clearVariableBuildKeys(keys)
@@ -90,7 +95,7 @@ func (m *BuildManager) StartVariableOutbound(ctx context.Context, build Variable
 	}
 	m.pendingVariable[replyID] = pending
 	m.mu.Unlock()
-	message := i2np.Message{Header: i2np.Header{Type: i2np.VariableTunnelBuild, ID: ids[0], Expiration: now + buildMessageLifetime}, Payload: payload}
+	message := i2np.Message{Header: i2np.Header{Type: i2np.VariableTunnelBuild, ID: ids[0], Expiration: messageDeadline}, Payload: payload}
 	if err = m.sender.Send(ctx, build.Hops[0].Router, message); err != nil {
 		m.removeVariablePending(replyID)
 		return 0, err
@@ -104,7 +109,7 @@ func (m *BuildManager) armVariableDeadline(replyID uint32) {
 	m.mu.Lock()
 	pending := m.pendingVariable[replyID]
 	if pending != nil {
-		pending.deadline = min(pending.build.ExpiresAt, now+buildRequestTimeout)
+		pending.deadline = min(pending.build.ExpiresAt, saturatingDeadline(now, buildRequestTimeout()))
 		pending.cancelDeadline = m.scheduleBuildDeadline(now, pending.deadline)
 	}
 	m.mu.Unlock()
@@ -193,7 +198,7 @@ func (m *BuildManager) handleVariableTransit(message i2np.Message) error {
 		}
 		return nil
 	}
-	forward := i2np.Message{Header: i2np.Header{Type: i2np.VariableTunnelBuild, ID: request.NextMessageID, Expiration: now + buildMessageLifetime}, Payload: message.Payload}
+	forward := i2np.Message{Header: i2np.Header{Type: i2np.VariableTunnelBuild, ID: request.NextMessageID, Expiration: saturatingDeadline(now, nextHopSendTimeout)}, Payload: message.Payload}
 	if err = m.sender.Send(m.ctx, request.NextRouter, forward); err != nil {
 		if accept {
 			m.runtime.RemoveCircuit(request.ReceiveTunnelID)
@@ -207,7 +212,7 @@ func (m *BuildManager) handleVariableTransit(message i2np.Message) error {
 }
 
 func (m *BuildManager) sendVariableReply(request VariableBuildRequest, records []byte, now uint64) error {
-	reply := i2np.Message{Header: i2np.Header{Type: i2np.VariableTunnelBuildReply, ID: request.NextMessageID, Expiration: now + buildMessageLifetime}, Payload: records}
+	reply := i2np.Message{Header: i2np.Header{Type: i2np.VariableTunnelBuildReply, ID: request.NextMessageID, Expiration: saturatingDeadline(now, nextHopSendTimeout)}, Payload: records}
 	frame := make([]byte, reply.EncodedLen())
 	if _, err := reply.MarshalTo(frame); err != nil {
 		return err
@@ -216,7 +221,7 @@ func (m *BuildManager) sendVariableReply(request VariableBuildRequest, records [
 	binary.BigEndian.PutUint32(payload[:4], request.NextTunnelID)
 	binary.BigEndian.PutUint16(payload[4:6], uint16(len(frame)))
 	copy(payload[6:], frame)
-	gateway := i2np.Message{Header: i2np.Header{Type: i2np.TunnelGateway, ID: request.NextMessageID, Expiration: now + buildMessageLifetime}, Payload: payload}
+	gateway := i2np.Message{Header: i2np.Header{Type: i2np.TunnelGateway, ID: request.NextMessageID, Expiration: saturatingDeadline(now, nextHopSendTimeout)}, Payload: payload}
 	return m.sender.Send(m.ctx, request.NextRouter, gateway)
 }
 
@@ -349,6 +354,12 @@ func (m *BuildManager) takeVariablePending(id uint32) *pendingVariableBuild {
 	m.mu.Lock()
 	pending := m.pendingVariable[id]
 	delete(m.pendingVariable, id)
+	if pending == nil {
+		if recent, ok := m.recent[id]; ok && recent.variable != nil {
+			pending = recent.variable
+			delete(m.recent, id)
+		}
+	}
 	m.mu.Unlock()
 	if pending != nil {
 		cancelBuildDeadline(pending.cancelDeadline)

@@ -28,6 +28,18 @@ func (r *buildCounterReader) Read(dst []byte) (int, error) {
 	return len(dst), nil
 }
 
+type buildXorShiftReader struct{ state uint64 }
+
+func (r *buildXorShiftReader) Read(dst []byte) (int, error) {
+	for index := range dst {
+		r.state ^= r.state << 13
+		r.state ^= r.state >> 7
+		r.state ^= r.state << 17
+		dst[index] = byte(r.state >> 56)
+	}
+	return len(dst), nil
+}
+
 type buildReplyRegistry struct {
 	entries map[[8]byte]GarlicReplyKey
 	removed [][8]byte
@@ -189,7 +201,8 @@ func TestBuildManagerCreatesAndInstallsOutboundTunnel(t *testing.T) {
 		t.Fatal(err)
 	}
 	sent := sender.take()
-	if len(sent) != 1 || sent[0].peer != build.Hops[0].Router || sent[0].message.Header.Type != i2np.ShortTunnelBuild {
+	if len(sent) != 1 || sent[0].peer != build.Hops[0].Router || sent[0].message.Header.Type != i2np.ShortTunnelBuild ||
+		sent[0].message.Header.Expiration < now+buildMessageLifetime || sent[0].message.Header.Expiration >= now+buildMessageLifetime+buildMessageFuzz {
 		t.Fatalf("initial build message = %#v", sent)
 	}
 	records, err := i2np.ParseBuildRecords(i2np.ShortTunnelBuild, sent[0].message.Payload)
@@ -315,9 +328,10 @@ func TestBuildManagerAcceptsAuthenticatedReplyDuringJavaGracePeriod(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	startedAt := now
 	replyID, err := manager.StartOutbound(context.Background(), OutboundBuild{
 		CircuitID: 40, Hops: []ShortBuildHop{hop}, ReplyRouter: foundation.Hash{2},
-		ReplyTunnelID: 42, ExpiresAt: now + 600_000,
+		ReplyTunnelID: 42, ExpiresAt: now + 30_000,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -338,11 +352,15 @@ func TestBuildManagerAcceptsAuthenticatedReplyDuringJavaGracePeriod(t *testing.T
 		t.Fatal(err)
 	}
 
-	now += buildRequestTimeout
+	now += buildRequestTimeout()
 	if expired := manager.Expire(now); expired != 1 {
 		t.Fatalf("timed out builds = %d, want 1", expired)
 	}
 	now += 1
+	registered, ok := replyKeys.entries[endpointKeys.GarlicTag]
+	if !ok || registered.ExpiresAt != startedAt+2*buildMessageLifetime {
+		t.Fatalf("late reply key expiry = %#v, found %t", registered, ok)
+	}
 	if _, err = replyKeys.consume(endpointKeys.GarlicTag); err != nil {
 		t.Fatalf("late reply key was not retained: %v", err)
 	}
@@ -358,8 +376,9 @@ func TestBuildManagerAcceptsAuthenticatedReplyDuringJavaGracePeriod(t *testing.T
 	}
 }
 
-func TestBuildManagerBoundsJavaGracePendingAcrossRepeatedTimeouts(t *testing.T) {
-	now := uint64(1_700_000_000_000)
+func TestBuildManagerRetainsEveryTimedOutBuildUntilJavaGraceExpires(t *testing.T) {
+	const start = uint64(1_700_000_000_000)
+	now := start
 	privateBytes := make([]byte, 32)
 	for index := range privateBytes {
 		privateBytes[index] = byte(index + 1)
@@ -368,12 +387,12 @@ func TestBuildManagerBoundsJavaGracePendingAcrossRepeatedTimeouts(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	hop := ShortBuildHop{Router: sha256.Sum256([]byte("bounded-grace-obep"))}
+	hop := ShortBuildHop{Router: sha256.Sum256([]byte("time-bounded-grace-obep"))}
 	copy(hop.StaticKey[:], private.PublicKey().Bytes())
 	replyKeys := newBuildReplyRegistry()
 	manager, err := NewBuildManager(BuildManagerConfig{
 		Runtime: NewRuntime(RuntimeConfig{}), Sender: discardTunnelSender{}, ReplyKeys: replyKeys,
-		Now: func() uint64 { return now }, Random: new(buildCounterReader), MaxPending: 2,
+		Now: func() uint64 { return now }, Random: &buildXorShiftReader{state: 1}, MaxPending: 2,
 		Schedule: func(time.Duration, func()) func() { return func() {} },
 	})
 	if err != nil {
@@ -381,19 +400,23 @@ func TestBuildManagerBoundsJavaGracePendingAcrossRepeatedTimeouts(t *testing.T) 
 	}
 	t.Cleanup(manager.ReleaseSensitive)
 
-	var previous []*pendingOutboundBuild
+	var retained []*pendingOutboundBuild
+	var retainedTags [][8]byte
 	for batch := range 6 {
 		for slot := range manager.maxPending {
 			hop.ReceiveTunnelID = uint32(100 + batch*manager.maxPending + slot)
-			_, err = manager.StartOutbound(context.Background(), OutboundBuild{
+			replyID, startErr := manager.StartOutbound(context.Background(), OutboundBuild{
 				CircuitID: uint32(200 + batch*manager.maxPending + slot), Hops: []ShortBuildHop{hop},
 				ReplyRouter: foundation.Hash{9}, ReplyTunnelID: 10, ExpiresAt: now + 600_000,
 			})
-			if err != nil {
-				t.Fatalf("batch %d retry %d: %v", batch, slot, err)
+			if startErr != nil {
+				t.Fatalf("batch %d retry %d: %v", batch, slot, startErr)
 			}
+			pending := manager.pending[replyID]
+			retained = append(retained, pending)
+			retainedTags = append(retainedTags, pending.replyTag)
 		}
-		now += buildRequestTimeout
+		now += buildRequestTimeout()
 		if expired := manager.Expire(now); expired != manager.maxPending {
 			t.Fatalf("batch %d expired builds = %d, want %d", batch, expired, manager.maxPending)
 		}
@@ -401,26 +424,152 @@ func TestBuildManagerBoundsJavaGracePendingAcrossRepeatedTimeouts(t *testing.T) 
 			t.Fatalf("batch %d active builds = %d, want 0 before retry", batch, active)
 		}
 		manager.mu.Lock()
-		if len(manager.recentPending) > manager.maxPending {
-			t.Fatalf("batch %d grace builds = %d, max %d", batch, len(manager.recentPending), manager.maxPending)
-		}
-		current := make([]*pendingOutboundBuild, 0, len(manager.recentPending))
-		for _, pending := range manager.recentPending {
-			current = append(current, pending)
-		}
+		recent := len(manager.recent)
 		manager.mu.Unlock()
-		if len(replyKeys.entries) > manager.maxPending {
-			t.Fatalf("batch %d retained reply keys = %d, max %d", batch, len(replyKeys.entries), manager.maxPending)
+		wantRecent := (batch + 1) * manager.maxPending
+		if recent != wantRecent {
+			t.Fatalf("batch %d grace builds = %d, want %d", batch, recent, wantRecent)
 		}
-		for _, pending := range previous {
-			if pending.keys[0] != (ShortBuildKeys{}) {
-				t.Fatalf("batch %d evicted reply %d retained key material", batch, pending.replyID)
-			}
-			if _, retained := replyKeys.entries[pending.replyTag]; retained {
-				t.Fatalf("batch %d evicted reply %d remained registered", batch, pending.replyID)
-			}
+		if len(replyKeys.entries) != wantRecent {
+			t.Fatalf("batch %d retained reply keys = %d, want %d", batch, len(replyKeys.entries), wantRecent)
 		}
-		previous = current
+	}
+	if len(retained) <= manager.maxPending {
+		t.Fatalf("grace state did not grow beyond active capacity: %d", len(retained))
+	}
+	for index, pending := range retained {
+		if pending.keys[0] == (ShortBuildKeys{}) {
+			t.Fatalf("retained reply %d lost key material before grace expiry", index)
+		}
+	}
+
+	now = start + buildRequestTimeout() + buildReplyGracePeriod
+	manager.Expire(now)
+	if retained[0].keys[0] != (ShortBuildKeys{}) || retained[1].keys[0] != (ShortBuildKeys{}) {
+		t.Fatal("oldest grace batch retained key material at expiry")
+	}
+	for _, tag := range retainedTags[:manager.maxPending] {
+		if _, ok := replyKeys.entries[tag]; ok {
+			t.Fatalf("expired grace reply tag %x remained registered", tag)
+		}
+	}
+	if retained[manager.maxPending].keys[0] == (ShortBuildKeys{}) {
+		t.Fatal("younger grace batch expired with oldest batch")
+	}
+
+	now = start + 6*buildRequestTimeout() + buildReplyGracePeriod
+	manager.Expire(now)
+	manager.mu.Lock()
+	recent := len(manager.recent)
+	manager.mu.Unlock()
+	if recent != 0 || len(replyKeys.entries) != 0 {
+		t.Fatalf("expired grace state: recent=%d reply_keys=%d", recent, len(replyKeys.entries))
+	}
+}
+
+func TestBuildManagerRetainsInboundAndVariableCreatorsDuringJavaGrace(t *testing.T) {
+	now := uint64(100)
+	manager, err := NewBuildManager(BuildManagerConfig{
+		Runtime: NewRuntime(RuntimeConfig{}), Sender: discardTunnelSender{}, ReplyKeys: newBuildReplyRegistry(),
+		Now: func() uint64 { return now }, Schedule: func(time.Duration, func()) func() { return func() {} },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.ReleaseSensitive)
+	inbound := &pendingInboundBuild{deadline: now, keys: []ShortBuildKeys{{LayerKey: [32]byte{1}}}}
+	variable := &pendingVariableBuild{deadline: now, keys: []VariableBuildKeys{{LayerKey: [32]byte{2}}}}
+	manager.pendingInbound[11] = inbound
+	manager.pendingVariable[12] = variable
+
+	if expired := manager.Expire(now); expired != 2 {
+		t.Fatalf("timed-out creator builds = %d, want 2", expired)
+	}
+	if manager.Pending() != 0 || !manager.hasInboundPending(11) {
+		t.Fatalf("grace state was counted active or inbound reply was unroutable: pending=%d", manager.Pending())
+	}
+	if got := manager.takeVariablePending(12); got != variable || got.keys[0].LayerKey[0] != 2 {
+		t.Fatalf("late variable pending = %#v, want retained build", got)
+	}
+	clearVariableBuildKeys(variable.keys)
+	now += buildReplyGracePeriod
+	manager.Expire(now)
+	if inbound.keys[0] != (ShortBuildKeys{}) || manager.hasInboundPending(11) {
+		t.Fatal("inbound creator state survived the Java grace deadline")
+	}
+}
+
+func TestBuildManagerDelayedSweepDoesNotExtendJavaGrace(t *testing.T) {
+	const activeDeadline = uint64(100)
+	now := activeDeadline + buildReplyGracePeriod + 1
+	replyKeys := newBuildReplyRegistry()
+	manager, err := NewBuildManager(BuildManagerConfig{
+		Runtime: NewRuntime(RuntimeConfig{}), Sender: discardTunnelSender{}, ReplyKeys: replyKeys,
+		Now: func() uint64 { return now }, Schedule: func(time.Duration, func()) func() { return func() {} },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.ReleaseSensitive)
+	tag := [8]byte{1}
+	if err = replyKeys.RegisterGarlicReplyKey(GarlicReplyKey{Tag: tag, ExpiresAt: now + 1}); err != nil {
+		t.Fatal(err)
+	}
+	outbound := &pendingOutboundBuild{deadline: activeDeadline, replyTag: tag, keys: []ShortBuildKeys{{LayerKey: [32]byte{1}}}}
+	inbound := &pendingInboundBuild{deadline: activeDeadline, keys: []ShortBuildKeys{{LayerKey: [32]byte{2}}}}
+	variable := &pendingVariableBuild{deadline: activeDeadline, keys: []VariableBuildKeys{{LayerKey: [32]byte{3}}}}
+	manager.pending[1] = outbound
+	manager.pendingInbound[2] = inbound
+	manager.pendingVariable[3] = variable
+
+	if expired := manager.Expire(now); expired != 3 {
+		t.Fatalf("delayed sweep expired builds = %d, want 3", expired)
+	}
+	manager.mu.Lock()
+	recent := len(manager.recent)
+	manager.mu.Unlock()
+	if recent != 0 {
+		t.Fatalf("delayed sweep retained %d builds past anchored grace", recent)
+	}
+	if outbound.keys[0] != (ShortBuildKeys{}) || inbound.keys[0] != (ShortBuildKeys{}) || variable.keys[0] != (VariableBuildKeys{}) {
+		t.Fatal("delayed sweep retained creator key material past anchored grace")
+	}
+	if _, ok := replyKeys.entries[tag]; ok {
+		t.Fatal("delayed sweep retained garlic reply key past anchored grace")
+	}
+}
+
+func TestBuildRequestTimeoutMatchesApplicableJavaSlowSystemRules(t *testing.T) {
+	tests := []struct {
+		name         string
+		goos, goarch string
+		cores        int
+		want         uint64
+	}{
+		{name: "Apple M1", goos: "darwin", goarch: "arm64", cores: 4, want: normalBuildRequestTimeout},
+		{name: "Linux ARM server", goos: "linux", goarch: "arm64", cores: 5, want: normalBuildRequestTimeout},
+		{name: "Raspberry Pi", goos: "linux", goarch: "arm64", cores: 4, want: slowBuildRequestTimeout},
+		{name: "32-bit ARM", goos: "linux", goarch: "arm", cores: 8, want: slowBuildRequestTimeout},
+		{name: "Android", goos: "android", goarch: "amd64", cores: 8, want: slowBuildRequestTimeout},
+		{name: "x86", goos: "linux", goarch: "amd64", cores: 2, want: normalBuildRequestTimeout},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := buildRequestTimeoutForSystem(test.goos, test.goarch, test.cores); got != test.want {
+				t.Fatalf("build timeout = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRandomizedBuildMessageDeadlineUsesJavaFuzzRange(t *testing.T) {
+	const now = uint64(1_700_000_000_000)
+	deadline, err := randomizedBuildMessageDeadline(now, bytes.NewReader([]byte{0, 0, 0x4e, 0x1f}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := now + buildMessageLifetime + buildMessageFuzz - 1; deadline != want {
+		t.Fatalf("randomized build deadline = %d, want %d", deadline, want)
 	}
 }
 
@@ -643,7 +792,7 @@ func TestBuildManagerRestoresRetiredTunnelWhenRuntimeInstallFails(t *testing.T) 
 }
 
 func TestBuildManagerBuildsInboundAcrossTransitAndRejectsStaleRequests(t *testing.T) {
-	const now = uint64(1_700_000_000_000)
+	now := uint64(1_700_000_000_000)
 	creator := sha256.Sum256([]byte("inbound-creator"))
 	outerPeer := sha256.Sum256([]byte("outer-obep"))
 	carrier := new(captureTunnelSender)
@@ -719,7 +868,7 @@ func TestBuildManagerBuildsInboundAcrossTransitAndRejectsStaleRequests(t *testin
 		if index+1 < len(build.Hops) {
 			wantPeer = build.Hops[index+1].Router
 		}
-		if forwarded[0].peer != wantPeer || forwarded[0].message.Header.Type != i2np.ShortTunnelBuild {
+		if forwarded[0].peer != wantPeer || forwarded[0].message.Header.Type != i2np.ShortTunnelBuild || forwarded[0].message.Header.Expiration != now+nextHopSendTimeout {
 			t.Fatalf("hop %d route = %#v", index, forwarded[0])
 		}
 		current = forwarded[0].message
@@ -728,6 +877,14 @@ func TestBuildManagerBuildsInboundAcrossTransitAndRejectsStaleRequests(t *testin
 		t.Fatalf("inbound reply ID = %d, want %d", current.Header.ID, replyID)
 	}
 	pendingKeys := append([]ShortBuildKeys(nil), creatorManager.pendingInbound[replyID].keys...)
+	now += buildRequestTimeout()
+	if expired := creatorManager.Expire(now); expired != 1 {
+		t.Fatalf("timed out inbound builds = %d, want 1", expired)
+	}
+	if !creatorManager.hasInboundPending(replyID) {
+		t.Fatal("timed-out inbound build was not retained during Java grace")
+	}
+	now++
 	if err = creatorManager.HandleBuild(current); err != nil {
 		t.Fatal(err)
 	}
@@ -840,7 +997,10 @@ func TestBuildManagerRoutesOBEPReplyWithDerivedGarlicKey(t *testing.T) {
 	if err = obep.HandleBuildFrom(foundation.Hash{7}, requests[0].message); err != nil {
 		t.Fatal(err)
 	}
-	if replies.peer != replyRouter || replies.tunnel != 42 || replies.reply.Header.Type != i2np.OutboundTunnelBuildReply || replies.reply.Header.ID != replyID {
+	routeMatches := replies.peer == replyRouter && replies.tunnel == 42
+	replyMatches := replies.reply.Header.Type == i2np.OutboundTunnelBuildReply && replies.reply.Header.ID == replyID
+	expirationMatches := replies.reply.Header.Expiration == now+nextHopSendTimeout && replies.key.ExpiresAt == now+nextHopSendTimeout
+	if !routeMatches || !replyMatches || !expirationMatches {
 		t.Fatalf("OBEP garlic route = %#v", replies)
 	}
 	registered, ok := replyKeys.entries[replies.key.Tag]

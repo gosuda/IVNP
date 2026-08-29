@@ -49,6 +49,19 @@ const (
 	daemonNetDBExplorationSteadyDelay         = 5 * time.Second
 )
 
+func daemonReplyKeyCapacity(buildPending, maxDestinations int) int {
+	maxInt := int(^uint(0) >> 1)
+	if maxDestinations >= maxInt {
+		return maxInt
+	}
+	managerCount := max(1, maxDestinations+1)
+	perManager := networking.TunnelBuildReplyKeyCapacity(buildPending)
+	if managerCount > maxInt/perManager {
+		return maxInt
+	}
+	return managerCount * perManager
+}
+
 // Listener provides stream and packet listening interfaces for node services.
 type Listener interface {
 	Listen(context.Context, string, string) (net.Listener, error)
@@ -711,7 +724,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		for _, peer := range bootstrapPeers {
 			responders.Record(peer)
 		}
-		replyKeys = networking.GarlicNewReplyKeyRegistry(cfg.Tunnel.BuildPendingCapacity * (2*cfg.State.MaxDestinations + 2))
+		replyKeys = networking.GarlicNewReplyKeyRegistry(daemonReplyKeyCapacity(cfg.Tunnel.BuildPendingCapacity, cfg.State.MaxDestinations))
 		replySender, replyErr := networking.RouterNewBuildReplySender(networking.RouterBuildReplySenderConfig{Sender: mux, Service: service, LocalRouter: bundle.Router.Hash, Now: now, NextID: randomMessageID, Logger: logger})
 		if replyErr != nil {
 			return nil, replyErr

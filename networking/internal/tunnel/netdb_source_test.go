@@ -13,21 +13,20 @@ import (
 	"gosuda.org/ivnp/networking/internal/netdb"
 )
 
-func TestNetDBOutboundBuildSourceRanksDistinctVerifiedPeers(t *testing.T) {
+func TestNetDBOutboundBuildSourceUsesJavaClientSubtiers(t *testing.T) {
 	left := verifiedX25519Router(t, 1)
 	right := verifiedX25519Router(t, 2)
 	table := netdb.NewTable(foundation.Hash{}, 8)
 	table.StoreVerified(left, false, 1)
 	table.StoreVerified(right, false, 1)
-	profiles := NewPeerProfiles(PeerProfilesConfig{Window: 4})
-	profiles.RecordSuccess(right.Hash(), 5)
+	target := javaTwoHopSelectionTarget(t, right.Hash(), left.Hash())
 	nextTunnel := uint32(80)
 	source, err := NewNetDBOutboundBuildSource(NetDBOutboundBuildSourceConfig{
-		Table: table, Profiles: profiles, ReplyRouter: foundation.Hash{9}, ReplyTunnelID: 10,
+		Table: table, Profiles: NewPeerProfiles(PeerProfilesConfig{}), ReplyRouter: foundation.Hash{9}, ReplyTunnelID: 10,
 		Hops: 2, CandidateLimit: 4, Lifetime: 100,
 		CircuitID: func() uint32 { return 70 },
 		TunnelID:  func() uint32 { nextTunnel++; return nextTunnel },
-		Target:    func(uint64) foundation.Hash { return foundation.Hash{} },
+		Target:    func(uint64) foundation.Hash { return target }, SelectionKey: target,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +38,8 @@ func TestNetDBOutboundBuildSourceRanksDistinctVerifiedPeers(t *testing.T) {
 	if build.CircuitID != 70 || build.ExpiresAt != 600 || len(build.Hops) != 2 {
 		t.Fatalf("build = %#v", build)
 	}
-	if build.Hops[0].Router != right.Hash() || build.Hops[0].Router == build.Hops[1].Router || build.Hops[0].ReceiveTunnelID != 81 || build.Hops[1].ReceiveTunnelID != 82 {
+	if build.Hops[0].Router != right.Hash() || build.Hops[1].Router != left.Hash() ||
+		build.Hops[0].ReceiveTunnelID != 81 || build.Hops[1].ReceiveTunnelID != 82 {
 		t.Fatalf("selected hops = %#v", build.Hops)
 	}
 	if build.Hops[0].StaticKey[0] != 2 || build.Hops[1].StaticKey[0] != 1 {
@@ -47,28 +47,39 @@ func TestNetDBOutboundBuildSourceRanksDistinctVerifiedPeers(t *testing.T) {
 	}
 }
 
-func TestNetDBEqualScoreSelectionIsCanonicalAndTargetDiverse(t *testing.T) {
-	base := make([]netdb.RouterRef, 8)
-	reversed := make([]netdb.RouterRef, len(base))
+func javaTwoHopSelectionTarget(t *testing.T, gateway, endpoint foundation.Hash) foundation.Hash {
+	t.Helper()
+	for marker := 1; marker < 1<<16; marker++ {
+		var target foundation.Hash
+		binary.BigEndian.PutUint16(target[14:16], uint16(marker))
+		keys := newJavaPeerSelectionKeys(target)
+		if keys.subTier(gateway) >= 2 && keys.subTier(endpoint) < 2 {
+			return target
+		}
+	}
+	t.Fatal("could not derive a two-hop Java selection key")
+	return foundation.Hash{}
+}
+
+func TestJavaSipHashPeerOrderingIsCanonicalAndTargetDiverse(t *testing.T) {
+	base := make([]hopCandidate, 8)
+	reversed := make([]hopCandidate, len(base))
 	for index := range base {
-		base[index].Hash = foundation.Hash{byte(index + 1)}
+		base[index].hop.Router = foundation.Hash{byte(index + 1)}
 		reversed[len(base)-1-index] = base[index]
 	}
-	selectFirst := func(input []netdb.RouterRef, target foundation.Hash) foundation.Hash {
-		refs := append([]netdb.RouterRef(nil), input...)
-		shuffleCandidates(refs, newSelectionRandom(target))
-		candidates := make([]hopCandidate, len(refs))
-		for index, ref := range refs {
-			candidates[index] = hopCandidate{hop: ShortBuildHop{Router: ref.Hash}}
+	selectFirst := func(input []hopCandidate, target foundation.Hash) foundation.Hash {
+		keys := newJavaPeerSelectionKeys(target)
+		candidates := append([]hopCandidate(nil), input...)
+		for index := range candidates {
+			candidates[index].order = keys.order(candidates[index].hop.Router)
 		}
-		choice := selectHopFromTier(candidates, nil, 1, 0, 0, false, false, peerSelectionPolicy{direction: Outbound})
-		if choice < 0 {
-			t.Fatal("selected no equal-score peer")
-		}
-		return candidates[choice].hop.Router
+		sortHopCandidates(candidates)
+		return candidates[0].hop.Router
 	}
 
-	fixedTarget := foundation.Hash{9}
+	var fixedTarget foundation.Hash
+	fixedTarget[31] = 9
 	fixedFirst := selectFirst(base, fixedTarget)
 	for repeat := range 16 {
 		input := base
@@ -82,10 +93,151 @@ func TestNetDBEqualScoreSelectionIsCanonicalAndTargetDiverse(t *testing.T) {
 
 	selected := make(map[foundation.Hash]struct{})
 	for marker := byte(1); marker <= 32; marker++ {
-		selected[selectFirst(base, foundation.Hash{marker})] = struct{}{}
+		var target foundation.Hash
+		target[31] = marker
+		selected[selectFirst(base, target)] = struct{}{}
 	}
 	if len(selected) < 2 {
-		t.Fatalf("32 targets selected only %d equal-score peer", len(selected))
+		t.Fatalf("32 targets selected only %d peer", len(selected))
+	}
+}
+
+func TestSipHash24MatchesJavaReferenceVector(t *testing.T) {
+	data := make([]byte, 15)
+	for index := range data {
+		data[index] = byte(index)
+	}
+	if got := sipHash24(0x0706050403020100, 0x0f0e0d0c0b0a0908, data); got != 0xa129ca6149be45e5 {
+		t.Fatalf("SipHash-2-4 = %016x", got)
+	}
+}
+
+func TestJavaClientSubtiersMapGatewayMiddleAndEndpoint(t *testing.T) {
+	candidates := make([]hopCandidate, 4)
+	for subTier := range candidates {
+		candidates[subTier] = hopCandidate{
+			hop:  ShortBuildHop{Router: foundation.Hash{byte(subTier + 1)}},
+			tier: 0, subTier: uint8(subTier),
+		}
+	}
+	policy := peerSelectionPolicy{direction: Outbound}
+	selected := make([]hopCandidate, 0, 3)
+	for len(selected) < cap(selected) {
+		choice := selectDiverseHop(candidates, selected, cap(selected), 0, policy)
+		if choice < 0 {
+			t.Fatalf("selected %d of %d client positions", len(selected), cap(selected))
+		}
+		selected = append(selected, candidates[choice])
+	}
+	if selected[0].subTier != 1 || selected[1].subTier < 2 || selected[2].subTier != 0 {
+		t.Fatalf("three-hop subtiers = %d, %d, %d", selected[0].subTier, selected[1].subTier, selected[2].subTier)
+	}
+}
+
+func TestPoolSelectionKeyKeepsSubtiersStableWhileBuildTargetsVaryMembership(t *testing.T) {
+	table := netdb.NewTable(foundation.Hash{}, 64)
+	peers := make([]foundation.Hash, 0, 32)
+	for marker := byte(1); marker <= 32; marker++ {
+		info := verifiedX25519Router(t, marker)
+		table.StoreVerified(info, false, 1)
+		peers = append(peers, info.Hash())
+	}
+	foundSelectionKey := false
+	var selectionKey foundation.Hash
+	for marker := 1; marker < 1<<16; marker++ {
+		binary.BigEndian.PutUint16(selectionKey[14:16], uint16(marker))
+		keys := newJavaPeerSelectionKeys(selectionKey)
+		low, high := 0, 0
+		for _, peer := range peers {
+			if keys.subTier(peer) < 2 {
+				low++
+			} else {
+				high++
+			}
+		}
+		if low >= 4 && high >= 4 {
+			foundSelectionKey = true
+			break
+		}
+	}
+	if !foundSelectionKey {
+		t.Fatal("could not derive a balanced pool selection key")
+	}
+	targetCounter := uint64(0)
+	nextTunnel := uint32(100)
+	nextCircuit := uint32(200)
+	source, err := NewNetDBOutboundBuildSource(NetDBOutboundBuildSourceConfig{
+		Table: table, Profiles: NewPeerProfiles(PeerProfilesConfig{}), ReplyRouter: foundation.Hash{9}, ReplyTunnelID: 10,
+		Hops: 2, CandidateLimit: len(peers), Lifetime: 100, SelectionKey: selectionKey,
+		CircuitID: func() uint32 { nextCircuit++; return nextCircuit },
+		TunnelID:  func() uint32 { nextTunnel++; return nextTunnel },
+		Target: func(uint64) foundation.Hash {
+			targetCounter++
+			var target foundation.Hash
+			binary.BigEndian.PutUint64(target[24:], targetCounter)
+			return target
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := newJavaPeerSelectionKeys(selectionKey)
+	selected := make(map[[2]foundation.Hash]struct{})
+	for buildIndex := range 32 {
+		build, buildErr := source.NextOutbound(context.Background(), uint64(500+buildIndex))
+		if buildErr != nil {
+			t.Fatal(buildErr)
+		}
+		if keys.subTier(build.Hops[0].Router) < 2 || keys.subTier(build.Hops[1].Router) >= 2 {
+			t.Fatalf("build %d subtiers changed: gateway=%d endpoint=%d", buildIndex, keys.subTier(build.Hops[0].Router), keys.subTier(build.Hops[1].Router))
+		}
+		selected[[2]foundation.Hash{build.Hops[0].Router, build.Hops[1].Router}] = struct{}{}
+	}
+	if len(selected) < 2 {
+		t.Fatalf("per-build targets selected only %d membership", len(selected))
+	}
+}
+
+func TestJavaClientMiddlePeersReverseKeyedEndpointFirstOrder(t *testing.T) {
+	candidates := []hopCandidate{
+		{hop: ShortBuildHop{Router: foundation.Hash{1}}, order: 4, tier: 0, subTier: 1},
+		{hop: ShortBuildHop{Router: foundation.Hash{2}}, order: 1, tier: 0, subTier: 2},
+		{hop: ShortBuildHop{Router: foundation.Hash{3}}, order: 9, tier: 0, subTier: 3},
+		{hop: ShortBuildHop{Router: foundation.Hash{4}}, order: 2, tier: 0, subTier: 0},
+	}
+	sortHopCandidates(candidates)
+	policy := peerSelectionPolicy{direction: Outbound}
+	selected := make([]hopCandidate, 0, 4)
+	for len(selected) < cap(selected) {
+		choice := selectDiverseHop(candidates, selected, cap(selected), 0, policy)
+		if choice < 0 {
+			t.Fatalf("selected %d of %d client positions", len(selected), cap(selected))
+		}
+		selected = append(selected, candidates[choice])
+	}
+	if selected[1].order != 9 || selected[2].order != 1 {
+		t.Fatalf("gateway-first middle order = %d, %d", selected[1].order, selected[2].order)
+	}
+}
+
+func TestJavaExploratoryNormalSelectionReservesHighCapacityQuota(t *testing.T) {
+	candidates := []hopCandidate{
+		{hop: ShortBuildHop{Router: foundation.Hash{1}}, order: 1, tier: 0},
+		{hop: ShortBuildHop{Router: foundation.Hash{2}}, order: 2, tier: 2},
+		{hop: ShortBuildHop{Router: foundation.Hash{3}}, order: 3, tier: 0},
+		{hop: ShortBuildHop{Router: foundation.Hash{4}}, order: 4, tier: 2},
+	}
+	policy := peerSelectionPolicy{direction: Outbound, exploratory: true}
+	selected := make([]hopCandidate, 0, 4)
+	for len(selected) < 2 {
+		choice := selectDiverseHop(candidates, selected, cap(selected), 0, policy)
+		if choice < 0 {
+			t.Fatalf("selected %d high-capacity exploratory peers", len(selected))
+		}
+		selected = append(selected, candidates[choice])
+	}
+	if selected[0].tier != 0 || selected[1].tier != 0 {
+		t.Fatalf("exploratory high-capacity quota tiers = %d, %d", selected[0].tier, selected[1].tier)
 	}
 }
 
@@ -146,7 +298,7 @@ func TestNetDBBuildSourceRequiresAdjacentTransportCompatibility(t *testing.T) {
 	nextTunnel := uint32(80)
 	source, err := NewNetDBOutboundBuildSource(NetDBOutboundBuildSourceConfig{
 		Table: table, Profiles: profiles, ReplyRouter: foundation.Hash{9}, ReplyTunnelID: 10,
-		Hops: 2, CandidateLimit: 3, Lifetime: 100,
+		Hops: 2, CandidateLimit: 3, Lifetime: 100, Exploratory: true,
 		CircuitID: func() uint32 { return 70 },
 		TunnelID:  func() uint32 { nextTunnel++; return nextTunnel },
 	})
