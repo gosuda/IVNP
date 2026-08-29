@@ -119,7 +119,7 @@ func (s *NetDBOutboundBuildSource) NextOutboundForReply(ctx context.Context, now
 	}
 	_, candidates := s.table.Snapshot()
 	random := newSelectionRandom(target)
-	random.shuffle(candidates)
+	shuffleCandidates(candidates, random)
 	if s.candidateLimit != 0 && len(candidates) > s.candidateLimit {
 		candidates = candidates[:s.candidateLimit]
 	}
@@ -209,6 +209,13 @@ func (r *selectionRandom) shuffle(refs []netdb.RouterRef) {
 	}
 }
 
+func shuffleCandidates(candidates []netdb.RouterRef, random *selectionRandom) {
+	slices.SortFunc(candidates, func(left, right netdb.RouterRef) int {
+		return bytes.Compare(left.Hash[:], right.Hash[:])
+	})
+	random.shuffle(candidates)
+}
+
 // InboundBuildSource selects one inbound path and binds it to the outbound
 // tunnel that carries its build request. An outbound tunnel ID of zero is the
 // explicit startup-only fake zero-hop route.
@@ -295,7 +302,7 @@ func (s *NetDBInboundBuildSource) NextInbound(ctx context.Context, nowMillis uin
 	}
 	_, candidates := s.table.Snapshot()
 	random := newSelectionRandom(target)
-	random.shuffle(candidates)
+	shuffleCandidates(candidates, random)
 	if s.candidateLimit != 0 && len(candidates) > s.candidateLimit {
 		candidates = candidates[:s.candidateLimit]
 	}
@@ -387,6 +394,7 @@ type hopCandidate struct {
 	v6         [][16]byte
 	ports      []uint16
 	transports tunnelTransportMask
+	score      int64
 	tier       uint8
 	reachable  bool
 }
@@ -433,7 +441,7 @@ func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, ex
 		candidates = append(candidates, hopCandidate{
 			hop: ShortBuildHop{Router: ref.Hash, StaticKey: key}, family: family,
 			v4: v4, v6: v6, ports: ports, transports: transports,
-			tier:      profiles.selectionTier(ref.Hash, caps.highCapacity, policy.exploratory),
+			score: profiles.Score(ref.Hash), tier: profiles.selectionTier(ref.Hash, caps.highCapacity, policy.exploratory),
 			reachable: caps.reachable,
 		})
 	}
@@ -485,11 +493,19 @@ func selectHopFromTier(candidates, selected []hopCandidate, wanted, relaxation i
 			choice, choiceAddsFamily, choiceFutureOptions = index, addsFamily, futureOptions
 			continue
 		}
-		if addsFamily && !choiceAddsFamily {
-			choice, choiceAddsFamily, choiceFutureOptions = index, addsFamily, futureOptions
+		if addsFamily != choiceAddsFamily {
+			if addsFamily {
+				choice, choiceAddsFamily, choiceFutureOptions = index, addsFamily, futureOptions
+			}
 			continue
 		}
-		if addsFamily == choiceAddsFamily && futureOptions > choiceFutureOptions {
+		if futureOptions != choiceFutureOptions {
+			if futureOptions > choiceFutureOptions {
+				choice, choiceAddsFamily, choiceFutureOptions = index, addsFamily, futureOptions
+			}
+			continue
+		}
+		if candidate.score > candidates[choice].score {
 			choice, choiceAddsFamily, choiceFutureOptions = index, addsFamily, futureOptions
 		}
 	}

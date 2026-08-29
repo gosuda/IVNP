@@ -28,7 +28,8 @@ const (
 	shortBuildFutureSkew     = 5 * 60_000
 	shortBuildReplayLifetime = 10 * 60_000
 	buildMessageLifetime     = 60_000
-	buildRequestTimeout      = 5_000 // Java BuildRequestor.REQUEST_TIMEOUT
+	buildRequestTimeout      = 5_000  // Java BuildRequestor.REQUEST_TIMEOUT
+	buildReplyGracePeriod    = 60_000 // Java BuildExecutor.GRACE_PERIOD
 )
 
 var (
@@ -158,6 +159,7 @@ type BuildManager struct {
 	lifecycleMu     sync.RWMutex
 	mu              sync.Mutex
 	pending         map[uint32]*pendingOutboundBuild
+	recentPending   map[uint32]*pendingOutboundBuild
 	pendingInbound  map[uint32]*pendingInboundBuild
 	pendingVariable map[uint32]*pendingVariableBuild
 	transit         map[uint32]uint64
@@ -176,6 +178,7 @@ type pendingOutboundBuild struct {
 	recordCount    uint8
 	startedAt      uint64
 	deadline       uint64
+	timedOut       bool
 	cancelDeadline func()
 }
 
@@ -279,9 +282,9 @@ func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
 		now:             config.Now,
 		random:          &synchronizedReader{reader: config.Random},
 		profiles:        config.Profiles,
-		maxPending:      config.MaxPending, pending: make(map[uint32]*pendingOutboundBuild), pendingInbound: make(map[uint32]*pendingInboundBuild),
-		pendingVariable: make(map[uint32]*pendingVariableBuild), transit: make(map[uint32]uint64),
-		transitRecords: make(map[[32]byte]uint64), staticPrivateKey: staticPrivateKey,
+		maxPending:      config.MaxPending, pending: make(map[uint32]*pendingOutboundBuild), recentPending: make(map[uint32]*pendingOutboundBuild),
+		pendingInbound: make(map[uint32]*pendingInboundBuild), pendingVariable: make(map[uint32]*pendingVariableBuild),
+		transit: make(map[uint32]uint64), transitRecords: make(map[[32]byte]uint64), staticPrivateKey: staticPrivateKey,
 		logger: config.Logger, metrics: config.Metrics, onBuildEvent: config.OnBuildEvent, schedule: config.Schedule,
 		ctx: lifecycle, cancel: cancel,
 	}
@@ -320,6 +323,16 @@ func (m *BuildManager) ReleaseSensitive() {
 		clear(pending.replyTag[:])
 		cancelBuildDeadline(pending.cancelDeadline)
 		delete(m.pending, id)
+	}
+	for id, pending := range m.recentPending {
+		if pending.replyTag != ([8]byte{}) {
+			m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
+		}
+		clear(pending.keys)
+		clear(pending.positions)
+		clear(pending.replyTag[:])
+		cancelBuildDeadline(pending.cancelDeadline)
+		delete(m.recentPending, id)
 	}
 	for id, pending := range m.pendingInbound {
 		clear(pending.keys)
@@ -473,7 +486,7 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		recordCount: uint8(recordCount), startedAt: now, deadline: build.ExpiresAt,
 	}
 	m.mu.Lock()
-	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.pending[replyID] != nil || m.pendingInbound[replyID] != nil || m.pendingVariable[replyID] != nil {
+	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.pending[replyID] != nil || m.recentPending[replyID] != nil || m.pendingInbound[replyID] != nil || m.pendingVariable[replyID] != nil {
 		m.mu.Unlock()
 		cancelBuildDeadline(pending.cancelDeadline)
 		clearBuildKeys(keys)
@@ -481,8 +494,9 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 	}
 	m.pending[replyID] = pending
 	m.mu.Unlock()
+	replyKeyExpiresAt := min(build.ExpiresAt, now+2*buildMessageLifetime)
 	if err = m.replyKeys.RegisterGarlicReplyKey(GarlicReplyKey{
-		Key: endpointKeys.GarlicKey, Tag: endpointKeys.GarlicTag, ExpiresAt: pending.deadline,
+		Key: endpointKeys.GarlicKey, Tag: endpointKeys.GarlicTag, ExpiresAt: replyKeyExpiresAt,
 	}); err != nil {
 		m.removePending(replyID)
 		return 0, err
@@ -492,7 +506,8 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		m.metrics.IncTunnelBuilds()
 	}
 	if m.logger != nil {
-		m.logger.Info("tunnel build send", "direction", "outbound", "reply_id", replyID, "hop_count", len(build.Hops), "peers", buildPeerDiagnostics(build.Hops))
+		ownerKind, owner := m.logOwner()
+		m.logger.Info("tunnel build reply stage", "stage", "creator_registered", "owner_kind", ownerKind, "owner", owner, "direction", "outbound", "reply_id", replyID, "reply_router", foundation.EncodeI2PBase64(build.ReplyRouter[:]), "reply_tunnel_id", build.ReplyTunnelID, "hop_count", len(build.Hops), "peers", buildPeerDiagnostics(build.Hops))
 	}
 	message := i2np.Message{Header: i2np.Header{Type: i2np.ShortTunnelBuild, ID: messageIDs[0], Expiration: now + buildMessageLifetime}, Payload: payload}
 	if err = m.sender.Send(ctx, build.Hops[0].Router, message); err != nil {
@@ -504,7 +519,8 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 			m.metrics.IncTunnelBuildFailures()
 		}
 		if m.logger != nil {
-			m.logger.Warn("tunnel build send failed", "direction", "outbound", "reply_id", replyID, "peer", foundation.EncodeI2PBase64(build.Hops[0].Router[:]), "error", err)
+			ownerKind, owner := m.logOwner()
+			m.logger.Warn("tunnel build send failed", "owner_kind", ownerKind, "owner", owner, "direction", "outbound", "reply_id", replyID, "peer", foundation.EncodeI2PBase64(build.Hops[0].Router[:]), "error", err)
 		}
 		m.scheduleBuildRetry()
 		return 0, err
@@ -661,7 +677,8 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 		m.metrics.IncTunnelBuilds()
 	}
 	if m.logger != nil {
-		m.logger.Info("tunnel build send", "direction", "inbound", "reply_id", replyID, "hop_count", len(build.Hops), "peers", buildPeerDiagnostics(build.Hops), "carrier_tunnel_id", build.OutboundTunnelID)
+		ownerKind, owner := m.logOwner()
+		m.logger.Info("tunnel build send", "owner_kind", ownerKind, "owner", owner, "direction", "inbound", "reply_id", replyID, "hop_count", len(build.Hops), "peers", buildPeerDiagnostics(build.Hops), "carrier_tunnel_id", build.OutboundTunnelID)
 	}
 	message := i2np.Message{Header: i2np.Header{Type: i2np.ShortTunnelBuild, ID: messageIDs[0], Expiration: now + buildMessageLifetime}, Payload: payload}
 	if build.OutboundTunnelID == 0 {
@@ -674,7 +691,8 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 				m.metrics.IncTunnelBuildFailures()
 			}
 			if m.logger != nil {
-				m.logger.Warn("tunnel build send failed", "direction", "inbound", "reply_id", replyID, "peer", foundation.EncodeI2PBase64(build.Hops[0].Router[:]), "error", err)
+				ownerKind, owner := m.logOwner()
+				m.logger.Warn("tunnel build send failed", "owner_kind", ownerKind, "owner", owner, "direction", "inbound", "reply_id", replyID, "peer", foundation.EncodeI2PBase64(build.Hops[0].Router[:]), "error", err)
 			}
 			m.scheduleBuildRetry()
 			return 0, err
@@ -848,7 +866,8 @@ func (m *BuildManager) handleInboundReply(message i2np.Message) error {
 		m.metrics.IncTunnelBuildSuccess(m.metricOwner(), observability.TunnelDirectionInbound)
 	}
 	if m.logger != nil {
-		m.logger.Info("tunnel build reply authenticated", "direction", "inbound", "reply_id", message.Header.ID, "latency_ms", now-pending.startedAt, "hop_count", len(pending.build.Hops))
+		ownerKind, owner := m.logOwner()
+		m.logger.Info("tunnel build reply authenticated", "owner_kind", ownerKind, "owner", owner, "direction", "inbound", "reply_id", message.Header.ID, "latency_ms", now-pending.startedAt, "hop_count", len(pending.build.Hops))
 	}
 	return nil
 }
@@ -1103,6 +1122,10 @@ func (m *BuildManager) HandleReply(message i2np.Message) error {
 	if pending == nil {
 		return ErrBuildPending
 	}
+	if m.logger != nil {
+		ownerKind, owner := m.logOwner()
+		m.logger.Info("tunnel build reply stage", "stage", "creator_received", "owner_kind", ownerKind, "owner", owner, "direction", "outbound", "reply_id", message.Header.ID, "late", pending.timedOut)
+	}
 	defer m.notifyBuildEvent()
 	m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
 	defer clearBuildKeys(pending.keys)
@@ -1174,7 +1197,8 @@ func (m *BuildManager) HandleReply(message i2np.Message) error {
 		m.metrics.IncTunnelBuildSuccess(m.metricOwner(), observability.TunnelDirectionOutbound)
 	}
 	if m.logger != nil {
-		m.logger.Info("tunnel build reply authenticated", "direction", "outbound", "reply_id", message.Header.ID, "latency_ms", now-pending.startedAt, "hop_count", len(pending.build.Hops))
+		ownerKind, owner := m.logOwner()
+		m.logger.Info("tunnel build reply stage", "stage", "creator_authenticated", "owner_kind", ownerKind, "owner", owner, "direction", "outbound", "reply_id", message.Header.ID, "late", pending.timedOut, "latency_ms", now-pending.startedAt, "hop_count", len(pending.build.Hops))
 	}
 	return nil
 }
@@ -1182,13 +1206,33 @@ func (m *BuildManager) HandleReply(message i2np.Message) error {
 func (m *BuildManager) Expire(nowMillis uint64) int {
 	m.lifecycleMu.RLock()
 	defer m.lifecycleMu.RUnlock()
+	graceDeadline := nowMillis + buildReplyGracePeriod
+	if graceDeadline < nowMillis {
+		graceDeadline = ^uint64(0)
+	}
 	m.mu.Lock()
 	expired := make([]*pendingOutboundBuild, 0)
+	expiredRecent := make([]*pendingOutboundBuild, 0)
+	evictedRecent := make([]*pendingOutboundBuild, 0)
 	expiredInbound := make([]*pendingInboundBuild, 0)
 	expiredVariable := make([]*pendingVariableBuild, 0)
+	for id, pending := range m.recentPending {
+		if pending.deadline <= nowMillis {
+			delete(m.recentPending, id)
+			expiredRecent = append(expiredRecent, pending)
+		}
+	}
 	for id, pending := range m.pending {
 		if pending.deadline <= nowMillis {
 			delete(m.pending, id)
+			pending.timedOut = true
+			pending.deadline = graceDeadline
+			cancelBuildDeadline(pending.cancelDeadline)
+			pending.cancelDeadline = m.scheduleBuildDeadline(nowMillis, graceDeadline)
+			if evicted := m.evictRecentPendingLocked(); evicted != nil {
+				evictedRecent = append(evictedRecent, evicted)
+			}
+			m.recentPending[id] = pending
 			expired = append(expired, pending)
 		}
 	}
@@ -1225,16 +1269,35 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 			m.metrics.AddTunnelBuildTimeouts(m.metricOwner(), observability.TunnelDirectionInbound, uint64(len(expiredInbound)))
 		}
 		if m.logger != nil {
-			m.logger.Warn("tunnel build reply timeout", "outbound", len(expired), "inbound", len(expiredInbound), "legacy", len(expiredVariable), "now_ms", nowMillis)
+			ownerKind, owner := m.logOwner()
+			m.logger.Warn("tunnel build reply timeout", "owner_kind", ownerKind, "owner", owner, "outbound", len(expired), "inbound", len(expiredInbound), "legacy", len(expiredVariable), "now_ms", nowMillis)
+			for _, pending := range expired {
+				m.logger.Warn("tunnel build reply stage", "stage", "creator_timeout", "owner_kind", ownerKind, "owner", owner, "direction", "outbound", "reply_id", pending.replyID, "reply_router", foundation.EncodeI2PBase64(pending.build.ReplyRouter[:]), "reply_tunnel_id", pending.build.ReplyTunnelID)
+			}
 		}
 	}
 	for _, pending := range expired {
-		cancelBuildDeadline(pending.cancelDeadline)
-		m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
 		for _, hop := range pending.build.Hops {
 			m.recordBuildPeer(hop.Router, false, 0, nowMillis)
 		}
+	}
+	for _, pending := range expiredRecent {
+		cancelBuildDeadline(pending.cancelDeadline)
+		m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
 		clearBuildKeys(pending.keys)
+		if m.logger != nil {
+			ownerKind, owner := m.logOwner()
+			m.logger.Warn("tunnel build reply stage", "stage", "creator_grace_expired", "owner_kind", ownerKind, "owner", owner, "direction", "outbound", "reply_id", pending.replyID)
+		}
+	}
+	for _, pending := range evictedRecent {
+		cancelBuildDeadline(pending.cancelDeadline)
+		m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
+		clearBuildKeys(pending.keys)
+		if m.logger != nil {
+			ownerKind, owner := m.logOwner()
+			m.logger.Warn("tunnel build reply stage", "stage", "creator_grace_evicted", "owner_kind", ownerKind, "owner", owner, "direction", "outbound", "reply_id", pending.replyID)
+		}
 	}
 	for _, pending := range expiredInbound {
 		cancelBuildDeadline(pending.cancelDeadline)
@@ -1253,7 +1316,7 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 	if expiredCount != 0 {
 		m.scheduleBuildRetry()
 	}
-	return len(expired) + len(expiredInbound) + len(expiredVariable)
+	return expiredCount
 }
 
 // Pending returns the bounded number of creator builds awaiting replies.
@@ -1447,10 +1510,36 @@ func validateShortBuildHops(hops []ShortBuildHop) error {
 	return nil
 }
 
+func (m *BuildManager) evictRecentPendingLocked() *pendingOutboundBuild {
+	if len(m.recentPending) < m.maxPending {
+		return nil
+	}
+	var victimID uint32
+	var victim *pendingOutboundBuild
+	for id, pending := range m.recentPending {
+		replaceVictim := victim == nil
+		if !replaceVictim {
+			replaceVictim = pending.deadline < victim.deadline
+		}
+		if !replaceVictim && pending.deadline == victim.deadline {
+			replaceVictim = id < victimID
+		}
+		if replaceVictim {
+			victimID, victim = id, pending
+		}
+	}
+	delete(m.recentPending, victimID)
+	return victim
+}
+
 func (m *BuildManager) takePending(id uint32) *pendingOutboundBuild {
 	m.mu.Lock()
 	pending := m.pending[id]
 	delete(m.pending, id)
+	if pending == nil {
+		pending = m.recentPending[id]
+		delete(m.recentPending, id)
+	}
 	m.mu.Unlock()
 	if pending != nil {
 		cancelBuildDeadline(pending.cancelDeadline)
@@ -1520,6 +1609,17 @@ func (m *BuildManager) metricOwner() observability.TunnelOwner {
 	return observability.TunnelOwnerExploratory
 }
 
+func (m *BuildManager) logOwner() (string, string) {
+	if m.pool == nil {
+		return "exploratory", "exploratory"
+	}
+	owner := m.pool.Owner()
+	if owner == (foundation.Hash{}) {
+		return "exploratory", "exploratory"
+	}
+	return "client", foundation.EncodeI2PBase64(owner[:])
+}
+
 func (m *BuildManager) ensureBuildSession(ctx context.Context, peer foundation.Hash, hops []ShortBuildHop, direction, role string) error {
 	ensurer, ok := m.sender.(SessionEnsurer)
 	if !ok {
@@ -1530,7 +1630,8 @@ func (m *BuildManager) ensureBuildSession(ctx context.Context, peer foundation.H
 			m.profiles.RecordTransportFailure(peer, m.now())
 		}
 		if m.logger != nil {
-			m.logger.Warn("tunnel build session failed", "direction", direction, "role", role, "peer", foundation.EncodeI2PBase64(peer[:]), "error", err)
+			ownerKind, owner := m.logOwner()
+			m.logger.Warn("tunnel build session failed", "owner_kind", ownerKind, "owner", owner, "direction", direction, "role", role, "peer", foundation.EncodeI2PBase64(peer[:]), "error", err)
 		}
 		m.scheduleBuildRetry()
 		return err

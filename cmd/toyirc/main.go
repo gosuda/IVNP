@@ -28,6 +28,11 @@ type ircConfig struct {
 	nick       string
 }
 
+type ircNetwork interface {
+	Start(context.Context) error
+	DialI2P(context.Context, string) (net.Conn, error)
+}
+
 func main() {
 	var timeout time.Duration
 	config := ircConfig{}
@@ -66,11 +71,29 @@ func runIRC2P(ctx context.Context, config ircConfig, output io.Writer) error {
 	if config.port < 1 || config.port > 65535 || !validNick(config.nick) {
 		return errors.New("toyirc: invalid configuration")
 	}
+	network, err := client.SimpleAnonymousMessagingNew(client.SimpleAnonymousMessagingConfig{
+		Address: config.samAddress, SignatureType: foundation.SigningEdDSASHA512Ed25519,
+		LeaseSetEncTypes: []foundation.CryptoKeyType{foundation.CryptoX25519},
+	})
+	if err != nil {
+		return fmt.Errorf("toyirc: create SAM session: %w", err)
+	}
+	defer network.Close()
+	return runIRC2PNetwork(ctx, config, output, network, 2*time.Second)
+}
+
+func runIRC2PNetwork(ctx context.Context, config ircConfig, output io.Writer, network ircNetwork, retryDelay time.Duration) error {
+	if ctx == nil || network == nil || retryDelay < 0 {
+		return errors.New("toyirc: invalid configuration")
+	}
+	if err := network.Start(ctx); err != nil {
+		return fmt.Errorf("toyirc: start SAM session: %w", err)
+	}
 	address := net.JoinHostPort(config.server, strconv.Itoa(config.port))
 	var lastErr error
 	for {
 		attemptContext, cancel := context.WithTimeout(ctx, 90*time.Second)
-		lastErr = runIRC2PAttempt(attemptContext, config, address)
+		lastErr = runIRC2PAttempt(attemptContext, network, config, address)
 		cancel()
 		if lastErr == nil {
 			_, err := fmt.Fprintf(output, "connected to %s as %s\n", address, config.nick)
@@ -79,7 +102,7 @@ func runIRC2P(ctx context.Context, config ircConfig, output io.Writer) error {
 		if ctx.Err() != nil {
 			return fmt.Errorf("toyirc: connect %s: %w", address, errors.Join(ctx.Err(), lastErr))
 		}
-		timer := time.NewTimer(2 * time.Second)
+		timer := time.NewTimer(retryDelay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -89,18 +112,7 @@ func runIRC2P(ctx context.Context, config ircConfig, output io.Writer) error {
 	}
 }
 
-func runIRC2PAttempt(ctx context.Context, config ircConfig, address string) error {
-	network, err := client.SimpleAnonymousMessagingNew(client.SimpleAnonymousMessagingConfig{
-		Address: config.samAddress, SignatureType: foundation.SigningEdDSASHA512Ed25519,
-		LeaseSetEncTypes: []foundation.CryptoKeyType{foundation.CryptoX25519},
-	})
-	if err != nil {
-		return fmt.Errorf("toyirc: create SAM session: %w", err)
-	}
-	defer network.Close()
-	if err = network.Start(ctx); err != nil {
-		return fmt.Errorf("toyirc: start SAM session: %w", err)
-	}
+func runIRC2PAttempt(ctx context.Context, network ircNetwork, config ircConfig, address string) error {
 	connection, err := network.DialI2P(ctx, address)
 	if err != nil {
 		return fmt.Errorf("toyirc: connect %s: %w", address, err)

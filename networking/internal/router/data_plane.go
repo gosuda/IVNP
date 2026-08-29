@@ -888,6 +888,7 @@ type GarlicReceiverConfig struct {
 	ReplyKeys     *garlic.ReplyKeyRegistry
 	Now           func() uint64
 	Metrics       *observability.Registry
+	Logger        *slog.Logger
 	StaticPrivate []byte
 }
 
@@ -902,6 +903,7 @@ type GarlicReceiver struct {
 	replyKeys      *garlic.ReplyKeyRegistry
 	now            func() uint64
 	metrics        *observability.Registry
+	logger         *slog.Logger
 	staticPrivate  [32]byte
 	hasStatic      bool
 	replyScratch   chan *[i2np.I2PDMaxPayload]byte
@@ -976,7 +978,7 @@ func NewGarlicReceiver(config GarlicReceiverConfig) (*GarlicReceiver, error) {
 	replySlots := parallelism.CPUs()
 	receiver := &GarlicReceiver{
 		service: config.Service, destinations: make(map[foundation.Hash]*garlicDestinationState, len(config.Destinations)),
-		replyKeys: config.ReplyKeys, now: config.Now, metrics: config.Metrics, hasStatic: len(config.StaticPrivate) == 32,
+		replyKeys: config.ReplyKeys, now: config.Now, metrics: config.Metrics, logger: config.Logger, hasStatic: len(config.StaticPrivate) == 32,
 		replyScratch: make(chan *[i2np.I2PDMaxPayload]byte, replySlots),
 	}
 	for range replySlots {
@@ -1124,6 +1126,9 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message i2np.Messag
 		var tag [8]byte
 		copy(tag[:], outer.Encrypted[:8])
 		if key, found := r.replyKeys.ConsumeGarlicReplyKey(tag, now); found {
+			if r.logger != nil {
+				r.logger.Info("tunnel build reply stage", "stage", "creator_key_matched", "garlic_id", message.Header.ID)
+			}
 			if len(outer.Encrypted) < 8+16 {
 				return garlicecies.ErrOneTimeReplyExistingSession
 			}
@@ -1133,12 +1138,16 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message i2np.Messag
 			}
 			scratch := <-r.replyScratch
 			reply, unwrapErr := garlicecies.OpenOneTimeReplyExistingSession(scratch[:plainLen], key.Key, key.Tag, outer.Encrypted)
-			if unwrapErr ==
-				nil {
+			if unwrapErr == nil {
+				if r.logger != nil {
+					r.logger.Info("tunnel build reply stage", "stage", "creator_decrypted", "garlic_id", message.Header.ID, "reply_id", reply.Header.ID)
+				}
 				unwrapErr = r.service.
 					dispatchClove(foundation.
 						Hash{}, garlic.Delivery{Type: garlic.
 						DeliveryLocal}, reply, now, false)
+			} else if r.logger != nil {
+				r.logger.Warn("tunnel build reply stage", "stage", "creator_decrypt_failed", "garlic_id", message.Header.ID, "error", unwrapErr)
 			}
 
 			clear(scratch[:plainLen])

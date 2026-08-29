@@ -1,8 +1,12 @@
 package router
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdh"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"gosuda.org/ivnp/foundation"
@@ -75,6 +79,147 @@ func TestBuildReplySenderSendsTunnelGatewayDirectlyToIBGW(t *testing.T) {
 	}
 	if received.Header.Type != 0 {
 		t.Fatal("remote reply was delivered to local Service")
+	}
+}
+
+func TestOutboundBuildReplyTraversesInboundTunnelDataPlane(t *testing.T) {
+	const (
+		now                  = uint64(1_700_000_000_000)
+		replyGatewayTunnelID = uint32(42)
+		replyEndpointID      = uint32(43)
+		outboundCircuitID    = uint32(44)
+		outboundReceiveID    = uint32(45)
+	)
+	creatorHash := foundation.Hash{1}
+	gatewayHash := foundation.Hash{2}
+	obepHash := foundation.Hash{3}
+	ownerHash := foundation.Hash{9}
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logOutput, nil))
+
+	var layerKey, ivKey [32]byte
+	for index := range layerKey {
+		layerKey[index] = byte(index + 1)
+		ivKey[index] = byte(index + 33)
+	}
+	gatewayEncryptor, err := tunnel.NewLayerEncryptor(layerKey[:], ivKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	creatorDecryptor, err := tunnel.NewLayerDecryptor(layerKey[:], ivKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	creatorService := NewService(nil)
+	var obepService *Service
+	creatorSender := &buildReplyCaptureSender{handle: func(message i2np.Message) error {
+		return obepService.HandleI2NPFrom(creatorHash, message, now, false)
+	}}
+	creatorRuntime := tunnel.NewRuntime(tunnel.RuntimeConfig{Sender: creatorSender, Now: func() uint64 { return now }})
+	replyKeys := garlic.NewReplyKeyRegistry(4)
+	creatorManager, err := tunnel.NewBuildManager(tunnel.BuildManagerConfig{
+		Runtime: creatorRuntime, Pool: tunnel.NewOwnedPool(ownerHash, 4), Sender: creatorSender, ReplyKeys: replyKeys,
+		LocalRouter: creatorHash, Now: func() uint64 { return now }, Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	creatorService.SetTunnelDataSink(creatorRuntime.Handle)
+	creatorService.SetOutboundTunnelBuildReplySink(creatorManager.HandleReply)
+	creatorReceiver, err := NewGarlicReceiver(GarlicReceiverConfig{
+		Service: creatorService, ReplyKeys: replyKeys, Now: func() uint64 { return now }, Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	creatorService.SetGarlicSink(creatorReceiver.HandleGarlicFrom)
+	if err = creatorRuntime.RegisterInbound(tunnel.InboundCircuit{
+		ID: replyEndpointID, Transforms: []tunnel.LayerCipher{creatorDecryptor},
+		Endpoint: tunnel.NewEndpoint(8, i2np.I2PDMaxPayload),
+		Local: func(message i2np.Message) error {
+			return creatorService.HandleI2NP(message, now, false)
+		},
+		ExpiresAt: now + 600_000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	gatewaySender := &buildReplyCaptureSender{handle: func(message i2np.Message) error {
+		return creatorService.HandleI2NPFrom(gatewayHash, message, now, false)
+	}}
+	gatewayRuntime := tunnel.NewRuntime(tunnel.RuntimeConfig{Sender: gatewaySender, Now: func() uint64 { return now }})
+	gatewayService := NewWithSinks(nil, Sinks{TunnelGateway: gatewayRuntime.HandleGateway})
+	if err = gatewayRuntime.RegisterOutbound(tunnel.OutboundCircuit{
+		ID: replyGatewayTunnelID, FirstHop: creatorHash, NextTunnelID: replyEndpointID,
+		Transforms: []tunnel.LayerCipher{gatewayEncryptor}, ExpiresAt: now + 600_000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	obepService = NewService(nil)
+	obepSender := &buildReplyCaptureSender{handle: func(message i2np.Message) error {
+		return gatewayService.HandleI2NPFrom(obepHash, message, now, false)
+	}}
+	obepRuntime := tunnel.NewRuntime(tunnel.RuntimeConfig{Sender: obepSender, Now: func() uint64 { return now }})
+	replySender, err := NewBuildReplySender(BuildReplySenderConfig{
+		Sender: obepSender, Service: obepService, LocalRouter: obepHash, Now: func() uint64 { return now },
+		NextID: buildReplyIDSource(50, 51), Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obepPrivateBytes := make([]byte, 32)
+	for index := range obepPrivateBytes {
+		obepPrivateBytes[index] = byte(index + 65)
+	}
+	obepPrivate, err := ecdh.X25519().NewPrivateKey(obepPrivateBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obepManager, err := tunnel.NewBuildManager(tunnel.BuildManagerConfig{
+		Runtime: obepRuntime, Sender: obepSender, ReplyKeys: garlic.NewReplyKeyRegistry(1),
+		ReplySender: replySender, LocalRouter: obepHash, StaticPrivate: obepPrivateBytes,
+		LocalDelivery: func(i2np.Message) error { return nil }, Now: func() uint64 { return now }, Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obepService.SetTunnelBuildSink(func(source I2NPSource, _ i2np.BuildRecords, message i2np.Message) error {
+		if !source.Direct {
+			return errors.New("outbound build was not delivered by direct transport")
+		}
+		return obepManager.HandleBuildFrom(source.Peer, message)
+	})
+
+	hop := tunnel.ShortBuildHop{Router: obepHash, ReceiveTunnelID: outboundReceiveID}
+	copy(hop.StaticKey[:], obepPrivate.PublicKey().Bytes())
+	if _, err = creatorManager.StartOutbound(context.Background(), tunnel.OutboundBuild{
+		CircuitID: outboundCircuitID, Hops: []tunnel.ShortBuildHop{hop},
+		ReplyRouter: gatewayHash, ReplyTunnelID: replyGatewayTunnelID, ExpiresAt: now + 600_000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if owner, ok := creatorRuntime.CircuitOwner(outboundCircuitID); !ok || owner != ownerHash {
+		t.Fatalf("outbound circuit owner = %x, %t; want %x", owner, ok, ownerHash)
+	}
+	if replyKeys.Len() != 0 {
+		t.Fatalf("reply key count = %d, want 0 after one-time delivery", replyKeys.Len())
+	}
+	if creatorSender.peer != obepHash || obepSender.peer != gatewayHash || gatewaySender.peer != creatorHash {
+		t.Fatalf("reply path creator=%x endpoint=%x gateway=%x", creatorSender.peer, obepSender.peer, gatewaySender.peer)
+	}
+	for _, stage := range []string{
+		"creator_registered", "obep_wrapped", "obep_sent", "creator_key_matched",
+		"creator_decrypted", "creator_received", "creator_authenticated",
+	} {
+		if !strings.Contains(logOutput.String(), `"stage":"`+stage+`"`) {
+			t.Fatalf("reply logs omit stage %q:\n%s", stage, logOutput.String())
+		}
+	}
+	wantOwnerLog := `"owner_kind":"client","owner":"` + foundation.EncodeI2PBase64(ownerHash[:]) + `"`
+	if !strings.Contains(logOutput.String(), wantOwnerLog) {
+		t.Fatalf("reply logs omit stable owner fields %q:\n%s", wantOwnerLog, logOutput.String())
 	}
 }
 

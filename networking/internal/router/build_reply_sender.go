@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"encoding/binary"
+	"log/slog"
 
 	"gosuda.org/ivnp/foundation"
 	garlicecies "gosuda.org/ivnp/networking/internal/garlic/ecies"
@@ -19,6 +20,7 @@ type BuildReplySenderConfig struct {
 	LocalRouter foundation.Hash
 	Now         func() uint64
 	NextID      MessageIDSource
+	Logger      *slog.Logger
 }
 
 // BuildReplySender is the production tunnel.BuildReplySender. Remote replies
@@ -32,6 +34,7 @@ type BuildReplySender struct {
 	local   foundation.Hash
 	now     func() uint64
 	nextID  MessageIDSource
+	logger  *slog.Logger
 }
 
 func NewBuildReplySender(config BuildReplySenderConfig) (*BuildReplySender, error) {
@@ -42,7 +45,7 @@ func NewBuildReplySender(config BuildReplySenderConfig) (*BuildReplySender, erro
 		config.NextID = randomMessageID
 	}
 	return &BuildReplySender{
-		sender: config.Sender, service: config.Service, local: config.LocalRouter, now: config.Now, nextID: config.NextID,
+		sender: config.Sender, service: config.Service, local: config.LocalRouter, now: config.Now, nextID: config.NextID, logger: config.Logger,
 	}, nil
 }
 
@@ -104,16 +107,28 @@ func (s *BuildReplySender) SendBuildReply(ctx context.Context, gateway foundatio
 		Header:  i2np.Header{Type: i2np.TunnelGateway, ID: gatewayID, Expiration: reply.Header.Expiration},
 		Payload: gatewayPayload,
 	}
+	if s.logger != nil {
+		s.logger.Info("tunnel build reply stage", "stage", "obep_wrapped", "reply_id", reply.Header.ID, "reply_router", foundation.EncodeI2PBase64(gateway[:]), "reply_tunnel_id", gatewayTunnelID, "garlic", gateway != s.local)
+	}
+	var sendErr error
 	if gateway == s.local {
 		// Service routes the parsed gateway to Runtime.HandleGateway (or another
 		// configured injector) with the raw outbound build reply.
-		return s.service.HandleI2NP(message, s.now(), false)
+		sendErr = s.service.HandleI2NP(message, s.now(), false)
+	} else {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		sendErr = s.sender.Send(ctx, gateway, message)
 	}
-	if ctx == nil {
-		ctx = context.Background()
+	if s.logger != nil {
+		if sendErr != nil {
+			s.logger.Warn("tunnel build reply stage", "stage", "obep_send_failed", "reply_id", reply.Header.ID, "reply_router", foundation.EncodeI2PBase64(gateway[:]), "reply_tunnel_id", gatewayTunnelID, "garlic", gateway != s.local, "error", sendErr)
+		} else {
+			s.logger.Info("tunnel build reply stage", "stage", "obep_sent", "reply_id", reply.Header.ID, "reply_router", foundation.EncodeI2PBase64(gateway[:]), "reply_tunnel_id", gatewayTunnelID, "garlic", gateway != s.local)
+		}
 	}
-
-	return s.sender.Send(ctx, gateway, message)
+	return sendErr
 }
 
 func (s *BuildReplySender) replyEnvelopeIDs(replyID uint32, count int) ([2]uint32, error) {

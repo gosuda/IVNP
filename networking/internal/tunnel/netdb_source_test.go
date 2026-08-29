@@ -47,6 +47,48 @@ func TestNetDBOutboundBuildSourceRanksDistinctVerifiedPeers(t *testing.T) {
 	}
 }
 
+func TestNetDBEqualScoreSelectionIsCanonicalAndTargetDiverse(t *testing.T) {
+	base := make([]netdb.RouterRef, 8)
+	reversed := make([]netdb.RouterRef, len(base))
+	for index := range base {
+		base[index].Hash = foundation.Hash{byte(index + 1)}
+		reversed[len(base)-1-index] = base[index]
+	}
+	selectFirst := func(input []netdb.RouterRef, target foundation.Hash) foundation.Hash {
+		refs := append([]netdb.RouterRef(nil), input...)
+		shuffleCandidates(refs, newSelectionRandom(target))
+		candidates := make([]hopCandidate, len(refs))
+		for index, ref := range refs {
+			candidates[index] = hopCandidate{hop: ShortBuildHop{Router: ref.Hash}}
+		}
+		choice := selectHopFromTier(candidates, nil, 1, 0, 0, false, false, peerSelectionPolicy{direction: Outbound})
+		if choice < 0 {
+			t.Fatal("selected no equal-score peer")
+		}
+		return candidates[choice].hop.Router
+	}
+
+	fixedTarget := foundation.Hash{9}
+	fixedFirst := selectFirst(base, fixedTarget)
+	for repeat := range 16 {
+		input := base
+		if repeat%2 != 0 {
+			input = reversed
+		}
+		if first := selectFirst(input, fixedTarget); first != fixedFirst {
+			t.Fatalf("fixed target repetition %d selected %x, want %x", repeat, first, fixedFirst)
+		}
+	}
+
+	selected := make(map[foundation.Hash]struct{})
+	for marker := byte(1); marker <= 32; marker++ {
+		selected[selectFirst(base, foundation.Hash{marker})] = struct{}{}
+	}
+	if len(selected) < 2 {
+		t.Fatalf("32 targets selected only %d equal-score peer", len(selected))
+	}
+}
+
 func TestNetDBBuildSourceRejectsReseedFreshButTransportStalePeer(t *testing.T) {
 	info := verifiedX25519Router(t, 1)
 	table := netdb.NewTable(foundation.Hash{}, 8)

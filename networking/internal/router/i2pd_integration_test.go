@@ -448,6 +448,12 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("native i2pd ignored the outbound ShortTunnelBuild reply for 15 seconds")
 	}
+	if _, ok := runtime.CircuitOwner(outboundCircuitID); !ok {
+		t.Fatal("native i2pd reply did not install the outbound circuit")
+	}
+	if replyKeys.Len() != 0 {
+		t.Fatalf("native i2pd reply left %d one-time keys", replyKeys.Len())
+	}
 
 	compressed, err := netdb.CompressRouterInfo(alice.Snapshot().Bytes())
 	if err != nil {

@@ -712,7 +712,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			responders.Record(peer)
 		}
 		replyKeys = networking.GarlicNewReplyKeyRegistry(cfg.Tunnel.BuildPendingCapacity * (2*cfg.State.MaxDestinations + 2))
-		replySender, replyErr := networking.RouterNewBuildReplySender(networking.RouterBuildReplySenderConfig{Sender: mux, Service: service, LocalRouter: bundle.Router.Hash, Now: now, NextID: randomMessageID})
+		replySender, replyErr := networking.RouterNewBuildReplySender(networking.RouterBuildReplySenderConfig{Sender: mux, Service: service, LocalRouter: bundle.Router.Hash, Now: now, NextID: randomMessageID, Logger: logger})
 		if replyErr != nil {
 			return nil, replyErr
 		}
@@ -787,7 +787,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		}
 		destinations = networking.RouterNewDestinationManager()
 		garlicReceiver, err = networking.RouterNewGarlicReceiver(networking.RouterGarlicReceiverConfig{
-			Service: service, Destinations: nil, ReplyKeys: replyKeys, Now: now, Metrics: registry,
+			Service: service, Destinations: nil, ReplyKeys: replyKeys, Now: now, Metrics: registry, Logger: logger,
 			StaticPrivate: bundle.Router.X25519Private[:],
 		})
 		if err != nil {

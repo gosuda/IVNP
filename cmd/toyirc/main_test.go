@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -71,6 +72,48 @@ func TestExchangeIRCRejectsOversizedLine(t *testing.T) {
 	defer cancel()
 	if err := exchangeIRC(ctx, clientConnection, "ivtest"); err == nil || !strings.Contains(err.Error(), "oversized IRC line") {
 		t.Fatalf("oversized line error = %v", err)
+	}
+}
+
+type retrySAMNetwork struct {
+	starts int
+	dials  int
+}
+
+func (n *retrySAMNetwork) Start(context.Context) error {
+	n.starts++
+	return nil
+}
+
+func (n *retrySAMNetwork) DialI2P(context.Context, string) (net.Conn, error) {
+	n.dials++
+	if n.dials == 1 {
+		return nil, errors.New("temporary dial failure")
+	}
+	clientConnection, serverConnection := net.Pipe()
+	go func() {
+		defer serverConnection.Close()
+		reader := bufio.NewReader(serverConnection)
+		for range 2 {
+			if _, err := reader.ReadString('\n'); err != nil {
+				return
+			}
+		}
+		_, _ = io.WriteString(serverConnection, ":irc.example 001 ivtest :welcome\r\n")
+	}()
+	return clientConnection, nil
+}
+
+func TestRunIRC2PReusesSAMSessionAcrossDialRetries(t *testing.T) {
+	network := new(retrySAMNetwork)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	config := ircConfig{samAddress: "127.0.0.1:7656", server: "irc.example.i2p", port: 6667, nick: "ivtest"}
+	if err := runIRC2PNetwork(ctx, config, io.Discard, network, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if network.starts != 1 || network.dials != 2 {
+		t.Fatalf("SAM lifecycle starts=%d dials=%d, want 1/2", network.starts, network.dials)
 	}
 }
 
