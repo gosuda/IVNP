@@ -1,0 +1,93 @@
+name: irc2p tunnel integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  irc2p:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build daemon
+        shell: bash
+        run: go build -o "$RUNNER_TEMP/ivnpd" ./cmd/ivnpd
+      - name: Run real tunnel and IRC connection
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly run_dir="$RUNNER_TEMP/ivnp-irc2p"
+          mkdir -p -- "$run_dir"
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors \
+            --output "$run_dir/privatehosts.txt" \
+            https://raw.githubusercontent.com/i2p/i2p.i2p/master/installer/resources/hosts.txt
+          cat >"$run_dir/ivnp.conf" <<EOF
+          [router]
+          version = 0.9.70
+          [tunnel]
+          enabled = true
+          hops = 2
+          exploratory_inbound_target = 1
+          exploratory_outbound_target = 1
+          exploratory_pool_capacity = 2
+          client_inbound_target = 1
+          client_outbound_target = 1
+          client_pool_capacity = 2
+          build_pending_capacity = 13
+          lifetime = 10m
+          renew_before = 30s
+          maintenance_interval = 1s
+          [sam]
+          enabled = true
+          listen_host = 127.0.0.1
+          listen_port = 7656
+          [addressbook]
+          enabled = true
+          privatehosts_path = $run_dir/privatehosts.txt
+          subscriptions =
+          [log]
+          level = info
+          format = text
+          EOF
+          "$RUNNER_TEMP/ivnpd" -config "$run_dir/ivnp.conf" -webui=false >"$run_dir/ivnpd.log" 2>&1 &
+          daemon_pid=$!
+          cleanup() {
+            status=$?
+            trap - EXIT
+            kill "$daemon_pid" 2>/dev/null || true
+            wait "$daemon_pid" 2>/dev/null || true
+            if ((status != 0)); then
+              cat "$run_dir/ivnpd.log" >&2
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          ready=false
+          for _ in {1..90}; do
+            if (exec 3<>/dev/tcp/127.0.0.1/7656) 2>/dev/null; then
+              exec 3>&-
+              ready=true
+              break
+            fi
+            if ! kill -0 "$daemon_pid" 2>/dev/null; then
+              printf 'ivnpd exited before SAM became ready\n' >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          if [[ $ready != true ]]; then
+            printf 'SAM did not become ready\n' >&2
+            exit 1
+          fi
+          IVNP_IRC2P_INTEGRATION=1 IVNP_IRC2P_SAM=127.0.0.1:7656 \
+            go test ./cmd/toyirc -run '^TestIRC2PIntegration$' -count=1 -timeout=5m
