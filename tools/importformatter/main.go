@@ -38,7 +38,7 @@ func run(root string, writeChanges bool) error {
 	if err != nil {
 		return errors.New("importformatter: goimports is required on PATH")
 	}
-	paths, err := trackedGoFiles(absoluteRoot)
+	paths, err := repositoryGoFiles(absoluteRoot)
 	if err != nil {
 		return err
 	}
@@ -46,6 +46,9 @@ func run(root string, writeChanges bool) error {
 	for _, relativePath := range paths {
 		path := filepath.Join(absoluteRoot, relativePath)
 		source, readErr := os.ReadFile(path)
+		if errors.Is(readErr, os.ErrNotExist) {
+			continue
+		}
 		if readErr != nil {
 			return readErr
 		}
@@ -81,12 +84,12 @@ func run(root string, writeChanges bool) error {
 	return nil
 }
 
-func trackedGoFiles(root string) ([]string, error) {
-	command := exec.Command("git", "ls-files", "-z", "--", "*.go")
+func repositoryGoFiles(root string) ([]string, error) {
+	command := exec.Command("git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.go")
 	command.Dir = root
 	output, err := command.Output()
 	if err != nil {
-		return nil, fmt.Errorf("importformatter: list tracked Go files: %w", err)
+		return nil, fmt.Errorf("importformatter: list repository Go files: %w", err)
 	}
 	var paths []string
 	for path := range strings.SplitSeq(string(output), "\x00") {
