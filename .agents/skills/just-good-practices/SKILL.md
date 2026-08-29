@@ -16,6 +16,7 @@ This umbrella skill classifies work, establishes cross-language defaults, and ro
 - Route readability, control flow, decomposition, dependencies, errors, logging, comments, duplication, dead code, and refactoring to `code-health`.
 - Route public contracts, types, compatibility, construction, ownership, versioning, and request or response semantics to `api-design`.
 - Route change structure, risk analysis, reviewer guidance, feedback, and commit quality to `code-review`.
+- Route strict comment density, zero-slop policy, commit message discipline, and reviewer slop protocols to `zero-slop`.
 - Route syntax, libraries, concurrency primitives, framework mechanics, build systems, and runtime idioms to the corresponding language-specific skill.
 - When a deeper skill is unavailable, apply the baseline below. Do not invent language-specific mechanics from generic guidance.
 
