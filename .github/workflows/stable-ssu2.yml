@@ -1,0 +1,34 @@
+name: stable SSU2 actual integration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stable-ssu2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Bootstrap NetDB and acquire pinned RouterInfo
+        shell: bash
+        run: |
+          set -euo pipefail
+          IVNP_STABLE_ROUTERINFO_ACQUIRE=1 \
+          IVNP_STABLE_ROUTER_INFO_OUTPUT="$RUNNER_TEMP/stable-router.info" \
+            go test -tags integration ./node/internal/runtime \
+              -run '^TestAcquireStableRouterInfo$' -count=1 -timeout=3m -v
+      - name: Run exact-hash SSU2 round trip
+        shell: bash
+        run: |
+          set -euo pipefail
+          IVNP_STABLE_SSU2_INTEGRATION=1 \
+          IVNP_STABLE_SSU2_ROUTER_INFO="$RUNNER_TEMP/stable-router.info" \
+            go test -tags integration ./networking/internal/router \
+              -run '^TestStableRouterSSU2Interop$' -count=1 -timeout=90s -v
