@@ -72,18 +72,88 @@ func TestSSU2I2NPFragmentsStartAtJavaMinimumMTU(t *testing.T) {
 		t.Fatalf("IPv6 packet size = %d, want %d", size, ssu2MinimumIPv6PacketSize)
 	}
 }
-func TestSSU2ImmediateACKPolicyIsExplicit(t *testing.T) {
-	requested := ssu2DataHeader(7, 11, true)
-	if requested.Fragment != 1 {
-		t.Fatalf("requested immediate ACK flag = %d, want 1", requested.Fragment)
+func TestSSU2ImmediateACKPolicyUsesRemainingWindow(t *testing.T) {
+	session := &ssu2TransportSession{sendWindowBytes: 3 * ssu2MinimumNetworkMTU}
+	session.sendWindowRemaining = session.sendWindowBytes / 3
+	if session.shouldRequestImmediateACKLocked() {
+		t.Fatal("window boundary requested an immediate ACK")
 	}
-	unrequested := ssu2DataHeader(7, 11, false)
-	if unrequested.Fragment != 0 {
-		t.Fatalf("unrequested immediate ACK flag = %d, want 0", unrequested.Fragment)
+	session.sendWindowRemaining--
+	if !session.shouldRequestImmediateACKLocked() {
+		t.Fatal("congested window did not request an immediate ACK")
 	}
 }
 
-func TestSSU2SessionConfirmedFragmentsUseJavaMinimumMTU(t *testing.T) {
+func TestSSU2AcknowledgementGrowsWindowAndProbesMTU(t *testing.T) {
+	session := new(ssu2TransportSession)
+	session.initReliability(ssu2MaximumNetworkMTU)
+	sentAt := time.Unix(1, 0)
+	sent := session.retainPayload([]byte("tracked packet"), sentAt)
+	sent.windowBytes = ssu2MinimumNetworkMTU
+	sent.packetSize = ssu2MinimumNetworkMTU
+	sent.latestPacket = 1
+	session.sent[1] = sent
+	session.sendWindowRemaining -= sent.windowBytes
+	session.packetsTransmitted = 1
+
+	session.acknowledge([]ssu2.ACKRange{{Start: 1, End: 1}}, sentAt.Add(100*time.Millisecond))
+	if session.sendWindowBytes != 4*ssu2MinimumNetworkMTU || session.sendWindowRemaining != session.sendWindowBytes {
+		t.Fatalf("ACK window = %d/%d", session.sendWindowRemaining, session.sendWindowBytes)
+	}
+	if mtu := session.mtu.Load(); mtu != ssu2MinimumNetworkMTU+ssu2MTUStep {
+		t.Fatalf("ACK MTU = %d, want %d", mtu, ssu2MinimumNetworkMTU+ssu2MTUStep)
+	}
+	if session.rto != ssu2RetransmitInterval {
+		t.Fatalf("ACK RTO = %s, want %s", session.rto, ssu2RetransmitInterval)
+	}
+	if len(session.sent) != 0 {
+		t.Fatalf("ACK retained %d packets", len(session.sent))
+	}
+}
+
+func TestSSU2AcknowledgementAccountsRetransmissionAliasesOnce(t *testing.T) {
+	session := new(ssu2TransportSession)
+	session.initReliability(ssu2MaximumNetworkMTU)
+	sent := session.retainPayload([]byte("retransmitted packet"), time.Unix(1, 0))
+	sent.windowBytes = ssu2MinimumNetworkMTU
+	sent.packetSize = ssu2MinimumNetworkMTU
+	sent.latestPacket = 2
+	sent.attempts = 1
+	session.sent[1] = sent
+	session.sent[2] = sent
+	session.sendWindowRemaining = 0
+
+	session.acknowledge([]ssu2.ACKRange{{Start: 1, End: 2}}, time.Unix(2, 0))
+	if session.sendWindowRemaining != ssu2MinimumNetworkMTU {
+		t.Fatalf("aliased ACK restored %d bytes, want %d", session.sendWindowRemaining, ssu2MinimumNetworkMTU)
+	}
+	if len(session.sent) != 0 || sent.inUse {
+		t.Fatalf("aliased ACK retained map=%d inUse=%t", len(session.sent), sent.inUse)
+	}
+}
+
+func TestSSU2RetransmissionContractsWindowAndMTU(t *testing.T) {
+	session := new(ssu2TransportSession)
+	session.initReliability(ssu2MaximumNetworkMTU)
+	session.mtu.Store(ssu2MinimumNetworkMTU + ssu2MTUStep)
+	session.sendWindowBytes = 4 * ssu2MinimumNetworkMTU
+	session.sendWindowRemaining = 1_000
+	session.packetsTransmitted = 10
+	sent := &ssu2SentPacket{packetSize: ssu2MinimumNetworkMTU + ssu2MTUStep}
+
+	session.noteCongestionLocked(time.Unix(1, 0), sent)
+	if session.sendWindowBytes != ssu2MaximumNetworkMTU || session.sendWindowRemaining != 1_000 {
+		t.Fatalf("congested window = %d/%d", session.sendWindowRemaining, session.sendWindowBytes)
+	}
+	if session.rto != 2*ssu2RetransmitInterval {
+		t.Fatalf("congested RTO = %s, want %s", session.rto, 2*ssu2RetransmitInterval)
+	}
+	if mtu := session.mtu.Load(); mtu != ssu2MinimumNetworkMTU {
+		t.Fatalf("congested MTU = %d, want %d", mtu, ssu2MinimumNetworkMTU)
+	}
+}
+
+func TestSSU2SessionConfirmedFragmentsUseJavaAdvertisedMTU(t *testing.T) {
 	routerInfo := bytes.Repeat([]byte{0x5a}, 1_400)
 	routerInfo[0], routerInfo[1] = 0, 1
 	payload, err := ssu2.MarshalBlock(nil, ssu2.BlockRouterInfo, routerInfo)
@@ -91,12 +161,14 @@ func TestSSU2SessionConfirmedFragmentsUseJavaMinimumMTU(t *testing.T) {
 		t.Fatal(err)
 	}
 	tests := []struct {
-		name   string
-		remote *net.UDPAddr
-		max    int
+		name       string
+		remote     *net.UDPAddr
+		networkMTU int
+		maxPacket  int
 	}{
-		{name: "IPv4", remote: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.1:1234")), max: ssu2MinimumIPv4PacketSize},
-		{name: "IPv6", remote: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("[2001:db8::1]:1234")), max: ssu2MinimumIPv6PacketSize},
+		{name: "IPv4 default", remote: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.1:1234")), maxPacket: ssu2MaximumNetworkMTU - 20 - 8},
+		{name: "IPv6 default", remote: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("[2001:db8::1]:1234")), maxPacket: ssu2MaximumNetworkMTU - 40 - 8},
+		{name: "IPv4 advertised", remote: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.1:1234")), networkMTU: 1360, maxPacket: 1360 - 20 - 8},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -104,6 +176,7 @@ func TestSSU2SessionConfirmedFragmentsUseJavaMinimumMTU(t *testing.T) {
 			packets, buildErr := buildSSU2SessionConfirmedFragments(&ssu2OutboundPending{
 				initiator: initiator,
 				remote:    test.remote,
+				address:   ssu2PeerAddress{mtu: test.networkMTU},
 			}, staticPrivate, payload)
 			if buildErr != nil {
 				t.Fatal(buildErr)
@@ -112,8 +185,8 @@ func TestSSU2SessionConfirmedFragmentsUseJavaMinimumMTU(t *testing.T) {
 				t.Fatalf("fragment count = %d, want at least 2", len(packets))
 			}
 			for index, packet := range packets {
-				if len(packet) > test.max {
-					t.Fatalf("fragment %d size = %d, max %d", index, len(packet), test.max)
+				if len(packet) > test.maxPacket {
+					t.Fatalf("fragment %d size = %d, max %d", index, len(packet), test.maxPacket)
 				}
 			}
 		})
@@ -699,7 +772,7 @@ func TestSSU2SessionEvictionRemovesBothIndexes(t *testing.T) {
 	}
 
 	session.lastActivity = now
-	session.sent[1] = &ssu2SentPacket{sentAt: now.Add(-ssu2RetransmitInterval), attempts: ssu2MaxRetransmits}
+	session.sent[1] = &ssu2SentPacket{sentAt: now.Add(-ssu2RetransmitInterval), latestPacket: 1, attempts: ssu2MaxRetransmits, inUse: true}
 	manager.sessionsByPeer[peer] = session
 	manager.sessionsByID[session.receiveID] = session
 	if !manager.retransmitOne(session, now) {
@@ -1015,6 +1088,38 @@ func TestValidateSSU2ConfirmedPayloadInflatesGzipRouterInfo(t *testing.T) {
 	}
 }
 
+func TestLocalConfirmedPayloadCompressesFragmentedRouterInfo(t *testing.T) {
+	options := make([]MappingOption, 12)
+	for index := range options {
+		options[index] = MappingOption{
+			Key:   string([]byte{'a', byte('a' + index)}),
+			Value: string(bytes.Repeat([]byte{'z'}, 80)),
+		}
+	}
+	owner, static, intro := newSSU2TestLocal(t, "127.0.0.1:1", options...)
+	manager := &SSU2Manager{
+		staticPrivate: static,
+		introKey:      intro,
+		bindings:      TransportBindings{LocalInfo: owner},
+	}
+	payload, err := manager.localConfirmedPayload(ssu2.MinPacketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	iterator := ssu2.NewBlockIterator(payload)
+	block, ok, err := iterator.Next()
+	if err != nil || !ok || block.Type != ssu2.BlockRouterInfo {
+		t.Fatalf("confirmed RouterInfo block = %d, %t, %v", block.Type, ok, err)
+	}
+	if len(block.Data) < 3 || block.Data[0]&2 == 0 {
+		t.Fatal("fragmented SessionConfirmed RouterInfo was not gzip-compressed")
+	}
+	raw, err := inflateSSU2RouterInfo(block.Data[2:])
+	if err != nil || !bytes.Equal(raw, owner.Snapshot().Bytes()) {
+		t.Fatalf("compressed RouterInfo round trip = %d bytes, %v", len(raw), err)
+	}
+}
+
 func TestSSU2EgressBackpressuresWhenSlotsAreBusy(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
@@ -1084,7 +1189,7 @@ func TestSSU2EgressContinuesAfterDestinationWriteError(t *testing.T) {
 	manager.wg.Wait()
 }
 
-func TestSSU2SendHonorsCallerCancellationDuringEgressAdmission(t *testing.T) {
+func TestSSU2CanceledEgressConsumesSealedPacketNumber(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		send, err := ssu2.NewDataCipher(bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32))
 		if err != nil {
@@ -1100,7 +1205,7 @@ func TestSSU2SendHonorsCallerCancellationDuringEgressAdmission(t *testing.T) {
 			nextPacket:   1,
 			lastActivity: time.Now(),
 		}
-		session.initReliability()
+		session.initReliability(ssu2MaximumNetworkMTU)
 		managerCtx, stopManager := context.WithCancel(t.Context())
 		defer stopManager()
 		manager := &SSU2Manager{
@@ -1125,11 +1230,185 @@ func TestSSU2SendHonorsCallerCancellationDuringEgressAdmission(t *testing.T) {
 		if err = <-result; !errors.Is(err, context.Canceled) {
 			t.Fatalf("canceled send = %v, want %v", err, context.Canceled)
 		}
-		if session.nextPacket != 1 {
-			t.Fatalf("canceled send advanced packet number to %d", session.nextPacket)
+		if session.nextPacket != 2 {
+			t.Fatalf("canceled sealed packet left next packet at %d, want 2", session.nextPacket)
+		}
+		if session.packetsTransmitted != 0 {
+			t.Fatalf("canceled egress counted %d transmitted packets", session.packetsTransmitted)
+		}
+		if session.sendWindowRemaining != session.sendWindowBytes || len(session.sent) != 0 {
+			t.Fatalf("canceled egress retained window %d/%d or %d packets", session.sendWindowRemaining, session.sendWindowBytes, len(session.sent))
 		}
 		if queued := len(manager.egressQueue); queued != 0 {
 			t.Fatalf("canceled send queued %d datagrams", queued)
+		}
+	})
+}
+
+func TestSSU2SendWaitsForWindowAndResumesAfterACK(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, session := newSSU2SendTestHarness(t)
+		sentAt := time.Unix(1, 0)
+		sent := session.retainPayload([]byte("previous packet"), sentAt)
+		sent.windowBytes = ssu2MinimumNetworkMTU
+		sent.packetSize = ssu2MinimumNetworkMTU
+		sent.latestPacket = 1
+		session.sent[1] = sent
+		session.sendWindowRemaining = 0
+		session.nextPacket = 2
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() {
+			result <- manager.sendDataContext(ctx, session, bytes.Repeat([]byte{1}, 8))
+		}()
+		synctest.Wait()
+		if queued := len(manager.egressQueue); queued != 0 {
+			t.Fatalf("window-exhausted send queued %d datagrams", queued)
+		}
+		if !session.sendMu.TryLock() {
+			t.Fatal("window-exhausted send retained sendMu")
+		}
+		session.sendMu.Unlock()
+
+		session.acknowledge([]ssu2.ACKRange{{Start: 1, End: 1}}, sentAt.Add(time.Millisecond))
+		synctest.Wait()
+		slot := <-manager.egressQueue
+		slot.done <- nil
+		synctest.Wait()
+		if err := <-result; err != nil {
+			t.Fatalf("ACK-resumed send = %v", err)
+		}
+	})
+}
+
+func TestSSU2SessionReleaseWakesWindowBlockedSend(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, session := newSSU2SendTestHarness(t)
+		session.sendWindowRemaining = 0
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() {
+			result <- manager.Send(ctx, session.peer, managerHotPathMessage())
+		}()
+		synctest.Wait()
+
+		removed := make(chan struct{})
+		go func() {
+			manager.removeSession(session)
+			close(removed)
+		}()
+		synctest.Wait()
+		select {
+		case <-removed:
+		default:
+			cancel()
+			synctest.Wait()
+			t.Fatal("session release remained blocked behind a window waiter")
+		}
+		if err := <-result; !errors.Is(err, ErrSSU2Session) {
+			t.Fatalf("released session send = %v, want %v", err, ErrSSU2Session)
+		}
+	})
+}
+
+func TestSSU2ReleaseWakesSaturatedReliableControlHoldingLifetimeRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, session := newSSU2SendTestHarness(t)
+		for range ssu2MaxTrackedPackets {
+			if retained := session.retainPayload([]byte("saturated"), time.Unix(1, 0)); retained == nil {
+				t.Fatal("failed to saturate retained payload slots")
+			}
+		}
+
+		result := make(chan error, 1)
+		go func() {
+			session.lifetimeMu.RLock()
+			err := manager.sendSessionData(session, bytes.Repeat([]byte{4}, 8), true)
+			session.lifetimeMu.RUnlock()
+			result <- err
+		}()
+		synctest.Wait()
+
+		released := make(chan struct{})
+		go func() {
+			session.ReleaseSensitive()
+			close(released)
+		}()
+		synctest.Wait()
+		select {
+		case <-released:
+		default:
+			t.Fatal("release remained blocked behind a lifetime-held retained-slot waiter")
+		}
+		if err := <-result; !errors.Is(err, ErrSSU2Session) {
+			t.Fatalf("released reliable control send = %v, want %v", err, ErrSSU2Session)
+		}
+	})
+}
+
+func TestSSU2ACKProceedsWhileEgressCompletionIsPending(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, session := newSSU2SendTestHarness(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() {
+			result <- manager.sendDataContext(ctx, session, bytes.Repeat([]byte{2}, 8))
+		}()
+		synctest.Wait()
+		slot := <-manager.egressQueue
+		if !session.sendMu.TryLock() {
+			t.Fatal("egress completion wait retained sendMu")
+		}
+		session.sendMu.Unlock()
+
+		session.acknowledge([]ssu2.ACKRange{{Start: 1, End: 1}}, time.Now())
+		if len(session.sent) != 0 {
+			t.Fatalf("ACK during egress retained %d packets", len(session.sent))
+		}
+		slot.done <- nil
+		synctest.Wait()
+		if err := <-result; err != nil {
+			t.Fatalf("egress-completed send = %v", err)
+		}
+	})
+}
+
+func TestSSU2PacketNumberAliasesDoNotExhaustRetainedPayloadSlots(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, session := newSSU2SendTestHarness(t)
+		sent := session.retainPayload([]byte("aliased packet"), time.Unix(1, 0))
+		sent.latestPacket = ssu2MaxTrackedPackets
+		for packetNumber := uint32(1); packetNumber <= ssu2MaxTrackedPackets; packetNumber++ {
+			session.sent[packetNumber] = sent
+		}
+		session.nextPacket = ssu2MaxTrackedPackets + 1
+
+		result := make(chan error, 1)
+		go func() {
+			result <- manager.sendSessionDataContext(t.Context(), session, bytes.Repeat([]byte{3}, 8), ssu2SessionDataOptions{
+				reliable:   true,
+				waitEgress: true,
+			})
+		}()
+		synctest.Wait()
+		slot := <-manager.egressQueue
+		slot.done <- nil
+		synctest.Wait()
+		if err := <-result; err != nil {
+			t.Fatalf("send with packet aliases = %v", err)
+		}
+		inUse := 0
+		for index := range session.sentSlots {
+			if session.sentSlots[index].inUse {
+				inUse++
+			}
+		}
+		if inUse != 2 {
+			t.Fatalf("retained payload slots = %d, want 2", inUse)
 		}
 	})
 }
@@ -1190,6 +1469,41 @@ func TestSSU2QueuesOnePendingACKPerSession(t *testing.T) {
 	}
 }
 
+func newSSU2SendTestHarness(t *testing.T) (*SSU2Manager, *ssu2TransportSession) {
+	t.Helper()
+	send, err := ssu2.NewDataCipher(bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := foundation.Hash{1}
+	session := &ssu2TransportSession{
+		peer:         peer,
+		sendID:       9,
+		receiveID:    10,
+		remote:       net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:1234")),
+		send:         send,
+		nextPacket:   1,
+		lastActivity: time.Now(),
+	}
+	session.initReliability(ssu2MaximumNetworkMTU)
+	managerCtx, cancel := context.WithCancel(t.Context())
+	free := make(chan *ssu2EgressSlot, 1)
+	free <- &ssu2EgressSlot{done: make(chan error, 1)}
+	manager := &SSU2Manager{
+		started:        true,
+		ctx:            managerCtx,
+		idleTimeout:    time.Hour,
+		sessionsByPeer: map[foundation.Hash]*ssu2TransportSession{peer: session},
+		sessionsByID:   map[uint64]*ssu2TransportSession{session.receiveID: session},
+		bindings:       TransportBindings{Clock: WallClock{}},
+		egressFree:     free,
+		egressQueue:    make(chan *ssu2EgressSlot, 1),
+	}
+	t.Cleanup(session.ReleaseSensitive)
+	t.Cleanup(cancel)
+	return manager, session
+}
+
 func gzipSSU2TestBytes(t *testing.T, raw []byte) []byte {
 	t.Helper()
 	var compressed bytes.Buffer
@@ -1203,7 +1517,7 @@ func gzipSSU2TestBytes(t *testing.T, raw []byte) []byte {
 	return compressed.Bytes()
 }
 
-func newSSU2TestLocal(t *testing.T, endpoint string) (*LocalRouterInfo, []byte, []byte) {
+func newSSU2TestLocal(t *testing.T, endpoint string, options ...MappingOption) (*LocalRouterInfo, []byte, []byte) {
 	t.Helper()
 	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
@@ -1221,7 +1535,7 @@ func newSSU2TestLocal(t *testing.T, endpoint string) (*LocalRouterInfo, []byte, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{Local: local})
+	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{Local: local, Options: options})
 	if err != nil {
 		t.Fatal(err)
 	}

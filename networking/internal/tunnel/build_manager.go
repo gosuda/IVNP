@@ -28,7 +28,6 @@ const (
 	shortBuildFutureSkew     = 5 * 60_000
 	shortBuildReplayLifetime = 10 * 60_000
 	buildMessageLifetime     = 60_000
-	buildRetryDelay          = 5 * time.Second
 	buildRequestTimeout      = 5_000 // Java BuildRequestor.REQUEST_TIMEOUT
 )
 
@@ -1590,11 +1589,9 @@ func (m *BuildManager) scheduleBuildDeadline(now, deadline uint64) func() {
 }
 
 func (m *BuildManager) scheduleBuildRetry() {
-	m.schedule(buildRetryDelay, func() {
-		if m.ctx.Err() == nil {
-			m.notifyBuildEvent()
-		}
-	})
+	if m.ctx == nil || m.ctx.Err() == nil {
+		m.notifyBuildEvent()
+	}
 }
 
 func (m *BuildManager) notifyBuildEvent() {

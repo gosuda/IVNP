@@ -326,6 +326,7 @@ type destinationRuntimeFactory struct {
 	preferredPeers           []foundation.Hash
 	profiles                 *networking.TunnelPeerProfiles
 	eligible                 func(foundation.Hash) bool
+	connected                func(foundation.Hash) bool
 	allowUnknownTransports   bool
 	responders               *networking.NetworkDatabaseResponderProfiles
 	now                      func() uint64
@@ -408,16 +409,16 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	}()
 	inboundSource, err := networking.TunnelNewNetDBInboundBuildSource(networking.TunnelNetDBInboundBuildSourceConfig{
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: f.cfg.Tunnel.Hops,
-		Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
-		Eligible: f.eligible, AllowUnknownTransports: f.allowUnknownTransports,
+		Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
+		Eligible: f.eligible, Connected: f.connected, AllowUnknownTransports: f.allowUnknownTransports,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create destination inbound build source: %w", err)
 	}
 	outboundSource, err := networking.TunnelNewNetDBOutboundBuildSource(networking.TunnelNetDBOutboundBuildSourceConfig{
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: f.cfg.Tunnel.Hops,
-		Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
-		Eligible: f.eligible, AllowUnknownTransports: f.allowUnknownTransports,
+		Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
+		Eligible: f.eligible, Connected: f.connected, AllowUnknownTransports: f.allowUnknownTransports,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create destination outbound build source: %w", err)

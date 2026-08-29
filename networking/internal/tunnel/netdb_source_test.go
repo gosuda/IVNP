@@ -115,7 +115,14 @@ func TestNetDBBuildSourceRequiresAdjacentTransportCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(build.Hops) != 2 || build.Hops[0].Router != first.Hash() || build.Hops[1].Router != compatible.Hash() {
+	if len(build.Hops) != 2 {
+		t.Fatalf("transport-compatible path = %#v", build.Hops)
+	}
+	selected := map[foundation.Hash]bool{
+		build.Hops[0].Router: true,
+		build.Hops[1].Router: true,
+	}
+	if !selected[first.Hash()] || !selected[compatible.Hash()] || selected[incompatible.Hash()] {
 		t.Fatalf("transport-compatible path = %#v", build.Hops)
 	}
 }
@@ -170,6 +177,47 @@ func TestTunnelPeerCapabilitiesMatchJavaPolicy(t *testing.T) {
 				t.Fatalf("allowed = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestTunnelPeerCapabilityRelaxationsAreIndependent(t *testing.T) {
+	severeFloodfill := verifiedX25519RouterTransport(t, 35, "NTCP2", "192.0.2.1", "", "OEF")
+	if _, allowed := tunnelPeerCapabilitiesAllowedWithDecisions(severeFloodfill, true, true, false, false); allowed {
+		t.Fatal("severe-congestion relaxation also relaxed exploratory floodfill")
+	}
+	if _, allowed := tunnelPeerCapabilitiesAllowedWithDecisions(severeFloodfill, true, true, true, false); !allowed {
+		t.Fatal("independently relaxed severe-congestion and floodfill peer was rejected")
+	}
+
+	severeUnreachable := verifiedX25519RouterTransport(t, 36, "NTCP2", "192.0.2.1", "", "OEU")
+	if _, allowed := tunnelPeerCapabilitiesAllowedWithDecisions(severeUnreachable, true, true, false, false); allowed {
+		t.Fatal("severe-congestion relaxation also relaxed exploratory unreachable")
+	}
+	if _, allowed := tunnelPeerCapabilitiesAllowedWithDecisions(severeUnreachable, true, true, false, true); !allowed {
+		t.Fatal("independently relaxed severe-congestion and unreachable peer was rejected")
+	}
+}
+
+func TestPrefixConflictUsesJavaIPRestrictionAndPortRules(t *testing.T) {
+	selected := []hopCandidate{{
+		v4:    [][4]byte{{192, 0, 2, 1}},
+		v6:    [][16]byte{{0x20, 0x01, 0x0d, 0xb8, 1}},
+		ports: []uint16{12345},
+	}}
+	if !prefixConflict(selected, hopCandidate{v4: [][4]byte{{192, 0, 99, 1}}}, 2) {
+		t.Fatal("IPv4 /16 conflict was accepted")
+	}
+	if !prefixConflict(selected, hopCandidate{v6: [][16]byte{{0x20, 0x01, 0x0d, 0xb8, 2}}}, 2) {
+		t.Fatal("IPv6 /32 conflict was accepted")
+	}
+	if prefixConflict(selected, hopCandidate{v6: [][16]byte{{0x20, 0x01, 0x0d, 0xb9}}}, 2) {
+		t.Fatal("distinct IPv6 /32 prefix was rejected")
+	}
+	if !prefixConflict(selected, hopCandidate{v4: [][4]byte{{198, 51, 100, 1}}, ports: []uint16{12345}}, 2) {
+		t.Fatal("shared transport port was accepted")
+	}
+	if prefixConflict(selected, hopCandidate{v4: [][4]byte{{192, 0, 2, 2}}}, 0) {
+		t.Fatal("disabled IP restriction rejected a peer")
 	}
 }
 
@@ -261,20 +309,22 @@ func verifiedX25519RouterTransportVersion(t *testing.T, marker byte, style, host
 	return info
 }
 
-func TestNetDBBuildSourcesLimitClosestCandidatesBeforeProfileRanking(t *testing.T) {
+func TestNetDBBuildSourcesUseFullProfilePopulation(t *testing.T) {
 	table := netdb.NewTable(foundation.Hash{}, 8)
 	for marker := byte(1); marker <= 3; marker++ {
-		table.StoreVerified(verifiedX25519Router(t, marker), false, 1)
+		table.StoreVerified(verifiedX25519RouterTransport(t, marker, "NTCP2", "192.0.2.1", "", "LR"), false, 1)
 	}
 	target := foundation.Hash{}
 	all := table.ClosestInto(make([]netdb.RouterRef, table.Len()), target)
 	outside := all[2].Hash
 	profiles := NewPeerProfiles(PeerProfilesConfig{Window: 4})
 	profiles.RecordSuccess(outside, 1)
+	profiles.RecordSuccess(outside, 1)
+	profiles.RecordSuccess(outside, 1)
 	nextTunnel := uint32(100)
 	outbound, err := NewNetDBOutboundBuildSource(NetDBOutboundBuildSourceConfig{
 		Table: table, Profiles: profiles, ReplyRouter: foundation.Hash{9}, ReplyTunnelID: 10,
-		Hops: 1, CandidateLimit: 2, Lifetime: 100,
+		Hops: 1, Lifetime: 100,
 		CircuitID: func() uint32 { return 70 },
 		TunnelID:  func() uint32 { nextTunnel++; return nextTunnel },
 		Target:    func(uint64) foundation.Hash { return target },
@@ -286,12 +336,12 @@ func TestNetDBBuildSourcesLimitClosestCandidatesBeforeProfileRanking(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outboundBuild.Hops[0].Router == outside {
-		t.Fatalf("outbound selected high-profile peer outside candidate limit: %#v", outboundBuild.Hops)
+	if outboundBuild.Hops[0].Router != outside {
+		t.Fatalf("outbound did not select high-profile peer from full population: %#v", outboundBuild.Hops)
 	}
 	inbound, err := NewNetDBInboundBuildSource(NetDBInboundBuildSourceConfig{
 		Table: table, Profiles: profiles, LocalRouter: foundation.Hash{8},
-		Hops: 1, CandidateLimit: 2, Lifetime: 100,
+		Hops: 1, Lifetime: 100,
 		CircuitID: func() uint32 { return 71 },
 		TunnelID:  func() uint32 { nextTunnel++; return nextTunnel },
 		Target:    func(uint64) foundation.Hash { return target },
@@ -303,7 +353,7 @@ func TestNetDBBuildSourcesLimitClosestCandidatesBeforeProfileRanking(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inboundBuild.Hops[0].Router == outside {
-		t.Fatalf("inbound selected high-profile peer outside candidate limit: %#v", inboundBuild.Hops)
+	if inboundBuild.Hops[0].Router != outside {
+		t.Fatalf("inbound did not select high-profile peer from full population: %#v", inboundBuild.Hops)
 	}
 }

@@ -707,6 +707,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		profiles = networking.TunnelNewPeerProfiles(networking.TunnelPeerProfilesConfig{})
 		responders = networking.NetworkDatabaseNewResponderProfiles(0)
 		eligible := transportPeerEligibility(mux)
+		connected := transportPeerConnection(mux)
 		for _, peer := range bootstrapPeers {
 			responders.Record(peer)
 		}
@@ -736,8 +737,8 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		inboundSource, sourceErr := networking.TunnelNewNetDBInboundBuildSource(networking.TunnelNetDBInboundBuildSourceConfig{
 			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: cfg.Tunnel.Hops,
 			Lifetime:  uint64(cfg.Tunnel.Lifetime / time.Millisecond),
-			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
-			Eligible: eligible, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
+			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
+			Eligible: eligible, Connected: connected, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
 		})
 		if sourceErr != nil {
 			return nil, fmt.Errorf("create exploratory inbound build source: %w", sourceErr)
@@ -745,8 +746,8 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		outboundSource, sourceErr := networking.TunnelNewNetDBOutboundBuildSource(networking.TunnelNetDBOutboundBuildSourceConfig{
 			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: cfg.Tunnel.Hops,
 			Lifetime:  uint64(cfg.Tunnel.Lifetime / time.Millisecond),
-			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
-			Eligible: eligible, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
+			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
+			Eligible: eligible, Connected: connected, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
 		})
 		if sourceErr != nil {
 			return nil, fmt.Errorf("create exploratory outbound build source: %w", sourceErr)
@@ -801,7 +802,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			cfg: cfg, database: database, service: service, tunnels: tunnels, destinations: destinations,
 			replyKeys: replyKeys, replySender: replySender, transport: mux,
 			localRouter: bundle.Router.Hash, staticPrivate: bundle.Router.X25519Private[:],
-			profiles: profiles, eligible: eligible, allowUnknownTransports: allowUnknownTransports,
+			profiles: profiles, eligible: eligible, connected: connected, allowUnknownTransports: allowUnknownTransports,
 			now: now, clockNow: clock.Now, garlicReceiver: garlicReceiver, status: statusMux,
 			buildReplies: buildReplies, requests: requestHandlers, publishers: destinationPublishers,
 			publicationTokens: publicationTokens,
@@ -2277,6 +2278,13 @@ func transportPeerEligibility(sender networking.TunnelSender) func(foundation.Ha
 		return selector.CanSend
 	}
 	return transportAcceptsAnyPeer
+}
+
+func transportPeerConnection(sender networking.TunnelSender) func(foundation.Hash) bool {
+	if sessions, ok := sender.(interface{ HasSession(foundation.Hash) bool }); ok {
+		return sessions.HasSession
+	}
+	return nil
 }
 
 func transportAcceptsAnyPeer(foundation.Hash) bool { return true }

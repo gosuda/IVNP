@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -11,7 +12,6 @@ import (
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
 	"gosuda.org/ivnp/networking/internal/netdb"
-	"gosuda.org/ivnp/observability"
 )
 
 type muxIPv4Listener struct{}
@@ -132,91 +132,73 @@ type muxCountedSessionTransport struct {
 
 func (m *muxCountedSessionTransport) activeSessionCount() int { return m.count }
 
-func TestTransportMuxRacesSSU2BelowJavaMinimum(t *testing.T) {
+func TestTransportMuxSelectsPreferredSSU2BidBelowMinimum(t *testing.T) {
 	database, peer := muxTestPeer(t, true, true)
 	ntcp2 := newMuxSessionTransport()
 	ssu2 := &muxCountedSessionTransport{muxSessionTransport: newMuxSessionTransport()}
-	metrics := observability.NewRegistry()
-	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2, Metrics: metrics})
+	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2})
 	if err != nil {
 		t.Fatal(err)
 	}
+	mux.random = bytes.NewReader([]byte{1})
 	done := make(chan error, 1)
 	go func() { done <- mux.EnsureSession(context.Background(), peer) }()
-	<-ntcp2.ensureStarted
 	<-ssu2.ensureStarted
+	select {
+	case <-ntcp2.ensureStarted:
+		t.Fatal("lower SSU2 bid started an NTCP2 handshake")
+	default:
+	}
 	ssu2.ensureRelease <- nil
 	if err = <-done; err != nil {
 		t.Fatal(err)
 	}
-	snapshot := metrics.Snapshot().Transport
-	if snapshot.RaceAttempts != 1 || snapshot.SSU2RaceWins != 1 || snapshot.SSU2Promotions != 1 {
-		t.Fatalf("transport preference metrics = %+v", snapshot)
-	}
 }
 
-func TestTransportMuxGivesNTCP2EveryFourthMinimumPeerAttempt(t *testing.T) {
+func TestTransportMuxUsesRandomMinimumPeerPreference(t *testing.T) {
 	ssu2 := &muxCountedSessionTransport{muxSessionTransport: newMuxSessionTransport()}
-	mux := new(TransportMux)
-	for attempt := range 4 {
-		preferred := mux.preferSSU2(ssu2)
-		if preferred != (attempt != 3) {
-			t.Fatalf("attempt %d SSU2 preference = %t", attempt+1, preferred)
-		}
+	mux := &TransportMux{random: bytes.NewReader([]byte{1, 0, 1})}
+	ipv4 := transportCapabilities{ssu2: ssu2, directSSU2: true}
+	if !mux.preferSSU2(ipv4) {
+		t.Fatal("nonzero random choice did not prefer SSU2 below the IPv4 minimum")
 	}
-	ssu2.count = minimumSSU2Peers
-	if mux.preferSSU2(ssu2) {
-		t.Fatal("SSU2 remained preferred at the minimum peer count")
+	if mux.preferSSU2(ipv4) {
+		t.Fatal("zero random choice did not give NTCP2 its Java-compatible chance")
 	}
-}
-
-func TestTransportMuxReturnsFirstSSU2Session(t *testing.T) {
-	database, peer := muxTestPeer(t, true, true)
-	ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
-	metrics := observability.NewRegistry()
-	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2, Metrics: metrics})
-	if err != nil {
-		t.Fatal(err)
+	ssu2.count = minimumSSU2IPv4Peers
+	if mux.preferSSU2(ipv4) {
+		t.Fatal("SSU2 remained preferred at the IPv4 minimum")
 	}
-	done := make(chan error, 1)
-	go func() { done <- mux.EnsureSession(context.Background(), peer) }()
-	<-ntcp2.ensureStarted
-	<-ssu2.ensureStarted
-	ssu2.ensureRelease <- nil
-	if err = <-done; err != nil {
-		t.Fatal(err)
+	ipv6 := ipv4
+	ipv6.ssu2IPv6 = true
+	if !mux.preferSSU2(ipv6) {
+		t.Fatal("SSU2 was not preferred below the IPv6 minimum")
 	}
-	if ntcp2.HasSession(peer) || !ssu2.HasSession(peer) {
-		t.Fatalf("raced sessions = NTCP2 %t SSU2 %t", ntcp2.HasSession(peer), ssu2.HasSession(peer))
-	}
-	snapshot := metrics.Snapshot().Transport
-	if snapshot.RaceAttempts != 1 || snapshot.SSU2RaceWins != 1 || snapshot.SSU2Promotions != 1 {
-		t.Fatalf("transport race metrics = %+v", snapshot)
+	ssu2.count = minimumSSU2IPv6Peers
+	if mux.preferSSU2(ipv6) {
+		t.Fatal("SSU2 remained preferred at the IPv6 minimum")
 	}
 }
 
-func TestTransportMuxReturnsFirstNTCP2SessionWithoutGrace(t *testing.T) {
+func TestTransportMuxStartsOnlyWinningNTCP2Bid(t *testing.T) {
 	database, peer := muxTestPeer(t, true, true)
 	ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
-	metrics := observability.NewRegistry()
-	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2, Metrics: metrics})
+	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2})
 	if err != nil {
 		t.Fatal(err)
 	}
+	mux.random = bytes.NewReader([]byte{0})
 	done := make(chan error, 1)
 	go func() { done <- mux.EnsureSession(context.Background(), peer) }()
 	<-ntcp2.ensureStarted
-	<-ssu2.ensureStarted
+	select {
+	case <-ssu2.ensureStarted:
+		t.Fatal("lower NTCP2 bid started an SSU2 handshake")
+	default:
+	}
 	ntcp2.ensureRelease <- nil
 	if err = <-done; err != nil {
 		t.Fatal(err)
-	}
-	if !ntcp2.HasSession(peer) || ssu2.HasSession(peer) {
-		t.Fatalf("raced sessions = NTCP2 %t SSU2 %t", ntcp2.HasSession(peer), ssu2.HasSession(peer))
-	}
-	snapshot := metrics.Snapshot().Transport
-	if snapshot.RaceAttempts != 1 || snapshot.NTCP2RaceWins != 1 {
-		t.Fatalf("transport race metrics = %+v", snapshot)
 	}
 }
 
@@ -259,7 +241,7 @@ func TestTransportMuxReusesSessionWithoutRouterInfoLookup(t *testing.T) {
 	}
 }
 
-func TestTransportMuxPrefersExistingSSU2AndDropsNTCP2(t *testing.T) {
+func TestTransportMuxChoosesEstablishedNTCP2BidWithoutDroppingSSU2(t *testing.T) {
 	database, peer := muxTestPeer(t, true, true)
 	ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
 	ntcp2.session, ssu2.session = true, true
@@ -270,19 +252,21 @@ func TestTransportMuxPrefersExistingSSU2AndDropsNTCP2(t *testing.T) {
 	if err = mux.EnsureSession(context.Background(), peer); err != nil {
 		t.Fatal(err)
 	}
-	if ntcp2.HasSession(peer) || !ssu2.HasSession(peer) || ntcp2.drops != 1 {
+	if !ntcp2.HasSession(peer) || !ssu2.HasSession(peer) || ntcp2.drops != 0 {
 		t.Fatalf("existing sessions = NTCP2 %t SSU2 %t drops %d", ntcp2.HasSession(peer), ssu2.HasSession(peer), ntcp2.drops)
 	}
 }
 
 func TestTransportMuxFallsBackOnlyBeforeAmbiguousWrite(t *testing.T) {
 	database, peer := muxTestPeer(t, true, true)
-	ssu2 := &muxTestTransport{}
-	ntcp2 := &muxTestTransport{sendErr: ErrNTCP2Session}
+	ssu2 := &muxCountedSessionTransport{muxSessionTransport: newMuxSessionTransport()}
+	ssu2.sendErr = ErrSSU2Session
+	ntcp2 := &muxTestTransport{}
 	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2})
 	if err != nil {
 		t.Fatal(err)
 	}
+	mux.random = bytes.NewReader([]byte{1, 1})
 
 	message := i2np.Message{Payload: []byte("borrowed")}
 	if err = mux.Send(context.Background(), peer, message); err != nil {
@@ -293,16 +277,14 @@ func TestTransportMuxFallsBackOnlyBeforeAmbiguousWrite(t *testing.T) {
 	if ssuSends != 1 || ntcpSends != 1 {
 		t.Fatalf("send calls = SSU2 %d, NTCP2 %d; want one each", ssuSends, ntcpSends)
 	}
-
 	writeErr := errors.New("message write outcome unknown")
-	ntcp2.sendErr = writeErr
+	ssu2.sendErr = writeErr
 	if err = mux.Send(context.Background(), peer, message); !errors.Is(err, writeErr) {
 		t.Fatalf("Send ambiguous write error = %v, want %v", err, writeErr)
 	}
 	_, _, _, ssuSends = ssu2.counts()
-	_, _, _, ntcpSends = ntcp2.counts()
-	if ssuSends != 1 || ntcpSends != 2 {
-		t.Fatalf("send calls after ambiguous write = SSU2 %d, NTCP2 %d; want 1, 2", ssuSends, ntcpSends)
+	if ssuSends != 2 || ntcpSends != 1 {
+		t.Fatalf("send calls after ambiguous write = SSU2 %d, NTCP2 %d; want 2, 1", ssuSends, ntcpSends)
 	}
 }
 

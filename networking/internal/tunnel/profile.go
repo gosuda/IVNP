@@ -17,6 +17,7 @@ const (
 	profileBuildCooldown       = uint64(2 * 60 * 1000)
 	profileTransportBaseDelay  = uint64(10 * 1000)
 	profileTransportMaxDelay   = uint64(5 * 60 * 1000)
+	profileFastLatency         = uint64(1000)
 )
 
 // ObservationKind identifies the authenticated tunnel outcome being scored.
@@ -235,6 +236,29 @@ func (p *PeerProfiles) Score(peer foundation.Hash) int64 {
 	}
 	latency := min(profile.MeanLatency, profileLatencyCap)
 	return int64(profile.Successes*profileSuccessWeight-profile.Failures*profileFailurePenalty) - int64(latency)
+}
+
+func (p *PeerProfiles) selectionTier(peer foundation.Hash, advertisedHighCapacity, exploratory bool) uint8 {
+	profile, observed := p.Snapshot(peer)
+	highCapacity := advertisedHighCapacity
+	fast := false
+	if observed && profile.Samples >= profileBuildMinimumSamples {
+		highCapacity = profile.Successes >= profile.Failures
+		fast = highCapacity && profile.MeanLatency <= profileFastLatency
+	}
+	if exploratory {
+		if highCapacity {
+			return 0
+		}
+		return 2
+	}
+	if fast {
+		return 0
+	}
+	if highCapacity {
+		return 1
+	}
+	return 2
 }
 
 func (p *PeerProfiles) evictLocked() {

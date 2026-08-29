@@ -370,7 +370,7 @@ func TestBuildManagerMultiHopTimeoutRecordsEveryPeer(t *testing.T) {
 	}
 }
 
-func TestBuildManagerDeadlineExpiresAndWakesOwnerAfterRetryDelay(t *testing.T) {
+func TestBuildManagerDeadlineExpiresAndWakesOwnerImmediately(t *testing.T) {
 	now := uint64(1)
 	var (
 		scheduledDuration time.Duration
@@ -399,19 +399,13 @@ func TestBuildManagerDeadlineExpiresAndWakesOwnerAfterRetryDelay(t *testing.T) {
 	if manager.Pending() != 0 {
 		t.Fatalf("expired pending builds = %d, want 0", manager.Pending())
 	}
-	select {
-	case <-wake:
-		t.Fatal("build deadline woke owner before retry delay")
-	default:
+	if scheduledDuration != time.Millisecond {
+		t.Fatalf("deadline schedule = %s, want %s", scheduledDuration, time.Millisecond)
 	}
-	if scheduledDuration != buildRetryDelay {
-		t.Fatalf("timeout wake delay = %s, want %s", scheduledDuration, buildRetryDelay)
-	}
-	scheduledCallback()
 	select {
 	case <-wake:
 	default:
-		t.Fatal("build deadline did not wake owner after retry delay")
+		t.Fatal("build deadline did not wake owner immediately")
 	}
 	if got := metrics.Snapshot().Tunnel.ExploratoryOutboundTimeouts; got != 1 {
 		t.Fatalf("exploratory outbound timeouts = %d, want 1", got)

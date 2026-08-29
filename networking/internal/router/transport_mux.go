@@ -3,10 +3,12 @@ package router
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
+	"io"
 	"net"
+	"net/netip"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
@@ -37,14 +39,17 @@ type activeSessionCounter interface {
 }
 
 const (
-	minimumSSU2Peers    = 10
-	ssu2PreferenceGrace = 750 * time.Millisecond
+	minimumSSU2IPv4Peers = 10
+	minimumSSU2IPv6Peers = 30
+	minimumIntroducers   = 5
 )
 
 type transportCapabilities struct {
-	ntcp2      TransportManager
-	ssu2       TransportManager
-	directSSU2 bool
+	ntcp2          TransportManager
+	ssu2           TransportManager
+	directSSU2     bool
+	ssu2IPv6       bool
+	ssu2Introducer bool
 }
 
 // TransportMuxConfig composes the direct-peer NTCP2 and SSU2 managers behind
@@ -59,24 +64,23 @@ type TransportMuxConfig struct {
 }
 
 // TransportMux reuses an authenticated session before opening another
-// transport. For a peer with direct NTCP2 and SSU2 addresses, it races both
-// handshakes and returns the first authenticated session. Introducer-only SSU2
-// remains a fallback because its relay setup is materially slower than a
-// direct dial.
+// transport. For an unestablished direct peer, Java-compatible transport bids
+// select one handshake; an alternate is attempted only after a retryable
+// pre-delivery failure.
 type TransportMux struct {
 	database *netdb.Database
 	ntcp2    TransportManager
 	ssu2     TransportManager
 	metrics  *observability.Registry
 
-	lifecycleMu   sync.Mutex
-	started       bool
-	closed        bool
-	managers      [2]TransportManager
-	managerCount  int
-	closeOnce     sync.Once
-	closeErr      error
-	udpPreference atomic.Uint32
+	lifecycleMu  sync.Mutex
+	started      bool
+	closed       bool
+	managers     [2]TransportManager
+	managerCount int
+	closeOnce    sync.Once
+	closeErr     error
+	random       io.Reader
 }
 
 var _ TransportManager = (*TransportMux)(nil)
@@ -93,6 +97,7 @@ func NewTransportMux(config TransportMuxConfig) (*TransportMux, error) {
 		ntcp2:    config.NTCP2,
 		ssu2:     config.SSU2,
 		metrics:  config.Metrics,
+		random:   rand.Reader,
 	}, nil
 }
 
@@ -276,105 +281,50 @@ func ensureTransportSession(ctx context.Context, manager TransportManager, peer 
 	return ensurer.EnsureSession(ctx, peer)
 }
 
-func (m *TransportMux) sessionManager(ctx context.Context, peer foundation.Hash) (TransportManager, bool, error) {
+func (m *TransportMux) sessionManager(_ context.Context, peer foundation.Hash) (TransportManager, bool, error) {
 	ntcp2, ntcp2OK := m.ntcp2.(preferredSessionManager)
 	ssu2, ssu2OK := m.ssu2.(preferredSessionManager)
-	if ssu2OK && ssu2.HasSession(peer) {
-		if m.metrics != nil {
-			m.metrics.IncTransportSessionReuses()
-			m.metrics.IncTransportSSU2Promotions()
-		}
-		if ntcp2OK {
-			ntcp2.DropSession(peer)
-		}
-		return ssu2, true, nil
+	ntcp2Live := ntcp2OK && ntcp2.HasSession(peer)
+	ssu2Live := ssu2OK && ssu2.HasSession(peer)
+	if !ntcp2Live && !ssu2Live {
+		return nil, false, nil
 	}
-	if ntcp2OK && ntcp2.HasSession(peer) {
-		if m.metrics != nil {
-			m.metrics.IncTransportSessionReuses()
-		}
+	if m.metrics != nil {
+		m.metrics.IncTransportSessionReuses()
+	}
+	if ntcp2Live {
 		return ntcp2, true, nil
 	}
-	capabilities, ok := m.capabilities(peer)
-	if !ok || capabilities.ntcp2 == nil || capabilities.ssu2 == nil || !capabilities.directSSU2 {
-		return nil, false, nil
-	}
-	ntcp2, ntcp2OK = capabilities.ntcp2.(preferredSessionManager)
-	ssu2, ssu2OK = capabilities.ssu2.(preferredSessionManager)
-	if !ntcp2OK || !ssu2OK {
-		return nil, false, nil
-	}
-	manager, err := m.raceDirectSessions(ctx, peer, ntcp2, ssu2, m.preferSSU2(ssu2))
-	return manager, true, err
-}
-
-func (m *TransportMux) preferSSU2(manager preferredSessionManager) bool {
-	counter, ok := manager.(activeSessionCounter)
-	return ok && counter.activeSessionCount() < minimumSSU2Peers && m.udpPreference.Add(1)%4 != 0
-}
-
-func (m *TransportMux) raceDirectSessions(ctx context.Context, peer foundation.Hash, ntcp2, ssu2 preferredSessionManager, preferSSU2 bool) (TransportManager, error) {
-	type result struct {
-		manager preferredSessionManager
-		err     error
-	}
-	raceContext, cancel := context.WithCancel(ctx)
-	defer cancel()
 	if m.metrics != nil {
-		m.metrics.IncTransportRaceAttempts()
-	}
-	results := make(chan result, 2)
-	go func() { results <- result{manager: ntcp2, err: ntcp2.EnsureSession(raceContext, peer)} }()
-	go func() { results <- result{manager: ssu2, err: ssu2.EnsureSession(raceContext, peer)} }()
-
-	first := <-results
-	if first.err != nil {
-		second := <-results
-		if second.err != nil {
-			return nil, errors.Join(first.err, second.err)
-		}
-		m.recordSessionRaceWinner(second.manager, ntcp2)
-		return second.manager, nil
-	}
-	if preferSSU2 && first.manager == ntcp2 {
-		timer := time.NewTimer(ssu2PreferenceGrace)
-		select {
-		case second := <-results:
-			timer.Stop()
-			if second.err == nil {
-				first.manager.DropSession(peer)
-				m.recordSessionRaceWinner(second.manager, ntcp2)
-				return second.manager, nil
-			}
-		case <-timer.C:
-		}
-	}
-	cancel()
-	go func() {
-		loser := <-results
-		if loser.err == nil {
-			loser.manager.DropSession(peer)
-		}
-	}()
-	m.recordSessionRaceWinner(first.manager, ntcp2)
-	return first.manager, nil
-}
-
-func (m *TransportMux) recordSessionRaceWinner(winner, ntcp2 preferredSessionManager) {
-	if winner != ntcp2 {
-		m.recordSSU2RaceWin()
-		return
-	}
-	if m.metrics != nil {
-		m.metrics.IncTransportNTCP2RaceWins()
-	}
-}
-
-func (m *TransportMux) recordSSU2RaceWin() {
-	if m.metrics != nil {
-		m.metrics.IncTransportSSU2RaceWins()
 		m.metrics.IncTransportSSU2Promotions()
 	}
+	return ssu2, true, nil
+}
+
+func (m *TransportMux) preferSSU2(capabilities transportCapabilities) bool {
+	counter, ok := capabilities.ssu2.(activeSessionCounter)
+	if !ok || !capabilities.directSSU2 {
+		return false
+	}
+	minimum := minimumSSU2IPv4Peers
+	if capabilities.ssu2IPv6 {
+		minimum = minimumSSU2IPv6Peers
+	}
+	prefer := counter.activeSessionCount() < minimum
+	if !prefer && capabilities.ssu2Introducer {
+		if manager, concrete := capabilities.ssu2.(*SSU2Manager); concrete {
+			prefer = manager.introducersRequired(capabilities.ssu2IPv6) &&
+				manager.introducerCount(capabilities.ssu2IPv6) < minimumIntroducers
+		}
+	}
+	if !prefer {
+		return false
+	}
+	var choice [1]byte
+	if _, err := io.ReadFull(m.random, choice[:]); err != nil {
+		return false
+	}
+	return choice[0]&3 != 0
 }
 
 func (m *TransportMux) configuredManagers() [2]TransportManager {
@@ -406,6 +356,19 @@ func (m *TransportMux) UsableRemoteRouterInfos(now time.Time) int {
 		}
 	}
 	return count
+}
+
+// HasSession reports whether any child transport has an authenticated session.
+func (m *TransportMux) HasSession(peer foundation.Hash) bool {
+	if m == nil {
+		return false
+	}
+	for _, manager := range m.configuredManagers() {
+		if sessions, ok := manager.(interface{ HasSession(foundation.Hash) bool }); ok && sessions.HasSession(peer) {
+			return true
+		}
+	}
+	return false
 }
 
 // CanSend reports whether the current verified RouterInfo has an address usable
@@ -448,6 +411,9 @@ func (m *TransportMux) selectManagers(peer foundation.Hash) (TransportManager, T
 	}
 	switch {
 	case capabilities.ssu2 != nil && capabilities.ntcp2 != nil:
+		if m.preferSSU2(capabilities) {
+			return capabilities.ssu2, capabilities.ntcp2, true
+		}
 		return capabilities.ntcp2, capabilities.ssu2, true
 	case capabilities.ssu2 != nil:
 		return capabilities.ssu2, nil, true
@@ -474,7 +440,19 @@ func (m *TransportMux) capabilities(peer foundation.Hash) (transportCapabilities
 	}
 	if m.ssu2 != nil && ssu2RouterInfoCapable(ref.Info, uint64(now.Unix())) {
 		capabilities.ssu2 = m.ssu2
-		capabilities.directSSU2 = m.directSSU2RouterInfoCapable(ref.Info, uint64(now.Unix()))
+		if manager, concrete := m.ssu2.(*SSU2Manager); concrete {
+			if address, err := manager.selectSSU2Address(ref.Info); err == nil {
+				capabilities.directSSU2 = hasCurrentTransportAddress(ref.Info, nowMillis, []byte("SSU"), []byte("SSU2"))
+				ip, _ := netip.ParseAddr(address.host)
+				capabilities.ssu2IPv6 = ip.Is6()
+				capabilities.ssu2Introducer = address.introducer
+			}
+		} else if address, err := selectSSU2Address(ref.Info); err == nil {
+			capabilities.directSSU2 = hasCurrentTransportAddress(ref.Info, nowMillis, []byte("SSU"), []byte("SSU2"))
+			ip, _ := netip.ParseAddr(address.host)
+			capabilities.ssu2IPv6 = ip.Is6()
+			capabilities.ssu2Introducer = address.introducer
+		}
 	}
 	return capabilities, capabilities.ntcp2 != nil || capabilities.ssu2 != nil
 }

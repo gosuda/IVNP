@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"slices"
+	"strconv"
 
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
@@ -33,6 +36,8 @@ type NetDBOutboundBuildSourceConfig struct {
 	TunnelID               func() uint32
 	Target                 func(nowMillis uint64) foundation.Hash
 	Eligible               func(foundation.Hash) bool
+	Connected              func(foundation.Hash) bool
+	IPRestriction          *uint8
 	Exploratory            bool
 	AllowUnknownTransports bool
 }
@@ -53,6 +58,8 @@ type NetDBOutboundBuildSource struct {
 	tunnelID               func() uint32
 	target                 func(uint64) foundation.Hash
 	eligible               func(foundation.Hash) bool
+	connected              func(foundation.Hash) bool
+	ipRestriction          uint8
 	exploratory            bool
 	allowUnknownTransports bool
 }
@@ -65,10 +72,14 @@ func NewNetDBOutboundBuildSource(config NetDBOutboundBuildSourceConfig) (*NetDBO
 	if newNetDBOutboundBuildSourceRejected {
 		return nil, ErrNetDBBuildSourceConfig
 	}
-	if config.CandidateLimit == 0 {
-		config.CandidateLimit = max(config.Hops, 128)
+	ipRestriction := uint8(2)
+	if config.IPRestriction != nil {
+		if *config.IPRestriction > 4 {
+			return nil, ErrNetDBBuildSourceConfig
+		}
+		ipRestriction = *config.IPRestriction
 	}
-	if config.CandidateLimit < config.Hops {
+	if config.CandidateLimit != 0 && config.CandidateLimit < config.Hops {
 		return nil, ErrNetDBBuildSourceConfig
 	}
 	return &NetDBOutboundBuildSource{
@@ -76,8 +87,8 @@ func NewNetDBOutboundBuildSource(config NetDBOutboundBuildSourceConfig) (*NetDBO
 		replyRouter: config.ReplyRouter, replyTunnelID: config.ReplyTunnelID,
 		hops: config.Hops, candidateLimit: config.CandidateLimit, lifetime: config.Lifetime,
 		circuitID: config.CircuitID, tunnelID: config.TunnelID, target: config.Target,
-		eligible: config.Eligible, exploratory: config.Exploratory,
-		allowUnknownTransports: config.AllowUnknownTransports,
+		eligible: config.Eligible, connected: config.Connected, ipRestriction: ipRestriction,
+		exploratory: config.Exploratory, allowUnknownTransports: config.AllowUnknownTransports,
 	}, nil
 }
 
@@ -106,14 +117,20 @@ func (s *NetDBOutboundBuildSource) NextOutboundForReply(ctx context.Context, now
 	if err != nil {
 		return OutboundBuild{}, err
 	}
-	candidates := s.table.ClosestInto(make([]netdb.RouterRef, s.candidateLimit), target)
+	_, candidates := s.table.Snapshot()
+	random := newSelectionRandom(target)
+	random.shuffle(candidates)
+	if s.candidateLimit != 0 && len(candidates) > s.candidateLimit {
+		candidates = candidates[:s.candidateLimit]
+	}
 	var endpointMask tunnelTransportMask
 	if reply, ok := s.table.Get(route.Gateway); ok {
 		endpointMask = tunnelPeerTransportMask(reply.Info)
 	}
 	policy := peerSelectionPolicy{
 		direction: Outbound, exploratory: s.exploratory, directFirst: true,
-		eligible: s.eligible, endpointMask: endpointMask, chance: target[0],
+		eligible: s.eligible, connected: s.connected, endpointMask: endpointMask,
+		random: random, ipRestriction: s.ipRestriction,
 		allowUnknownTransports: s.allowUnknownTransports,
 	}
 	hops := selectDiverseHops(candidates, s.profiles, s.local, route.Gateway, s.hops, nowMillis, policy)
@@ -156,6 +173,42 @@ func (s *NetDBOutboundBuildSource) selectionTarget(nowMillis uint64) (foundation
 	return target, err
 }
 
+type selectionRandom struct {
+	seed    foundation.Hash
+	counter uint64
+	block   [sha256.Size]byte
+	offset  int
+}
+
+func newSelectionRandom(seed foundation.Hash) *selectionRandom {
+	return &selectionRandom{seed: seed, offset: sha256.Size}
+}
+
+func (r *selectionRandom) nextUint64() uint64 {
+	if r.offset+8 > len(r.block) {
+		var input [len(foundation.Hash{}) + 8]byte
+		copy(input[:], r.seed[:])
+		binary.BigEndian.PutUint64(input[len(r.seed):], r.counter)
+		r.block = sha256.Sum256(input[:])
+		r.counter++
+		r.offset = 0
+	}
+	value := binary.BigEndian.Uint64(r.block[r.offset : r.offset+8])
+	r.offset += 8
+	return value
+}
+
+func (r *selectionRandom) oneIn(divisor uint64) bool {
+	return r != nil && divisor != 0 && r.nextUint64()%divisor == 0
+}
+
+func (r *selectionRandom) shuffle(refs []netdb.RouterRef) {
+	for index := len(refs) - 1; index > 0; index-- {
+		swap := int(r.nextUint64() % uint64(index+1))
+		refs[index], refs[swap] = refs[swap], refs[index]
+	}
+}
+
 // InboundBuildSource selects one inbound path and binds it to the outbound
 // tunnel that carries its build request. An outbound tunnel ID of zero is the
 // explicit startup-only fake zero-hop route.
@@ -176,6 +229,8 @@ type NetDBInboundBuildSourceConfig struct {
 	TunnelID               func() uint32
 	Target                 func(nowMillis uint64) foundation.Hash
 	Eligible               func(foundation.Hash) bool
+	Connected              func(foundation.Hash) bool
+	IPRestriction          *uint8
 	Exploratory            bool
 	AllowUnknownTransports bool
 }
@@ -193,6 +248,8 @@ type NetDBInboundBuildSource struct {
 	tunnelID               func() uint32
 	target                 func(uint64) foundation.Hash
 	eligible               func(foundation.Hash) bool
+	connected              func(foundation.Hash) bool
+	ipRestriction          uint8
 	exploratory            bool
 	allowUnknownTransports bool
 }
@@ -205,18 +262,22 @@ func NewNetDBInboundBuildSource(config NetDBInboundBuildSourceConfig) (*NetDBInb
 	if newNetDBInboundBuildSourceRejected {
 		return nil, ErrNetDBBuildSourceConfig
 	}
-	if config.CandidateLimit == 0 {
-		config.CandidateLimit = max(config.Hops, 128)
+	ipRestriction := uint8(2)
+	if config.IPRestriction != nil {
+		if *config.IPRestriction > 4 {
+			return nil, ErrNetDBBuildSourceConfig
+		}
+		ipRestriction = *config.IPRestriction
 	}
-	if config.CandidateLimit < config.Hops {
+	if config.CandidateLimit != 0 && config.CandidateLimit < config.Hops {
 		return nil, ErrNetDBBuildSourceConfig
 	}
 	return &NetDBInboundBuildSource{
 		table: config.Table, profiles: config.Profiles, local: config.LocalRouter,
 		hops: config.Hops, candidateLimit: config.CandidateLimit, lifetime: config.Lifetime,
 		circuitID: config.CircuitID, tunnelID: config.TunnelID, target: config.Target,
-		eligible: config.Eligible, exploratory: config.Exploratory,
-		allowUnknownTransports: config.AllowUnknownTransports,
+		eligible: config.Eligible, connected: config.Connected, ipRestriction: ipRestriction,
+		exploratory: config.Exploratory, allowUnknownTransports: config.AllowUnknownTransports,
 	}, nil
 }
 
@@ -232,10 +293,16 @@ func (s *NetDBInboundBuildSource) NextInbound(ctx context.Context, nowMillis uin
 	if err != nil {
 		return InboundBuild{}, err
 	}
-	candidates := s.table.ClosestInto(make([]netdb.RouterRef, s.candidateLimit), target)
+	_, candidates := s.table.Snapshot()
+	random := newSelectionRandom(target)
+	random.shuffle(candidates)
+	if s.candidateLimit != 0 && len(candidates) > s.candidateLimit {
+		candidates = candidates[:s.candidateLimit]
+	}
 	policy := peerSelectionPolicy{
 		direction: Inbound, exploratory: s.exploratory, directFirst: outboundTunnelID == 0,
-		eligible: s.eligible, chance: target[0], allowUnknownTransports: s.allowUnknownTransports,
+		eligible: s.eligible, connected: s.connected, random: random, ipRestriction: s.ipRestriction,
+		allowUnknownTransports: s.allowUnknownTransports,
 	}
 	hops := selectDiverseHops(candidates, s.profiles, s.local, foundation.Hash{}, s.hops, nowMillis, policy)
 	if len(hops) < s.hops {
@@ -316,8 +383,9 @@ const (
 type hopCandidate struct {
 	hop        ShortBuildHop
 	family     string
-	v4         []uint16
-	v6         [][6]byte
+	v4         [][4]byte
+	v6         [][16]byte
+	ports      []uint16
 	transports tunnelTransportMask
 	tier       uint8
 	reachable  bool
@@ -329,8 +397,10 @@ type peerSelectionPolicy struct {
 	directFirst            bool
 	allowUnknownTransports bool
 	eligible               func(foundation.Hash) bool
+	connected              func(foundation.Hash) bool
 	endpointMask           tunnelTransportMask
-	chance                 byte
+	random                 *selectionRandom
+	ipRestriction          uint8
 }
 
 // selectDiverseHops makes strict correlation avoidance win over score. It
@@ -340,9 +410,14 @@ type peerSelectionPolicy struct {
 // publish an address mask.
 func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, excluded foundation.Hash, wanted int, nowMillis uint64, policy peerSelectionPolicy) []ShortBuildHop {
 	candidates := make([]hopCandidate, 0, len(refs))
-	allowRestricted := policy.chance&3 == 0
 	for _, ref := range refs {
-		caps, allowed := tunnelPeerCapabilitiesAllowed(ref.Info, policy.exploratory, allowRestricted)
+		caps, allowed := tunnelPeerCapabilitiesAllowedWithDecisions(
+			ref.Info,
+			policy.exploratory,
+			policy.random.oneIn(4),
+			policy.random.oneIn(4),
+			policy.random.oneIn(4),
+		)
 		if ref.Hash == local || ref.Hash == excluded || !profiles.EligibleAt(ref.Hash, nowMillis) || netdb.RouterInfoFresh(ref.Info, nowMillis) != nil || !allowed {
 			continue
 		}
@@ -354,23 +429,12 @@ func selectDiverseHops(refs []netdb.RouterRef, profiles *PeerProfiles, local, ex
 		if transports == 0 && !policy.allowUnknownTransports {
 			continue
 		}
-		family, v4, v6 := routerMetadata(ref.Info)
-		score := profiles.Score(ref.Hash)
-		tier := uint8(2)
-		if policy.exploratory {
-			if caps.highCapacity {
-				tier = 0
-			} else if score > 0 {
-				tier = 1
-			}
-		} else if score > 0 {
-			tier = 0
-		} else if caps.highCapacity {
-			tier = 1
-		}
+		family, v4, v6, ports := routerMetadata(ref.Info)
 		candidates = append(candidates, hopCandidate{
 			hop: ShortBuildHop{Router: ref.Hash, StaticKey: key}, family: family,
-			v4: v4, v6: v6, transports: transports, tier: tier, reachable: caps.reachable,
+			v4: v4, v6: v6, ports: ports, transports: transports,
+			tier:      profiles.selectionTier(ref.Hash, caps.highCapacity, policy.exploratory),
+			reachable: caps.reachable,
 		})
 	}
 	selected := make([]hopCandidate, 0, wanted)
@@ -461,26 +525,22 @@ func hopCandidateAllowed(candidate hopCandidate, selected []hopCandidate, wanted
 	if relaxation < 2 && familyConflict(selected, candidate) {
 		return false
 	}
-	return relaxation != 0 || !prefixConflict(selected, candidate)
+	return relaxation != 0 || !prefixConflict(selected, candidate, policy.ipRestriction)
 }
 
 func peerAllowedAtPosition(candidate hopCandidate, selected, wanted int, policy peerSelectionPolicy) bool {
-	v4 := candidate.transports&(tunnelNTCP2V4|tunnelSSU2V4) != 0 || candidate.transports == 0 && policy.allowUnknownTransports
+	connected := policy.connected != nil && policy.connected(candidate.hop.Router)
 	if selected == 0 {
-		if policy.direction == Inbound && (!candidate.reachable || !v4) {
+		if policy.direction == Inbound && !candidate.reachable && !connected {
 			return false
 		}
-		if policy.directFirst && policy.eligible != nil && !policy.eligible(candidate.hop.Router) {
+		if policy.directFirst && !connected && policy.eligible != nil && !policy.eligible(candidate.hop.Router) {
 			return false
 		}
 	}
-	if selected+1 == wanted && policy.direction == Outbound {
-		if !v4 {
-			return false
-		}
-		if policy.endpointMask != 0 && candidate.transports&policy.endpointMask == 0 {
-			return false
-		}
+	if selected+1 == wanted && policy.direction == Outbound &&
+		!connected && policy.endpointMask != 0 && candidate.transports&policy.endpointMask == 0 {
+		return false
 	}
 	return true
 }
@@ -498,6 +558,10 @@ type tunnelPeerCapabilities struct {
 }
 
 func tunnelPeerCapabilitiesAllowed(info netdb.RouterInfo, exploratory, allowRestricted bool) (tunnelPeerCapabilities, bool) {
+	return tunnelPeerCapabilitiesAllowedWithDecisions(info, exploratory, allowRestricted, allowRestricted, allowRestricted)
+}
+
+func tunnelPeerCapabilitiesAllowedWithDecisions(info netdb.RouterInfo, exploratory, allowCongested, allowFloodfill, allowUnreachable bool) (tunnelPeerCapabilities, bool) {
 	if info.Identity.SigningKeyType() == foundation.SigningDSASHA1 {
 		return tunnelPeerCapabilities{}, false
 	}
@@ -505,17 +569,16 @@ func tunnelPeerCapabilitiesAllowed(info netdb.RouterInfo, exploratory, allowRest
 	if !ok {
 		return tunnelPeerCapabilities{}, false
 	}
-	result, hasCapacity, floodfill, unreachable, allowed := parseTunnelPeerCapabilities(caps, allowRestricted)
-	if !allowed || !hasCapacity {
+	result, hasCapacity, floodfill, unreachable, allowed := parseTunnelPeerCapabilities(caps, allowCongested)
+	invalidCapacity := !allowed || !hasCapacity
+	conflictingReachability := floodfill && unreachable
+	if invalidCapacity || conflictingReachability {
 		return tunnelPeerCapabilities{}, false
 	}
-	if floodfill && unreachable {
+	if exploratory && floodfill && !allowFloodfill {
 		return tunnelPeerCapabilities{}, false
 	}
-	if exploratory && floodfill && !allowRestricted {
-		return tunnelPeerCapabilities{}, false
-	}
-	if unreachable && (!exploratory || !allowRestricted) {
+	if unreachable && (!exploratory || !allowUnreachable) {
 		return tunnelPeerCapabilities{}, false
 	}
 	return result, i2pVersionAtLeast(version, 0, 9, 62)
@@ -666,16 +729,30 @@ func familyConflict(selected []hopCandidate, candidate hopCandidate) bool {
 	return false
 }
 
-func prefixConflict(selected []hopCandidate, candidate hopCandidate) bool {
+func prefixConflict(selected []hopCandidate, candidate hopCandidate, restriction uint8) bool {
+	if restriction == 0 {
+		return false
+	}
+	v4Bytes := int(restriction)
+	v6Bytes := int(restriction) * 2
 	for _, current := range selected {
-		for _, prefix := range candidate.v4 {
-			if slices.Contains(current.v4, prefix) {
+		for _, port := range candidate.ports {
+			if slices.Contains(current.ports, port) {
 				return true
 			}
 		}
-		for _, prefix := range candidate.v6 {
-			if slices.Contains(current.v6, prefix) {
-				return true
+		for _, address := range candidate.v4 {
+			for _, selectedAddress := range current.v4 {
+				if bytes.Equal(address[:v4Bytes], selectedAddress[:v4Bytes]) {
+					return true
+				}
+			}
+		}
+		for _, address := range candidate.v6 {
+			for _, selectedAddress := range current.v6 {
+				if bytes.Equal(address[:v6Bytes], selectedAddress[:v6Bytes]) {
+					return true
+				}
 			}
 		}
 	}
@@ -690,7 +767,7 @@ func selectedAddressFamilies(selected []hopCandidate) (hasV4, hasV6 bool) {
 	return hasV4, hasV6
 }
 
-func routerMetadata(info netdb.RouterInfo) (string, []uint16, [][6]byte) {
+func routerMetadata(info netdb.RouterInfo) (string, [][4]byte, [][16]byte, []uint16) {
 	var family string
 	options := info.Options.Iterator()
 	for {
@@ -703,35 +780,39 @@ func routerMetadata(info netdb.RouterInfo) (string, []uint16, [][6]byte) {
 			break
 		}
 	}
-	var v4 []uint16
-	var v6 [][6]byte
+	var v4 [][4]byte
+	var v6 [][16]byte
+	var ports []uint16
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
 		if err != nil || !ok {
 			break
 		}
+		var host string
+		var port uint64
 		options := address.Options.Iterator()
 		for {
 			key, value, ok, err := options.Next()
 			if err != nil || !ok {
 				break
 			}
-			if !bytes.Equal(key, []byte("host")) {
-				continue
-			}
-			address, err := netip.ParseAddr(string(value))
-			if err != nil {
-				continue
-			}
-			if address.Is4() {
-				raw := address.As4()
-				v4 = append(v4, uint16(raw[0])<<8|uint16(raw[1]))
-			} else if address.Is6() {
-				raw := address.As16()
-				v6 = append(v6, [6]byte(raw[:6]))
+			switch {
+			case bytes.Equal(key, []byte("host")):
+				host = string(value)
+			case bytes.Equal(key, []byte("port")):
+				port, _ = strconv.ParseUint(string(value), 10, 16)
 			}
 		}
+		ip, err := netip.ParseAddr(host)
+		if err == nil && ip.Is4() {
+			v4 = append(v4, ip.As4())
+		} else if err == nil && ip.Is6() {
+			v6 = append(v6, ip.As16())
+		}
+		if port != 0 {
+			ports = append(ports, uint16(port))
+		}
 	}
-	return family, v4, v6
+	return family, v4, v6, ports
 }

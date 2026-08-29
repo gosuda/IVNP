@@ -75,6 +75,28 @@ func TestPeerProfilesKeepTransportCooldownSeparate(t *testing.T) {
 	}
 }
 
+func TestPeerProfilesDeriveJavaSelectionTiersFromHistory(t *testing.T) {
+	profiles := NewPeerProfiles(PeerProfilesConfig{Window: 8})
+	fast := foundation.Hash{3}
+	if tier := profiles.selectionTier(fast, true, false); tier != 1 {
+		t.Fatalf("unobserved advertised high-capacity tier = %d, want 1", tier)
+	}
+	for range profileBuildMinimumSamples {
+		profiles.RecordSuccess(fast, 10)
+	}
+	if tier := profiles.selectionTier(fast, false, false); tier != 0 {
+		t.Fatalf("observed fast tier = %d, want 0", tier)
+	}
+
+	failing := foundation.Hash{4}
+	profiles.RecordSuccess(failing, 10)
+	profiles.RecordFailure(failing)
+	profiles.RecordFailure(failing)
+	if tier := profiles.selectionTier(failing, true, true); tier != 2 {
+		t.Fatalf("failure-majority exploratory tier = %d, want 2", tier)
+	}
+}
+
 func TestHealthProbeCorrelatesStatusAndExpiresFailures(t *testing.T) {
 	now := uint64(1_000)
 	sender := new(captureTunnelSender)
