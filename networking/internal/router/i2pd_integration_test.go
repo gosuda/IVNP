@@ -293,23 +293,6 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 	buildManager, err = tunnel.NewBuildManager(tunnel.BuildManagerConfig{
 		Runtime: runtime, Sender: sender, ReplyKeys: replyKeys,
 		LocalRouter: alice.Hash(), StaticPrivate: aliceStatic,
-		SeedReplyRouterInfo: func(seedCtx context.Context, endpoint, replyRouter foundation.Hash) error {
-			if endpoint != peer.Hash() || replyRouter != replyPeer.Hash() {
-				return fmt.Errorf("unexpected reply RouterInfo seed endpoint=%s reply=%s", endpoint, replyRouter)
-			}
-			compressed, compressErr := netdb.CompressRouterInfo(replyWire)
-			if compressErr != nil {
-				return compressErr
-			}
-			payload, marshalErr := netdb.MarshalDatabaseStore(replyRouter, i2np.StoreRouterInfo, compressed, 0, foundation.Hash{}, 0)
-			if marshalErr != nil {
-				return marshalErr
-			}
-			return transportManager.Send(seedCtx, endpoint, i2np.Message{
-				Header:  i2np.Header{Type: i2np.DatabaseStore, ID: 0x31415926, Expiration: now() + 60_000},
-				Payload: payload,
-			})
-		},
 		LocalDelivery: func(message i2np.Message) error {
 			return service.HandleI2NP(message, now(), false)
 		},

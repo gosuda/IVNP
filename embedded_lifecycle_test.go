@@ -62,7 +62,11 @@ func (n *embeddedMemoryNetwork) messageID() uint32 {
 	return n.nextID
 }
 
-func (t *embeddedMemoryTransport) Start(_ context.Context, bindings networking.RouterTransportBindings) error {
+func (t *embeddedMemoryTransport) Start(ctx context.Context, bindings networking.RouterTransportBindings) error {
+	bindings.LocalInfo.SetReachability(networking.RouterReachabilityReachable)
+	if err := bindings.LocalInfo.Publish(ctx); err != nil {
+		return err
+	}
 	t.network.mu.Lock()
 	t.local = bindings.LocalInfo.Hash()
 	t.bindings = bindings
@@ -256,7 +260,7 @@ func embeddedTestConfig(t *testing.T) ivnp.Config {
 	cfg.KeyPath = filepath.Join(base, "router.keys")
 	cfg.Network.ID = 2
 	cfg.Network.IPv4 = true
-	cfg.Router.Version = "0.0.0"
+	cfg.Router.Version = "0.9.70"
 	cfg.State.MaxBytes = 1 << 20
 	cfg.State.MaxDestinations = 16
 	cfg.State.MaxNameBytes = 64
@@ -440,6 +444,8 @@ func TestEmbeddedDestinationLifecycle(t *testing.T) {
 		if err = router.Close(); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for _, router := range routers {
 		if err = router.Wait(); err != nil {
 			t.Fatal(err)
 		}

@@ -66,7 +66,7 @@ type StreamingTunnelSenderConfig struct {
 	RemoteELS      map[foundation.Hash]RemoteELSContext
 	Tunnels        *tunnel.Runtime
 	Pool           *tunnel.Pool
-	SeedRouterInfo tunnel.ReplyRouterInfoSeeder
+	SeedRouterInfo tunnel.RouterInfoSeeder
 	Now            func() uint64
 	NextID         MessageIDSource
 	Limiter        *DestinationBandwidthLimiter
@@ -92,7 +92,7 @@ type StreamingTunnelSender struct {
 	ratchet        *garlic.RatchetManager
 	tunnels        *tunnel.Runtime
 	pool           *tunnel.Pool
-	seedRouterInfo tunnel.ReplyRouterInfoSeeder
+	seedRouterInfo tunnel.RouterInfoSeeder
 	now            func() uint64
 	nextID         MessageIDSource
 	lifecycleMu    sync.RWMutex

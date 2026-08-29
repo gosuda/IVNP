@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"encoding/binary"
@@ -142,6 +143,46 @@ func TestNetDBBuildSourceExcludesPeersRejectingTunnelParticipation(t *testing.T)
 		t.Fatalf("tunnel-capable path = %#v", build.Hops)
 	}
 }
+func TestTunnelPeerCapabilitiesMatchJavaPolicy(t *testing.T) {
+	tests := []struct {
+		name            string
+		caps            string
+		exploratory     bool
+		allowRestricted bool
+		want            bool
+	}{
+		{name: "hidden capability is not a slow-peer signal", caps: "OH", want: true},
+		{name: "client unreachable", caps: "OU"},
+		{name: "exploratory unreachable cover", caps: "OU", exploratory: true, allowRestricted: true, want: true},
+		{name: "low bandwidth", caps: "OK"},
+		{name: "severe congestion", caps: "OE"},
+		{name: "occasional severe congestion", caps: "OE", allowRestricted: true, want: true},
+		{name: "no tunnels", caps: "OG"},
+		{name: "client floodfill", caps: "OF", want: true},
+		{name: "exploratory floodfill", caps: "OF", exploratory: true},
+		{name: "occasional exploratory floodfill", caps: "OF", exploratory: true, allowRestricted: true, want: true},
+	}
+	for marker, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			info := verifiedX25519RouterTransport(t, byte(marker+20), "NTCP2", "192.0.2.1", "", test.caps)
+			_, got := tunnelPeerCapabilitiesAllowed(info, test.exploratory, test.allowRestricted)
+			if got != test.want {
+				t.Fatalf("allowed = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestTunnelPeerCapabilitiesRequireCurrentBuildVersion(t *testing.T) {
+	old := verifiedX25519RouterTransportVersion(t, 40, "NTCP2", "192.0.2.1", "", "OR", "0.9.61")
+	current := verifiedX25519RouterTransportVersion(t, 41, "NTCP2", "192.0.2.1", "", "OR", "0.9.62")
+	if _, allowed := tunnelPeerCapabilitiesAllowed(old, false, false); allowed {
+		t.Fatal("pre-0.9.62 peer was eligible for current tunnel builds")
+	}
+	if _, allowed := tunnelPeerCapabilitiesAllowed(current, false, false); !allowed {
+		t.Fatal("0.9.62 peer was ineligible for current tunnel builds")
+	}
+}
 
 func verifiedX25519Router(t *testing.T, marker byte) netdb.RouterInfo {
 	t.Helper()
@@ -150,6 +191,12 @@ func verifiedX25519Router(t *testing.T, marker byte) netdb.RouterInfo {
 
 func verifiedX25519RouterTransport(t *testing.T, marker byte, style, host, addressCaps, routerCaps string) netdb.RouterInfo {
 	t.Helper()
+	return verifiedX25519RouterTransportVersion(t, marker, style, host, addressCaps, routerCaps, "0.9.70")
+}
+
+func verifiedX25519RouterTransportVersion(t *testing.T, marker byte, style, host, addressCaps, routerCaps, version string) netdb.RouterInfo {
+	t.Helper()
+	routerCaps = cmp.Or(routerCaps, "OR")
 	seed := make([]byte, ed25519.SeedSize)
 	seed[0] = marker
 	private := ed25519.NewKeyFromSeed(seed)
@@ -174,9 +221,9 @@ func verifiedX25519RouterTransport(t *testing.T, marker byte, style, host, addre
 	if err != nil {
 		t.Fatal(err)
 	}
-	routerEntries := make([]foundation.MappingEntry, 0, 1)
-	if routerCaps != "" {
-		routerEntries = append(routerEntries, foundation.MappingEntry{Key: []byte("caps"), Value: []byte(routerCaps)})
+	routerEntries := []foundation.MappingEntry{
+		{Key: []byte("caps"), Value: []byte(routerCaps)},
+		{Key: []byte("router.version"), Value: []byte(version)},
 	}
 	routerMappingLen, err := foundation.MappingEncodedLen(routerEntries)
 	if err != nil {

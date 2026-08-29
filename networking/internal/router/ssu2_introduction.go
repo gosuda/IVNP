@@ -219,8 +219,8 @@ func (m *SSU2Manager) forwardRelayStore(job ssu2RelayStoreJob) {
 	store, err := m.cachedSSU2RouterInfoStore(job.aliceInfo, m.now())
 	if err == nil {
 		job.charlie.frameMu.Lock()
-		err = forEachSSU2I2NPFragment(job.charlie.frame[:], store, func(fragment []byte) error {
-			return m.sendData(job.charlie, fragment)
+		err = forEachSSU2I2NPFragment(job.charlie.frame[:], store, ssu2SessionPacketSize(job.charlie), func(fragment []byte, last bool) error {
+			return m.sendData(job.charlie, fragment, last)
 		})
 		job.charlie.frameMu.Unlock()
 	}
@@ -228,7 +228,7 @@ func (m *SSU2Manager) forwardRelayStore(job ssu2RelayStoreJob) {
 		var intro []byte
 		intro, err = ssu2.MarshalRelayIntroBlock(nil, ssu2.RelayIntro{AliceHash: [32]byte(job.alice.peer), Request: job.request})
 		if err == nil {
-			err = m.sendData(job.charlie, intro)
+			err = m.sendSessionData(job.charlie, intro, true)
 		}
 
 	}
@@ -318,7 +318,7 @@ func (m *SSU2Manager) processRelayIntro(bob *ssu2TransportSession, intro ssu2.Re
 		return response, true
 	}
 	block, err := ssu2.MarshalRelayResponseBlock(nil, response)
-	if err != nil || m.sendData(bob, block) != nil {
+	if err != nil || m.sendSessionData(bob, block, true) != nil {
 		return response, true
 	}
 	m.sendHolePunch(aliceAddress, intro.Request.Endpoint, response)
@@ -380,7 +380,7 @@ func (m *SSU2Manager) forwardRelayResponse(from *ssu2TransportSession, response 
 	}
 	payload, err := ssu2.MarshalBlock(nil, ssu2.BlockRelayResponse, data)
 	if err == nil {
-		_ = m.sendData(forward.alice, payload)
+		_ = m.sendSessionData(forward.alice, payload, true)
 	}
 }
 
@@ -444,7 +444,7 @@ func (m *SSU2Manager) sendRelayResponse(session *ssu2TransportSession, bobHash f
 	}
 	payload, err := ssu2.MarshalRelayResponseBlock(nil, response)
 	if err == nil {
-		_ = m.sendData(session, payload)
+		_ = m.sendSessionData(session, payload, true)
 	}
 }
 

@@ -125,6 +125,51 @@ func (m *muxSessionTransport) DropSession(foundation.Hash) bool {
 	return true
 }
 
+type muxCountedSessionTransport struct {
+	*muxSessionTransport
+	count int
+}
+
+func (m *muxCountedSessionTransport) activeSessionCount() int { return m.count }
+
+func TestTransportMuxRacesSSU2BelowJavaMinimum(t *testing.T) {
+	database, peer := muxTestPeer(t, true, true)
+	ntcp2 := newMuxSessionTransport()
+	ssu2 := &muxCountedSessionTransport{muxSessionTransport: newMuxSessionTransport()}
+	metrics := observability.NewRegistry()
+	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2, Metrics: metrics})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- mux.EnsureSession(context.Background(), peer) }()
+	<-ntcp2.ensureStarted
+	<-ssu2.ensureStarted
+	ssu2.ensureRelease <- nil
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	snapshot := metrics.Snapshot().Transport
+	if snapshot.RaceAttempts != 1 || snapshot.SSU2RaceWins != 1 || snapshot.SSU2Promotions != 1 {
+		t.Fatalf("transport preference metrics = %+v", snapshot)
+	}
+}
+
+func TestTransportMuxGivesNTCP2EveryFourthMinimumPeerAttempt(t *testing.T) {
+	ssu2 := &muxCountedSessionTransport{muxSessionTransport: newMuxSessionTransport()}
+	mux := new(TransportMux)
+	for attempt := range 4 {
+		preferred := mux.preferSSU2(ssu2)
+		if preferred != (attempt != 3) {
+			t.Fatalf("attempt %d SSU2 preference = %t", attempt+1, preferred)
+		}
+	}
+	ssu2.count = minimumSSU2Peers
+	if mux.preferSSU2(ssu2) {
+		t.Fatal("SSU2 remained preferred at the minimum peer count")
+	}
+}
+
 func TestTransportMuxReturnsFirstSSU2Session(t *testing.T) {
 	database, peer := muxTestPeer(t, true, true)
 	ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
@@ -320,8 +365,8 @@ func TestTransportMuxTunnelEligibilityUsesSSU2OnlyWithoutNTCP2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if withNTCP2.CanBuildTunnel(peer) {
-		t.Fatal("SSU2-only peer was eligible while reliable NTCP2 tunnel construction was configured")
+	if !withNTCP2.CanBuildTunnel(peer) {
+		t.Fatal("direct SSU2 peer was ineligible while NTCP2 was also configured")
 	}
 }
 
@@ -337,6 +382,18 @@ func TestTransportMuxTunnelEligibilityMatchesIPv4Binding(t *testing.T) {
 	}
 	if mux.CanBuildTunnel(peer) {
 		t.Fatal("IPv6-only peer was eligible for an IPv4-bound tunnel builder")
+	}
+}
+
+func TestTransportMuxTunnelEligibilityRejectsUnavailableIPv6SSU2(t *testing.T) {
+	database, peer := muxTestPeerAtHost(t, false, true, "2001:db8::1")
+	manager := new(SSU2Manager)
+	mux, err := NewTransportMux(TransportMuxConfig{Database: database, SSU2: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mux.CanBuildTunnel(peer) {
+		t.Fatal("IPv6-only SSU2 peer was eligible without a global IPv6 interface")
 	}
 }
 

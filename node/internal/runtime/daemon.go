@@ -574,6 +574,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			return nil, err
 		}
 	}
+	allowUnknownTransports := options.Transport != nil
 	var mux networking.RouterTransportManager
 	if options.Transport != nil {
 		mux = options.Transport
@@ -641,7 +642,6 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		tunnels               *networking.TunnelRuntime
 		pool                  *networking.TunnelPool
 		profiles              *networking.TunnelPeerProfiles
-		reservations          *networking.TunnelBuildReservations
 		replyKeys             *networking.GarlicReplyKeyRegistry
 		buildManager          *networking.TunnelBuildManager
 		maintainer            *networking.TunnelPairedPoolMaintainer
@@ -705,7 +705,6 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		tunnels = networking.TunnelNewRuntime(networking.TunnelRuntimeConfig{Sender: mux, Now: now})
 		pool = networking.TunnelNewPool(cfg.Tunnel.ExploratoryPoolCapacity)
 		profiles = networking.TunnelNewPeerProfiles(networking.TunnelPeerProfilesConfig{})
-		reservations = networking.TunnelNewBuildReservations()
 		responders = networking.NetworkDatabaseNewResponderProfiles(0)
 		eligible := transportPeerEligibility(mux)
 		for _, peer := range bootstrapPeers {
@@ -719,8 +718,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		buildManager, err = networking.TunnelNewBuildManager(networking.TunnelBuildManagerConfig{
 			Runtime: tunnels, Pool: pool, Sender: mux, ReplyKeys: replyKeys, ReplySender: replySender,
 			LocalRouter: bundle.Router.Hash, StaticPrivate: bundle.Router.X25519Private[:],
-			StaticKeyLookup:     networking.TunnelNewNetDBBuildStaticKeyLookup(database.Routers()),
-			SeedReplyRouterInfo: buildReplyRouterInfoSeeder(database, mux, now),
+			StaticKeyLookup: networking.TunnelNewNetDBBuildStaticKeyLookup(database.Routers()),
 			Bandwidth: func(networking.TunnelShortBuildRequest) uint32 {
 				return uint32(cfg.Tunnel.BandwidthRateBytesPerSecond / 1024)
 			},
@@ -739,7 +737,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: cfg.Tunnel.Hops,
 			Lifetime:  uint64(cfg.Tunnel.Lifetime / time.Millisecond),
 			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
-			Eligible: eligible, Reservations: reservations,
+			Eligible: eligible, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
 		})
 		if sourceErr != nil {
 			return nil, fmt.Errorf("create exploratory inbound build source: %w", sourceErr)
@@ -748,7 +746,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: cfg.Tunnel.Hops,
 			Lifetime:  uint64(cfg.Tunnel.Lifetime / time.Millisecond),
 			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
-			Eligible: eligible, Reservations: reservations,
+			Eligible: eligible, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
 		})
 		if sourceErr != nil {
 			return nil, fmt.Errorf("create exploratory outbound build source: %w", sourceErr)
@@ -803,7 +801,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			cfg: cfg, database: database, service: service, tunnels: tunnels, destinations: destinations,
 			replyKeys: replyKeys, replySender: replySender, transport: mux,
 			localRouter: bundle.Router.Hash, staticPrivate: bundle.Router.X25519Private[:],
-			reservations: reservations, profiles: profiles, eligible: eligible,
+			profiles: profiles, eligible: eligible, allowUnknownTransports: allowUnknownTransports,
 			now: now, clockNow: clock.Now, garlicReceiver: garlicReceiver, status: statusMux,
 			buildReplies: buildReplies, requests: requestHandlers, publishers: destinationPublishers,
 			publicationTokens: publicationTokens,
@@ -2146,7 +2144,7 @@ type muxRequestSender struct {
 	now                 func() uint64
 	replyKeys           *networking.GarlicReplyKeyRegistry
 	staticKeyLookup     networking.TunnelBuildStaticKeyLookup
-	seedReplyRouterInfo networking.TunnelReplyRouterInfoSeeder
+	seedReplyRouterInfo networking.TunnelRouterInfoSeeder
 }
 
 func (s muxRequestSender) Send(ctx context.Context, peer networking.NetworkDatabaseRouterRef, message networking.I2NPMessage) error {
@@ -2209,7 +2207,7 @@ type muxLeaseSetSender struct {
 	pairs               requestPairSource
 	now                 func() uint64
 	staticKeyLookup     networking.TunnelBuildStaticKeyLookup
-	seedReplyRouterInfo networking.TunnelReplyRouterInfoSeeder
+	seedReplyRouterInfo networking.TunnelRouterInfoSeeder
 }
 
 func (s muxLeaseSetSender) Send(ctx context.Context, peer networking.NetworkDatabaseRouterRef, message networking.I2NPMessage) error {
@@ -2229,7 +2227,7 @@ func (s muxLeaseSetSender) Eligible(peer networking.NetworkDatabaseRouterRef) bo
 	return eligible == nil || eligible(peer.Hash)
 }
 
-func sendNetDBThroughPair(ctx context.Context, peer networking.NetworkDatabaseRouterRef, message networking.I2NPMessage, sender networking.TunnelSender, tunnels requestTunnelSender, pairs requestPairSource, now func() uint64, staticKeyLookup networking.TunnelBuildStaticKeyLookup, seedReplyRouterInfo networking.TunnelReplyRouterInfoSeeder) error {
+func sendNetDBThroughPair(ctx context.Context, peer networking.NetworkDatabaseRouterRef, message networking.I2NPMessage, sender networking.TunnelSender, tunnels requestTunnelSender, pairs requestPairSource, now func() uint64, staticKeyLookup networking.TunnelBuildStaticKeyLookup, seedReplyRouterInfo networking.TunnelRouterInfoSeeder) error {
 	if tunnels == nil || pairs == nil || now == nil {
 		return sender.Send(ctx, peer.Hash, message)
 	}
@@ -2373,7 +2371,7 @@ func nowFromClock(clock networking.RouterClock) func() uint64 {
 	return func() uint64 { return uint64(clock.Now().UnixMilli()) }
 }
 
-func buildReplyRouterInfoSeeder(database *networking.NetworkDatabase, sender networking.TunnelSender, now func() uint64) networking.TunnelReplyRouterInfoSeeder {
+func buildReplyRouterInfoSeeder(database *networking.NetworkDatabase, sender networking.TunnelSender, now func() uint64) networking.TunnelRouterInfoSeeder {
 	return func(ctx context.Context, endpoint, replyRouter foundation.Hash) error {
 		ref, ok := database.Routers().Get(replyRouter)
 		if !ok {

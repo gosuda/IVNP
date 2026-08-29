@@ -41,7 +41,7 @@ func TestParseOperatingDefaults(t *testing.T) {
 		}
 	}
 	tunnel := config.Tunnel
-	coreDefaultsRejected := !tunnel.Enabled || tunnel.Lifetime != 10*time.Minute || config.Router.Floodfill || config.Router.Version != "2.13.0" || config.NetDB.LookupCapacity != 32
+	coreDefaultsRejected := !tunnel.Enabled || tunnel.Lifetime != 10*time.Minute || config.Router.Floodfill || config.Router.Version != "0.9.70" || config.NetDB.LookupCapacity != 32
 	exploratoryDefaultsRejected := tunnel.ExploratoryInboundTarget != 4 || tunnel.ExploratoryOutboundTarget != 4 || tunnel.ExploratoryPoolCapacity != 8
 	clientDefaultsRejected := tunnel.ClientInboundTarget != 2 || tunnel.ClientOutboundTarget != 2 || tunnel.ClientPoolCapacity != 4
 	if coreDefaultsRejected || exploratoryDefaultsRejected || clientDefaultsRejected {

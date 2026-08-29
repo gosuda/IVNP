@@ -159,7 +159,11 @@ func (n *daemonMemoryNetwork) transport() *daemonMemoryTransport {
 	return &daemonMemoryTransport{network: n, done: make(chan struct{})}
 }
 
-func (t *daemonMemoryTransport) Start(_ context.Context, bindings networking.RouterTransportBindings) error {
+func (t *daemonMemoryTransport) Start(ctx context.Context, bindings networking.RouterTransportBindings) error {
+	bindings.LocalInfo.SetReachability(networking.RouterReachabilityReachable)
+	if err := bindings.LocalInfo.Publish(ctx); err != nil {
+		return err
+	}
 	t.local, t.bindings, t.running = bindings.LocalInfo.Hash(), bindings, true
 	t.network.mu.Lock()
 	t.network.endpoints[t.local] = t
@@ -330,7 +334,7 @@ func daemonTestConfig(t *testing.T) state.ConfigurationOperating {
 		StatePath: filepath.Join(base, "router.state"),
 		KeyPath:   filepath.Join(base, "router.keys"),
 		Network:   state.ConfigurationNetwork{ID: 2, IPv4: true},
-		Router:    state.ConfigurationRouter{Version: "0.0.0"},
+		Router:    state.ConfigurationRouter{Version: "0.9.70"},
 		State:     state.ConfigurationState{MaxBytes: 1 << 20, MaxDestinations: 16, MaxNameBytes: 64},
 		NetDB:     state.ConfigurationNetDB{BucketCapacity: 4, LookupCapacity: 8},
 		Tunnel: state.ConfigurationTunnel{

@@ -121,7 +121,6 @@ type (
 	TunnelBlock                                        = tunnel.Block
 	TunnelBuildManager                                 = tunnel.BuildManager
 	TunnelBuildManagerConfig                           = tunnel.BuildManagerConfig
-	TunnelBuildReservations                            = tunnel.BuildReservations
 	TunnelBuildStaticKeyLookup                         = tunnel.BuildStaticKeyLookup
 	TunnelCircuitPair                                  = tunnel.CircuitPair
 	TunnelDirection                                    = tunnel.Direction
@@ -136,7 +135,7 @@ type (
 	TunnelPeerProfiles                                 = tunnel.PeerProfiles
 	TunnelPeerProfilesConfig                           = tunnel.PeerProfilesConfig
 	TunnelPool                                         = tunnel.Pool
-	TunnelReplyRouterInfoSeeder                        = tunnel.ReplyRouterInfoSeeder
+	TunnelRouterInfoSeeder                             = tunnel.RouterInfoSeeder
 	TunnelRuntime                                      = tunnel.Runtime
 	TunnelRuntimeConfig                                = tunnel.RuntimeConfig
 	TunnelSender                                       = tunnel.Sender
@@ -255,7 +254,6 @@ var (
 	TunnelErrProbeNotReady                        = tunnel.ErrProbeNotReady
 	TunnelErrProbePending                         = tunnel.ErrProbePending
 	TunnelNewBuildManager                         = tunnel.NewBuildManager
-	TunnelNewBuildReservations                    = tunnel.NewBuildReservations
 	TunnelNewHealth                               = tunnel.NewHealth
 	TunnelNewNetDBBuildStaticKeyLookup            = tunnel.NewNetDBBuildStaticKeyLookup
 	TunnelNewNetDBInboundBuildSource              = tunnel.NewNetDBInboundBuildSource

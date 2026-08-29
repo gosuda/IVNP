@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
@@ -30,6 +31,15 @@ type preferredSessionManager interface {
 	HasSession(foundation.Hash) bool
 	DropSession(foundation.Hash) bool
 }
+
+type activeSessionCounter interface {
+	activeSessionCount() int
+}
+
+const (
+	minimumSSU2Peers    = 10
+	ssu2PreferenceGrace = 750 * time.Millisecond
+)
 
 type transportCapabilities struct {
 	ntcp2      TransportManager
@@ -59,13 +69,14 @@ type TransportMux struct {
 	ssu2     TransportManager
 	metrics  *observability.Registry
 
-	lifecycleMu  sync.Mutex
-	started      bool
-	closed       bool
-	managers     [2]TransportManager
-	managerCount int
-	closeOnce    sync.Once
-	closeErr     error
+	lifecycleMu   sync.Mutex
+	started       bool
+	closed        bool
+	managers      [2]TransportManager
+	managerCount  int
+	closeOnce     sync.Once
+	closeErr      error
+	udpPreference atomic.Uint32
 }
 
 var _ TransportManager = (*TransportMux)(nil)
@@ -293,11 +304,16 @@ func (m *TransportMux) sessionManager(ctx context.Context, peer foundation.Hash)
 	if !ntcp2OK || !ssu2OK {
 		return nil, false, nil
 	}
-	manager, err := m.raceDirectSessions(ctx, peer, ntcp2, ssu2)
+	manager, err := m.raceDirectSessions(ctx, peer, ntcp2, ssu2, m.preferSSU2(ssu2))
 	return manager, true, err
 }
 
-func (m *TransportMux) raceDirectSessions(ctx context.Context, peer foundation.Hash, ntcp2, ssu2 preferredSessionManager) (TransportManager, error) {
+func (m *TransportMux) preferSSU2(manager preferredSessionManager) bool {
+	counter, ok := manager.(activeSessionCounter)
+	return ok && counter.activeSessionCount() < minimumSSU2Peers && m.udpPreference.Add(1)%4 != 0
+}
+
+func (m *TransportMux) raceDirectSessions(ctx context.Context, peer foundation.Hash, ntcp2, ssu2 preferredSessionManager, preferSSU2 bool) (TransportManager, error) {
 	type result struct {
 		manager preferredSessionManager
 		err     error
@@ -319,6 +335,19 @@ func (m *TransportMux) raceDirectSessions(ctx context.Context, peer foundation.H
 		}
 		m.recordSessionRaceWinner(second.manager, ntcp2)
 		return second.manager, nil
+	}
+	if preferSSU2 && first.manager == ntcp2 {
+		timer := time.NewTimer(ssu2PreferenceGrace)
+		select {
+		case second := <-results:
+			timer.Stop()
+			if second.err == nil {
+				first.manager.DropSession(peer)
+				m.recordSessionRaceWinner(second.manager, ntcp2)
+				return second.manager, nil
+			}
+		case <-timer.C:
+		}
 	}
 	cancel()
 	go func() {
@@ -389,10 +418,8 @@ func (m *TransportMux) CanSend(peer foundation.Hash) bool {
 	return ok
 }
 
-// CanBuildTunnel reports whether the peer has a directly reachable address
-// suitable for latency-bounded tunnel construction. When NTCP2 is configured,
-// its reliable stream path is required; SSU2 is the direct-only fallback for
-// SSU2-only nodes. Introducer-only SSU2 remains valid for ordinary delivery.
+// CanBuildTunnel reports whether a peer has any directly reachable configured
+// transport. Introducer-only SSU2 remains valid only for ordinary delivery.
 func (m *TransportMux) CanBuildTunnel(peer foundation.Hash) bool {
 	if m == nil {
 		return false
@@ -403,18 +430,15 @@ func (m *TransportMux) CanBuildTunnel(peer foundation.Hash) bool {
 	}
 	now := time.Now()
 	nowMillis := uint64(now.UnixMilli())
-	if m.ntcp2 != nil {
-		if !ntcp2RouterInfoCapable(ref.Info, nowMillis) {
-			return false
+	ntcp2OK := m.ntcp2 != nil && ntcp2RouterInfoCapable(ref.Info, nowMillis)
+	if ntcp2OK {
+		if manager, concrete := m.ntcp2.(*NTCP2Manager); concrete {
+			_, err := selectNTCP2AddressForNetwork(ref.Info, ntcp2AddressSelection(manager.currentBindings().NTCP2))
+			ntcp2OK = err == nil
 		}
-		manager, concrete := m.ntcp2.(*NTCP2Manager)
-		if !concrete {
-			return true
-		}
-		_, err := selectNTCP2AddressForNetwork(ref.Info, ntcp2AddressSelection(manager.currentBindings().NTCP2))
-		return err == nil
 	}
-	return m.ssu2 != nil && ssu2DirectRouterInfoCapable(ref.Info, uint64(now.Unix()))
+	ssu2OK := m.ssu2 != nil && m.directSSU2RouterInfoCapable(ref.Info, uint64(now.Unix()))
+	return ntcp2OK || ssu2OK
 }
 
 func (m *TransportMux) selectManagers(peer foundation.Hash) (TransportManager, TransportManager, bool) {
@@ -450,9 +474,20 @@ func (m *TransportMux) capabilities(peer foundation.Hash) (transportCapabilities
 	}
 	if m.ssu2 != nil && ssu2RouterInfoCapable(ref.Info, uint64(now.Unix())) {
 		capabilities.ssu2 = m.ssu2
-		capabilities.directSSU2 = ssu2DirectRouterInfoCapable(ref.Info, uint64(now.Unix()))
+		capabilities.directSSU2 = m.directSSU2RouterInfoCapable(ref.Info, uint64(now.Unix()))
 	}
 	return capabilities, capabilities.ntcp2 != nil || capabilities.ssu2 != nil
+}
+
+func (m *TransportMux) directSSU2RouterInfoCapable(info netdb.RouterInfo, now uint64) bool {
+	manager, concrete := m.ssu2.(*SSU2Manager)
+	if !concrete {
+		return ssu2DirectRouterInfoCapable(info, now)
+	}
+	if _, err := manager.selectSSU2Address(info); err != nil {
+		return false
+	}
+	return hasCurrentTransportAddress(info, now*1000, []byte("SSU"), []byte("SSU2"))
 }
 
 func ntcp2RouterInfoCapable(info netdb.RouterInfo, nowMillis uint64) bool {

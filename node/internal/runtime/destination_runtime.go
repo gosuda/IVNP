@@ -324,9 +324,9 @@ type destinationRuntimeFactory struct {
 	localRouter              foundation.Hash
 	staticPrivate            []byte
 	preferredPeers           []foundation.Hash
-	reservations             *networking.TunnelBuildReservations
 	profiles                 *networking.TunnelPeerProfiles
 	eligible                 func(foundation.Hash) bool
+	allowUnknownTransports   bool
 	responders               *networking.NetworkDatabaseResponderProfiles
 	now                      func() uint64
 	clockNow                 func() time.Time
@@ -385,8 +385,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	build, err := networking.TunnelNewBuildManager(networking.TunnelBuildManagerConfig{
 		Runtime: f.tunnels, Pool: pool, Sender: f.transport, ReplyKeys: f.replyKeys, ReplySender: f.replySender,
 		LocalRouter: f.localRouter, StaticPrivate: f.staticPrivate,
-		StaticKeyLookup:     networking.TunnelNewNetDBBuildStaticKeyLookup(f.database.Routers()),
-		SeedReplyRouterInfo: buildReplyRouterInfoSeeder(f.database, f.transport, f.now),
+		StaticKeyLookup: networking.TunnelNewNetDBBuildStaticKeyLookup(f.database.Routers()),
 		Bandwidth: func(networking.TunnelShortBuildRequest) uint32 {
 			return uint32(f.cfg.Tunnel.BandwidthRateBytesPerSecond / 1024)
 		},
@@ -410,7 +409,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	inboundSource, err := networking.TunnelNewNetDBInboundBuildSource(networking.TunnelNetDBInboundBuildSourceConfig{
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: f.cfg.Tunnel.Hops,
 		Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
-		Eligible: f.eligible, Reservations: f.reservations,
+		Eligible: f.eligible, AllowUnknownTransports: f.allowUnknownTransports,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create destination inbound build source: %w", err)
@@ -418,7 +417,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	outboundSource, err := networking.TunnelNewNetDBOutboundBuildSource(networking.TunnelNetDBOutboundBuildSourceConfig{
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: f.cfg.Tunnel.Hops,
 		Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID, CandidateLimit: daemonTunnelBuildCandidates,
-		Eligible: f.eligible, Reservations: f.reservations,
+		Eligible: f.eligible, AllowUnknownTransports: f.allowUnknownTransports,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create destination outbound build source: %w", err)

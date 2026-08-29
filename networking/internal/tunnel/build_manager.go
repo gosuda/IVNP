@@ -29,7 +29,6 @@ const (
 	shortBuildReplayLifetime = 10 * 60_000
 	buildMessageLifetime     = 60_000
 	buildRetryDelay          = 5 * time.Second
-	buildTimeoutPathCooldown = 30 * time.Second
 	buildRequestTimeout      = 5_000 // Java BuildRequestor.REQUEST_TIMEOUT
 )
 
@@ -70,8 +69,7 @@ type OutboundBuild struct {
 	// retireID is assigned by Rotator for a renewal. It is intentionally kept
 	// out of the source-facing build contract: no caller may retire a tunnel
 	// unless the rotator selected it from the renewal window.
-	retireID    uint32
-	reservation *BuildReservation
+	retireID uint32
 }
 
 // InboundBuild describes a modern short-record inbound tunnel.
@@ -85,8 +83,7 @@ type InboundBuild struct {
 	// retireID is assigned by paired maintenance for a renewal. It stays
 	// private so only a selection made from the renewal window can retire a
 	// live inbound path.
-	retireID    uint32
-	reservation *BuildReservation
+	retireID uint32
 }
 
 // BuildReplySender garlic-wraps the OBEP reply using the one-time key
@@ -108,10 +105,9 @@ type BuildBandwidth func(ShortBuildRequest) uint32
 // BuildStaticKeyLookup returns a retained RouterInfo identity encryption key.
 type BuildStaticKeyLookup func(foundation.Hash) ([32]byte, bool)
 
-// ReplyRouterInfoSeeder sends the selected inbound gateway RouterInfo to the
-// outbound endpoint before its build request. The endpoint needs that address
-// to route OutboundTunnelBuildReply through the requested inbound tunnel.
-type ReplyRouterInfoSeeder func(context.Context, foundation.Hash, foundation.Hash) error
+// RouterInfoSeeder sends a RouterInfo to one tunnel endpoint before traffic
+// that depends on the endpoint routing to that router.
+type RouterInfoSeeder func(context.Context, foundation.Hash, foundation.Hash) error
 
 // BuildSource identifies how a build reached the local router. Direct sources
 // are authenticated transport peers; a zero source is tunnel-originated.
@@ -138,28 +134,27 @@ type BuildScheduleFunc func(time.Duration, func()) func()
 // BuildManager creates and processes short-record and compatibility variable
 // tunnel builds. Pending creator and transit replay state is bounded.
 type BuildManager struct {
-	runtime             *Runtime
-	pool                *Pool
-	sender              Sender
-	replyKeys           GarlicReplyKeyRegistry
-	replySender         BuildReplySender
-	local               foundation.Hash
-	staticPrivateKey    *ecdh.PrivateKey
-	legacyPrivate       cryptography.ElGamalPrivateKey
-	legacyEnabled       bool
-	admit               BuildAdmission
-	bandwidth           BuildBandwidth
-	staticKeyLookup     BuildStaticKeyLookup
-	seedReplyRouterInfo ReplyRouterInfoSeeder
-	localDelivery       func(i2np.Message) error
-	now                 func() uint64
-	random              io.Reader
-	profiles            *PeerProfiles
-	maxPending          int
-	logger              *slog.Logger
-	metrics             *observability.Registry
-	onBuildEvent        func()
-	schedule            BuildScheduleFunc
+	runtime          *Runtime
+	pool             *Pool
+	sender           Sender
+	replyKeys        GarlicReplyKeyRegistry
+	replySender      BuildReplySender
+	local            foundation.Hash
+	staticPrivateKey *ecdh.PrivateKey
+	legacyPrivate    cryptography.ElGamalPrivateKey
+	legacyEnabled    bool
+	admit            BuildAdmission
+	bandwidth        BuildBandwidth
+	staticKeyLookup  BuildStaticKeyLookup
+	localDelivery    func(i2np.Message) error
+	now              func() uint64
+	random           io.Reader
+	profiles         *PeerProfiles
+	maxPending       int
+	logger           *slog.Logger
+	metrics          *observability.Registry
+	onBuildEvent     func()
+	schedule         BuildScheduleFunc
 
 	lifecycleMu     sync.RWMutex
 	mu              sync.Mutex
@@ -222,21 +217,20 @@ type VariableOutboundBuild struct {
 // BuildManagerConfig provides the network handoff and local ECIES or legacy
 // ElGamal identity needed by short and compatibility build processing.
 type BuildManagerConfig struct {
-	Runtime             *Runtime
-	Pool                *Pool
-	Sender              Sender
-	ReplyKeys           GarlicReplyKeyRegistry
-	ReplySender         BuildReplySender
-	LocalRouter         foundation.Hash
-	StaticPrivate       []byte
-	LegacyPrivate       []byte
-	Admission           BuildAdmission
-	Bandwidth           BuildBandwidth
-	StaticKeyLookup     BuildStaticKeyLookup
-	SeedReplyRouterInfo ReplyRouterInfoSeeder
-	LocalDelivery       func(i2np.Message) error
-	Now                 func() uint64
-	Random              io.Reader
+	Runtime         *Runtime
+	Pool            *Pool
+	Sender          Sender
+	ReplyKeys       GarlicReplyKeyRegistry
+	ReplySender     BuildReplySender
+	LocalRouter     foundation.Hash
+	StaticPrivate   []byte
+	LegacyPrivate   []byte
+	Admission       BuildAdmission
+	Bandwidth       BuildBandwidth
+	StaticKeyLookup BuildStaticKeyLookup
+	LocalDelivery   func(i2np.Message) error
+	Now             func() uint64
+	Random          io.Reader
 	// Profiles receives terminal authenticated build observations. It is
 	// optional for compatibility-only runtimes without tunnel selection.
 	Profiles     *PeerProfiles
@@ -278,10 +272,15 @@ func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
 	lifecycle, cancel := context.WithCancel(context.Background())
 	manager := &BuildManager{
 		runtime: config.Runtime, pool: config.Pool, sender: config.Sender, replyKeys: config.ReplyKeys, replySender: config.ReplySender,
-		local: config.LocalRouter, admit: config.Admission, bandwidth: config.Bandwidth, staticKeyLookup: config.StaticKeyLookup,
-		seedReplyRouterInfo: config.SeedReplyRouterInfo,
-		localDelivery:       config.LocalDelivery, now: config.Now, random: &synchronizedReader{reader: config.Random}, profiles: config.Profiles,
-		maxPending: config.MaxPending, pending: make(map[uint32]*pendingOutboundBuild), pendingInbound: make(map[uint32]*pendingInboundBuild),
+		local:           config.LocalRouter,
+		admit:           config.Admission,
+		bandwidth:       config.Bandwidth,
+		staticKeyLookup: config.StaticKeyLookup,
+		localDelivery:   config.LocalDelivery,
+		now:             config.Now,
+		random:          &synchronizedReader{reader: config.Random},
+		profiles:        config.Profiles,
+		maxPending:      config.MaxPending, pending: make(map[uint32]*pendingOutboundBuild), pendingInbound: make(map[uint32]*pendingInboundBuild),
 		pendingVariable: make(map[uint32]*pendingVariableBuild), transit: make(map[uint32]uint64),
 		transitRecords: make(map[[32]byte]uint64), staticPrivateKey: staticPrivateKey,
 		logger: config.Logger, metrics: config.Metrics, onBuildEvent: config.OnBuildEvent, schedule: config.Schedule,
@@ -319,7 +318,6 @@ func (m *BuildManager) ReleaseSensitive() {
 		}
 		clear(pending.keys)
 		clear(pending.positions)
-		pending.build.reservation.Release()
 		clear(pending.replyTag[:])
 		cancelBuildDeadline(pending.cancelDeadline)
 		delete(m.pending, id)
@@ -329,7 +327,6 @@ func (m *BuildManager) ReleaseSensitive() {
 		clear(pending.positions)
 		clear(pending.fakeHash[:])
 		cancelBuildDeadline(pending.cancelDeadline)
-		pending.build.reservation.Release()
 		delete(m.pendingInbound, id)
 	}
 	for id, pending := range m.pendingVariable {
@@ -369,12 +366,6 @@ func (m *BuildManager) isReleased() bool {
 func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (uint32, error) {
 	m.lifecycleMu.RLock()
 	defer m.lifecycleMu.RUnlock()
-	reservationOwned := build.reservation != nil
-	defer func() {
-		if reservationOwned {
-			build.reservation.Release()
-		}
-	}()
 	if m.isReleased() {
 		return 0, ErrBuildConfig
 	}
@@ -472,20 +463,6 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		return 0, err
 	}
 
-	if m.seedReplyRouterInfo != nil {
-		endpoint := build.Hops[len(build.Hops)-1].Router
-		if err = m.seedReplyRouterInfo(ctx, endpoint, build.ReplyRouter); err != nil {
-			if m.profiles != nil {
-				m.profiles.RecordTransportFailure(endpoint, now)
-			}
-			if m.logger != nil {
-				m.logger.Warn("tunnel build reply RouterInfo seed failed", "direction", "outbound", "endpoint", foundation.EncodeI2PBase64(endpoint[:]), "error", err)
-			}
-			clearBuildKeys(keys)
-			m.scheduleBuildRetry()
-			return 0, err
-		}
-	}
 	replyID := messageIDs[len(messageIDs)-1]
 	endpointKeys := keys[len(keys)-1]
 	if !endpointKeys.HasGarlicKeys {
@@ -504,7 +481,6 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		return 0, ErrBuildPending
 	}
 	m.pending[replyID] = pending
-	reservationOwned = false
 	m.mu.Unlock()
 	if err = m.replyKeys.RegisterGarlicReplyKey(GarlicReplyKey{
 		Key: endpointKeys.GarlicKey, Tag: endpointKeys.GarlicTag, ExpiresAt: pending.deadline,
@@ -545,12 +521,6 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (uint32, error) {
 	m.lifecycleMu.RLock()
 	defer m.lifecycleMu.RUnlock()
-	reservationOwned := build.reservation != nil
-	defer func() {
-		if reservationOwned {
-			build.reservation.Release()
-		}
-	}()
 	if m.isReleased() {
 		return 0, ErrBuildConfig
 	}
@@ -595,15 +565,6 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 	if build.OutboundTunnelID == 0 {
 		if err := m.ensureBuildSession(ctx, build.Hops[0].Router, build.Hops, "inbound", "first_hop"); err != nil {
 			return 0, err
-		}
-	}
-	if build.Hops[len(build.Hops)-1].Router != build.Hops[0].Router {
-		replyPeer := build.Hops[len(build.Hops)-1].Router
-		if err := m.ensureBuildSession(ctx, replyPeer, build.Hops, "inbound", "reply_endpoint"); err != nil {
-			return 0, err
-		}
-		if m.logger != nil {
-			m.logger.Debug("tunnel build reply session ready", "direction", "inbound", "peer", foundation.EncodeI2PBase64(replyPeer[:]))
 		}
 	}
 	var messageIDStorage [i2np.MaxVariableBuildRecords + 1]uint32
@@ -696,7 +657,6 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 		return 0, ErrBuildPending
 	}
 	m.pendingInbound[replyID] = pending
-	reservationOwned = false
 	m.mu.Unlock()
 	if m.metrics != nil {
 		m.metrics.IncTunnelBuilds()
@@ -809,7 +769,6 @@ func (m *BuildManager) handleInboundReply(message i2np.Message) error {
 		return ErrBuildPending
 	}
 	defer m.notifyBuildEvent()
-	defer pending.build.reservation.Release()
 	success := false
 	defer func() {
 		if !success && m.metrics != nil {
@@ -1146,7 +1105,6 @@ func (m *BuildManager) HandleReply(message i2np.Message) error {
 		return ErrBuildPending
 	}
 	defer m.notifyBuildEvent()
-	defer pending.build.reservation.Release()
 	m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
 	defer clearBuildKeys(pending.keys)
 	success := false
@@ -1274,24 +1232,27 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 	for _, pending := range expired {
 		cancelBuildDeadline(pending.cancelDeadline)
 		m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
-		pending.build.reservation.ReleaseAfter(buildTimeoutPathCooldown)
+		for _, hop := range pending.build.Hops {
+			m.recordBuildPeer(hop.Router, false, 0, nowMillis)
+		}
 		clearBuildKeys(pending.keys)
 	}
 	for _, pending := range expiredInbound {
 		cancelBuildDeadline(pending.cancelDeadline)
+		for _, hop := range pending.build.Hops {
+			m.recordBuildPeer(hop.Router, false, 0, nowMillis)
+		}
 		clearBuildKeys(pending.keys)
-		pending.build.reservation.ReleaseAfter(buildTimeoutPathCooldown)
 	}
 	for _, pending := range expiredVariable {
 		cancelBuildDeadline(pending.cancelDeadline)
+		for _, hop := range pending.build.Hops {
+			m.recordBuildPeer(hop.Router, false, 0, nowMillis)
+		}
 		clearVariableBuildKeys(pending.keys)
 	}
 	if expiredCount != 0 {
-		m.schedule(buildTimeoutPathCooldown, func() {
-			if m.ctx.Err() == nil {
-				m.notifyBuildEvent()
-			}
-		})
+		m.scheduleBuildRetry()
 	}
 	return len(expired) + len(expiredInbound) + len(expiredVariable)
 }
@@ -1503,7 +1464,6 @@ func (m *BuildManager) removePending(id uint32) {
 	delete(m.pending, id)
 	m.mu.Unlock()
 	if pending != nil {
-		pending.build.reservation.Release()
 		m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
 		clearBuildKeys(pending.keys)
 	}
@@ -1523,7 +1483,6 @@ func (m *BuildManager) takeInboundPending(id uint32) *pendingInboundBuild {
 func (m *BuildManager) removeInboundPending(id uint32) {
 	pending := m.takeInboundPending(id)
 	if pending != nil {
-		pending.build.reservation.Release()
 		clearBuildKeys(pending.keys)
 	}
 }

@@ -59,7 +59,7 @@ func TestManagerHotPathAllocationBudgets(t *testing.T) {
 	var fragmentFrame [ssu2.MaxIPv4PacketLen]byte
 	if got := testing.AllocsPerRun(100, func() {
 		fragments := 0
-		if err := forEachSSU2I2NPFragment(fragmentFrame[:], fragmented, func([]byte) error {
+		if err := forEachSSU2I2NPFragment(fragmentFrame[:], fragmented, ssu2.MaxIPv4PacketLen, func([]byte, bool) error {
 			fragments++
 			return nil
 		}); err != nil {
@@ -374,7 +374,7 @@ func BenchmarkSSU2FragmentSendFraming(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		fragments := 0
-		if err := forEachSSU2I2NPFragment(frame[:], message, func([]byte) error {
+		if err := forEachSSU2I2NPFragment(frame[:], message, ssu2.MaxIPv4PacketLen, func([]byte, bool) error {
 			fragments++
 			return nil
 		}); err != nil {

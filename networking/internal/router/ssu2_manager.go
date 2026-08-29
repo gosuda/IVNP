@@ -45,6 +45,8 @@ const (
 	ssu2DefaultIdleTimeout      = 10 * time.Minute
 	ssu2MaxFragmentedMessages   = 64
 	ssu2FragmentLifetime        = 30 * time.Second
+	ssu2MinimumIPv4PacketSize   = 1280 - 20 - 8
+	ssu2MinimumIPv6PacketSize   = 1280 - 40 - 8
 
 	ssu2ReceiveBatchCount = 4
 	ssu2ReceiveBatchSize  = 32
@@ -112,6 +114,13 @@ type SSU2ManagerConfig struct {
 	IntroductionEndpoint func() (netip.AddrPort, error)
 }
 
+type ssu2BatchConnection interface {
+	ReadBatch(*ssu2.Batch) (int, error)
+	WriteBatchPrefix(*ssu2.Batch, int) (int, error)
+	KernelDrops() uint64
+	Close() error
+}
+
 // SSU2Manager is the native UDP SSU2 transport manager. It performs the
 // address-validation retry exchange, Noise XK setup, fragmented Session
 // Confirmed reassembly, RouterInfo/static-key binding validation, and delivery
@@ -132,11 +141,11 @@ type SSU2Manager struct {
 	onPeerTestResult     func(PeerTestResult)
 	signControl          func([]byte) ([]byte, error)
 	introductionEndpoint func() (netip.AddrPort, error)
-	limiter              rateLimiter
 	mu                   sync.RWMutex
 	started              bool
 	conn                 *net.UDPConn
-	batchConn            *ssu2.UDPBatchConn
+	ipv6Available        bool
+	batchConn            ssu2BatchConnection
 	bindings             TransportBindings
 	ctx                  context.Context
 	cancel               context.CancelFunc
@@ -712,6 +721,7 @@ func (m *SSU2Manager) Start(parent context.Context, bindings TransportBindings) 
 	m.started = true
 	m.conn = bindings.SSU2
 	m.batchConn = batchConn
+	m.ipv6Available = ssu2IPv6Available(bindings.SSU2)
 	m.bindings = bindings
 	m.ctx, m.cancel = context.WithCancel(parent)
 	m.relayStoreJobs = make(chan ssu2RelayStoreJob, m.maxPending)
@@ -906,6 +916,16 @@ func (m *SSU2Manager) HasSession(peer foundation.Hash) bool {
 	return session != nil
 }
 
+func (m *SSU2Manager) activeSessionCount() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	count := len(m.sessionsByPeer)
+	m.mu.RUnlock()
+	return count
+}
+
 func (m *SSU2Manager) DropSession(peer foundation.Hash) bool {
 	if m == nil {
 		return false
@@ -953,8 +973,8 @@ func (m *SSU2Manager) Send(ctx context.Context, peer foundation.Hash, message i2
 	}
 	session.frameMu.Lock()
 	defer session.frameMu.Unlock()
-	return forEachSSU2I2NPFragment(session.frame[:], message, func(payload []byte) error {
-		if err = m.sendDataContext(ctx, session, payload); err == nil {
+	return forEachSSU2I2NPFragment(session.frame[:], message, ssu2SessionPacketSize(session), func(payload []byte, last bool) error {
+		if err = m.sendDataContext(ctx, session, payload, last); err == nil {
 			return nil
 		}
 		if m.sessionActive(session) {
@@ -965,7 +985,7 @@ func (m *SSU2Manager) Send(ctx context.Context, peer foundation.Hash, message i2
 			m.recordOutboundFailure(peer, err)
 			return err
 		}
-		return m.sendDataContext(ctx, session, payload)
+		return m.sendDataContext(ctx, session, payload, last)
 	})
 }
 
@@ -993,7 +1013,7 @@ func (m *SSU2Manager) SendPeerTest(ctx context.Context, peer foundation.Hash, te
 	if !ok {
 		return ErrSSU2Peer
 	}
-	address, err := selectSSU2Address(ref.Info)
+	address, err := m.selectSSU2Address(ref.Info)
 	if err != nil {
 		return err
 	}
@@ -1465,7 +1485,7 @@ func (m *SSU2Manager) Introduce(ctx context.Context, introducer, target foundati
 		m.mu.Unlock()
 	})
 	m.mu.Unlock()
-	if err = m.sendData(introducerSession, payload); err != nil {
+	if err = m.sendSessionData(introducerSession, payload, true); err != nil {
 		m.mu.Lock()
 		m.finishRelayRequestLocked(nonce, relay, err)
 		m.mu.Unlock()
@@ -1564,7 +1584,7 @@ func (m *SSU2Manager) newOutboundLocked(peer foundation.Hash) (*ssu2OutboundPend
 	if err := netdb.ReseedRouterInfoFresh(ref.Info, uint64(m.nowLocked().UnixMilli())); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSSU2Peer, err)
 	}
-	address, err := selectSSU2Address(ref.Info)
+	address, err := m.selectSSU2Address(ref.Info)
 	if err != nil {
 		return nil, err
 	}
@@ -1843,7 +1863,7 @@ func (m *SSU2Manager) retransmitOne(session *ssu2TransportSession, now time.Time
 	if packetNumber == 0 {
 		return true
 	}
-	packet, err := session.send.SealDataTo(session.sendPacket[:], ssu2.ShortHeader{DestinationID: session.sendID, PacketNumber: packetNumber, Type: ssu2.Data}, target.payload)
+	packet, err := session.send.SealDataTo(session.sendPacket[:], ssu2DataHeader(session.sendID, packetNumber, true), target.payload)
 	if err != nil {
 		return false
 	}
@@ -2532,7 +2552,7 @@ func (m *SSU2Manager) sendSessionConfirmed(pending *ssu2OutboundPending) {
 		m.markOutboundFailed(pending, err)
 		return
 	}
-	packets, err := pending.initiator.BuildSessionConfirmedFragments(m.staticPrivate, payload, ssu2.MaxIPv4PacketLen)
+	packets, err := buildSSU2SessionConfirmedFragments(pending, m.staticPrivate, payload)
 	if err != nil {
 		m.markOutboundFailed(pending, err)
 		return
@@ -2581,9 +2601,6 @@ func (m *SSU2Manager) handleTokenRequest(header ssu2.LongHeader, remote net.Addr
 	if ssu2.SameConnectionID(header.DestinationID, header.SourceID) {
 		return
 	}
-	if key, ok := rateKeyFromAddr(remote); !ok || !m.limiter.allow(rateSSU2Control, key, uint64(m.now().UnixMilli())) {
-		return
-	}
 	m.mu.Lock()
 	if !m.runningLocked() {
 		m.mu.Unlock()
@@ -2617,9 +2634,6 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 		return
 	}
 	m.mu.Unlock()
-	if key, ok := rateKeyFromAddr(remote); !ok || !m.limiter.allow(rateSSU2Control, key, uint64(m.now().UnixMilli())) {
-		return
-	}
 	responder, requestHeader, payload, err := ssu2.ParseSessionRequest(packet, m.staticPrivate, m.introKey)
 	if err != nil || requestHeader != header || !m.timestampValid(payload) {
 		return
@@ -2701,9 +2715,6 @@ func (m *SSU2Manager) handleSessionConfirmed(packet []byte, pending *ssu2Inbound
 	active := m.inbound[destinationID] == pending
 	m.mu.RUnlock()
 	if !active {
-		return
-	}
-	if key, ok := rateKeyFromAddr(remote); !ok || !m.limiter.allow(rateSSU2Control, key, uint64(m.now().UnixMilli())) {
 		return
 	}
 	static, payload, complete, err := pending.reassembly.Add(packet)
@@ -2890,9 +2901,6 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 			if !newPacket {
 				continue
 			}
-			if !m.limiter.allow(rateSSU2Control, rateKey(session.peer), uint64(m.now().UnixMilli())) {
-				return
-			}
 			request, err := ssu2.ParseRelayRequestBlock(block.Data)
 			if err != nil {
 				return
@@ -2903,9 +2911,6 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 			if !newPacket {
 				continue
 			}
-			if !m.limiter.allow(rateSSU2Control, rateKey(session.peer), uint64(m.now().UnixMilli())) {
-				return
-			}
 			intro, err := ssu2.ParseRelayIntroBlock(block.Data)
 			if err != nil {
 				return
@@ -2915,9 +2920,6 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 			ackEliciting = true
 			if !newPacket {
 				continue
-			}
-			if !m.limiter.allow(rateSSU2Control, rateKey(session.peer), uint64(m.now().UnixMilli())) {
-				return
 			}
 			response, err := ssu2.ParseRelayResponseBlock(block.Data)
 			if err != nil {
@@ -3043,12 +3045,20 @@ func (m *SSU2Manager) sendSessionDataTo(session *ssu2TransportSession, remote ne
 	session.nextPacket++
 	return nil
 }
-func (m *SSU2Manager) sendData(session *ssu2TransportSession, payload []byte) error {
-	return m.sendSessionData(session, payload, true)
+func (m *SSU2Manager) sendData(session *ssu2TransportSession, payload []byte, requestImmediateACK bool) error {
+	return m.sendSessionDataContext(context.Background(), session, payload, ssu2SessionDataOptions{
+		reliable:            true,
+		requestImmediateACK: requestImmediateACK,
+		waitEgress:          true,
+	})
 }
 
-func (m *SSU2Manager) sendDataContext(ctx context.Context, session *ssu2TransportSession, payload []byte) error {
-	return m.sendSessionDataContext(ctx, session, payload, true)
+func (m *SSU2Manager) sendDataContext(ctx context.Context, session *ssu2TransportSession, payload []byte, requestImmediateACK bool) error {
+	return m.sendSessionDataContext(ctx, session, payload, ssu2SessionDataOptions{
+		reliable:            true,
+		requestImmediateACK: requestImmediateACK,
+		waitEgress:          true,
+	})
 }
 
 func (m *SSU2Manager) queueACK(session *ssu2TransportSession) {
@@ -3129,19 +3139,26 @@ func (m *SSU2Manager) sendACK(session *ssu2TransportSession) error {
 	return m.sendSessionDataQueued(session, payload[:3+len(ackData)], false)
 }
 
-func (m *SSU2Manager) sendSessionData(session *ssu2TransportSession, payload []byte, reliable bool) error {
-	return m.sendSessionDataContext(context.Background(), session, payload, reliable)
+type ssu2SessionDataOptions struct {
+	reliable            bool
+	requestImmediateACK bool
+	waitEgress          bool
 }
 
-func (m *SSU2Manager) sendSessionDataContext(ctx context.Context, session *ssu2TransportSession, payload []byte, reliable bool) error {
-	return m.sendSessionDataMode(ctx, session, payload, reliable, true)
+func (m *SSU2Manager) sendSessionData(session *ssu2TransportSession, payload []byte, reliable bool) error {
+	return m.sendSessionDataContext(context.Background(), session, payload, ssu2SessionDataOptions{
+		reliable:   reliable,
+		waitEgress: true,
+	})
 }
 
 func (m *SSU2Manager) sendSessionDataQueued(session *ssu2TransportSession, payload []byte, reliable bool) error {
-	return m.sendSessionDataMode(context.Background(), session, payload, reliable, false)
+	return m.sendSessionDataContext(context.Background(), session, payload, ssu2SessionDataOptions{
+		reliable: reliable,
+	})
 }
 
-func (m *SSU2Manager) sendSessionDataMode(ctx context.Context, session *ssu2TransportSession, payload []byte, reliable, waitEgress bool) error {
+func (m *SSU2Manager) sendSessionDataContext(ctx context.Context, session *ssu2TransportSession, payload []byte, options ssu2SessionDataOptions) error {
 	if len(payload) < 8 {
 		paddingLength := max(8-len(payload)-3, 0)
 		var minimumPayload [10]byte
@@ -3157,7 +3174,7 @@ func (m *SSU2Manager) sendSessionDataMode(ctx context.Context, session *ssu2Tran
 		return ErrSSU2Session
 	}
 	var retained *ssu2SentPacket
-	if reliable {
+	if options.reliable {
 		if len(session.sent) >= ssu2MaxTrackedPackets {
 			session.sendMu.Unlock()
 			return ErrSSU2Session
@@ -3173,13 +3190,13 @@ func (m *SSU2Manager) sendSessionDataMode(ctx context.Context, session *ssu2Tran
 		session.sendMu.Unlock()
 		return ErrSSU2Session
 	}
-	packet, err := session.send.SealDataTo(session.sendPacket[:], ssu2.ShortHeader{DestinationID: session.sendID, PacketNumber: packetNumber, Type: ssu2.Data}, payload)
+	packet, err := session.send.SealDataTo(session.sendPacket[:], ssu2DataHeader(session.sendID, packetNumber, options.requestImmediateACK), payload)
 	if err != nil {
 		retained.release()
 		session.sendMu.Unlock()
 		return err
 	}
-	if waitEgress {
+	if options.waitEgress {
 		err = m.writeToContext(ctx, packet, session.remoteAddr())
 	} else {
 		err = m.writeToQueued(packet, session.remoteAddr())
@@ -3192,12 +3209,24 @@ func (m *SSU2Manager) sendSessionDataMode(ctx context.Context, session *ssu2Tran
 	session.nextPacket++
 	now := m.now()
 	session.touch(now)
-	if reliable {
+	if options.reliable {
 		retained.sentAt = now
 		session.sent[packetNumber] = retained
 	}
 	session.sendMu.Unlock()
 	return nil
+}
+func ssu2DataHeader(destinationID uint64, packetNumber uint32, requestImmediateACK bool) ssu2.ShortHeader {
+	var immediateACK uint8
+	if requestImmediateACK {
+		immediateACK = 1
+	}
+	return ssu2.ShortHeader{
+		DestinationID: destinationID,
+		PacketNumber:  packetNumber,
+		Type:          ssu2.Data,
+		Fragment:      immediateACK,
+	}
 }
 
 func (s *ssu2TransportSession) touch(now time.Time) {
@@ -3433,7 +3462,7 @@ func (m *SSU2Manager) sendNewToken(session *ssu2TransportSession) error {
 	if err != nil {
 		return err
 	}
-	return m.sendSessionData(session, payload, true)
+	return m.sendSessionData(session, payload, false)
 }
 
 func (m *SSU2Manager) storeNewToken(session *ssu2TransportSession, token ssu2.NewToken) {
@@ -3681,7 +3710,6 @@ func (m *SSU2Manager) currentBindings() TransportBindings {
 	return bindings
 }
 
-// RateLimitSnapshot returns cumulative per-source SSU2 control admission
 func (m *SSU2Manager) borrowDispatchBatch() (*ssu2DispatchBatch, error) {
 	m.mu.RLock()
 	free, running := m.dispatchFree, m.runningLocked()
@@ -4004,9 +4032,11 @@ func (m *SSU2Manager) egressLoop() {
 		written, writeErr := m.batchConn.WriteBatchPrefix(batch, count)
 		m.recordEgressWrite(activeSlots, written)
 		m.completeEgressSlots(activeSlots, written, writeErr)
-		if writeErr != nil && m.contextErr() == nil && !errors.Is(writeErr, net.ErrClosed) {
-			m.recordSSU2Error(writeErr)
-			_ = m.Close()
+		if errors.Is(writeErr, net.ErrClosed) {
+			if m.contextErr() == nil {
+				m.recordSSU2Error(writeErr)
+				_ = m.Close()
+			}
 			return
 		}
 	}
@@ -4251,22 +4281,40 @@ func ssu2SessionCreatedPayload(remote net.Addr, now time.Time) ([]byte, error) {
 	return ssu2.MarshalBlock(payload, ssu2.BlockAddress, data[:])
 }
 
+func buildSSU2SessionConfirmedFragments(pending *ssu2OutboundPending, staticPrivate, payload []byte) ([][]byte, error) {
+	return pending.initiator.BuildSessionConfirmedFragments(staticPrivate, payload, ssu2RemotePacketSize(pending.remote))
+}
+
+func ssu2SessionPacketSize(session *ssu2TransportSession) int {
+	if session == nil {
+		return ssu2MinimumIPv4PacketSize
+	}
+	return ssu2RemotePacketSize(session.remoteAddr())
+}
+
+func ssu2RemotePacketSize(remote net.Addr) int {
+	if endpoint, ok := addrPortKey(remote); ok && endpoint.Addr().Is6() {
+		return ssu2MinimumIPv6PacketSize
+	}
+	return ssu2MinimumIPv4PacketSize
+}
+
 // forEachSSU2I2NPFragment frames one payload at a time into caller-owned
-// storage. send must consume the view synchronously before returning.
-func forEachSSU2I2NPFragment(scratch []byte, message i2np.Message, send func([]byte) error) error {
-	const (
-		maxFirst = ssu2.MaxIPv4PacketLen - ssu2.ShortHeaderLen - ssu2.PacketTagLen - 3 - i2np.TransportHeaderLen
-		maxNext  = ssu2.MaxIPv4PacketLen - ssu2.ShortHeaderLen - ssu2.PacketTagLen - 3 - 5
-	)
-	if len(scratch) < ssu2.MaxIPv4PacketLen {
+// storage. send must consume the view synchronously before returning. The last
+// marker lets the transport request one ACK per I2NP burst, matching Java's
+// sparse immediate-ACK policy without applying it to reliable control blocks.
+func forEachSSU2I2NPFragment(scratch []byte, message i2np.Message, maxPacket int, send func([]byte, bool) error) error {
+	if maxPacket > ssu2.MaxIPv4PacketLen || maxPacket < ssu2.MinPacketLen || len(scratch) < maxPacket {
 		return ErrSSU2Session
 	}
+	maxFirst := maxPacket - ssu2.ShortHeaderLen - ssu2.PacketTagLen - 3 - i2np.TransportHeaderLen
+	maxNext := maxPacket - ssu2.ShortHeaderLen - ssu2.PacketTagLen - 3 - 5
 	if len(message.Payload) <= maxFirst {
 		payload, err := marshalSSU2I2NPTo(scratch, message)
 		if err != nil {
 			return err
 		}
-		return send(payload)
+		return send(payload, true)
 	}
 	if len(message.Payload) > i2np.I2PDMaxPayload {
 		return i2np.ErrPayloadTooLarge
@@ -4283,7 +4331,7 @@ func forEachSSU2I2NPFragment(scratch []byte, message i2np.Message, send func([]b
 	binary.BigEndian.PutUint32(first[4:8], message.Header.ID)
 	binary.BigEndian.PutUint32(first[8:12], expiration)
 	copy(first[3+i2np.TransportHeaderLen:], message.Payload[:maxFirst])
-	if err := send(first); err != nil {
+	if err := send(first, false); err != nil {
 		return err
 	}
 	for offset, number := maxFirst, uint8(1); offset < len(message.Payload); number++ {
@@ -4301,7 +4349,7 @@ func forEachSSU2I2NPFragment(scratch []byte, message i2np.Message, send func([]b
 		}
 		binary.BigEndian.PutUint32(follow[4:8], message.Header.ID)
 		copy(follow[8:], message.Payload[offset:end])
-		if err := send(follow); err != nil {
+		if err := send(follow, end == len(message.Payload)); err != nil {
 			return err
 		}
 		offset = end
@@ -4559,7 +4607,46 @@ func ssu2IntroForStatic(info netdb.RouterInfo, static []byte) ([]byte, bool) {
 	}
 }
 
+func (m *SSU2Manager) selectSSU2Address(info netdb.RouterInfo) (ssu2PeerAddress, error) {
+	return selectSSU2AddressForNetwork(info, m.ipv6Available)
+}
+
+func ssu2IPv6Available(conn *net.UDPConn) bool {
+	local, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || local.IP.To4() != nil {
+		return false
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, networkInterface := range interfaces {
+		if networkInterface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addresses, err := networkInterface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			prefix, err := netip.ParsePrefix(address.String())
+			if err != nil {
+				continue
+			}
+			ip := prefix.Addr()
+			if ip.Is6() && ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func selectSSU2Address(info netdb.RouterInfo) (ssu2PeerAddress, error) {
+	return selectSSU2AddressForNetwork(info, true)
+}
+
+func selectSSU2AddressForNetwork(info netdb.RouterInfo, allowIPv6 bool) (ssu2PeerAddress, error) {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -4593,7 +4680,12 @@ func selectSSU2Address(info netdb.RouterInfo) (ssu2PeerAddress, error) {
 			}
 		}
 		portNumber, err := strconv.ParseUint(port, 10, 16)
-		if err != nil || host == "" || portNumber == 0 || !supportsSSU2Version(version) || net.ParseIP(host) == nil {
+		ip, ipErr := netip.ParseAddr(host)
+		invalidEndpoint := err != nil || ipErr != nil || portNumber == 0
+		if invalidEndpoint || !supportsSSU2Version(version) {
+			continue
+		}
+		if !allowIPv6 && ip.Is6() {
 			continue
 		}
 		staticKey, staticErr := foundation.DecodeI2PBase64([]byte(static))

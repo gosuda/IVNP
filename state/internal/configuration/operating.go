@@ -376,7 +376,7 @@ func defaultOperating(base string) Operating {
 		StatePath: filepath.Join(stateDir, "router.state"),
 		KeyPath:   filepath.Join(stateDir, "router.keys"),
 		Network:   Network{ID: 2, IPv4: true},
-		Router:    Router{IdentityType: "ed25519", Version: "2.13.0"},
+		Router:    Router{IdentityType: "ed25519", Version: "0.9.70"},
 		State:     State{MaxBytes: 16 << 20, MaxDestinations: 64, MaxNameBytes: 255},
 		NetDB:     NetDB{BucketCapacity: 24, LookupCapacity: 32},
 		Tunnel: Tunnel{

@@ -89,6 +89,16 @@ func (s failingSessionBuildSender) EnsureSession(context.Context, foundation.Has
 	return s.err
 }
 
+type sessionCaptureTunnelSender struct {
+	captureTunnelSender
+	sessions []foundation.Hash
+}
+
+func (s *sessionCaptureTunnelSender) EnsureSession(_ context.Context, peer foundation.Hash) error {
+	s.sessions = append(s.sessions, peer)
+	return nil
+}
+
 func TestBuildManagerSeparatesTransportFailureFromBuildHistory(t *testing.T) {
 	now := uint64(1_000)
 	sessionErr := errors.New("session failed")
@@ -146,13 +156,8 @@ func TestBuildManagerCreatesAndInstallsOutboundTunnel(t *testing.T) {
 	sender := new(captureTunnelSender)
 	runtime := NewRuntime(RuntimeConfig{Sender: sender, Now: func() uint64 { return now }})
 	replyKeys := newBuildReplyRegistry()
-	var seededEndpoint, seededReply foundation.Hash
 	manager, err := NewBuildManager(BuildManagerConfig{
 		Runtime: runtime, Sender: sender, ReplyKeys: replyKeys, Now: func() uint64 { return now }, Random: new(buildCounterReader),
-		SeedReplyRouterInfo: func(_ context.Context, endpoint, reply foundation.Hash) error {
-			seededEndpoint, seededReply = endpoint, reply
-			return nil
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -181,9 +186,6 @@ func TestBuildManagerCreatesAndInstallsOutboundTunnel(t *testing.T) {
 	replyID, err := manager.StartOutbound(context.Background(), build)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if seededEndpoint != build.Hops[len(build.Hops)-1].Router || seededReply != build.ReplyRouter {
-		t.Fatalf("reply RouterInfo seed = endpoint %s reply %s", seededEndpoint, seededReply)
 	}
 	sent := sender.take()
 	if len(sent) != 1 || sent[0].peer != build.Hops[0].Router || sent[0].message.Header.Type != i2np.ShortTunnelBuild {
@@ -271,23 +273,6 @@ func TestBuildManagerCreatesAndInstallsOutboundTunnel(t *testing.T) {
 	if delivered.Header.Type != i2np.DeliveryStatus || delivered.Header.ID != 7 {
 		t.Fatalf("delivered message = %#v", delivered)
 	}
-	metrics := observability.NewRegistry()
-	seedErr := errors.New("reply path unavailable")
-	failed, err := NewBuildManager(BuildManagerConfig{
-		Runtime: NewRuntime(RuntimeConfig{}), Sender: new(captureTunnelSender), ReplyKeys: newBuildReplyRegistry(),
-		Now: func() uint64 { return now }, Random: new(buildCounterReader), Metrics: metrics,
-		SeedReplyRouterInfo: func(context.Context, foundation.Hash, foundation.Hash) error { return seedErr },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = failed.StartOutbound(context.Background(), build); !errors.Is(err, seedErr) {
-		t.Fatalf("reply path seed error = %v, want %v", err, seedErr)
-	}
-	snapshot := metrics.Snapshot().Tunnel
-	if snapshot.Builds != 0 || snapshot.BuildFailures != 0 {
-		t.Fatalf("unsent build metrics = builds %d, failures %d", snapshot.Builds, snapshot.BuildFailures)
-	}
 }
 
 func TestBuildManagerRejectsExpiredAndUnknownReplies(t *testing.T) {
@@ -353,12 +338,13 @@ func TestBuildManagerClearsReplyRegistryAfterReplyErrorAndExpiry(t *testing.T) {
 	if _, ok := replyKeys.entries[expiryTag]; ok {
 		t.Fatal("reply key retained after expiry")
 	}
-	if profile, ok := profiles.Snapshot(failedPeer); ok {
-		t.Fatalf("unattributable build timeout poisoned peer profile: %#v", profile)
+	profile, ok := profiles.Snapshot(failedPeer)
+	if !ok || profile.Failures != 1 || profile.Successes != 0 {
+		t.Fatalf("build timeout profile = %#v, %t", profile, ok)
 	}
 }
 
-func TestBuildManagerMultiHopTimeoutDoesNotPoisonProfiles(t *testing.T) {
+func TestBuildManagerMultiHopTimeoutRecordsEveryPeer(t *testing.T) {
 	profiles := NewPeerProfiles(PeerProfilesConfig{})
 	manager, err := NewBuildManager(BuildManagerConfig{
 		Runtime: NewRuntime(RuntimeConfig{}), Sender: discardTunnelSender{}, ReplyKeys: newBuildReplyRegistry(),
@@ -377,13 +363,14 @@ func TestBuildManagerMultiHopTimeoutDoesNotPoisonProfiles(t *testing.T) {
 		t.Fatalf("expired builds = %d, want 1", expired)
 	}
 	for _, peer := range peers {
-		if profile, ok := profiles.Snapshot(peer); ok {
-			t.Fatalf("multi-hop timeout poisoned peer %x profile: %#v", peer, profile)
+		profile, ok := profiles.Snapshot(peer)
+		if !ok || profile.Failures != 1 || profile.Successes != 0 {
+			t.Fatalf("timeout profile for %x = %#v, %t", peer, profile, ok)
 		}
 	}
 }
 
-func TestBuildManagerDeadlineExpiresAndWakesOwnerAfterCooldown(t *testing.T) {
+func TestBuildManagerDeadlineExpiresAndWakesOwnerAfterRetryDelay(t *testing.T) {
 	now := uint64(1)
 	var (
 		scheduledDuration time.Duration
@@ -414,17 +401,17 @@ func TestBuildManagerDeadlineExpiresAndWakesOwnerAfterCooldown(t *testing.T) {
 	}
 	select {
 	case <-wake:
-		t.Fatal("build deadline woke owner before peer cooldown")
+		t.Fatal("build deadline woke owner before retry delay")
 	default:
 	}
-	if scheduledDuration != buildTimeoutPathCooldown {
-		t.Fatalf("timeout wake delay = %s, want %s", scheduledDuration, buildTimeoutPathCooldown)
+	if scheduledDuration != buildRetryDelay {
+		t.Fatalf("timeout wake delay = %s, want %s", scheduledDuration, buildRetryDelay)
 	}
 	scheduledCallback()
 	select {
 	case <-wake:
 	default:
-		t.Fatal("build deadline did not wake owner after cooldown")
+		t.Fatal("build deadline did not wake owner after retry delay")
 	}
 	if got := metrics.Snapshot().Tunnel.ExploratoryOutboundTimeouts; got != 1 {
 		t.Fatalf("exploratory outbound timeouts = %d, want 1", got)
@@ -949,6 +936,36 @@ func TestInboundCreatorFakeRecordIsRealAndTamperChecked(t *testing.T) {
 	tampered.Payload[1+int(pending.fakePosition)*ShortBuildRecordSize+100] ^= 1
 	if err = manager.HandleBuild(tampered); !errors.Is(err, ErrBuildFakeRecord) {
 		t.Fatalf("tampered creator fake error = %v", err)
+	}
+}
+
+func TestInboundBuildThroughCarrierDoesNotPreflightReplyEndpoint(t *testing.T) {
+	const now = uint64(1_700_000_000_000)
+	local := sha256.Sum256([]byte("carrier-inbound-creator"))
+	first, _ := testShortBuildHop(t, "carrier-inbound-first", 301)
+	last, _ := testShortBuildHop(t, "carrier-inbound-last", 302)
+	carrierEndpoint := sha256.Sum256([]byte("carrier-inbound-endpoint"))
+	carrierFirst := sha256.Sum256([]byte("carrier-inbound-first-hop"))
+	sender := new(sessionCaptureTunnelSender)
+	runtime := NewRuntime(RuntimeConfig{Sender: sender, Now: func() uint64 { return now }})
+	if err := runtime.RegisterOutbound(OutboundCircuit{ID: 303, FirstHop: carrierFirst, NextTunnelID: 304}); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewBuildManager(BuildManagerConfig{
+		Runtime: runtime, Sender: sender, ReplyKeys: newBuildReplyRegistry(), LocalRouter: local,
+		LocalDelivery: func(i2np.Message) error { return nil }, Now: func() uint64 { return now }, Random: new(buildCounterReader),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = manager.StartInbound(context.Background(), InboundBuild{
+		CircuitID: 305, OutboundTunnelID: 303, CarrierEndpoint: carrierEndpoint,
+		Hops: []ShortBuildHop{first, last}, ExpiresAt: now + 600_000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.sessions) != 0 {
+		t.Fatalf("carrier build preflight sessions = %x", sender.sessions)
 	}
 }
 

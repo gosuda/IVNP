@@ -21,6 +21,147 @@ import (
 	"gosuda.org/ivnp/networking/internal/transport/ssu2"
 )
 
+type recoverableEgressBatchConn struct {
+	writes atomic.Uint32
+	err    error
+}
+
+func (c *recoverableEgressBatchConn) ReadBatch(*ssu2.Batch) (int, error) {
+	return 0, net.ErrClosed
+}
+
+func (c *recoverableEgressBatchConn) WriteBatchPrefix(_ *ssu2.Batch, count int) (int, error) {
+	if c.writes.Add(1) == 1 {
+		return 0, c.err
+	}
+	return count, nil
+}
+
+func (c *recoverableEgressBatchConn) KernelDrops() uint64 { return 0 }
+func (c *recoverableEgressBatchConn) Close() error        { return nil }
+
+func TestSSU2I2NPFragmentsStartAtJavaMinimumMTU(t *testing.T) {
+	message := i2np.Message{
+		Header:  i2np.Header{Type: i2np.Data, ID: 1, Expiration: uint64(time.Now().Add(time.Minute).UnixMilli())},
+		Payload: make([]byte, 2_000),
+	}
+	var frame [ssu2.MaxIPv4PacketLen]byte
+	fragments, finalFragments := 0, 0
+	err := forEachSSU2I2NPFragment(frame[:], message, ssu2MinimumIPv4PacketSize, func(fragment []byte, last bool) error {
+		fragments++
+		if last {
+			finalFragments++
+		}
+		packetSize := ssu2.ShortHeaderLen + len(fragment) + ssu2.PacketTagLen
+		if packetSize > ssu2MinimumIPv4PacketSize {
+			t.Fatalf("fragment packet size = %d, max %d", packetSize, ssu2MinimumIPv4PacketSize)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fragments < 2 {
+		t.Fatalf("fragment count = %d, want at least 2", fragments)
+	}
+	if finalFragments != 1 {
+		t.Fatalf("final fragment markers = %d, want 1", finalFragments)
+	}
+	ipv6 := &ssu2TransportSession{remote: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("[2001:db8::1]:1234"))}
+	if size := ssu2SessionPacketSize(ipv6); size != ssu2MinimumIPv6PacketSize {
+		t.Fatalf("IPv6 packet size = %d, want %d", size, ssu2MinimumIPv6PacketSize)
+	}
+}
+func TestSSU2ImmediateACKPolicyIsExplicit(t *testing.T) {
+	requested := ssu2DataHeader(7, 11, true)
+	if requested.Fragment != 1 {
+		t.Fatalf("requested immediate ACK flag = %d, want 1", requested.Fragment)
+	}
+	unrequested := ssu2DataHeader(7, 11, false)
+	if unrequested.Fragment != 0 {
+		t.Fatalf("unrequested immediate ACK flag = %d, want 0", unrequested.Fragment)
+	}
+}
+
+func TestSSU2SessionConfirmedFragmentsUseJavaMinimumMTU(t *testing.T) {
+	routerInfo := bytes.Repeat([]byte{0x5a}, 1_400)
+	routerInfo[0], routerInfo[1] = 0, 1
+	payload, err := ssu2.MarshalBlock(nil, ssu2.BlockRouterInfo, routerInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		remote *net.UDPAddr
+		max    int
+	}{
+		{name: "IPv4", remote: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.1:1234")), max: ssu2MinimumIPv4PacketSize},
+		{name: "IPv6", remote: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("[2001:db8::1]:1234")), max: ssu2MinimumIPv6PacketSize},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			initiator, staticPrivate := newSSU2ConfirmedInitiator(t)
+			packets, buildErr := buildSSU2SessionConfirmedFragments(&ssu2OutboundPending{
+				initiator: initiator,
+				remote:    test.remote,
+			}, staticPrivate, payload)
+			if buildErr != nil {
+				t.Fatal(buildErr)
+			}
+			if len(packets) < 2 {
+				t.Fatalf("fragment count = %d, want at least 2", len(packets))
+			}
+			for index, packet := range packets {
+				if len(packet) > test.max {
+					t.Fatalf("fragment %d size = %d, max %d", index, len(packet), test.max)
+				}
+			}
+		})
+	}
+}
+
+func newSSU2ConfirmedInitiator(t *testing.T) (*ssu2.Initiator, []byte) {
+	t.Helper()
+	curve := ecdh.X25519()
+	remoteStatic, err := curve.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localStatic, err := curve.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intro := bytes.Repeat([]byte{0x33}, 32)
+	initiator, err := ssu2.NewInitiator(remoteStatic.PublicKey().Bytes(), intro, 11, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestPayload, err := ssu2DateTimePayload(time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := initiator.BuildSessionRequest(make([]byte, ssu2.MaxIPv4PacketLen), requestPayload, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responder, _, _, err := ssu2.ParseSessionRequest(append([]byte(nil), request...), remoteStatic.Bytes(), intro)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdPayload, err := ssu2DateTimePayload(time.Unix(2, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := responder.BuildSessionCreated(make([]byte, ssu2.MaxIPv4PacketLen), createdPayload, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = initiator.ParseSessionCreated(append([]byte(nil), created...)); err != nil {
+		t.Fatal(err)
+	}
+	return initiator, localStatic.Bytes()
+}
+
 func TestSSU2RouterInfoStoreUsesDeterministicGzipAndServiceAdmission(t *testing.T) {
 	local, _, _ := newSSU2TestLocal(t, "127.0.0.1:23456")
 	now := time.UnixMilli(int64(local.Snapshot().Published))
@@ -914,6 +1055,33 @@ func TestSSU2EgressBackpressuresWhenSlotsAreBusy(t *testing.T) {
 			t.Fatalf("backpressured writes counted as dropped: %d", dropped)
 		}
 	})
+}
+
+func TestSSU2EgressContinuesAfterDestinationWriteError(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	free := make(chan *ssu2EgressSlot, 2)
+	for range 2 {
+		free <- &ssu2EgressSlot{done: make(chan error, 1)}
+	}
+	writeErr := errors.New("destination unavailable")
+	manager := &SSU2Manager{
+		started:     true,
+		ctx:         ctx,
+		batchConn:   &recoverableEgressBatchConn{err: writeErr},
+		egressFree:  free,
+		egressQueue: make(chan *ssu2EgressSlot, 2),
+	}
+	manager.wg.Add(1)
+	go manager.egressLoop()
+	remote := net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:1234"))
+	if err := manager.writeTo([]byte{1}, remote); !errors.Is(err, writeErr) {
+		t.Fatalf("first write = %v, want %v", err, writeErr)
+	}
+	if err := manager.writeTo([]byte{2}, remote); err != nil {
+		t.Fatalf("write after destination error = %v", err)
+	}
+	cancel()
+	manager.wg.Wait()
 }
 
 func TestSSU2SendHonorsCallerCancellationDuringEgressAdmission(t *testing.T) {

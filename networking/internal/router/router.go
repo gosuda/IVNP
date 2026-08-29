@@ -76,12 +76,11 @@ type Sinks struct {
 	TunnelGateway            func(uint32, i2np.Message) error
 }
 
-// Service provides I2NP message admission, rate limiting, replay filtering, and dispatch.
+// Service provides I2NP message admission, replay filtering, and dispatch.
 type Service struct {
 	database *netdb.Database
 	sinks    Sinks
 	replay   replayFilter
-	limiter  rateLimiter
 }
 
 type replayScope uint64
@@ -220,9 +219,6 @@ func (s *Service) HandleI2NPFromContext(ctx context.Context, peer foundation.Has
 }
 
 func (s *Service) handleI2NP(message i2np.Message, nowMillis uint64, fromFloodfill bool, source I2NPSource) error {
-	if source.Direct && !s.admitI2NP(message.Header.Type, rateKey(source.Peer), nowMillis) {
-		return ErrRateLimited
-	}
 	prepared, err := s.prepareI2NP(message, nowMillis, true)
 	if err != nil {
 		return err
@@ -231,32 +227,6 @@ func (s *Service) handleI2NP(message i2np.Message, nowMillis uint64, fromFloodfi
 		return ErrDuplicate
 	}
 	return s.dispatchPreparedI2NP(source, message, prepared, nowMillis, fromFloodfill)
-}
-
-func (s *Service) admitI2NP(messageType i2np.MessageType, source [32]byte, nowMillis uint64) bool {
-	if !s.limiter.allow(rateI2NPAdmission, source, nowMillis) {
-		return false
-	}
-	switch messageType {
-	case i2np.DatabaseLookup:
-		return s.limiter.allow(rateNetDBLookup, source, nowMillis)
-	case i2np.DatabaseStore:
-		return s.limiter.allow(rateNetDBStore, source, nowMillis)
-	case i2np.Garlic:
-		return s.limiter.allow(rateGarlicDecrypt, source, nowMillis)
-	case i2np.TunnelBuild, i2np.TunnelBuildReply, i2np.VariableTunnelBuild, i2np.VariableTunnelBuildReply, i2np.ShortTunnelBuild:
-		return s.limiter.allow(rateTunnelBuild, source, nowMillis)
-	default:
-		return true
-	}
-}
-
-// RateLimitSnapshot returns cumulative source-scoped admission decisions.
-func (s *Service) RateLimitSnapshot() RateLimitSnapshot {
-	if s == nil {
-		return RateLimitSnapshot{}
-	}
-	return s.limiter.snapshot()
 }
 
 func (s *Service) prepareI2NP(message i2np.Message, nowMillis uint64, requireSink bool) (preparedI2NP, error) {
