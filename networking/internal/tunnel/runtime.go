@@ -16,9 +16,11 @@ import (
 )
 
 const (
-	defaultTunnelTTL      = time.Minute
-	defaultDeliveryBlocks = TunnelPayloadLen / 3
-	circuitShards         = 64
+	defaultTunnelTTL = time.Minute
+	// Java I2P FragmentHandler removes incomplete messages after 45 seconds.
+	fragmentReassemblyLifetime = 45 * time.Second
+	defaultDeliveryBlocks      = TunnelPayloadLen / 3
+	circuitShards              = 64
 )
 
 var (
@@ -338,6 +340,12 @@ func (r *Runtime) Expire(nowMillis uint64) (removed int) {
 	if r == nil {
 		return 0
 	}
+	fragmentLifetimeMillis := uint64(fragmentReassemblyLifetime / time.Millisecond)
+	expireFragments := nowMillis >= fragmentLifetimeMillis
+	var fragmentCutoff uint64
+	if expireFragments {
+		fragmentCutoff = nowMillis - fragmentLifetimeMillis
+	}
 	for index := range r.shards {
 		shard := &r.shards[index]
 		shard.mu.Lock()
@@ -345,6 +353,10 @@ func (r *Runtime) Expire(nowMillis uint64) (removed int) {
 			if circuit.expiresAt != 0 && circuit.expiresAt <= nowMillis {
 				delete(shard.inbound, id)
 				removed++
+				continue
+			}
+			if expireFragments && circuit.endpoint != nil {
+				circuit.endpoint.Expire(fragmentCutoff)
 			}
 		}
 		for id, circuit := range shard.outbound {
@@ -570,7 +582,7 @@ func (r *Runtime) HandleContext(ctx context.Context, message i2np.Message) error
 	}
 
 	blocks := r.blocks.Get().(*[]Block)
-	count, err := circuit.endpoint.Parse(payload, *blocks)
+	count, err := circuit.endpoint.Parse(payload, *blocks, r.now())
 	if err == nil {
 		sender := r.currentSender()
 		for _, block := range (*blocks)[:count] {

@@ -100,7 +100,7 @@ func testJavaUnknownI2NPRelay(t testing.TB, record int, fixture []byte) {
 		t.Fatalf("record %d: %v", record, err)
 	}
 	blocks := make([]Block, 1)
-	count, err := NewEndpoint(1, i2np.I2PDMaxPayload).Parse(payload, blocks)
+	count, err := NewEndpoint(1, i2np.I2PDMaxPayload).Parse(payload, blocks, 0)
 	if err != nil || count != 1 || blocks[0].Delivery != DeliveryLocal {
 		t.Fatalf("record %d: gateway payload blocks = %d, %#v, %v", record, count, blocks[0], err)
 	}

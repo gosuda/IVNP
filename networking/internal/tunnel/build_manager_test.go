@@ -834,7 +834,7 @@ func TestBuildManagerBuildsInboundAcrossTransitAndRejectsStaleRequests(t *testin
 		t.Fatalf("inbound carrier message = %#v", carried)
 	}
 	blocks := make([]Block, 1)
-	count, err := NewEndpoint(1, i2np.I2PDMaxPayload).Parse(carried[0].message.Payload, blocks)
+	count, err := NewEndpoint(1, i2np.I2PDMaxPayload).Parse(carried[0].message.Payload, blocks, 0)
 	if err != nil || count != 1 || blocks[0].Delivery != DeliveryRouter || blocks[0].Gateway != build.Hops[0].Router {
 		t.Fatalf("carrier blocks = %d, %#v, %v", count, blocks[0], err)
 	}
@@ -1291,7 +1291,7 @@ func TestInboundBuildGarlicWrapsAcrossDifferentCarrierEndpoint(t *testing.T) {
 		t.Fatalf("carrier output = %#v", carried)
 	}
 	blocks := make([]Block, 1)
-	count, err := NewEndpoint(1, i2np.I2PDMaxPayload).Parse(carried[0].message.Payload, blocks)
+	count, err := NewEndpoint(1, i2np.I2PDMaxPayload).Parse(carried[0].message.Payload, blocks, 0)
 	if err != nil || count != 1 {
 		t.Fatalf("carrier parse = %d, %v", count, err)
 	}

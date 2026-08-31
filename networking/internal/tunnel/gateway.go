@@ -270,13 +270,12 @@ type Endpoint struct {
 	mu      sync.Mutex
 	reasm   *Reassembler
 	maxMeta int
-	clock   uint64
 	meta    map[uint32]deliveryMeta
 }
 
 type deliveryMeta struct {
 	block   Block
-	touched uint64
+	created uint64
 }
 
 func NewEndpoint(maxEntries, maxMessage int) *Endpoint {
@@ -291,11 +290,11 @@ func NewEndpoint(maxEntries, maxMessage int) *Endpoint {
 }
 
 // Parse reads a complete 1028-byte I2NP TunnelData payload and writes completed
-// deliveries to out. It returns ErrGatewayOutput if out cannot hold all
-// completed deliveries. Follow-on fragments may arrive before their initial
-// fragment; no delivery is emitted until both delivery metadata and every
-// fragment are present.
-func (e *Endpoint) Parse(payload []byte, out []Block) (int, error) {
+// deliveries to out. nowMillis timestamps incomplete reassemblies. It returns
+// ErrGatewayOutput if out cannot hold all completed deliveries. Follow-on
+// fragments may arrive before their initial fragment; no delivery is emitted
+// until both delivery metadata and every fragment are present.
+func (e *Endpoint) Parse(payload []byte, out []Block, nowMillis uint64) (int, error) {
 	message, err := i2np.ParseTunnelData(payload)
 	if err != nil {
 		return 0, err
@@ -320,7 +319,6 @@ func (e *Endpoint) Parse(payload []byte, out []Block) (int, error) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.clock++
 	it := NewBlockIterator(data[start+1:])
 	n := 0
 	for {
@@ -335,7 +333,7 @@ func (e *Endpoint) Parse(payload []byte, out []Block) (int, error) {
 			if block.Fragment == 0 {
 				return n, ErrGatewayBlock
 			}
-			complete, done, err := e.reasm.Add(Fragment{MessageID: block.MessageID, Number: block.Fragment, Last: block.Last, Data: block.Data})
+			complete, done, err := e.reasm.Add(Fragment{MessageID: block.MessageID, Number: block.Fragment, Last: block.Last, Data: block.Data}, nowMillis)
 			if err != nil {
 				return n, err
 			}
@@ -363,10 +361,10 @@ func (e *Endpoint) Parse(payload []byte, out []Block) (int, error) {
 			continue
 		}
 
-		if err := e.remember(block); err != nil {
+		if err := e.remember(block, nowMillis); err != nil {
 			return n, err
 		}
-		complete, done, err := e.reasm.Add(Fragment{MessageID: block.MessageID, Number: 0, Data: block.Data})
+		complete, done, err := e.reasm.Add(Fragment{MessageID: block.MessageID, Number: 0, Data: block.Data}, nowMillis)
 		if err != nil {
 			return n, err
 		}
@@ -383,13 +381,12 @@ func (e *Endpoint) Parse(payload []byte, out []Block) (int, error) {
 	}
 }
 
-func (e *Endpoint) remember(block Block) error {
+func (e *Endpoint) remember(block Block, nowMillis uint64) error {
 	block.Data = nil
 	if prior, exists := e.meta[block.MessageID]; exists {
 		if prior.block.Delivery != block.Delivery || prior.block.Gateway != block.Gateway || prior.block.TunnelID != block.TunnelID {
 			return ErrFragment
 		}
-		prior.touched = e.clock
 		e.meta[block.MessageID] = prior
 		return nil
 	}
@@ -397,24 +394,24 @@ func (e *Endpoint) remember(block Block) error {
 		var oldestID uint32
 		var oldest uint64 = ^uint64(0)
 		for id, item := range e.meta {
-			if item.touched < oldest {
-				oldestID, oldest = id, item.touched
+			if item.created < oldest {
+				oldestID, oldest = id, item.created
 			}
 		}
 		delete(e.meta, oldestID)
 	}
-	e.meta[block.MessageID] = deliveryMeta{block: block, touched: e.clock}
+	e.meta[block.MessageID] = deliveryMeta{block: block, created: nowMillis}
 	return nil
 }
 
-// Expire removes retained fragment metadata and incomplete reassemblies not
-// touched since the supplied endpoint clock tick.
+// Expire removes retained fragment metadata and incomplete reassemblies
+// created at or before cutoff.
 func (e *Endpoint) Expire(cutoff uint64) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	removed := e.reasm.Expire(cutoff)
 	for id, item := range e.meta {
-		if item.touched <= cutoff {
+		if item.created <= cutoff {
 			delete(e.meta, id)
 			removed++
 		}

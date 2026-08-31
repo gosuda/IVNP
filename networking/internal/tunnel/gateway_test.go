@@ -32,7 +32,7 @@ func TestGatewayRoundTripsDeliveryInstructions(t *testing.T) {
 	if !ok {
 		t.Fatal("payload unavailable")
 	}
-	n, err := endpoint.Parse(payload, got)
+	n, err := endpoint.Parse(payload, got, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestGatewayFragmentsAndReassembles(t *testing.T) {
 		if !ok {
 			t.Fatalf("fragment %d payload unavailable", i)
 		}
-		if count, err := endpoint.Parse(payload, out); err != nil || count != 0 {
+		if count, err := endpoint.Parse(payload, out, uint64(i)); err != nil || count != 0 {
 			t.Fatalf("fragment %d = %d, %v", i, count, err)
 		}
 	}
@@ -87,7 +87,7 @@ func TestGatewayFragmentsAndReassembles(t *testing.T) {
 	if !ok {
 		t.Fatal("final fragment payload unavailable")
 	}
-	count, err := endpoint.Parse(payload, out)
+	count, err := endpoint.Parse(payload, out, uint64(n))
 	if err != nil || count != 1 {
 		t.Fatalf("final fragment = %d, %v", count, err)
 	}
@@ -104,7 +104,7 @@ func TestGatewayRejectsTruncatedAndOversizedBlocks(t *testing.T) {
 		t.Fatal("oversized block accepted")
 	}
 	endpoint := NewEndpoint(1, 1)
-	if _, err := endpoint.Parse(make([]byte, i2np.TunnelDataMessageLen-1), nil); err == nil {
+	if _, err := endpoint.Parse(make([]byte, i2np.TunnelDataMessageLen-1), nil, 0); err == nil {
 		t.Fatal("truncated TunnelData accepted")
 	}
 }
@@ -122,7 +122,7 @@ func TestGatewayRejectsChecksumMismatch(t *testing.T) {
 		t.Fatal("payload unavailable")
 	}
 	payload[len(payload)-1] ^= 1
-	if _, err := NewEndpoint(1, 64).Parse(payload, make([]Block, 1)); err != ErrGatewayPayload {
+	if _, err := NewEndpoint(1, 64).Parse(payload, make([]Block, 1), 0); err != ErrGatewayPayload {
 		t.Fatalf("tampered payload error = %v, want %v", err, ErrGatewayPayload)
 	}
 }

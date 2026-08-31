@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"sync"
 	"testing"
+	"time"
 
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/networking/internal/i2np"
@@ -158,7 +159,7 @@ func TestRuntimeTransitForwarding(t *testing.T) {
 	binary.BigEndian.PutUint32(decoded[:4], data.TunnelID)
 	copy(decoded[4:], data.Data)
 	blocks := make([]Block, 1)
-	count, err := NewEndpoint(1, 4096).Parse(decoded, blocks)
+	count, err := NewEndpoint(1, 4096).Parse(decoded, blocks, 0)
 	if err != nil || count != 1 || !bytes.Equal(blocks[0].Data, frame) {
 		t.Fatalf("transit result = %d, %#v, %v", count, blocks[0], err)
 	}
@@ -199,6 +200,35 @@ func TestRuntimeExpiresCircuitLifecycle(t *testing.T) {
 	}
 	if err := runtime.RegisterOutbound(OutboundCircuit{ID: 5, NextTunnelID: 6, ExpiresAt: now}); err != ErrCircuitExpired {
 		t.Fatalf("register expired circuit = %v", err)
+	}
+}
+
+func TestRuntimeExpiresIncompleteEndpointReassemblies(t *testing.T) {
+	const started = uint64(1_000)
+	lifetime := uint64(fragmentReassemblyLifetime / time.Millisecond)
+	now := started
+	endpoint := NewEndpoint(2, 64)
+	if _, _, err := endpoint.reasm.Add(Fragment{MessageID: 7, Data: []byte("partial")}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := endpoint.remember(Block{MessageID: 7}, now); err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewRuntime(RuntimeConfig{Now: func() uint64 { return now }})
+	if err := runtime.RegisterInbound(InboundCircuit{ID: 3, Endpoint: endpoint, ExpiresAt: started + 2*lifetime}); err != nil {
+		t.Fatal(err)
+	}
+
+	now = started + lifetime - 1
+	if removed := runtime.Expire(now); removed != 0 || len(endpoint.reasm.entries) != 1 || len(endpoint.meta) != 1 {
+		t.Fatalf("early expiry removed circuits=%d reassemblies=%d metadata=%d", removed, len(endpoint.reasm.entries), len(endpoint.meta))
+	}
+	now++
+	if removed := runtime.Expire(now); removed != 0 || len(endpoint.reasm.entries) != 0 || len(endpoint.meta) != 0 {
+		t.Fatalf("deadline expiry removed circuits=%d reassemblies=%d metadata=%d", removed, len(endpoint.reasm.entries), len(endpoint.meta))
+	}
+	if !runtime.hasCircuit(3) {
+		t.Fatal("endpoint cleanup removed the live circuit")
 	}
 }
 

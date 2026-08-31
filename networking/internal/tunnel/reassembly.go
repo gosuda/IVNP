@@ -29,7 +29,7 @@ type partial struct {
 	last     uint8
 	hasLast  bool
 	size     int
-	touched  uint64
+	created  uint64
 }
 
 // Reassembler bounds retained incomplete data by entry count and message size.
@@ -37,7 +37,6 @@ type Reassembler struct {
 	mu          sync.Mutex
 	maxEntries  int
 	maxMessage  int
-	clock       uint64
 	entries     map[uint32]*partial
 	partialPool sync.Pool
 }
@@ -56,13 +55,12 @@ func NewReassembler(maxEntries, maxMessage int) *Reassembler {
 
 // Add copies one fragment and returns a complete caller-owned message only
 // after every fragment from zero through the final number is present.
-func (r *Reassembler) Add(fragment Fragment) ([]byte, bool, error) {
+func (r *Reassembler) Add(fragment Fragment, nowMillis uint64) ([]byte, bool, error) {
 	if len(fragment.Data) == 0 || fragment.Number > 127 {
 		return nil, false, ErrFragment
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.clock++
 	entry := r.entries[fragment.MessageID]
 	if entry == nil {
 		if len(r.entries) == r.maxEntries {
@@ -70,8 +68,8 @@ func (r *Reassembler) Add(fragment Fragment) ([]byte, bool, error) {
 		}
 		entry = r.partialPool.Get().(*partial)
 		r.entries[fragment.MessageID] = entry
+		entry.created = nowMillis
 	}
-	entry.touched = r.clock
 	if entry.hasLast && fragment.Number > entry.last {
 		r.remove(fragment.MessageID)
 		return nil, false, ErrFragment
@@ -125,13 +123,13 @@ func (r *Reassembler) Add(fragment Fragment) ([]byte, bool, error) {
 	return message, true, nil
 }
 
-// Expire removes incomplete assemblies not touched since cutoff clock ticks.
+// Expire removes incomplete assemblies created at or before cutoff.
 func (r *Reassembler) Expire(cutoff uint64) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	removed := 0
 	for id, entry := range r.entries {
-		if entry.touched < cutoff {
+		if entry.created <= cutoff {
 			r.remove(id)
 			removed++
 		}
@@ -143,8 +141,8 @@ func (r *Reassembler) evictOldest() {
 	var oldestID uint32
 	var oldest uint64 = ^uint64(0)
 	for id, entry := range r.entries {
-		if entry.touched < oldest {
-			oldestID, oldest = id, entry.touched
+		if entry.created < oldest {
+			oldestID, oldest = id, entry.created
 		}
 	}
 	r.remove(oldestID)
