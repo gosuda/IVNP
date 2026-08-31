@@ -468,6 +468,8 @@ type ssu2SentPacket struct {
 	attempts     uint8
 	nacks        uint8
 	fast         bool
+	acknowledged bool
+	ackNext      *ssu2SentPacket
 	inUse        bool
 }
 
@@ -510,6 +512,8 @@ func (s *ssu2TransportSession) retainPayload(payload []byte, now time.Time) *ssu
 		slot.attempts = 0
 		slot.nacks = 0
 		slot.fast = false
+		slot.acknowledged = false
+		slot.ackNext = nil
 		slot.inUse = true
 		return slot
 	}
@@ -531,6 +535,8 @@ func (p *ssu2SentPacket) release() {
 	p.attempts = 0
 	p.nacks = 0
 	p.fast = false
+	p.acknowledged = false
+	p.ackNext = nil
 	p.inUse = false
 }
 
@@ -3435,24 +3441,30 @@ func (s *ssu2TransportSession) acknowledge(ranges []ssu2.ACKRange, now time.Time
 	for _, acked := range ranges {
 		highest = max(highest, acked.End)
 	}
-	sendCapacityChanged := false
-	for {
-		var acknowledged *ssu2SentPacket
+	var acknowledged *ssu2SentPacket
+	for number, sent := range s.sent {
+		if !sent.inUse || sent.acknowledged || !acknowledgedBy(ranges, number) {
+			continue
+		}
+		sent.acknowledged = true
+		sent.ackNext = acknowledged
+		acknowledged = sent
+		if sent.windowBytes != 0 {
+			s.messageACKedLocked(sent, now)
+		}
+	}
+	sendCapacityChanged := acknowledged != nil
+	if sendCapacityChanged {
 		for number, sent := range s.sent {
-			if sent.inUse && acknowledgedBy(ranges, number) {
-				acknowledged = sent
-				break
+			if sent.acknowledged {
+				delete(s.sent, number)
 			}
 		}
-		if acknowledged == nil {
-			break
+		for acknowledged != nil {
+			next := acknowledged.ackNext
+			acknowledged.release()
+			acknowledged = next
 		}
-		if acknowledged.windowBytes != 0 {
-			s.messageACKedLocked(acknowledged, now)
-		}
-		s.removeSentAliasesLocked(acknowledged)
-		acknowledged.release()
-		sendCapacityChanged = true
 	}
 	for number, sent := range s.sent {
 		if !sent.inUse || number != sent.latestPacket || number >= highest || sent.nackThrough >= highest {
