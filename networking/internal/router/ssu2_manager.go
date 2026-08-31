@@ -3051,8 +3051,10 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 			if err != nil {
 				return
 			}
-			response, _ := ssu2.MarshalPathResponseBlock(nil, ssu2.PathResponse{Data: challenge.Data})
+			session.frameMu.Lock()
+			response, _ := ssu2.MarshalPathResponseBlock(session.frame[:0], ssu2.PathResponse{Data: challenge.Data})
 			_ = m.sendSessionData(session, response, false)
+			session.frameMu.Unlock()
 		case ssu2.BlockPathResponse:
 			ackEliciting = true
 		case ssu2.BlockAddress, ssu2.BlockDateTime, ssu2.BlockPadding:
@@ -3108,8 +3110,13 @@ func (m *SSU2Manager) handleCandidatePath(session *ssu2TransportSession, payload
 	challenge := current.challenge
 	session.pathMu.Unlock()
 
-	probe, err := ssu2.MarshalPathChallengeBlock(nil, ssu2.PathChallenge{Data: challenge})
-	if err != nil || m.sendSessionDataTo(session, candidate, probe) != nil {
+	session.frameMu.Lock()
+	probe, err := ssu2.MarshalPathChallengeBlock(session.frame[:0], ssu2.PathChallenge{Data: challenge})
+	if err == nil {
+		err = m.sendSessionDataTo(session, candidate, probe)
+	}
+	session.frameMu.Unlock()
+	if err != nil {
 		return
 	}
 	iterator := ssu2.NewBlockIterator(payload)
@@ -3124,8 +3131,10 @@ func (m *SSU2Manager) handleCandidatePath(session *ssu2TransportSession, payload
 			if err != nil {
 				return
 			}
-			response, _ := ssu2.MarshalPathResponseBlock(nil, ssu2.PathResponse{Data: request.Data})
+			session.frameMu.Lock()
+			response, _ := ssu2.MarshalPathResponseBlock(session.frame[:0], ssu2.PathResponse{Data: request.Data})
 			_ = m.sendSessionDataTo(session, candidate, response)
+			session.frameMu.Unlock()
 		case ssu2.BlockPathResponse:
 			response, err := ssu2.ParsePathResponseBlock(block.Data)
 			if err != nil {
