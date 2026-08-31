@@ -42,11 +42,12 @@ const (
 var (
 	stateMagic = [...]byte{'I', 'V', 'N', 'P'}
 
-	ErrStoreConfig   = errors.New("state: invalid store configuration")
-	ErrInvalidState  = errors.New("state: invalid encrypted state")
-	ErrInvalidBundle = errors.New("state: invalid identity bundle")
-	ErrInvalidKey    = errors.New("state: invalid master key")
-	ErrStateLocked   = errors.New("state: state directory is already locked")
+	ErrStoreConfig       = errors.New("state: invalid store configuration")
+	ErrInvalidState      = errors.New("state: invalid encrypted state")
+	ErrInvalidBundle     = errors.New("state: invalid identity bundle")
+	ErrInvalidKey        = errors.New("state: invalid master key")
+	ErrStateLocked       = errors.New("state: state directory is already locked")
+	ErrUnsafePermissions = errors.New("state: unsafe file or directory permissions")
 )
 
 // Bundle holds persistent private key material for a router and its local destinations.
@@ -1093,7 +1094,7 @@ func (s *Store) openPrivateFile(path string) (*os.File, error) {
 func validatePrivateFile(info os.FileInfo) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
-		return ErrInvalidState
+		return ErrUnsafePermissions
 	}
 	return nil
 }
@@ -1121,7 +1122,7 @@ func ensureParent(path string) (string, error) {
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.IsDir() || stat.Uid != uint32(os.Getuid()) || info.Mode().Perm()&0o022 != 0 {
-		return "", ErrInvalidState
+		return "", ErrUnsafePermissions
 	}
 	return dir, nil
 }
