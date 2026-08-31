@@ -1,4 +1,4 @@
-name: IRC2P deterministic
+name: CI
 
 on:
   push:
@@ -10,14 +10,20 @@ permissions:
   contents: read
 
 jobs:
-  deterministic:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: Verify SAM and tunnel packages
-        run: go test -p=1 -count=1 ./cmd/toyirc ./networking/internal/tunnel ./networking/internal/router ./node/internal/runtime
+      - name: Install gojgp
+        run: go install github.com/gosuda/JustGoodPractices/cmd/gojgp@v1.2.0
+      - name: Run all tests
+        run: go test -count=1 ./...
+      - name: Run go vet
+        run: go vet ./...
+      - name: Run gojgp
+        run: gojgp lint ./...
