@@ -864,6 +864,64 @@ func TestSSU2SessionReleaseSynchronizesWithReceive(t *testing.T) {
 	}
 }
 
+func TestSSU2ReplayDropsACKAndPathChallengeBlocks(t *testing.T) {
+	key := bytes.Repeat([]byte{1}, 32)
+	header1 := bytes.Repeat([]byte{2}, 32)
+	header2 := bytes.Repeat([]byte{3}, 32)
+	sealer, err := ssu2.NewDataCipher(key, header1, header2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver, err := ssu2.NewDataCipher(key, header1, header2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack, err := ssu2.MarshalACKRanges(nil, []ssu2.ACKRange{{Start: 7, End: 7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := ssu2.MarshalBlock(nil, ssu2.BlockACK, ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err = ssu2.MarshalPathChallengeBlock(payload, ssu2.PathChallenge{Data: [8]byte{1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := sealer.SealDataTo(make([]byte, ssu2.MaxIPv4PacketLen), ssu2.ShortHeader{
+		DestinationID: 17, PacketNumber: 1, Type: ssu2.Data,
+	}, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := netip.MustParseAddrPort("127.0.0.1:12345")
+	session := &ssu2TransportSession{
+		receiveID: 17,
+		receive:   receiver,
+		remote:    net.UDPAddrFromAddrPort(expected),
+		sent:      map[uint32]*ssu2SentPacket{7: {inUse: true}},
+		fragments: make(map[uint32]*ssu2FragmentAssembly),
+	}
+	manager := &SSU2Manager{bindings: TransportBindings{Clock: WallClock{}}}
+	manager.handleDataFrom(session, append([]byte(nil), packet...), expected)
+	if len(session.sent) != 0 {
+		t.Fatal("new packet did not apply its ACK block")
+	}
+
+	session.sent[7] = &ssu2SentPacket{inUse: true}
+	replaySource := netip.MustParseAddrPort("127.0.0.1:12346")
+	manager.handleDataFrom(session, append([]byte(nil), packet...), replaySource)
+	if len(session.sent) != 1 {
+		t.Fatal("replayed ACK block changed send state")
+	}
+	session.pathMu.Lock()
+	candidate := session.candidate
+	session.pathMu.Unlock()
+	if candidate != nil {
+		t.Fatal("replayed PathChallenge created a migration candidate")
+	}
+}
+
 func TestSSU2SessionReleaseWaitsForAuthenticatedDispatch(t *testing.T) {
 	key := bytes.Repeat([]byte{4}, 32)
 	header1 := bytes.Repeat([]byte{5}, 32)

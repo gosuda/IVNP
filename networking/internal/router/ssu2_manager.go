@@ -2931,17 +2931,19 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 		session.receiveMu.Unlock()
 		return
 	}
+	if !session.received.ObserveNew(header.PacketNumber) {
+		session.receiveMu.Unlock()
+		return
+	}
+	session.receiveMu.Unlock()
 	if remote.IsValid() {
 		expected, expectedOK := addrPortKey(session.remoteAddr())
 		canonicalRemote := netip.AddrPortFrom(remote.Addr().Unmap(), remote.Port())
 		if !expectedOK || expected != canonicalRemote {
-			session.receiveMu.Unlock()
 			m.handleCandidatePath(session, payload, net.UDPAddrFromAddrPort(canonicalRemote))
 			return
 		}
 	}
-	newPacket := session.received.ObserveNew(header.PacketNumber)
-	session.receiveMu.Unlock()
 	now := m.now()
 	session.touch(now)
 	terminated := false
@@ -2971,9 +2973,6 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 			session.acknowledge(acked, now)
 		case ssu2.BlockI2NP:
 			ackEliciting = true
-			if !newPacket {
-				continue
-			}
 			message, err := decodeSSU2I2NP(block.Data)
 			if err != nil {
 				return
@@ -2984,9 +2983,6 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 			}
 		case ssu2.BlockPeerTest:
 			ackEliciting = true
-			if !newPacket {
-				continue
-			}
 			test, err := ssu2.ParsePeerTestBlock(block.Data)
 			if err != nil {
 				return
@@ -2994,9 +2990,6 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 			m.handleSessionPeerTest(session, test)
 		case ssu2.BlockFirstFragment, ssu2.BlockFollowOnFragment:
 			ackEliciting = true
-			if !newPacket {
-				continue
-			}
 			message, complete, err := session.addFragment(block.Type, block.Data, m.now())
 			if err != nil {
 				return
@@ -3009,32 +3002,23 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 			}
 		case ssu2.BlockRelayTagRequest:
 			ackEliciting = true
-			if newPacket {
-				m.handleRelayTagRequest(session)
-			}
+			m.handleRelayTagRequest(session)
 		case ssu2.BlockRelayTag:
 			ackEliciting = true
-			if newPacket {
-				tag, err := ssu2.ParseRelayTagBlock(block.Data)
-				if err != nil {
-					return
-				}
-				m.handleRelayTag(session, tag)
+			tag, err := ssu2.ParseRelayTagBlock(block.Data)
+			if err != nil {
+				return
 			}
+			m.handleRelayTag(session, tag)
 		case ssu2.BlockNewToken:
 			ackEliciting = true
-			if newPacket {
-				token, err := ssu2.ParseNewTokenBlock(block.Data)
-				if err != nil {
-					return
-				}
-				m.storeNewToken(session, token)
+			token, err := ssu2.ParseNewTokenBlock(block.Data)
+			if err != nil {
+				return
 			}
+			m.storeNewToken(session, token)
 		case ssu2.BlockRelayRequest:
 			ackEliciting = true
-			if !newPacket {
-				continue
-			}
 			request, err := ssu2.ParseRelayRequestBlock(block.Data)
 			if err != nil {
 				return
@@ -3042,9 +3026,6 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 			m.handleRelayRequest(session, request)
 		case ssu2.BlockRelayIntro:
 			ackEliciting = true
-			if !newPacket {
-				continue
-			}
 			intro, err := ssu2.ParseRelayIntroBlock(block.Data)
 			if err != nil {
 				return
@@ -3052,9 +3033,6 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 			m.handleRelayIntro(session, intro)
 		case ssu2.BlockRelayResponse:
 			ackEliciting = true
-			if !newPacket {
-				continue
-			}
 			response, err := ssu2.ParseRelayResponseBlock(block.Data)
 			if err != nil {
 				return
