@@ -85,11 +85,7 @@ func (r *Reassembler) Add(fragment Fragment, nowMillis uint64) ([]byte, bool, er
 		r.remove(fragment.MessageID)
 		return nil, false, ErrTooLarge
 	}
-	lease, ok := pool.AcquireLease(len(fragment.Data))
-	if !ok {
-		r.remove(fragment.MessageID)
-		return nil, false, ErrTooLarge
-	}
+	lease, _ := pool.AcquireLease(len(fragment.Data))
 	part, _ := lease.Bytes(len(fragment.Data))
 	copy(part, fragment.Data)
 	entry.parts[fragment.Number], entry.leases[fragment.Number] = part, lease
