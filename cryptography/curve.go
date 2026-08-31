@@ -59,6 +59,27 @@ func (c curve) mul(p point, k *big.Int) point {
 	}
 	return out
 }
+func (c curve) validPoint(p point) bool {
+	if p.inf || p.x == nil || p.y == nil {
+		return false
+	}
+	if p.x.Sign() < 0 || p.x.Cmp(c.p) >= 0 {
+		return false
+	}
+	if p.y.Sign() < 0 || p.y.Cmp(c.p) >= 0 {
+		return false
+	}
+	var left, right big.Int
+	left.Mul(p.y, p.y)
+	left.Mod(&left, c.p)
+	right.Mul(p.x, p.x)
+	right.Add(&right, c.a)
+	right.Mul(&right, p.x)
+	right.Add(&right, c.b)
+	right.Mod(&right, c.p)
+	return left.Cmp(&right) == 0 && c.mul(p, c.q).inf
+}
+
 func (c curve) verify(public, digest, r, s []byte) bool {
 	if len(public) != (c.p.BitLen()+7)/8*2 || len(r) != (c.p.BitLen()+7)/8 || len(s) != len(r) {
 		return false
@@ -68,14 +89,20 @@ func (c curve) verify(public, digest, r, s []byte) bool {
 	if rr.Sign() <= 0 || rr.Cmp(c.q) >= 0 || ss.Sign() <= 0 || ss.Cmp(c.q) >= 0 {
 		return false
 	}
-	h := new(big.Int).Mod(new(big.Int).SetBytes(digest), c.q)
-	inv := new(big.Int).ModInverse(h, c.q)
+	pub := point{new(big.Int).SetBytes(public[:len(public)/2]), new(big.Int).SetBytes(public[len(public)/2:]), false}
+	if !c.validPoint(pub) {
+		return false
+	}
+	e := new(big.Int).Mod(new(big.Int).SetBytes(digest), c.q)
+	if e.Sign() == 0 {
+		e.SetInt64(1)
+	}
+	inv := new(big.Int).ModInverse(e, c.q)
 	if inv == nil {
 		return false
 	}
 	z1 := new(big.Int).Mod(new(big.Int).Mul(ss, inv), c.q)
 	z2 := new(big.Int).Mod(new(big.Int).Mul(new(big.Int).Sub(c.q, rr), inv), c.q)
-	pub := point{new(big.Int).SetBytes(public[:len(public)/2]), new(big.Int).SetBytes(public[len(public)/2:]), false}
 	base := point{new(big.Int).Set(c.gx), new(big.Int).Set(c.gy), false}
 	out := c.add(c.mul(base, z1), c.mul(pub, z2))
 	if out.inf {
