@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -341,6 +342,9 @@ func TestDaemonReplyKeyCapacityIncludesJavaBuildGrace(t *testing.T) {
 func daemonTestConfig(t *testing.T) state.ConfigurationOperating {
 	t.Helper()
 	base := t.TempDir()
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	return state.ConfigurationOperating{
 		StatePath: filepath.Join(base, "router.state"),
 		KeyPath:   filepath.Join(base, "router.keys"),

@@ -253,6 +253,9 @@ func embeddedTestFloodfill(t *testing.T) networking.NetworkDatabaseRouterInfo {
 func embeddedTestConfig(t *testing.T) ivnp.Config {
 	t.Helper()
 	base := t.TempDir()
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	var cfg ivnp.Config
 	cfg.DataDir = base
 	cfg.StateDir = base
