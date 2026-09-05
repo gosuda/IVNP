@@ -228,3 +228,32 @@ func TestSessionCreateOfflineEncryptedLeaseSetRejected(t *testing.T) {
 		t.Fatalf("offline encrypted create = %q", line)
 	}
 }
+
+func TestSessionAddOfflinePrimaryDatagram1Rejected(t *testing.T) {
+	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
+	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, MaxSessions: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = server.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close(); _ = server.Wait() }()
+	private, _ := offlineSAMPrivateDestination(t, uint32(time.Now().Add(time.Hour).Unix()))
+	control, reader := samDial(t, server.Addr().String())
+	defer control.Close()
+	_, _ = io.WriteString(control, "SESSION CREATE STYLE=PRIMARY ID=primary DESTINATION="+private+"\n")
+	if line := readSAMLine(t, reader); !strings.Contains(line, "RESULT=OK") {
+		t.Fatalf("offline primary create = %q", line)
+	}
+	// The subsession shares the offline root endpoint, so the Datagram1
+	// restriction from createSession applies here as well.
+	_, _ = io.WriteString(control, "SESSION ADD STYLE=DATAGRAM ID=legacy\n")
+	if line := readSAMLine(t, reader); !strings.Contains(line, "RESULT=INVALID_KEY") {
+		t.Fatalf("offline DATAGRAM add = %q", line)
+	}
+	_, _ = io.WriteString(control, "SESSION ADD STYLE=DATAGRAM2 ID=modern\n")
+	if line := readSAMLine(t, reader); !strings.Contains(line, "RESULT=OK") {
+		t.Fatalf("offline DATAGRAM2 add = %q", line)
+	}
+}

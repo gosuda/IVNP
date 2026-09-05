@@ -267,6 +267,11 @@ func (s *Server) addSubsession(connection *serverConnection, cmd command) error 
 	if !ok || style == stylePrimary {
 		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_STYLE")
 	}
+	if root.offline != nil && style == styleDatagram {
+		// Same restriction as createSession: Datagram1 cannot carry the
+		// offline signature section, so peers would drop every packet.
+		return connection.writeLine("SESSION STATUS RESULT=INVALID_KEY")
+	}
 	fromPort, toPort, listenPort, protocol, listenProtocol, rawHeader, udpTarget, err := s.sessionTransport(connection, style, cmd.values, true)
 	if err != nil {
 		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=INVALID_OPTION")

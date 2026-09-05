@@ -33,7 +33,8 @@ func offlineTestDestination(t *testing.T, expires uint32) *foundation.LocalDesti
 	if err != nil {
 		t.Fatal(err)
 	}
-	transientPrivate := transientFull.Seed()
+	transientPrivate := append([]byte(nil), transientFull.Seed()...)
+	clear(transientFull)
 	defer clear(transientPrivate)
 	offline := foundation.OfflineSignature{Expires: expires, Type: foundation.SigningEdDSASHA512Ed25519, PublicKey: transientPublic}
 	var content [6 + ed25519.PublicKeySize]byte
@@ -114,5 +115,43 @@ func TestNewLocalEncryptedLeaseSetRejectsOfflineDestination(t *testing.T) {
 	encrypted, err := NewLocalEncryptedLeaseSet(destination, local, EncryptedLeaseSetAuthorization{}, nil)
 	if err == nil || encrypted != nil {
 		t.Fatalf("offline encrypted LeaseSet = %#v, %v", encrypted, err)
+	}
+}
+
+func TestLocalLeaseSet2OfflineCapsLeaseExpiry(t *testing.T) {
+	now := uint64(time.Now().UnixMilli())
+	expires := uint32(now/1000) + 60
+	destination := offlineTestDestination(t, expires)
+	defer destination.ReleaseSensitive()
+	local, err := NewLocalLeaseSet2(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gateway foundation.Hash
+	gateway[0] = 1
+	if err = local.ReplaceInboundLeases([]Lease{{Gateway: gateway, TunnelID: 7, EndDate: now + 3_600_000}}); err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, MaxLeaseSetBytes)
+	n, err := local.MarshalTo(payload, now, destination.Sign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := ParseLeaseSet2(payload[:n])
+	if err != nil {
+		t.Fatal(err)
+	}
+	leases := set.Leases()
+	lease, ok, err := leases.Next()
+	if err != nil || !ok {
+		t.Fatalf("lease = %t, %v", ok, err)
+	}
+	// Remote verifiers stop trusting the transient key at the offline
+	// authorization expiry, so no published lease may outlive it.
+	if lease.EndDate != expires {
+		t.Fatalf("lease end = %d, want capped at offline expiry %d", lease.EndDate, expires)
+	}
+	if ok, err = set.Verify(); err != nil || !ok {
+		t.Fatalf("verify = %t, %v", ok, err)
 	}
 }

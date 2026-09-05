@@ -142,12 +142,17 @@ func (s *LocalLeaseSet2) MarshalTo(dst []byte, nowMillis uint64, sign func([]byt
 		signingType = offline.Type
 	}
 	var latest uint32
-	for _, lease := range leases {
-		if lease.TunnelID == 0 || lease.EndDate <= uint32(published) {
+	for i := range leases {
+		if offline != nil && leases[i].EndDate > offline.Expires {
+			// Remote verifiers stop trusting the transient key at the offline
+			// authorization expiry, so no lease may outlive it.
+			leases[i].EndDate = offline.Expires
+		}
+		if leases[i].TunnelID == 0 || leases[i].EndDate <= uint32(published) {
 			return 0, ErrLocalLeaseSet2
 		}
-		if lease.EndDate > latest {
-			latest = lease.EndDate
+		if leases[i].EndDate > latest {
+			latest = leases[i].EndDate
 		}
 	}
 	expires := uint64(latest) - published
