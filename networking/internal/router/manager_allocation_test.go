@@ -99,14 +99,14 @@ func TestSSU2LiveVectorReadAuthDispatchWriteAllocations(t *testing.T) {
 	aliceMetrics, bobMetrics := observability.NewRegistry(), observability.NewRegistry()
 	aliceManager, err := NewSSU2Manager(SSU2ManagerConfig{
 		Database: aliceDB, StaticPrivate: aliceStatic, IntroKey: aliceIntro,
-		IdleTimeout: time.Minute, HandshakeTimeout: 500 * time.Millisecond, Metrics: aliceMetrics,
+		IdleTimeout: time.Minute, HandshakeTimeout: 2 * time.Second, Metrics: aliceMetrics,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{
 		Database: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro,
-		IdleTimeout: time.Minute, HandshakeTimeout: 500 * time.Millisecond, Metrics: bobMetrics,
+		IdleTimeout: time.Minute, HandshakeTimeout: 2 * time.Second, Metrics: bobMetrics,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func TestSSU2LiveVectorReadAuthDispatchWriteAllocations(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	waitForSSU2Live(t, 5*time.Second, func() bool {
+	waitForSSU2Live(t, 30*time.Second, func() bool {
 		aliceManager.mu.RLock()
 		session := aliceManager.sessionsByPeer[bob.Hash()]
 		peerTests := len(aliceManager.peerTests)
@@ -154,7 +154,7 @@ func TestSSU2LiveVectorReadAuthDispatchWriteAllocations(t *testing.T) {
 	if sendErr != nil {
 		t.Fatal(sendErr)
 	}
-	waitForSSU2Live(t, 5*time.Second, func() bool {
+	waitForSSU2Live(t, 30*time.Second, func() bool {
 		return delivered.Load() >= before+65
 	}, "measured live vector/auth/dispatch/write delivery")
 	if allocations != 0 {

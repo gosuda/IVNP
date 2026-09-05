@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -275,13 +276,16 @@ func TestDatagramModernSendWithoutEndpointSupport(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = server.Close(); _ = server.Wait() }()
-	for _, style := range []string{"DATAGRAM2", "DATAGRAM3"} {
+	for i, style := range []string{"DATAGRAM2", "DATAGRAM3"} {
+		// Session teardown on connection close is asynchronous; use a distinct
+		// ID per style instead of relying on the previous session being gone.
+		id := "dg" + strconv.Itoa(i)
 		control, reader := samDial(t, server.Addr().String())
-		_, _ = io.WriteString(control, "SESSION CREATE STYLE="+style+" ID=dg DESTINATION=TRANSIENT\n")
+		_, _ = io.WriteString(control, "SESSION CREATE STYLE="+style+" ID="+id+" DESTINATION=TRANSIENT\n")
 		if line := readSAMLine(t, reader); !strings.Contains(line, "RESULT=OK") {
 			t.Fatalf("%s create = %q", style, line)
 		}
-		_, _ = io.WriteString(control, "DATAGRAM SEND ID=dg DESTINATION=peer.i2p SIZE=4\nDATA")
+		_, _ = io.WriteString(control, "DATAGRAM SEND ID="+id+" DESTINATION=peer.i2p SIZE=4\nDATA")
 		if line := readSAMLine(t, reader); line != "DATAGRAM STATUS RESULT=I2P_ERROR" {
 			t.Fatalf("%s send = %q", style, line)
 		}
