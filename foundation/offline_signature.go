@@ -18,13 +18,24 @@ type OfflineSignature struct {
 	Signature []byte
 }
 
-// SignedContent returns the authorized content (expires, key type, public key)
-// covered by the offline signature.
+// SignedContentLen returns the encoded length of the authorized content.
+func (o OfflineSignature) SignedContentLen() int { return 6 + len(o.PublicKey) }
+
+// MarshalSignedContentTo serializes the authorized content into dst.
+func (o OfflineSignature) MarshalSignedContentTo(dst []byte) (int, error) {
+	if len(dst) < o.SignedContentLen() {
+		return 0, ErrInvalidIdentity
+	}
+	binary.BigEndian.PutUint32(dst[:4], o.Expires)
+	binary.BigEndian.PutUint16(dst[4:6], uint16(o.Type))
+	copy(dst[6:], o.PublicKey)
+	return o.SignedContentLen(), nil
+}
+
+// SignedContent returns the authorized content (expires, key type, public key).
 func (o OfflineSignature) SignedContent() []byte {
-	signed := make([]byte, 6+len(o.PublicKey))
-	binary.BigEndian.PutUint32(signed[:4], o.Expires)
-	binary.BigEndian.PutUint16(signed[4:6], uint16(o.Type))
-	copy(signed[6:], o.PublicKey)
+	signed := make([]byte, o.SignedContentLen())
+	_, _ = o.MarshalSignedContentTo(signed)
 	return signed
 }
 
