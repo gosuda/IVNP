@@ -219,11 +219,11 @@ func parseOfflinePrivateKey(identity foundation.Identity, section []byte) (*offl
 		return nil, ErrInvalidKey
 	}
 	offset := 6
-	public := append([]byte(nil), section[offset:offset+publicLength]...)
+	public := section[offset : offset+publicLength]
 	offset += publicLength
-	signature := append([]byte(nil), section[offset:offset+signatureLength]...)
+	signature := section[offset : offset+signatureLength]
 	offset += signatureLength
-	transientPrivate := append([]byte(nil), section[offset:]...)
+	transientPrivate := section[offset:]
 	return &offlinePrivateKey{
 		OfflineSignature: foundation.OfflineSignature{
 			Expires:   binary.BigEndian.Uint32(section[:4]),
