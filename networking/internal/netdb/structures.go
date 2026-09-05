@@ -549,6 +549,19 @@ func (s LeaseSet2) Verify() (bool, error) {
 		if err != nil || !valid {
 			return valid, err
 		}
+		leases := s.Leases()
+		for {
+			lease, ok, err := leases.Next()
+			if err != nil {
+				return false, err
+			}
+			if !ok {
+				break
+			}
+			if uint64(lease.EndDate) > uint64(s.Header.Offline.Expires) {
+				return false, nil
+			}
+		}
 		signingType = s.Header.Offline.Type
 		first, rest = s.Header.Offline.PublicKey, nil
 	}

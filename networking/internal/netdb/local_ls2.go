@@ -146,6 +146,9 @@ func (s *LocalLeaseSet2) MarshalTo(dst []byte, nowMillis uint64, sign func([]byt
 		if lease.TunnelID == 0 || lease.EndDate <= uint32(published) {
 			return 0, ErrLocalLeaseSet2
 		}
+		if offline != nil && uint64(lease.EndDate) > uint64(offline.Expires) {
+			return 0, ErrLocalLeaseSet2
+		}
 		if lease.EndDate > latest {
 			latest = lease.EndDate
 		}
