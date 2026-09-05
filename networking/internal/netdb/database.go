@@ -317,6 +317,12 @@ func (d *Database) storeLeaseSet2(store i2np.DatabaseStoreMessage, seenAt uint64
 	}
 	version := uint64(parsed.Header.Published)
 	expires := (uint64(parsed.Header.Published) + uint64(parsed.Header.Expires)) * 1000
+	if parsed.Header.Offline.Present() {
+		offlineExpiry := uint64(parsed.Header.Offline.Expires) * 1000
+		if expires > offlineExpiry {
+			expires = offlineExpiry
+		}
+	}
 	d.leasesMu.Lock()
 	defer d.leasesMu.Unlock()
 	if old, exists := d.leases[store.Key]; exists && old.version >= version {
@@ -350,6 +356,12 @@ func (d *Database) storeMetaLeaseSet(store i2np.DatabaseStoreMessage, seenAt uin
 		return err
 	}
 	headerExpires := (uint64(parsed.Header.Published) + uint64(parsed.Header.Expires)) * 1000
+	if parsed.Header.Offline.Present() {
+		offlineExpiry := uint64(parsed.Header.Offline.Expires) * 1000
+		if headerExpires > offlineExpiry {
+			headerExpires = offlineExpiry
+		}
+	}
 	if headerExpires < latest {
 		latest = headerExpires
 	}
@@ -382,6 +394,12 @@ func (d *Database) storeEncryptedLeaseSet(store i2np.DatabaseStoreMessage, seenA
 	}
 	earliest := uint64(parsed.Published) * 1000
 	latest := (uint64(parsed.Published) + uint64(parsed.Expires)) * 1000
+	if parsed.Offline.Present() {
+		offlineLimit := uint64(parsed.Offline.Expires) * 1000
+		if latest > offlineLimit {
+			latest = offlineLimit
+		}
+	}
 	if err = validateLeaseSetRange(earliest, latest, seenAt, LeaseSetMaxFutureMillis); err != nil {
 		return err
 	}
@@ -445,6 +463,9 @@ func leaseSet2Range(set LeaseSet2) (uint64, uint64, error) {
 		if !ok {
 			break
 		}
+		if set.Header.Offline.Present() && lease.EndDate > set.Header.Offline.Expires {
+			return 0, 0, ErrMalformed
+		}
 		end := uint64(lease.EndDate) * 1000
 		earliest = min(earliest, end)
 		latest = max(latest, end)
@@ -465,6 +486,9 @@ func metaLeaseSetRange(set MetaLeaseSet) (uint64, uint64, error) {
 		}
 		if !ok {
 			break
+		}
+		if set.Header.Offline.Present() && lease.EndDate > set.Header.Offline.Expires {
+			return 0, 0, ErrMalformed
 		}
 		end := uint64(lease.EndDate) * 1000
 		earliest = min(earliest, end)

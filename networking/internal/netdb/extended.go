@@ -73,6 +73,23 @@ func (s MetaLeaseSet) Verify() (bool, error) {
 	signingType := s.Header.Destination.SigningKeyType()
 	first, rest := s.Header.Destination.SigningKeyParts()
 	if s.Header.Offline.Present() {
+		if s.Header.Published > s.Header.Offline.Expires ||
+			uint64(s.Header.Published)+uint64(s.Header.Expires) > uint64(s.Header.Offline.Expires) {
+			return false, nil
+		}
+		leases := s.Leases()
+		for {
+			lease, ok, err := leases.Next()
+			if err != nil {
+				return false, err
+			}
+			if !ok {
+				break
+			}
+			if lease.EndDate > s.Header.Offline.Expires {
+				return false, nil
+			}
+		}
 		valid, err := s.Header.Destination.Verify(s.Header.Offline.Signed, s.Header.Offline.Signature)
 		if err != nil || !valid {
 			return valid, err
@@ -172,6 +189,9 @@ func (s EncryptedLeaseSet) Hash() foundation.Hash {
 func (s EncryptedLeaseSet) Verify() (bool, error) {
 	signingType, public := s.SigningType, s.BlindedPublicKey
 	if s.Offline.Present() {
+		if s.Published > s.Offline.Expires || uint64(s.Published)+uint64(s.Expires) > uint64(s.Offline.Expires) {
+			return false, nil
+		}
 		valid, err := foundation.VerifySignature(s.SigningType, s.BlindedPublicKey, nil, s.Offline.Signed, s.Offline.Signature)
 		if err != nil || !valid {
 			return valid, err

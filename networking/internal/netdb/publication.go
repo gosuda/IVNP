@@ -299,6 +299,12 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 				expiresAt = lease.EndDate
 			}
 		}
+		if exp, ok := local2.OfflineExpires(); ok {
+			offlineLimit := uint64(exp) * 1000
+			if expiresAt > offlineLimit {
+				expiresAt = offlineLimit
+			}
+		}
 	} else {
 		if err := p.local.ReplaceInboundLeases(inbound); err != nil {
 			return 0, err
@@ -310,11 +316,14 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 		}
 		leases, expiresAt = snapshot.Leases, snapshot.ExpiresAt
 	}
-	if len(leases) == 0 {
+	if len(leases) == 0 || expiresAt <= now {
 		p.leases = nil
 		p.storePayload = nil
 		p.expiresAt = 0
 		p.nextPublication = 0
+		if p.confirmed != nil {
+			p.confirmed.replace(nil)
+		}
 		return 0, nil
 	}
 
@@ -351,7 +360,7 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 	if publishRejected {
 		publishRejected = (p.nextPublication == 0 || now < p.nextPublication)
 	}
-	if publishRejected {
+	if publishRejected || now >= p.expiresAt {
 		return 0, nil
 	}
 

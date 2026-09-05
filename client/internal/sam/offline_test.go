@@ -47,6 +47,7 @@ func offlineSAMPrivateDestination(t *testing.T, expires uint32) (private, public
 		t.Fatal(err)
 	}
 	seed := transientFull.Seed()
+	clear(transientFull)
 	defer clear(seed)
 	wire := make([]byte, 0, len(identityRaw)+32+32+len(signed)+len(offline.Signature)+len(seed))
 	wire = append(wire, identityRaw...)
@@ -83,15 +84,23 @@ func TestDatagram2OfflineRoundtrip(t *testing.T) {
 		t.Fatal("SESSION STATUS did not echo the offline private destination")
 	}
 	_, _ = io.WriteString(control, "DATAGRAM SEND ID=offline DESTINATION="+public+" SIZE=4\nDATA")
-	if line = readSAMLine(t, reader); line != "DATAGRAM STATUS RESULT=OK" {
-		t.Fatalf("datagram status = %q", line)
-	}
-	line = readSAMLine(t, reader)
-	if !strings.HasPrefix(line, "DATAGRAM RECEIVED DESTINATION="+public+" ") || !strings.Contains(line, "SIZE=4") {
-		t.Fatalf("datagram receive = %q", line)
-	}
 	body := make([]byte, 4)
-	if _, err = io.ReadFull(reader, body); err != nil || string(body) != "DATA" {
+	var statusOK, received bool
+	for !statusOK || !received {
+		line = readSAMLine(t, reader)
+		switch {
+		case line == "DATAGRAM STATUS RESULT=OK":
+			statusOK = true
+		case strings.HasPrefix(line, "DATAGRAM RECEIVED DESTINATION="+public+" ") && strings.Contains(line, "SIZE=4"):
+			received = true
+			if _, err = io.ReadFull(reader, body); err != nil {
+				t.Fatal(err)
+			}
+		default:
+			t.Fatalf("datagram reply = %q", line)
+		}
+	}
+	if string(body) != "DATA" {
 		t.Fatalf("datagram body = %q, %v", body, err)
 	}
 }
@@ -255,5 +264,41 @@ func TestSessionAddOfflinePrimaryDatagram1Rejected(t *testing.T) {
 	_, _ = io.WriteString(control, "SESSION ADD STYLE=DATAGRAM2 ID=modern\n")
 	if line := readSAMLine(t, reader); !strings.Contains(line, "RESULT=OK") {
 		t.Fatalf("offline DATAGRAM2 add = %q", line)
+	}
+}
+
+func TestDatagram2ClockOutsideRangeRejected(t *testing.T) {
+	overflowTime := time.Unix(4_294_967_296, 0)
+	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
+	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, MaxSessions: 4, Now: func() time.Time { return overflowTime }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = server.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close(); _ = server.Wait() }()
+	address := server.Addr().String()
+	receiver, receiverReader, receiverLocal := createDatagramSession(t, address, "receiver", "DATAGRAM2")
+	defer receiver.Close()
+	defer receiverLocal.ReleaseSensitive()
+	target := string(receiverLocal.Destination())
+
+	private, _ := offlineSAMPrivateDestination(t, 4_294_967_295)
+	sender, senderReader := samDial(t, address)
+	defer sender.Close()
+	_, _ = io.WriteString(sender, "SESSION CREATE STYLE=DATAGRAM2 ID=sender DESTINATION="+private+"\n")
+	if line := readSAMLine(t, senderReader); !strings.Contains(line, "RESULT=OK") {
+		t.Fatalf("offline create = %q", line)
+	}
+	_, _ = io.WriteString(sender, "DATAGRAM SEND ID=sender DESTINATION="+target+" SIZE=4\nDATA")
+	if line := readSAMLine(t, senderReader); line != "DATAGRAM STATUS RESULT=OK" {
+		t.Fatalf("datagram status = %q", line)
+	}
+	if err = receiver.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = receiverReader.ReadString('\n'); err == nil {
+		t.Fatal("receiver accepted a datagram with clock past uint32 range")
 	}
 }

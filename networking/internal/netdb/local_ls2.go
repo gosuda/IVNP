@@ -100,6 +100,13 @@ func (s *LocalLeaseSet2) ReplaceInboundLeases(leases []Lease) error {
 	return nil
 }
 
+func (s *LocalLeaseSet2) OfflineExpires() (uint32, bool) {
+	if s == nil || s.offline == nil {
+		return 0, false
+	}
+	return s.offline.Expires, true
+}
+
 // MarshalTo emits a canonical signed LS2 payload. The supplied clock is Unix
 // milliseconds and is reduced to protocol seconds only at this wire boundary.
 func (s *LocalLeaseSet2) MarshalTo(dst []byte, nowMillis uint64, sign func([]byte) ([]byte, error)) (int, error) {

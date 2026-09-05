@@ -3,6 +3,7 @@ package sam
 import (
 	"encoding/base32"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 
@@ -175,7 +176,11 @@ func (s *samSession) parseReceivedDatagram(delivery networking.StreamingTunnelDe
 		}
 		return foundation.EncodeI2PBase64(packet.V1.From.Bytes()), packet.V1.Payload, true
 	case networking.DatagramProtocolDatagram2:
-		valid, err := packet.V2.VerifyTargetAt(s.endpoint.Hash(), uint32(s.now()))
+		now := s.now()
+		if now < 0 || now > math.MaxUint32 {
+			return "", nil, false
+		}
+		valid, err := packet.V2.VerifyTargetAt(s.endpoint.Hash(), uint32(now))
 		if err != nil || !valid || packet.V2.From.Hash() != delivery.From {
 			return "", nil, false
 		}

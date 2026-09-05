@@ -29,6 +29,7 @@ func offlineTestState(t *testing.T, expires uint32) (state []byte, offline Offli
 		t.Fatal(err)
 	}
 	transientPrivate = transientFull.Seed()
+	clear(transientFull)
 	offline = OfflineSignature{Expires: expires, Type: SigningEdDSASHA512Ed25519, PublicKey: transientPublic}
 	var content [6 + ed25519.PublicKeySize]byte
 	contentLen, err := offline.MarshalSignedContentTo(content[:])
@@ -118,6 +119,11 @@ func TestOfflineDestinationRejectsExpiredSigning(t *testing.T) {
 	if _, err = destination.Sign([]byte("stale datagram")); !errors.Is(err, ErrOfflineSignatureExpired) {
 		t.Fatalf("Sign() error = %v, want ErrOfflineSignatureExpired", err)
 	}
+
+	offlineTimeNow = func() time.Time { return time.Unix(4_294_967_296, 0) }
+	if _, err = destination.Sign([]byte("overflow datagram")); !errors.Is(err, ErrOfflineSignatureExpired) {
+		t.Fatalf("overflow Sign() error = %v, want ErrOfflineSignatureExpired", err)
+	}
 }
 
 func TestImportLocalDestinationOfflineRejectsForgery(t *testing.T) {
@@ -140,7 +146,10 @@ func TestImportLocalDestinationOfflineRejectsForgery(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err = ImportLocalDestinationOffline(state, offline, otherPrivate.Seed()); err == nil {
+		otherSeed := otherPrivate.Seed()
+		defer clear(otherPrivate)
+		defer clear(otherSeed)
+		if _, err = ImportLocalDestinationOffline(state, offline, otherSeed); err == nil {
 			t.Fatal("accepted transient private key not matching the authorized public key")
 		}
 	})

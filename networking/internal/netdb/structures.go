@@ -545,6 +545,23 @@ func (s LeaseSet2) Verify() (bool, error) {
 	signingType := s.Header.Destination.SigningKeyType()
 	first, rest := s.Header.Destination.SigningKeyParts()
 	if s.Header.Offline.Present() {
+		if s.Header.Published > s.Header.Offline.Expires ||
+			uint64(s.Header.Published)+uint64(s.Header.Expires) > uint64(s.Header.Offline.Expires) {
+			return false, nil
+		}
+		leases := s.Leases()
+		for {
+			lease, ok, err := leases.Next()
+			if err != nil {
+				return false, err
+			}
+			if !ok {
+				break
+			}
+			if lease.EndDate > s.Header.Offline.Expires {
+				return false, nil
+			}
+		}
 		valid, err := s.Header.Destination.Verify(s.Header.Offline.Signed, s.Header.Offline.Signature)
 		if err != nil || !valid {
 			return valid, err

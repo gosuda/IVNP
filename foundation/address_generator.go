@@ -303,7 +303,8 @@ func (d *LocalDestination) Sign(message []byte) ([]byte, error) {
 		return nil, cryptography.ErrSensitiveReleased
 	}
 	if d.offline != nil {
-		if uint32(offlineTimeNow().Unix()) > d.offline.expires {
+		nowSec := offlineTimeNow().Unix()
+		if nowSec < 0 || nowSec > int64(d.offline.expires) {
 			return nil, ErrOfflineSignatureExpired
 		}
 		switch d.offline.keyType {

@@ -106,15 +106,15 @@ func TestLocalLeaseSet2OfflineExpiredRefusesPublication(t *testing.T) {
 }
 
 func TestNewLocalEncryptedLeaseSetRejectsOfflineDestination(t *testing.T) {
-	destination := offlineTestDestination(t, uint32(1_000_000_000_000/1000)+3600)
+	destination := offlineTestDestination(t, uint32(time.Now().Unix())+3600)
 	defer destination.ReleaseSensitive()
 	local, err := NewLocalLeaseSet2(destination)
 	if err != nil {
 		t.Fatal(err)
 	}
 	encrypted, err := NewLocalEncryptedLeaseSet(destination, local, EncryptedLeaseSetAuthorization{}, nil)
-	if err == nil || encrypted != nil {
-		t.Fatalf("offline encrypted LeaseSet = %#v, %v", encrypted, err)
+	if !errors.Is(err, ErrEncryptedLeaseSet) || encrypted != nil {
+		t.Fatalf("offline encrypted LeaseSet = %#v, %v, want ErrEncryptedLeaseSet", encrypted, err)
 	}
 }
 
@@ -154,4 +154,81 @@ func TestLocalLeaseSet2OfflineCapsLeaseExpiry(t *testing.T) {
 	if ok, err = set.Verify(); err != nil || !ok {
 		t.Fatalf("verify = %t, %v", ok, err)
 	}
+}
+
+func TestOfflineLeaseSet2VerifyRejectsPastExpiry(t *testing.T) {
+	now := uint64(time.Now().UnixMilli())
+	expires := uint32(now/1000) + 60
+	destination := offlineTestDestination(t, expires)
+	defer destination.ReleaseSensitive()
+	local, err := NewLocalLeaseSet2(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gateway foundation.Hash
+	gateway[0] = 1
+	if err = local.ReplaceInboundLeases([]Lease{{Gateway: gateway, TunnelID: 7, EndDate: now + 30_000}}); err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, MaxLeaseSetBytes)
+	n, err := local.MarshalTo(payload, now, destination.Sign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := ParseLeaseSet2(payload[:n])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := set.Verify(); err != nil || !ok {
+		t.Fatalf("valid set verify = %t, %v", ok, err)
+	}
+
+	t.Run("published past offline expires", func(t *testing.T) {
+		bad := set
+		bad.Header.Offline.Expires = bad.Header.Published - 1
+		if ok, err := bad.Verify(); err != nil || ok {
+			t.Fatalf("Verify() = %t, %v, want false", ok, err)
+		}
+	})
+
+	t.Run("header duration past offline expires", func(t *testing.T) {
+		bad := set
+		bad.Header.Offline.Expires = bad.Header.Published + uint32(bad.Header.Expires) - 1
+		if ok, err := bad.Verify(); err != nil || ok {
+			t.Fatalf("Verify() = %t, %v, want false", ok, err)
+		}
+	})
+
+	t.Run("lease end date past offline expires", func(t *testing.T) {
+		leases := set.Leases()
+		lease, ok, err := leases.Next()
+		if err != nil || !ok {
+			t.Fatal("no lease")
+		}
+		bad := set
+		bad.Header.Offline.Expires = lease.EndDate - 1
+		if ok, err := bad.Verify(); err != nil || ok {
+			t.Fatalf("Verify() = %t, %v, want false", ok, err)
+		}
+	})
+
+	t.Run("leaseSet2Range rejects lease past offline expires", func(t *testing.T) {
+		leases := set.Leases()
+		lease, ok, err := leases.Next()
+		if err != nil || !ok {
+			t.Fatal("no lease")
+		}
+		bad := set
+		bad.Header.Offline.Expires = lease.EndDate - 1
+		if _, _, err := leaseSet2Range(bad); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("leaseSet2Range() = %v, want ErrMalformed", err)
+		}
+	})
+
+	t.Run("OfflineExpires returns configured expiry", func(t *testing.T) {
+		exp, ok := local.OfflineExpires()
+		if !ok || exp != expires {
+			t.Fatalf("OfflineExpires() = %d, %t, want %d, true", exp, ok, expires)
+		}
+	})
 }
