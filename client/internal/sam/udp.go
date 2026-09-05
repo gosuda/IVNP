@@ -136,7 +136,7 @@ func (s *Server) parseUDPPacket(wire []byte, source net.Addr) (udpPacket, bool) 
 		return udpPacket{}, false
 	}
 	session := s.session(parts[1])
-	parseUDPPacketRejected := session == nil || (session.style != styleDatagram && session.style != styleRaw)
+	parseUDPPacketRejected := session == nil || (!isDatagramStyle(session.style) && session.style != styleRaw)
 	if !parseUDPPacketRejected {
 		parseUDPPacketRejected = !sameSourceIP(session.sourceIP, source)
 	}
@@ -170,7 +170,7 @@ func (s *Server) parseUDPPacket(wire []byte, source net.Addr) (udpPacket, bool) 
 		}
 	}
 	payloadLen := len(wire) - newline - 1
-	if session.style == styleDatagram && (session.datagramOverhead <= 0 || payloadLen > s.config.MaxDatagramBytes-session.datagramOverhead) {
+	if isDatagramStyle(session.style) && (session.datagramOverhead <= 0 || payloadLen > s.config.MaxDatagramBytes-session.datagramOverhead) {
 		return udpPacket{}, false
 	}
 	lease, ok := pool.AcquireLease(payloadLen)
@@ -219,19 +219,18 @@ func (s *Server) sendUDPPacket(packet udpPacket) {
 	payload := packet.payload
 	protocol := packet.protocol
 	var framedLease *pool.Lease
-	if session.style == styleDatagram {
+	if isDatagramStyle(session.style) {
 		framed, lease, ok := session.datagramFrame(len(packet.payload))
 		if !ok {
 			return
 		}
 		framedLease = lease
 		defer framedLease.ReleaseSensitive()
-		n, marshalErr := session.endpoint.MarshalDatagramV1To(framed, packet.payload)
+		n, marshalErr := marshalSessionDatagram(session, framed, hash, packet.payload)
 		if marshalErr != nil || n != len(framed) {
 			return
 		}
 		payload = framed
-		protocol = networking.DatagramProtocolDatagram1
 	}
 	_ = session.endpoint.SendMessage(session.ctx, networking.StreamingTunnelDelivery{From: session.endpoint.Hash(), To: hash, FromPort: packet.fromPort, ToPort: packet.toPort, Protocol: protocol, Payload: payload})
 }

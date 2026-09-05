@@ -79,6 +79,11 @@ func NewLocalEncryptedLeaseSet(destination *foundation.LocalDestination, inner *
 	if kind != foundation.SigningEdDSASHA512Ed25519 && kind != foundation.SigningRedDSASHA512Ed25519 {
 		return nil, ErrEncryptedLeaseSet
 	}
+	// Blinding derives from the long-term signing private key, which an
+	// offline destination does not hold.
+	if _, offline := destination.OfflineSignature(); offline {
+		return nil, ErrEncryptedLeaseSet
+	}
 	return &LocalEncryptedLeaseSet{
 		destination: destination,
 		inner:       inner,

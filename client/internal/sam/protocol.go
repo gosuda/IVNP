@@ -145,6 +145,21 @@ func (s *Server) createSession(ctx context.Context, connection *serverConnection
 	if err != nil {
 		return connection.writeLine("SESSION STATUS RESULT=INVALID_KEY")
 	}
+	var offline *foundation.OfflineSignature
+	if meta, ok := local.OfflineSignature(); ok {
+		meta := meta
+		offline = &meta
+	}
+	if offline != nil {
+		// Blinding an encrypted LeaseSet requires the long-term signing private
+		// key, which an offline destination does not hold, and the legacy
+		// Datagram1 wire format cannot carry the offline signature section
+		// receivers need to verify against the transient key.
+		if policy.Encrypted || style == styleDatagram {
+			local.ReleaseSensitive()
+			return connection.writeLine("SESSION STATUS RESULT=INVALID_KEY")
+		}
+	}
 	private, err := encodePrivateDestination(local)
 	if err != nil {
 		local.ReleaseSensitive()
@@ -173,7 +188,7 @@ func (s *Server) createSession(ctx context.Context, connection *serverConnection
 			return errors.Join(connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=SESSION_NOT_READY"), cleanupErr)
 		}
 	}
-	root := newRootSession(s, id, style, endpoint, connection, fromPort, toPort, listenPort, protocol, listenProtocol, rawHeader, udpTarget)
+	root := newRootSession(s, id, style, endpoint, connection, fromPort, toPort, listenPort, protocol, listenProtocol, rawHeader, udpTarget, offline)
 	if err = s.addRoot(root); err != nil {
 		cleanupErr := s.destroyDestination(endpoint)
 		result := "I2P_ERROR"
@@ -186,8 +201,8 @@ func (s *Server) createSession(ctx context.Context, connection *serverConnection
 		return errors.Join(connection.writeLine("SESSION STATUS RESULT="+result), cleanupErr)
 	}
 	connection.root = root
-	if style == styleDatagram {
-		err = root.startReceiver(destination.DestinationRoute{Protocol: networking.DatagramProtocolDatagram1, ToPort: listenPort}, s.config.SessionQueue)
+	if isDatagramStyle(style) {
+		err = root.startReceiver(destination.DestinationRoute{Protocol: protocol, ToPort: listenPort}, s.config.SessionQueue)
 	}
 	if style == styleRaw {
 		err = root.startReceiver(destination.DestinationRoute{Protocol: listenProtocol, ToPort: listenPort}, s.config.SessionQueue)
@@ -252,13 +267,18 @@ func (s *Server) addSubsession(connection *serverConnection, cmd command) error 
 	if !ok || style == stylePrimary {
 		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_STYLE")
 	}
+	if root.offline != nil && style == styleDatagram {
+		// Same restriction as createSession: Datagram1 cannot carry the
+		// offline signature section, so peers would drop every packet.
+		return connection.writeLine("SESSION STATUS RESULT=INVALID_KEY")
+	}
 	fromPort, toPort, listenPort, protocol, listenProtocol, rawHeader, udpTarget, err := s.sessionTransport(connection, style, cmd.values, true)
 	if err != nil {
 		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=INVALID_OPTION")
 	}
 	ctx, cancel := context.WithCancel(root.ctx)
-	child := &samSession{server: s, root: root, id: id, style: style, endpoint: root.endpoint, control: connection, ctx: ctx, cancel: cancel, sourceIP: root.sourceIP, fromPort: fromPort, toPort: toPort, listenPort: listenPort, protocol: protocol, listenProtocol: listenProtocol, rawHeader: rawHeader, udpTarget: udpTarget, children: make(map[string]*samSession), attachments: make(map[net.Conn]struct{}), queueBytes: newByteBudget(s.config.MaxSessionQueueBytes), acceptRequests: make(chan acceptRequest, s.config.SessionQueue)}
-	child.datagramOverhead = root.datagramOverhead
+	child := &samSession{server: s, root: root, id: id, style: style, endpoint: root.endpoint, control: connection, ctx: ctx, cancel: cancel, sourceIP: root.sourceIP, fromPort: fromPort, toPort: toPort, listenPort: listenPort, protocol: protocol, listenProtocol: listenProtocol, rawHeader: rawHeader, udpTarget: udpTarget, now: root.now, children: make(map[string]*samSession), attachments: make(map[net.Conn]struct{}), queueBytes: newByteBudget(s.config.MaxSessionQueueBytes), acceptRequests: make(chan acceptRequest, s.config.SessionQueue)}
+	child.datagramOverhead = datagramOverhead(protocol, root.endpoint, root.offline)
 	if err = s.addChild(child); err != nil {
 		cancel()
 		return connection.writeLine("SESSION STATUS RESULT=DUPLICATED_ID")
@@ -266,8 +286,8 @@ func (s *Server) addSubsession(connection *serverConnection, cmd command) error 
 	root.mu.Lock()
 	root.children[id] = child
 	root.mu.Unlock()
-	if style == styleDatagram {
-		err = child.startReceiver(destination.DestinationRoute{Protocol: networking.DatagramProtocolDatagram1, ToPort: listenPort}, s.config.SessionQueue)
+	if isDatagramStyle(style) {
+		err = child.startReceiver(destination.DestinationRoute{Protocol: protocol, ToPort: listenPort}, s.config.SessionQueue)
 	}
 	if style == styleRaw {
 		err = child.startReceiver(destination.DestinationRoute{Protocol: listenProtocol, ToPort: listenPort}, s.config.SessionQueue)
@@ -294,7 +314,7 @@ func (s *Server) removeSubsession(connection *serverConnection, cmd command) err
 
 func parseStyle(value string) (sessionStyle, bool) {
 	switch sessionStyle(strings.ToUpper(value)) {
-	case styleStream, styleDatagram, styleRaw, stylePrimary:
+	case styleStream, styleDatagram, styleDatagram2, styleDatagram3, styleRaw, stylePrimary:
 		return sessionStyle(strings.ToUpper(value)), true
 	}
 	return "", false
@@ -426,7 +446,7 @@ func (s *Server) sessionTransport(connection *serverConnection, style sessionSty
 	switch style {
 	case styleStream:
 		err = s.configureStreamTransport(&config, values, child)
-	case styleDatagram, styleRaw:
+	case styleDatagram, styleDatagram2, styleDatagram3, styleRaw:
 		err = s.configurePacketTransport(connection, &config, style, values, child)
 	case stylePrimary:
 		if child || values["PORT"] != "" || values["HOST"] != "" || values["HEADER"] != "" || values["PROTOCOL"] != "" {
@@ -467,8 +487,9 @@ func (s *Server) configureStreamTransport(config *sessionTransportConfig, values
 }
 
 func (s *Server) configurePacketTransport(connection *serverConnection, config *sessionTransportConfig, style sessionStyle, values map[string]string, child bool) error {
-	if style == styleDatagram {
-		config.protocol, config.listenProtocol = networking.DatagramProtocolDatagram1, networking.DatagramProtocolDatagram1
+	if isDatagramStyle(style) {
+		config.protocol = datagramStyleProtocol(style)
+		config.listenProtocol = config.protocol
 		if values["PROTOCOL"] != "" || values["HEADER"] != "" || values["LISTEN_PROTOCOL"] != "" {
 			return ErrProtocol
 		}

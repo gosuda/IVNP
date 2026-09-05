@@ -17,16 +17,12 @@ const (
 	v3AllowedFlags         = flagVersionMask | flagOptions
 )
 
-// OfflineSignature holds a transient signing key and its authorizing signature.
-type OfflineSignature struct {
-	Expires   uint32
-	Type      foundation.SigningKeyType
-	PublicKey []byte
-	Signature []byte
-	Signed    []byte
-}
+// FlagOffline marks a Datagram2 packet carrying an offline signature section.
+const FlagOffline = flagOffline
 
-func (o OfflineSignature) Present() bool { return o.PublicKey != nil }
+// OfflineSignature is the canonical foundation offline signature: a transient
+// signing key plus its authorizing signature.
+type OfflineSignature = foundation.OfflineSignature
 
 type V2 struct {
 	From               foundation.Identity
@@ -35,6 +31,7 @@ type V2 struct {
 	Offline            OfflineSignature
 	Payload, Signature []byte
 	signedRest         []byte
+	offlineSigned      []byte
 }
 
 // ParseV2 parses a protocol-19 Datagram2 packet.
@@ -93,8 +90,9 @@ func ParseV2(src []byte) (V2, error) {
 		off += originSignatureLen
 		out.Offline = OfflineSignature{
 			Expires: expires, Type: offlineType, PublicKey: publicKey,
-			Signature: offlineSignature, Signed: src[offlineStart : off-originSignatureLen],
+			Signature: offlineSignature,
 		}
+		out.offlineSigned = src[offlineStart : off-originSignatureLen]
 		signingType = offlineType
 	}
 	signatureLen, ok := signingType.SignatureLen()
@@ -121,7 +119,7 @@ func (d V2) VerifyTargetAt(target foundation.Hash, now uint32) (bool, error) {
 		if now > d.Offline.Expires {
 			return false, ErrDatagram
 		}
-		valid, err := d.From.Verify(d.Offline.Signed, d.Offline.Signature)
+		valid, err := d.From.Verify(d.offlineSigned, d.Offline.Signature)
 		if err != nil || !valid {
 			return valid, err
 		}

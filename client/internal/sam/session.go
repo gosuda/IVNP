@@ -8,17 +8,36 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/networking"
 )
 
 type sessionStyle string
 
 const (
-	styleStream   sessionStyle = "STREAM"
-	styleDatagram sessionStyle = "DATAGRAM"
-	styleRaw      sessionStyle = "RAW"
-	stylePrimary  sessionStyle = "PRIMARY"
+	styleStream    sessionStyle = "STREAM"
+	styleDatagram  sessionStyle = "DATAGRAM"
+	styleDatagram2 sessionStyle = "DATAGRAM2"
+	styleDatagram3 sessionStyle = "DATAGRAM3"
+	styleRaw       sessionStyle = "RAW"
+	stylePrimary   sessionStyle = "PRIMARY"
 )
+
+func isDatagramStyle(style sessionStyle) bool {
+	return style == styleDatagram || style == styleDatagram2 || style == styleDatagram3
+}
+
+func datagramStyleProtocol(style sessionStyle) uint8 {
+	switch style {
+	case styleDatagram2:
+		return networking.DatagramProtocolDatagram2
+	case styleDatagram3:
+		return networking.DatagramProtocolDatagram3
+	default:
+		return networking.DatagramProtocolDatagram1
+	}
+}
 
 type samSession struct {
 	server           *Server
@@ -37,7 +56,9 @@ type samSession struct {
 	listenProtocol   uint8
 	rawHeader        bool
 	udpTarget        *net.UDPAddr
+	offline          *foundation.OfflineSignature
 	datagramOverhead int
+	now              func() int64
 
 	forward             bool
 	mu                  sync.Mutex
@@ -56,10 +77,10 @@ type samSession struct {
 	wg                  sync.WaitGroup
 }
 
-func newRootSession(server *Server, id string, style sessionStyle, endpoint destination.DestinationEndpoint, control *serverConnection, fromPort, toPort, listenPort uint16, protocol, listenProtocol uint8, rawHeader bool, udpTarget *net.UDPAddr) *samSession {
+func newRootSession(server *Server, id string, style sessionStyle, endpoint destination.DestinationEndpoint, control *serverConnection, fromPort, toPort, listenPort uint16, protocol, listenProtocol uint8, rawHeader bool, udpTarget *net.UDPAddr, offline *foundation.OfflineSignature) *samSession {
 	ctx, cancel := context.WithCancel(server.ctx)
-	s := &samSession{server: server, id: id, style: style, endpoint: endpoint, control: control, ctx: ctx, cancel: cancel, sourceIP: connectionIP(control.Conn), fromPort: fromPort, toPort: toPort, listenPort: listenPort, protocol: protocol, listenProtocol: listenProtocol, rawHeader: rawHeader, udpTarget: udpTarget, children: make(map[string]*samSession), attachments: make(map[net.Conn]struct{}), queueBytes: newByteBudget(server.config.MaxSessionQueueBytes), acceptRequests: make(chan acceptRequest, server.config.SessionQueue)}
-	s.datagramOverhead = datagramV1Overhead(endpoint)
+	s := &samSession{server: server, id: id, style: style, endpoint: endpoint, control: control, ctx: ctx, cancel: cancel, sourceIP: connectionIP(control.Conn), fromPort: fromPort, toPort: toPort, listenPort: listenPort, protocol: protocol, listenProtocol: listenProtocol, rawHeader: rawHeader, udpTarget: udpTarget, offline: offline, now: func() int64 { return server.config.Now().Unix() }, children: make(map[string]*samSession), attachments: make(map[net.Conn]struct{}), queueBytes: newByteBudget(server.config.MaxSessionQueueBytes), acceptRequests: make(chan acceptRequest, server.config.SessionQueue)}
+	s.datagramOverhead = datagramOverhead(protocol, endpoint, offline)
 	s.root = s
 	return s
 }

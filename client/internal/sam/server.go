@@ -51,6 +51,9 @@ type ServerConfig struct {
 	ReadinessTimeout       time.Duration
 	CleanupTimeout         time.Duration
 	AllowLoopbackForward   bool
+	// Now supplies the current time for offline signature expiry checks on
+	// received datagrams. Nil defaults to time.Now.
+	Now func() time.Time
 }
 
 // Server serves inbound SAM while Network remains the external SAM client.
@@ -136,6 +139,9 @@ func NewServer(config ServerConfig) (*Server, error) {
 	}
 	if config.CleanupTimeout <= 0 {
 		config.CleanupTimeout = defaultCleanupTimeout
+	}
+	if config.Now == nil {
+		config.Now = time.Now
 	}
 	return &Server{config: config, sessions: make(map[string]*samSession), destinations: make(map[foundation.Hash]*samSession), connections: make(map[net.Conn]struct{}), done: make(chan struct{}), sem: make(chan struct{}, config.MaxConnections), queueBytes: newByteBudget(config.MaxServerQueueBytes)}, nil
 }

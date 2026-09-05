@@ -19,6 +19,7 @@ type LocalLeaseSet2 struct {
 	hash     foundation.Hash
 	public   [32]byte
 	types    []foundation.CryptoKeyType
+	offline  *foundation.OfflineSignature
 	mu       sync.RWMutex
 	leases   []Lease2
 }
@@ -69,7 +70,15 @@ func NewLocalLeaseSet2WithTypes(destination *foundation.LocalDestination, reques
 		}
 		seen[cryptoType] = true
 	}
-	return &LocalLeaseSet2{identity: owned, hash: owned.Hash(), public: public, types: types}, nil
+	var offline *foundation.OfflineSignature
+	if meta, ok := destination.OfflineSignature(); ok {
+		meta := meta
+		if _, ok = meta.Type.SignatureLen(); !ok {
+			return nil, ErrLocalLeaseSet2
+		}
+		offline = &meta
+	}
+	return &LocalLeaseSet2{identity: owned, hash: owned.Hash(), public: public, types: types, offline: offline}, nil
 }
 
 func (s *LocalLeaseSet2) Hash() foundation.Hash { return s.hash }
@@ -102,6 +111,7 @@ func (s *LocalLeaseSet2) MarshalTo(dst []byte, nowMillis uint64, sign func([]byt
 	public := s.public
 	types := append([]foundation.CryptoKeyType(nil), s.types...)
 	leases := append([]Lease2(nil), s.leases...)
+	offline := s.offline
 	s.mu.RUnlock()
 	if len(leases) == 0 || len(leases) > MaxLeases {
 		return 0, ErrLocalLeaseSet2
@@ -110,13 +120,39 @@ func (s *LocalLeaseSet2) MarshalTo(dst []byte, nowMillis uint64, sign func([]byt
 	if published > uint64(^uint32(0)) {
 		return 0, ErrLocalLeaseSet2
 	}
-	var latest uint32
-	for _, lease := range leases {
-		if lease.TunnelID == 0 || lease.EndDate <= uint32(published) {
+	flags := uint16(0)
+	offlineLen := 0
+	signingType := identity.SigningKeyType()
+	if offline != nil {
+		// Peers verify the LS2 signature with the transient key authorized by
+		// this offline signature; publishing past its expiry is useless.
+		if published > uint64(offline.Expires) {
 			return 0, ErrLocalLeaseSet2
 		}
-		if lease.EndDate > latest {
-			latest = lease.EndDate
+		keyLen, ok := offline.Type.PublicKeyLen()
+		if !ok || len(offline.PublicKey) != keyLen {
+			return 0, ErrLocalLeaseSet2
+		}
+		authorizationLen, ok := signingType.SignatureLen()
+		if !ok || len(offline.Signature) != authorizationLen {
+			return 0, ErrLocalLeaseSet2
+		}
+		flags = leaseSetOfflineFlag
+		offlineLen = 6 + keyLen + authorizationLen
+		signingType = offline.Type
+	}
+	var latest uint32
+	for i := range leases {
+		if offline != nil && leases[i].EndDate > offline.Expires {
+			// Remote verifiers stop trusting the transient key at the offline
+			// authorization expiry, so no lease may outlive it.
+			leases[i].EndDate = offline.Expires
+		}
+		if leases[i].TunnelID == 0 || leases[i].EndDate <= uint32(published) {
+			return 0, ErrLocalLeaseSet2
+		}
+		if leases[i].EndDate > latest {
+			latest = leases[i].EndDate
 		}
 	}
 	expires := uint64(latest) - published
@@ -131,8 +167,8 @@ func (s *LocalLeaseSet2) MarshalTo(dst []byte, nowMillis uint64, sign func([]byt
 	if keyCount == 0 || keyCount > 255 {
 		return 0, ErrLocalLeaseSet2
 	}
-	unsignedLen := len(identityBytes) + 8 + 2 + 1 + keyCount*(4+32) + 1 + len(leases)*40
-	signatureLen, ok := identity.SigningKeyType().SignatureLen()
+	unsignedLen := len(identityBytes) + 8 + offlineLen + 2 + 1 + keyCount*(4+32) + 1 + len(leases)*40
+	signatureLen, ok := signingType.SignatureLen()
 	if !ok || len(dst) < unsignedLen+signatureLen {
 		return 0, foundation.ErrDestinationSmall
 	}
@@ -141,8 +177,15 @@ func (s *LocalLeaseSet2) MarshalTo(dst []byte, nowMillis uint64, sign func([]byt
 	off += 4
 	binary.BigEndian.PutUint16(dst[off:off+2], uint16(expires))
 	off += 2
-	binary.BigEndian.PutUint16(dst[off:off+2], 0)
+	binary.BigEndian.PutUint16(dst[off:off+2], flags)
 	off += 2
+	if offline != nil {
+		binary.BigEndian.PutUint32(dst[off:off+4], offline.Expires)
+		binary.BigEndian.PutUint16(dst[off+4:off+6], uint16(offline.Type))
+		off += 6
+		off += copy(dst[off:], offline.PublicKey)
+		off += copy(dst[off:], offline.Signature)
+	}
 	// Canonical empty mapping and every locally accepted encryption format in
 	// local preference order, independent of a resolver's parser order.
 	dst[off], dst[off+1] = 0, 0

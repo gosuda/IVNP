@@ -35,6 +35,7 @@ type LocalDestination struct {
 	identityCryptoType CryptoKeyType
 	elgamalPrivate     cryptography.ElGamalPrivateKey
 	cryptoCapabilities byte
+	offline            *offlineSigning
 	released           bool
 }
 
@@ -301,12 +302,31 @@ func (d *LocalDestination) Sign(message []byte) ([]byte, error) {
 	if d.released {
 		return nil, cryptography.ErrSensitiveReleased
 	}
+	if d.offline != nil {
+		if uint32(offlineTimeNow().Unix()) > d.offline.expires {
+			return nil, ErrOfflineSignatureExpired
+		}
+		switch d.offline.keyType {
+		case SigningEdDSASHA512Ed25519:
+			key := ed25519.NewKeyFromSeed(d.offline.private)
+			defer clear(key)
+			return ed25519.Sign(key, message), nil
+		case SigningRedDSASHA512Ed25519:
+			var private [32]byte
+			copy(private[:], d.offline.private)
+			defer clear(private[:])
+			return Red25519Sign(private, message)
+		default:
+			return nil, ErrEncryptedSigningKey
+		}
+	}
 	switch d.signingType {
 	case SigningEdDSASHA512Ed25519:
 		return ed25519.Sign(ed25519.PrivateKey(d.signingPrivate), message), nil
 	case SigningRedDSASHA512Ed25519:
 		var private [32]byte
 		copy(private[:], d.signingPrivate)
+		defer clear(private[:])
 		return Red25519Sign(private, message)
 	default:
 		return nil, ErrEncryptedSigningKey
@@ -377,6 +397,15 @@ func (d *LocalDestination) Clone() (*LocalDestination, error) {
 		identityCryptoType: d.identityCryptoType,
 		elgamalPrivate:     d.elgamalPrivate,
 	}
+	if d.offline != nil {
+		clone.offline = &offlineSigning{
+			expires:   d.offline.expires,
+			keyType:   d.offline.keyType,
+			public:    append([]byte(nil), d.offline.public...),
+			signature: append([]byte(nil), d.offline.signature...),
+			private:   append([]byte(nil), d.offline.private...),
+		}
+	}
 	return clone, nil
 }
 
@@ -390,6 +419,10 @@ func (d *LocalDestination) ReleaseSensitive() {
 		clear(d.signingPrivate)
 		clear(d.x25519Private[:])
 		clear(d.elgamalPrivate[:])
+		if d.offline != nil {
+			d.offline.clear()
+			d.offline = nil
+		}
 		d.released = true
 	}
 	d.mu.Unlock()
@@ -438,6 +471,38 @@ func (d *LocalDestination) MarshalPrivateTo(dst []byte) (int, error) {
 
 // ImportLocalDestination reconstructs and validates a LocalDestination from serialized private state bytes.
 func ImportLocalDestination(src []byte) (*LocalDestination, error) {
+	return importLocalDestination(src, nil)
+}
+
+// ImportLocalDestinationOffline reconstructs a LocalDestination whose long-term
+// signing private key is absent (all zero in src) and replaced by an authorized
+// transient signing key. The authorization signature is verified against the
+// destination identity.
+func ImportLocalDestinationOffline(src []byte, offline OfflineSignature, transientPrivate []byte) (*LocalDestination, error) {
+	if len(src) < 2 {
+		return nil, ErrInvalidIdentity
+	}
+	n := int(binary.BigEndian.Uint16(src[:2]))
+	if n == 0 || len(src) < 2+n {
+		return nil, ErrInvalidIdentity
+	}
+	identity, err := ParseDestination(src[2 : 2+n])
+	if err != nil {
+		return nil, ErrInvalidIdentity
+	}
+	signing, err := parseOfflineSigning(identity, offline, transientPrivate)
+	if err != nil {
+		return nil, err
+	}
+	destination, err := importLocalDestination(src, signing)
+	if err != nil {
+		signing.clear()
+		return nil, err
+	}
+	return destination, nil
+}
+
+func importLocalDestination(src []byte, offline *offlineSigning) (*LocalDestination, error) {
 	if len(src) < 2 {
 		return nil, ErrInvalidIdentity
 	}
@@ -474,21 +539,38 @@ func ImportLocalDestination(src []byte) (*LocalDestination, error) {
 	off := 2 + n
 	private := append([]byte(nil), src[off:off+privateLen]...)
 	var public ed25519.PublicKey
-	switch signingType {
-	case SigningEdDSASHA512Ed25519:
-		public = ed25519.PrivateKey(private).Public().(ed25519.PublicKey)
-	case SigningRedDSASHA512Ed25519:
-		scalar, scalarErr := new(edwards25519.Scalar).SetCanonicalBytes(private)
-		if scalarErr != nil {
+	if offline != nil {
+		// The long-term signing private key stays offline; only zero padding
+		// occupies its slot in the serialized state.
+		for _, value := range private {
+			if value != 0 {
+				clear(private)
+				return nil, ErrInvalidIdentity
+			}
+		}
+		signing, rest := identity.SigningKeyParts()
+		if len(rest) != 0 {
 			clear(private)
 			return nil, ErrInvalidIdentity
 		}
-		public = append(ed25519.PublicKey(nil), new(edwards25519.Point).ScalarBaseMult(scalar).Bytes()...)
-	}
-	signing, rest := identity.SigningKeyParts()
-	if len(rest) != 0 || !bytes.Equal(signing, public) {
-		clear(private)
-		return nil, ErrInvalidIdentity
+		public = append(ed25519.PublicKey(nil), signing...)
+	} else {
+		switch signingType {
+		case SigningEdDSASHA512Ed25519:
+			public = ed25519.PrivateKey(private).Public().(ed25519.PublicKey)
+		case SigningRedDSASHA512Ed25519:
+			scalar, scalarErr := new(edwards25519.Scalar).SetCanonicalBytes(private)
+			if scalarErr != nil {
+				clear(private)
+				return nil, ErrInvalidIdentity
+			}
+			public = append(ed25519.PublicKey(nil), new(edwards25519.Point).ScalarBaseMult(scalar).Bytes()...)
+		}
+		signing, rest := identity.SigningKeyParts()
+		if len(rest) != 0 || !bytes.Equal(signing, public) {
+			clear(private)
+			return nil, ErrInvalidIdentity
+		}
 	}
 	off += privateLen
 	x25519, err := ecdh.X25519().NewPrivateKey(src[off : off+32])
@@ -524,6 +606,7 @@ func ImportLocalDestination(src []byte) (*LocalDestination, error) {
 		identityCryptoType: identity.CryptoKeyType(),
 		elgamalPrivate:     elgamalPrivate,
 		cryptoCapabilities: capabilities,
+		offline:            offline,
 	}
 	copy(d.x25519Private[:], x25519.Bytes())
 	return d, nil
