@@ -5,6 +5,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
@@ -175,7 +176,7 @@ func (s *samSession) parseReceivedDatagram(delivery networking.StreamingTunnelDe
 		}
 		return foundation.EncodeI2PBase64(packet.V1.From.Bytes()), packet.V1.Payload, true
 	case networking.DatagramProtocolDatagram2:
-		valid, err := packet.V2.VerifyTarget(s.endpoint.Hash())
+		valid, err := packet.V2.VerifyTargetAt(s.endpoint.Hash(), uint32(time.Now().Unix()))
 		if err != nil || !valid || packet.V2.From.Hash() != delivery.From {
 			return "", nil, false
 		}
