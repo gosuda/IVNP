@@ -163,6 +163,7 @@ func decodePrivateDestination(encoded string) (*foundation.LocalDestination, err
 			return nil, ErrInvalidKey
 		}
 		x25519 = generated.Bytes()
+		defer clear(x25519)
 		elgamal = encryptionPrivate
 	} else {
 		x25519 = encryptionPrivate

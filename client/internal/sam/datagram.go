@@ -182,7 +182,10 @@ func (s *samSession) parseReceivedDatagram(delivery networking.StreamingTunnelDe
 		return foundation.EncodeI2PBase64(packet.V2.From.Bytes()), packet.V2.Payload, true
 	case networking.DatagramProtocolDatagram3:
 		// Datagram3 is unauthenticated by spec: no signature to verify and the
-		// source is a bare 32-byte hash, not a full destination.
+		// source is a bare 32-byte hash supplied by the sender. The FROM value
+		// delivered to SAM clients is attacker-controlled and must not be
+		// trusted for authorization decisions; use DATAGRAM or DATAGRAM2 when
+		// the source identity matters.
 		return foundation.EncodeI2PBase64(packet.V3.From[:]), packet.V3.Payload, true
 	}
 	return "", nil, false

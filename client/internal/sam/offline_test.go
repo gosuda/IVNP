@@ -90,7 +90,7 @@ func TestDatagram2OfflineRoundtrip(t *testing.T) {
 	}
 }
 
-func TestDatagram2OfflineExpiredDropped(t *testing.T) {
+func TestDatagram2OfflineExpiredRejected(t *testing.T) {
 	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, MaxSessions: 4})
 	if err != nil {
@@ -114,8 +114,8 @@ func TestDatagram2OfflineExpiredDropped(t *testing.T) {
 		t.Fatalf("expired offline create = %q", line)
 	}
 	_, _ = io.WriteString(sender, "DATAGRAM SEND ID=sender DESTINATION="+target+" SIZE=4\nDATA")
-	if line := readSAMLine(t, senderReader); line != "DATAGRAM STATUS RESULT=OK" {
-		t.Fatalf("datagram status = %q", line)
+	if line := readSAMLine(t, senderReader); line == "DATAGRAM STATUS RESULT=OK" {
+		t.Fatal("sender signed with an expired offline signature")
 	}
 	if err = receiver.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
 		t.Fatal(err)

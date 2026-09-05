@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"testing"
 	"time"
 )
@@ -91,6 +92,23 @@ func mustSign(t *testing.T, d *LocalDestination, message []byte) []byte {
 		t.Fatal(err)
 	}
 	return signature
+}
+
+func TestOfflineDestinationRejectsExpiredSigning(t *testing.T) {
+	expires := uint32(time.Now().Add(-time.Hour).Unix())
+	state, offline, transientPrivate, longTerm := offlineTestState(t, expires)
+	defer longTerm.ReleaseSensitive()
+	defer clear(transientPrivate)
+	defer clear(state)
+
+	destination, err := ImportLocalDestinationOffline(state, offline, transientPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.ReleaseSensitive()
+	if _, err = destination.Sign([]byte("stale datagram")); !errors.Is(err, ErrOfflineSignatureExpired) {
+		t.Fatalf("Sign() error = %v, want ErrOfflineSignatureExpired", err)
+	}
 }
 
 func TestImportLocalDestinationOfflineRejectsForgery(t *testing.T) {

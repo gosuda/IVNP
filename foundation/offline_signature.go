@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/binary"
+	"errors"
 
 	"filippo.io/edwards25519"
 )
+
+// ErrOfflineSignatureExpired is returned when a transient signing key is used
+// past the expiry authorized by the offline signature.
+var ErrOfflineSignatureExpired = errors.New("i2p: offline signature is expired")
 
 // OfflineSignature authorizes a transient signing key to act on behalf of a
 // destination whose long-term signing private key is kept offline. It appears
