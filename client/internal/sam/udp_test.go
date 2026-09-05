@@ -328,7 +328,7 @@ func TestDatagramFrameUsesExactPayloadCapacity(t *testing.T) {
 	}
 	defer endpoint.Close()
 	payload := []byte("exact datagram")
-	overhead := datagramV1Overhead(endpoint)
+	overhead := datagramOverhead(networking.DatagramProtocolDatagram1, endpoint, nil)
 	session := &samSession{
 		server:           &Server{config: ServerConfig{MaxDatagramBytes: overhead + len(payload)}},
 		endpoint:         endpoint,

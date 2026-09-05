@@ -190,6 +190,28 @@ func (e *clientDestinationEndpoint) MarshalDatagramV1To(dst, payload []byte) (in
 	}
 	return networking.DatagramMarshalV1To(dst, identity, payload, e.runtime.local.Sign)
 }
+func (e *clientDestinationEndpoint) MarshalDatagramV2To(dst []byte, target foundation.Hash, payload []byte) (int, error) {
+	if e == nil || e.runtime == nil || e.runtime.local == nil || !e.runtime.active() {
+		return 0, net.ErrClosed
+	}
+	identity, err := e.runtime.local.Identity()
+	if err != nil {
+		return 0, err
+	}
+	flags := uint16(2)
+	var offline networking.DatagramOfflineSignature
+	if meta, ok := e.runtime.local.OfflineSignature(); ok {
+		flags |= networking.DatagramFlagOffline
+		offline = networking.DatagramOfflineSignature{Expires: meta.Expires, Type: meta.Type, PublicKey: meta.PublicKey, Signature: meta.Signature}
+	}
+	return networking.DatagramMarshalV2To(dst, target, identity, flags, foundation.Mapping{}, offline, payload, e.runtime.local.Sign)
+}
+func (e *clientDestinationEndpoint) MarshalDatagramV3To(dst, payload []byte) (int, error) {
+	if e == nil || e.runtime == nil || e.runtime.local == nil || !e.runtime.active() {
+		return 0, net.ErrClosed
+	}
+	return networking.DatagramMarshalV3To(dst, e.Hash(), 3, foundation.Mapping{}, payload)
+}
 func (e *clientDestinationEndpoint) Subscribe(route client.ClientDestinationRoute, capacity int) (client.ClientMessageSubscription, error) {
 	session, err := e.session()
 	if err != nil {

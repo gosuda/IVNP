@@ -14,7 +14,11 @@ var ErrInvalidKey = errors.New("sam: invalid private destination")
 
 // SAM private Destinations are the binary public Destination followed by the
 // encryption private key and signing private key, encoded with I2P base64. For
-// Ed25519 SAM carries the 32-byte seed, not Go's 64-byte expanded key.
+// Ed25519 SAM carries the 32-byte seed, not Go's 64-byte expanded key. An
+// all-zero signing private key introduces an Offline Signature section:
+// expires (4 BE), transient signing key type (2 BE), transient signing public
+// key, authorization signature by the offline key, transient signing private
+// key.
 func encodePrivateDestination(destination *foundation.LocalDestination) ([]byte, error) {
 	if destination == nil {
 		return nil, ErrInvalidKey
@@ -43,49 +47,58 @@ func encodePrivateDestination(destination *foundation.LocalDestination) ([]byte,
 	if err != nil || consumed != len(publicRaw) {
 		return nil, ErrInvalidKey
 	}
-	offset := 2 + publicLength
-	var signing []byte
+	stateSigningLength := 0
 	switch identity.SigningKeyType() {
 	case foundation.SigningEdDSASHA512Ed25519:
-		if len(state) < offset+ed25519.PrivateKeySize+32 {
-			return nil, ErrInvalidKey
-		}
-		signing = state[offset : offset+ed25519.SeedSize]
-		offset += ed25519.PrivateKeySize
+		stateSigningLength = ed25519.PrivateKeySize
 	case foundation.SigningRedDSASHA512Ed25519:
-		if len(state) < offset+32+32 {
-			return nil, ErrInvalidKey
-		}
-		signing = state[offset : offset+32]
-		offset += 32
+		stateSigningLength = 32
 	default:
 		return nil, ErrInvalidKey
 	}
+	offset := 2 + publicLength + stateSigningLength
+	if len(state) < offset+32 {
+		return nil, ErrInvalidKey
+	}
+	var encryption []byte
 	switch identity.CryptoKeyType() {
 	case foundation.CryptoX25519:
-		x25519 := state[offset : offset+32]
-		wire := make([]byte, len(publicRaw)+32+len(signing))
-		position := copy(wire, publicRaw)
-		position += copy(wire[position:], x25519)
-		copy(wire[position:], signing)
-		encoded := []byte(foundation.EncodeI2PBase64(wire))
-		clear(wire)
-		return encoded, nil
+		encryption = state[offset : offset+32]
 	case foundation.CryptoElGamal:
-		elgamalOffset := offset + 32
-		if len(state) < elgamalOffset+256 {
+		if len(state) < offset+32+256 {
 			return nil, ErrInvalidKey
 		}
-		wire := make([]byte, len(publicRaw)+256+len(signing))
-		position := copy(wire, publicRaw)
-		position += copy(wire[position:], state[elgamalOffset:elgamalOffset+256])
-		copy(wire[position:], signing)
-		encoded := []byte(foundation.EncodeI2PBase64(wire))
-		clear(wire)
-		return encoded, nil
+		encryption = state[offset+32 : offset+32+256]
 	default:
 		return nil, ErrInvalidKey
 	}
+	var signing []byte
+	if offlineLength := destination.OfflinePrivateEncodedLen(); offlineLength > 0 {
+		signing = make([]byte, 32+offlineLength)
+		if _, err = destination.MarshalOfflinePrivateTo(signing[32:]); err != nil {
+			clear(signing)
+			return nil, err
+		}
+		defer clear(signing)
+	} else {
+		signing = state[2+publicLength : 2+publicLength+32]
+	}
+	wire := make([]byte, len(publicRaw)+len(encryption)+len(signing))
+	position := copy(wire, publicRaw)
+	position += copy(wire[position:], encryption)
+	copy(wire[position:], signing)
+	encoded := []byte(foundation.EncodeI2PBase64(wire))
+	clear(wire)
+	return encoded, nil
+}
+
+func zeroBytes(value []byte) bool {
+	for _, b := range value {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func decodePrivateDestination(encoded string) (*foundation.LocalDestination, error) {
@@ -103,22 +116,43 @@ func decodePrivateDestination(encoded string) (*foundation.LocalDestination, err
 	if identity.CryptoKeyType() == foundation.CryptoElGamal {
 		encryptionLength = 256
 	}
-	if len(wire) != consumed+encryptionLength+signingLength {
+	if len(wire) < consumed+encryptionLength+signingLength {
 		return nil, ErrInvalidKey
 	}
 	encryptionPrivate := wire[consumed : consumed+encryptionLength]
-	signing := wire[consumed+encryptionLength:]
-	var private []byte
+	signing := wire[consumed+encryptionLength : consumed+encryptionLength+signingLength]
+	offlineSection := wire[consumed+encryptionLength+signingLength:]
+	var offline *offlinePrivateKey
+	if zeroBytes(signing) {
+		parsed, parseErr := parseOfflinePrivateKey(identity, offlineSection)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		offline = parsed
+		defer offline.clear()
+	} else if len(offlineSection) != 0 {
+		return nil, ErrInvalidKey
+	}
+	privateLength := 0
 	switch identity.SigningKeyType() {
 	case foundation.SigningEdDSASHA512Ed25519:
-		private = ed25519.NewKeyFromSeed(signing)
+		privateLength = ed25519.PrivateKeySize
 	case foundation.SigningRedDSASHA512Ed25519:
 		if identity.CryptoKeyType() != foundation.CryptoX25519 {
 			return nil, ErrInvalidKey
 		}
-		private = append([]byte(nil), signing...)
+		privateLength = 32
 	default:
 		return nil, ErrInvalidKey
+	}
+	private := make([]byte, privateLength)
+	if offline == nil {
+		switch identity.SigningKeyType() {
+		case foundation.SigningEdDSASHA512Ed25519:
+			private = ed25519.NewKeyFromSeed(signing)
+		case foundation.SigningRedDSASHA512Ed25519:
+			copy(private, signing)
+		}
 	}
 	defer clear(private)
 	var x25519 []byte
@@ -142,9 +176,61 @@ func decodePrivateDestination(encoded string) (*foundation.LocalDestination, err
 	offset += copy(state[offset:], x25519)
 	offset += copy(state[offset:], elgamal)
 	state[offset] = 0x07
+	if offline != nil {
+		destination, err := foundation.ImportLocalDestinationOffline(state, offline.OfflineSignature, offline.transientPrivate)
+		if err != nil {
+			return nil, ErrInvalidKey
+		}
+		return destination, nil
+	}
 	destination, err := foundation.ImportLocalDestination(state)
 	if err != nil {
 		return nil, ErrInvalidKey
 	}
 	return destination, nil
+}
+
+type offlinePrivateKey struct {
+	foundation.OfflineSignature
+	transientPrivate []byte
+}
+
+func (o *offlinePrivateKey) clear() {
+	o.PublicKey = nil
+	o.Signature = nil
+	clear(o.transientPrivate)
+	o.transientPrivate = nil
+}
+
+func parseOfflinePrivateKey(identity foundation.Identity, section []byte) (*offlinePrivateKey, error) {
+	if len(section) < 6 {
+		return nil, ErrInvalidKey
+	}
+	keyType := foundation.SigningKeyType(binary.BigEndian.Uint16(section[4:6]))
+	publicLength, ok := keyType.PublicKeyLen()
+	if !ok {
+		return nil, ErrInvalidKey
+	}
+	signatureLength, ok := identity.SigningKeyType().SignatureLen()
+	if !ok {
+		return nil, ErrInvalidKey
+	}
+	if len(section) != 6+publicLength+signatureLength+ed25519.SeedSize {
+		return nil, ErrInvalidKey
+	}
+	offset := 6
+	public := append([]byte(nil), section[offset:offset+publicLength]...)
+	offset += publicLength
+	signature := append([]byte(nil), section[offset:offset+signatureLength]...)
+	offset += signatureLength
+	transientPrivate := append([]byte(nil), section[offset:]...)
+	return &offlinePrivateKey{
+		OfflineSignature: foundation.OfflineSignature{
+			Expires:   binary.BigEndian.Uint32(section[:4]),
+			Type:      keyType,
+			PublicKey: public,
+			Signature: signature,
+		},
+		transientPrivate: transientPrivate,
+	}, nil
 }

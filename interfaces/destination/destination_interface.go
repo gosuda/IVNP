@@ -94,6 +94,12 @@ type DestinationEndpoint interface {
 	Close() error
 }
 
+// ModernDatagramEndpoint is an optional interface for endpoints that can serialize repliable Datagram2 (protocol 19, authenticated) and Datagram3 (protocol 20, unauthenticated) packets.
+type ModernDatagramEndpoint interface {
+	MarshalDatagramV2To(dst []byte, target foundation.Hash, payload []byte) (int, error)
+	MarshalDatagramV3To(dst []byte, payload []byte) (int, error)
+}
+
 // SourcePortDestinationEndpoint is an optional interface for endpoints that allow selecting the local virtual port.
 type SourcePortDestinationEndpoint interface {
 	DialI2PFromPort(context.Context, string, uint16) (net.Conn, error)

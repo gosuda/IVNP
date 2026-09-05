@@ -17,6 +17,9 @@ const (
 	v3AllowedFlags         = flagVersionMask | flagOptions
 )
 
+// FlagOffline marks a Datagram2 packet carrying an offline signature section.
+const FlagOffline = flagOffline
+
 // OfflineSignature holds a transient signing key and its authorizing signature.
 type OfflineSignature struct {
 	Expires   uint32

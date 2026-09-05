@@ -17,6 +17,7 @@ import (
 )
 
 type (
+	DatagramOfflineSignature                           = datagram.OfflineSignature
 	GarlicDatabaseLookupReplyWrapper                   = garlic.DatabaseLookupReplyWrapper
 	GarlicRatchetConfig                                = garlic.RatchetConfig
 	GarlicRatchetManager                               = garlic.RatchetManager
@@ -148,7 +149,10 @@ type (
 
 const (
 	DatagramProtocolDatagram1                       = datagram.ProtocolDatagram1
+	DatagramProtocolDatagram2                       = datagram.ProtocolDatagram2
+	DatagramProtocolDatagram3                       = datagram.ProtocolDatagram3
 	DatagramProtocolRaw                             = datagram.ProtocolRaw
+	DatagramFlagOffline                             = datagram.FlagOffline
 	I2NPDatabaseLookup                              = i2np.DatabaseLookup
 	I2NPDatabaseStore                               = i2np.DatabaseStore
 	I2NPDeliveryStatus                              = i2np.DeliveryStatus
@@ -183,6 +187,8 @@ const (
 
 var (
 	DatagramMarshalV1To                           = datagram.MarshalV1To
+	DatagramMarshalV2To                           = datagram.MarshalV2To
+	DatagramMarshalV3To                           = datagram.MarshalV3To
 	DatagramParsePacket                           = datagram.ParsePacket
 	GarlicECIESOpenRouterMessage                  = garlicecies.OpenRouterMessage
 	GarlicECIESSealRouterMessage                  = garlicecies.SealRouterMessage

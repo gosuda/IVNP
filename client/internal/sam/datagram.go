@@ -22,7 +22,7 @@ func (s *Server) handleSend(connection *serverConnection, cmd command) error {
 	if session == nil {
 		return connection.writeLine(cmd.verb + " STATUS RESULT=INVALID_ID")
 	}
-	if cmd.verb == "DATAGRAM" && session.style != styleDatagram {
+	if cmd.verb == "DATAGRAM" && !isDatagramStyle(session.style) {
 		return connection.writeLine("DATAGRAM STATUS RESULT=I2P_ERROR MESSAGE=WRONG_STYLE")
 	}
 	if cmd.verb == "RAW" && session.style != styleRaw {
@@ -67,12 +67,11 @@ func (s *Server) handleSend(connection *serverConnection, cmd command) error {
 		}
 		framedLease = lease
 		defer framedLease.ReleaseSensitive()
-		n, marshalErr := session.endpoint.MarshalDatagramV1To(framed, body)
+		n, marshalErr := marshalSessionDatagram(session, framed, hash, body)
 		if marshalErr != nil || n != len(framed) {
 			return connection.writeLine("DATAGRAM STATUS RESULT=I2P_ERROR")
 		}
 		payload = framed
-		protocol = networking.DatagramProtocolDatagram1
 	}
 	if cmd.verb == "RAW" {
 		if _, ok := cmd.values["PROTOCOL"]; ok {
@@ -113,26 +112,41 @@ func (s *samSession) forwardReceivedMessage(message *destination.ReceivedMessage
 		}
 	}()
 	defer message.Release()
-	switch s.style {
-	case styleDatagram:
+	switch {
+	case isDatagramStyle(s.style):
 		s.forwardDatagram(message.Delivery)
-	case styleRaw:
+	case s.style == styleRaw:
 		s.forwardRaw(message.Delivery)
 	}
 }
 
+func marshalSessionDatagram(session *samSession, dst []byte, target foundation.Hash, payload []byte) (int, error) {
+	switch session.protocol {
+	case networking.DatagramProtocolDatagram1:
+		return session.endpoint.MarshalDatagramV1To(dst, payload)
+	case networking.DatagramProtocolDatagram2:
+		modern, ok := session.endpoint.(destination.ModernDatagramEndpoint)
+		if !ok {
+			return 0, ErrUnsupported
+		}
+		return modern.MarshalDatagramV2To(dst, target, payload)
+	case networking.DatagramProtocolDatagram3:
+		modern, ok := session.endpoint.(destination.ModernDatagramEndpoint)
+		if !ok {
+			return 0, ErrUnsupported
+		}
+		return modern.MarshalDatagramV3To(dst, payload)
+	}
+	return 0, ErrProtocol
+}
+
 func (s *samSession) forwardDatagram(delivery networking.StreamingTunnelDelivery) {
-	packet, err := networking.DatagramParsePacket(networking.DatagramProtocolDatagram1, delivery.Payload)
-	if err != nil {
+	source, payload, ok := s.parseReceivedDatagram(delivery)
+	if !ok {
 		return
 	}
-	valid, err := packet.V1.Verify()
-	if err != nil || !valid || packet.V1.From.Hash() != delivery.From {
-		return
-	}
-	source := foundation.EncodeI2PBase64(packet.V1.From.Bytes())
 	if s.udpTarget != nil {
-		wire, lease, ok := datagramUDPWire(source, delivery.FromPort, delivery.ToPort, packet.V1.Payload)
+		wire, lease, ok := datagramUDPWire(source, delivery.FromPort, delivery.ToPort, payload)
 		if !ok {
 			return
 		}
@@ -140,12 +154,38 @@ func (s *samSession) forwardDatagram(delivery networking.StreamingTunnelDelivery
 		_, _ = s.server.udp.WriteTo(wire, s.udpTarget)
 		return
 	}
-	header, lease, ok := datagramReceivedHeader(source, delivery.FromPort, delivery.ToPort, len(packet.V1.Payload))
+	header, lease, ok := datagramReceivedHeader(source, delivery.FromPort, delivery.ToPort, len(payload))
 	if !ok {
 		return
 	}
 	defer lease.Release()
-	_ = s.control.writeFrame(header, packet.V1.Payload)
+	_ = s.control.writeFrame(header, payload)
+}
+
+func (s *samSession) parseReceivedDatagram(delivery networking.StreamingTunnelDelivery) (string, []byte, bool) {
+	packet, err := networking.DatagramParsePacket(s.protocol, delivery.Payload)
+	if err != nil {
+		return "", nil, false
+	}
+	switch s.protocol {
+	case networking.DatagramProtocolDatagram1:
+		valid, err := packet.V1.Verify()
+		if err != nil || !valid || packet.V1.From.Hash() != delivery.From {
+			return "", nil, false
+		}
+		return foundation.EncodeI2PBase64(packet.V1.From.Bytes()), packet.V1.Payload, true
+	case networking.DatagramProtocolDatagram2:
+		valid, err := packet.V2.VerifyTarget(s.endpoint.Hash())
+		if err != nil || !valid || packet.V2.From.Hash() != delivery.From {
+			return "", nil, false
+		}
+		return foundation.EncodeI2PBase64(packet.V2.From.Bytes()), packet.V2.Payload, true
+	case networking.DatagramProtocolDatagram3:
+		// Datagram3 is unauthenticated by spec: no signature to verify and the
+		// source is a bare 32-byte hash, not a full destination.
+		return foundation.EncodeI2PBase64(packet.V3.From[:]), packet.V3.Payload, true
+	}
+	return "", nil, false
 }
 
 func (s *samSession) forwardRaw(delivery networking.StreamingTunnelDelivery) {
@@ -187,8 +227,14 @@ func destinationHash(value string) (foundation.Hash, error) {
 	return hash, nil
 }
 
-func datagramV1Overhead(endpoint destination.DestinationEndpoint) int {
+func datagramOverhead(protocol uint8, endpoint destination.DestinationEndpoint, offline *foundation.OfflineSignature) int {
 	if endpoint == nil {
+		return 0
+	}
+	if protocol == networking.DatagramProtocolDatagram3 {
+		return 34
+	}
+	if protocol != networking.DatagramProtocolDatagram1 && protocol != networking.DatagramProtocolDatagram2 {
 		return 0
 	}
 	identity, err := foundation.ParseDestination(endpoint.Destination())
@@ -199,7 +245,22 @@ func datagramV1Overhead(endpoint destination.DestinationEndpoint) int {
 	if !ok {
 		return 0
 	}
-	return identity.EncodedLen() + signatureLen
+	overhead := identity.EncodedLen() + signatureLen
+	if protocol == networking.DatagramProtocolDatagram2 {
+		// Flags word; options section is absent.
+		overhead += 2
+		if offline != nil {
+			transientLen, ok := offline.Type.SignatureLen()
+			if !ok {
+				return 0
+			}
+			// Expires, transient key type, transient public key, and the
+			// authorization signature; the payload signature uses the
+			// transient key.
+			overhead += 6 + len(offline.PublicKey) + transientLen
+		}
+	}
+	return overhead
 }
 
 func (s *samSession) datagramFrame(payloadLen int) ([]byte, *pool.Lease, bool) {

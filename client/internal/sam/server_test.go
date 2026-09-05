@@ -87,6 +87,22 @@ func (e *loopEndpoint) MarshalDatagramV1To(dst, payload []byte) (int, error) {
 	}
 	return networking.DatagramMarshalV1To(dst, identity, payload, e.local.Sign)
 }
+func (e *loopEndpoint) MarshalDatagramV2To(dst []byte, target foundation.Hash, payload []byte) (int, error) {
+	identity, err := e.local.Identity()
+	if err != nil {
+		return 0, err
+	}
+	flags := uint16(2)
+	var offline networking.DatagramOfflineSignature
+	if meta, ok := e.local.OfflineSignature(); ok {
+		flags |= networking.DatagramFlagOffline
+		offline = networking.DatagramOfflineSignature{Expires: meta.Expires, Type: meta.Type, PublicKey: meta.PublicKey, Signature: meta.Signature}
+	}
+	return networking.DatagramMarshalV2To(dst, target, identity, flags, foundation.Mapping{}, offline, payload, e.local.Sign)
+}
+func (e *loopEndpoint) MarshalDatagramV3To(dst, payload []byte) (int, error) {
+	return networking.DatagramMarshalV3To(dst, e.local.Hash(), 3, foundation.Mapping{}, payload)
+}
 func (e *loopEndpoint) Subscribe(route destination.DestinationRoute, _ int) (destination.MessageSubscription, error) {
 	sub := &loopSubscription{ch: make(chan *destination.ReceivedMessage, 8), done: make(chan struct{})}
 	e.mu.Lock()
