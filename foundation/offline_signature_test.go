@@ -30,7 +30,12 @@ func offlineTestState(t *testing.T, expires uint32) (state []byte, offline Offli
 	}
 	transientPrivate = transientFull.Seed()
 	offline = OfflineSignature{Expires: expires, Type: SigningEdDSASHA512Ed25519, PublicKey: transientPublic}
-	offline.Signature, err = longTerm.Sign(offline.SignedContent())
+	var content [6 + ed25519.PublicKeySize]byte
+	contentLen, err := offline.MarshalSignedContentTo(content[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	offline.Signature, err = longTerm.Sign(content[:contentLen])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +100,11 @@ func mustSign(t *testing.T, d *LocalDestination, message []byte) []byte {
 }
 
 func TestOfflineDestinationRejectsExpiredSigning(t *testing.T) {
-	expires := uint32(time.Now().Add(-time.Hour).Unix())
+	fixed := time.Unix(1_800_000_000, 0)
+	original := offlineTimeNow
+	offlineTimeNow = func() time.Time { return fixed }
+	defer func() { offlineTimeNow = original }()
+	expires := uint32(fixed.Add(-time.Hour).Unix())
 	state, offline, transientPrivate, longTerm := offlineTestState(t, expires)
 	defer longTerm.ReleaseSensitive()
 	defer clear(transientPrivate)

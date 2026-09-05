@@ -150,6 +150,16 @@ func (s *Server) createSession(ctx context.Context, connection *serverConnection
 		meta := meta
 		offline = &meta
 	}
+	if offline != nil {
+		// Blinding an encrypted LeaseSet requires the long-term signing private
+		// key, which an offline destination does not hold, and the legacy
+		// Datagram1 wire format cannot carry the offline signature section
+		// receivers need to verify against the transient key.
+		if policy.Encrypted || style == styleDatagram {
+			local.ReleaseSensitive()
+			return connection.writeLine("SESSION STATUS RESULT=INVALID_KEY")
+		}
+	}
 	private, err := encodePrivateDestination(local)
 	if err != nil {
 		local.ReleaseSensitive()
@@ -262,7 +272,7 @@ func (s *Server) addSubsession(connection *serverConnection, cmd command) error 
 		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=INVALID_OPTION")
 	}
 	ctx, cancel := context.WithCancel(root.ctx)
-	child := &samSession{server: s, root: root, id: id, style: style, endpoint: root.endpoint, control: connection, ctx: ctx, cancel: cancel, sourceIP: root.sourceIP, fromPort: fromPort, toPort: toPort, listenPort: listenPort, protocol: protocol, listenProtocol: listenProtocol, rawHeader: rawHeader, udpTarget: udpTarget, children: make(map[string]*samSession), attachments: make(map[net.Conn]struct{}), queueBytes: newByteBudget(s.config.MaxSessionQueueBytes), acceptRequests: make(chan acceptRequest, s.config.SessionQueue)}
+	child := &samSession{server: s, root: root, id: id, style: style, endpoint: root.endpoint, control: connection, ctx: ctx, cancel: cancel, sourceIP: root.sourceIP, fromPort: fromPort, toPort: toPort, listenPort: listenPort, protocol: protocol, listenProtocol: listenProtocol, rawHeader: rawHeader, udpTarget: udpTarget, now: root.now, children: make(map[string]*samSession), attachments: make(map[net.Conn]struct{}), queueBytes: newByteBudget(s.config.MaxSessionQueueBytes), acceptRequests: make(chan acceptRequest, s.config.SessionQueue)}
 	child.datagramOverhead = datagramOverhead(protocol, root.endpoint, root.offline)
 	if err = s.addChild(child); err != nil {
 		cancel()

@@ -96,7 +96,7 @@ func (e *loopEndpoint) MarshalDatagramV2To(dst []byte, target foundation.Hash, p
 	var offline networking.DatagramOfflineSignature
 	if meta, ok := e.local.OfflineSignature(); ok {
 		flags |= networking.DatagramFlagOffline
-		offline = networking.DatagramOfflineSignature{Expires: meta.Expires, Type: meta.Type, PublicKey: meta.PublicKey, Signature: meta.Signature}
+		offline = meta
 	}
 	return networking.DatagramMarshalV2To(dst, target, identity, flags, foundation.Mapping{}, offline, payload, e.local.Sign)
 }
@@ -350,15 +350,24 @@ func TestEmbeddedServerLiveLoopbackStylesAndRecovery(t *testing.T) {
 	target := string(local.Destination())
 	local.ReleaseSensitive()
 	_, _ = io.WriteString(datagramControl, "DATAGRAM SEND ID=dg DESTINATION="+target+" TO_PORT=9 SIZE=4\nDATA")
-	if line = readSAMLine(t, datagramReader); line != "DATAGRAM STATUS RESULT=OK" {
-		t.Fatalf("datagram status = %q", line)
-	}
-	line = readSAMLine(t, datagramReader)
-	if !strings.Contains(line, "DATAGRAM RECEIVED") || !strings.Contains(line, "SIZE=4") {
-		t.Fatalf("datagram receive = %q", line)
-	}
+	// Inbound forwarding runs on a separate goroutine, so DATAGRAM RECEIVED may
+	// arrive before the STATUS reply on the shared control connection.
+	var datagramStatusOK, datagramReceived bool
 	body := make([]byte, 4)
-	_, _ = io.ReadFull(datagramReader, body)
+	for !datagramStatusOK || !datagramReceived {
+		line = readSAMLine(t, datagramReader)
+		switch {
+		case line == "DATAGRAM STATUS RESULT=OK":
+			datagramStatusOK = true
+		case strings.Contains(line, "DATAGRAM RECEIVED") && strings.Contains(line, "SIZE=4"):
+			datagramReceived = true
+			if _, err = io.ReadFull(datagramReader, body); err != nil {
+				t.Fatal(err)
+			}
+		default:
+			t.Fatalf("datagram reply = %q", line)
+		}
+	}
 	if string(body) != "DATA" {
 		t.Fatalf("datagram body = %q", body)
 	}
@@ -378,15 +387,22 @@ func TestEmbeddedServerLiveLoopbackStylesAndRecovery(t *testing.T) {
 	target = string(local.Destination())
 	local.ReleaseSensitive()
 	_, _ = io.WriteString(rawControl, "RAW SEND ID=raw DESTINATION="+target+" TO_PORT=10 SIZE=3\nRAW")
-	if line = readSAMLine(t, rawReader); line != "RAW STATUS RESULT=OK" {
-		t.Fatalf("raw status = %q", line)
-	}
-	line = readSAMLine(t, rawReader)
-	if !strings.Contains(line, "RAW RECEIVED") || !strings.Contains(line, "SIZE=3") {
-		t.Fatalf("raw receive = %q", line)
-	}
+	var rawStatusOK, rawReceived bool
 	body = make([]byte, 3)
-	_, _ = io.ReadFull(rawReader, body)
+	for !rawStatusOK || !rawReceived {
+		line = readSAMLine(t, rawReader)
+		switch {
+		case line == "RAW STATUS RESULT=OK":
+			rawStatusOK = true
+		case strings.Contains(line, "RAW RECEIVED") && strings.Contains(line, "SIZE=3"):
+			rawReceived = true
+			if _, err = io.ReadFull(rawReader, body); err != nil {
+				t.Fatal(err)
+			}
+		default:
+			t.Fatalf("raw reply = %q", line)
+		}
+	}
 	if string(body) != "RAW" {
 		t.Fatalf("raw body = %q", body)
 	}

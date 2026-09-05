@@ -303,15 +303,18 @@ func (d *LocalDestination) Sign(message []byte) ([]byte, error) {
 		return nil, cryptography.ErrSensitiveReleased
 	}
 	if d.offline != nil {
-		if uint32(time.Now().Unix()) > d.offline.expires {
+		if uint32(offlineTimeNow().Unix()) > d.offline.expires {
 			return nil, ErrOfflineSignatureExpired
 		}
 		switch d.offline.keyType {
 		case SigningEdDSASHA512Ed25519:
-			return ed25519.Sign(ed25519.NewKeyFromSeed(d.offline.private), message), nil
+			key := ed25519.NewKeyFromSeed(d.offline.private)
+			defer clear(key)
+			return ed25519.Sign(key, message), nil
 		case SigningRedDSASHA512Ed25519:
 			var private [32]byte
 			copy(private[:], d.offline.private)
+			defer clear(private[:])
 			return Red25519Sign(private, message)
 		default:
 			return nil, ErrEncryptedSigningKey
@@ -323,6 +326,7 @@ func (d *LocalDestination) Sign(message []byte) ([]byte, error) {
 	case SigningRedDSASHA512Ed25519:
 		var private [32]byte
 		copy(private[:], d.signingPrivate)
+		defer clear(private[:])
 		return Red25519Sign(private, message)
 	default:
 		return nil, ErrEncryptedSigningKey

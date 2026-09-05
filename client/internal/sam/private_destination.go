@@ -196,13 +196,16 @@ type offlinePrivateKey struct {
 	transientPrivate []byte
 }
 
+// clear detaches the offline key material views. The backing wire buffer is
+// caller-owned and wiped by the caller, which covers these subslices.
 func (o *offlinePrivateKey) clear() {
 	o.PublicKey = nil
 	o.Signature = nil
-	clear(o.transientPrivate)
 	o.transientPrivate = nil
 }
 
+// parseOfflinePrivateKey parses the SAM offline signature section as views over
+// the caller-owned section; the caller keeps section alive and wipes it.
 func parseOfflinePrivateKey(identity foundation.Identity, section []byte) (*offlinePrivateKey, error) {
 	if len(section) < 6 {
 		return nil, ErrInvalidKey
@@ -220,11 +223,11 @@ func parseOfflinePrivateKey(identity foundation.Identity, section []byte) (*offl
 		return nil, ErrInvalidKey
 	}
 	offset := 6
-	public := append([]byte(nil), section[offset:offset+publicLength]...)
+	public := section[offset : offset+publicLength]
 	offset += publicLength
-	signature := append([]byte(nil), section[offset:offset+signatureLength]...)
+	signature := section[offset : offset+signatureLength]
 	offset += signatureLength
-	transientPrivate := append([]byte(nil), section[offset:]...)
+	transientPrivate := section[offset:]
 	return &offlinePrivateKey{
 		OfflineSignature: foundation.OfflineSignature{
 			Expires:   binary.BigEndian.Uint32(section[:4]),

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
+	"time"
 
 	"filippo.io/edwards25519"
 )
@@ -23,15 +24,29 @@ type OfflineSignature struct {
 	Signature []byte
 }
 
-// SignedContent returns the authorized content (expires, key type, public key)
-// covered by the offline signature.
-func (o OfflineSignature) SignedContent() []byte {
-	signed := make([]byte, 6+len(o.PublicKey))
-	binary.BigEndian.PutUint32(signed[:4], o.Expires)
-	binary.BigEndian.PutUint16(signed[4:6], uint16(o.Type))
-	copy(signed[6:], o.PublicKey)
-	return signed
+// Present reports whether the offline signature carries a transient public key.
+func (o OfflineSignature) Present() bool { return o.PublicKey != nil }
+
+// SignedContentLen returns the encoded length of the authorized content
+// (expires, key type, public key) covered by the offline signature.
+func (o OfflineSignature) SignedContentLen() int { return 6 + len(o.PublicKey) }
+
+// MarshalSignedContentTo serializes the authorized content covered by the
+// offline signature into dst without growing it.
+func (o OfflineSignature) MarshalSignedContentTo(dst []byte) (int, error) {
+	n := o.SignedContentLen()
+	if len(dst) < n {
+		return 0, ErrDestinationSmall
+	}
+	binary.BigEndian.PutUint32(dst[:4], o.Expires)
+	binary.BigEndian.PutUint16(dst[4:6], uint16(o.Type))
+	copy(dst[6:], o.PublicKey)
+	return n, nil
 }
+
+// offlineTimeNow is the time source for offline signature expiry enforcement;
+// tests override it (never in parallel) to pin expiry decisions.
+var offlineTimeNow = time.Now
 
 func offlineTransientPrivateLen(keyType SigningKeyType) (int, bool) {
 	switch keyType {
@@ -89,7 +104,15 @@ func parseOfflineSigning(identity Identity, offline OfflineSignature, transientP
 	if !ok || len(offline.Signature) != signatureLen {
 		return nil, ErrInvalidIdentity
 	}
-	valid, err := identity.Verify(offline.SignedContent(), offline.Signature)
+	var content [6 + ed25519.PublicKeySize]byte
+	if offline.SignedContentLen() > len(content) {
+		return nil, ErrInvalidIdentity
+	}
+	n, err := offline.MarshalSignedContentTo(content[:])
+	if err != nil {
+		return nil, ErrInvalidIdentity
+	}
+	valid, err := identity.Verify(content[:n], offline.Signature)
 	if err != nil || !valid {
 		return nil, ErrInvalidIdentity
 	}

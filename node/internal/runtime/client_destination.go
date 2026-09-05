@@ -202,7 +202,7 @@ func (e *clientDestinationEndpoint) MarshalDatagramV2To(dst []byte, target found
 	var offline networking.DatagramOfflineSignature
 	if meta, ok := e.runtime.local.OfflineSignature(); ok {
 		flags |= networking.DatagramFlagOffline
-		offline = networking.DatagramOfflineSignature{Expires: meta.Expires, Type: meta.Type, PublicKey: meta.PublicKey, Signature: meta.Signature}
+		offline = meta
 	}
 	return networking.DatagramMarshalV2To(dst, target, identity, flags, foundation.Mapping{}, offline, payload, e.runtime.local.Sign)
 }

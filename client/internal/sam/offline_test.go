@@ -36,7 +36,12 @@ func offlineSAMPrivateDestination(t *testing.T, expires uint32) (private, public
 		t.Fatal(err)
 	}
 	offline := foundation.OfflineSignature{Expires: expires, Type: foundation.SigningEdDSASHA512Ed25519, PublicKey: transientPublic}
-	signed := offline.SignedContent()
+	var content [6 + ed25519.PublicKeySize]byte
+	contentLen, err := offline.MarshalSignedContentTo(content[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed := content[:contentLen]
 	offline.Signature, err = longTerm.Sign(signed)
 	if err != nil {
 		t.Fatal(err)
@@ -56,8 +61,9 @@ func offlineSAMPrivateDestination(t *testing.T, expires uint32) (private, public
 }
 
 func TestDatagram2OfflineRoundtrip(t *testing.T) {
+	fixed := time.Now()
 	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
-	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, MaxSessions: 4})
+	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, MaxSessions: 4, Now: func() time.Time { return fixed }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +71,7 @@ func TestDatagram2OfflineRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = server.Close(); _ = server.Wait() }()
-	private, public := offlineSAMPrivateDestination(t, uint32(time.Now().Add(time.Hour).Unix()))
+	private, public := offlineSAMPrivateDestination(t, uint32(fixed.Add(time.Hour).Unix()))
 	control, reader := samDial(t, server.Addr().String())
 	defer control.Close()
 	_, _ = io.WriteString(control, "SESSION CREATE STYLE=DATAGRAM2 ID=offline DESTINATION="+private+"\n")
@@ -91,8 +97,9 @@ func TestDatagram2OfflineRoundtrip(t *testing.T) {
 }
 
 func TestDatagram2OfflineExpiredRejected(t *testing.T) {
+	fixed := time.Now()
 	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
-	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, MaxSessions: 4})
+	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, MaxSessions: 4, Now: func() time.Time { return fixed }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +113,7 @@ func TestDatagram2OfflineExpiredRejected(t *testing.T) {
 	defer receiverLocal.ReleaseSensitive()
 	target := string(receiverLocal.Destination())
 
-	private, _ := offlineSAMPrivateDestination(t, uint32(time.Now().Add(-time.Hour).Unix()))
+	private, _ := offlineSAMPrivateDestination(t, uint32(fixed.Add(-time.Hour).Unix()))
 	sender, senderReader := samDial(t, address)
 	defer sender.Close()
 	_, _ = io.WriteString(sender, "SESSION CREATE STYLE=DATAGRAM2 ID=sender DESTINATION="+private+"\n")
@@ -156,5 +163,68 @@ func TestSessionCreateOfflineForgedSignatureRejected(t *testing.T) {
 	_, _ = io.WriteString(control, "SESSION CREATE STYLE=DATAGRAM2 ID=forged DESTINATION="+forged+"\n")
 	if line := readSAMLine(t, reader); !strings.Contains(line, "RESULT=INVALID_KEY") {
 		t.Fatalf("forged offline create = %q", line)
+	}
+}
+
+func TestSessionCreateOfflineDatagram1Rejected(t *testing.T) {
+	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
+	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, MaxSessions: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = server.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close(); _ = server.Wait() }()
+	private, _ := offlineSAMPrivateDestination(t, uint32(time.Now().Add(time.Hour).Unix()))
+	control, reader := samDial(t, server.Addr().String())
+	defer control.Close()
+	// The Datagram1 wire format cannot carry the offline signature section, so
+	// receivers verifying against the long-term identity key would drop every
+	// packet; refuse the session instead.
+	_, _ = io.WriteString(control, "SESSION CREATE STYLE=DATAGRAM ID=legacy DESTINATION="+private+"\n")
+	if line := readSAMLine(t, reader); !strings.Contains(line, "RESULT=INVALID_KEY") {
+		t.Fatalf("offline DATAGRAM create = %q", line)
+	}
+}
+
+func TestSessionCreateOfflineDatagram3Allowed(t *testing.T) {
+	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
+	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, MaxSessions: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = server.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close(); _ = server.Wait() }()
+	private, _ := offlineSAMPrivateDestination(t, uint32(time.Now().Add(time.Hour).Unix()))
+	control, reader := samDial(t, server.Addr().String())
+	defer control.Close()
+	// Datagram3 is unsigned, so an offline destination is usable as-is.
+	_, _ = io.WriteString(control, "SESSION CREATE STYLE=DATAGRAM3 ID=unsigned DESTINATION="+private+"\n")
+	if line := readSAMLine(t, reader); !strings.Contains(line, "RESULT=OK") {
+		t.Fatalf("offline DATAGRAM3 create = %q", line)
+	}
+}
+
+func TestSessionCreateOfflineEncryptedLeaseSetRejected(t *testing.T) {
+	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
+	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, MaxSessions: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = server.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close(); _ = server.Wait() }()
+	private, _ := offlineSAMPrivateDestination(t, uint32(time.Now().Add(time.Hour).Unix()))
+	control, reader := samDial(t, server.Addr().String())
+	defer control.Close()
+	// Encrypted LeaseSet blinding derives from the long-term signing private
+	// key, which an offline destination does not hold.
+	_, _ = io.WriteString(control, "SESSION CREATE STYLE=DATAGRAM2 ID=encrypted DESTINATION="+private+" I2CP.LEASESETTYPE=5\n")
+	if line := readSAMLine(t, reader); !strings.Contains(line, "RESULT=INVALID_KEY") {
+		t.Fatalf("offline encrypted create = %q", line)
 	}
 }

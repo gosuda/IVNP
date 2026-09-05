@@ -58,6 +58,7 @@ type samSession struct {
 	udpTarget        *net.UDPAddr
 	offline          *foundation.OfflineSignature
 	datagramOverhead int
+	now              func() int64
 
 	forward             bool
 	mu                  sync.Mutex
@@ -78,7 +79,7 @@ type samSession struct {
 
 func newRootSession(server *Server, id string, style sessionStyle, endpoint destination.DestinationEndpoint, control *serverConnection, fromPort, toPort, listenPort uint16, protocol, listenProtocol uint8, rawHeader bool, udpTarget *net.UDPAddr, offline *foundation.OfflineSignature) *samSession {
 	ctx, cancel := context.WithCancel(server.ctx)
-	s := &samSession{server: server, id: id, style: style, endpoint: endpoint, control: control, ctx: ctx, cancel: cancel, sourceIP: connectionIP(control.Conn), fromPort: fromPort, toPort: toPort, listenPort: listenPort, protocol: protocol, listenProtocol: listenProtocol, rawHeader: rawHeader, udpTarget: udpTarget, offline: offline, children: make(map[string]*samSession), attachments: make(map[net.Conn]struct{}), queueBytes: newByteBudget(server.config.MaxSessionQueueBytes), acceptRequests: make(chan acceptRequest, server.config.SessionQueue)}
+	s := &samSession{server: server, id: id, style: style, endpoint: endpoint, control: control, ctx: ctx, cancel: cancel, sourceIP: connectionIP(control.Conn), fromPort: fromPort, toPort: toPort, listenPort: listenPort, protocol: protocol, listenProtocol: listenProtocol, rawHeader: rawHeader, udpTarget: udpTarget, offline: offline, now: func() int64 { return server.config.Now().Unix() }, children: make(map[string]*samSession), attachments: make(map[net.Conn]struct{}), queueBytes: newByteBudget(server.config.MaxSessionQueueBytes), acceptRequests: make(chan acceptRequest, server.config.SessionQueue)}
 	s.datagramOverhead = datagramOverhead(protocol, endpoint, offline)
 	s.root = s
 	return s
