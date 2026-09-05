@@ -149,6 +149,14 @@ func (s *Server) createSession(ctx context.Context, connection *serverConnection
 	if meta, ok := local.OfflineSignature(); ok {
 		meta := meta
 		offline = &meta
+		if style == styleDatagram {
+			local.ReleaseSensitive()
+			return connection.writeLine("SESSION STATUS RESULT=INVALID_KEY")
+		}
+		if policy.Encrypted {
+			local.ReleaseSensitive()
+			return connection.writeLine("SESSION STATUS RESULT=INVALID_KEY")
+		}
 	}
 	private, err := encodePrivateDestination(local)
 	if err != nil {
