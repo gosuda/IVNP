@@ -33,6 +33,7 @@ func offlineTestDestination(t *testing.T, expires uint32) *foundation.LocalDesti
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer clear(transientFull)
 	transientPrivate := transientFull.Seed()
 	defer clear(transientPrivate)
 	offline := foundation.OfflineSignature{Expires: expires, Type: foundation.SigningEdDSASHA512Ed25519, PublicKey: transientPublic}
