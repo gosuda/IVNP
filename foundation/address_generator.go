@@ -305,10 +305,13 @@ func (d *LocalDestination) Sign(message []byte) ([]byte, error) {
 	if d.offline != nil {
 		switch d.offline.keyType {
 		case SigningEdDSASHA512Ed25519:
-			return ed25519.Sign(ed25519.NewKeyFromSeed(d.offline.private), message), nil
+			private := ed25519.NewKeyFromSeed(d.offline.private)
+			defer clear(private)
+			return ed25519.Sign(private, message), nil
 		case SigningRedDSASHA512Ed25519:
 			var private [32]byte
 			copy(private[:], d.offline.private)
+			defer clear(private[:])
 			return Red25519Sign(private, message)
 		default:
 			return nil, ErrEncryptedSigningKey
