@@ -281,7 +281,9 @@ func TestDatagramModernSendWithoutEndpointSupport(t *testing.T) {
 		// ID per style instead of relying on the previous session being gone.
 		id := "dg" + strconv.Itoa(i)
 		control, reader := samDial(t, server.Addr().String())
-		_, _ = io.WriteString(control, "SESSION CREATE STYLE="+style+" ID="+id+" DESTINATION=TRANSIENT\n")
+		func() {
+			defer control.Close()
+			_, _ = io.WriteString(control, "SESSION CREATE STYLE="+style+" ID="+id+" DESTINATION=TRANSIENT\n")
 		if line := readSAMLine(t, reader); !strings.Contains(line, "RESULT=OK") {
 			t.Fatalf("%s create = %q", style, line)
 		}
@@ -289,6 +291,6 @@ func TestDatagramModernSendWithoutEndpointSupport(t *testing.T) {
 		if line := readSAMLine(t, reader); line != "DATAGRAM STATUS RESULT=I2P_ERROR" {
 			t.Fatalf("%s send = %q", style, line)
 		}
-		control.Close()
+		}()
 	}
 }
