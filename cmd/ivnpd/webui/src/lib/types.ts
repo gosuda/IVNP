@@ -112,7 +112,7 @@ export interface TelemetryPoint {
 	inRate: number;
 	outRate: number;
 	activeTunnels: number;
-	buildSuccessRate: number;
+	buildSuccessRate: number | null;
 	routers: number;
 	floodfills: number;
 	goroutines: number;
@@ -156,8 +156,8 @@ export interface NetDBRouterItem {
 	hash: string;
 	b32: string;
 	floodfill: boolean;
-	transports: string[];
-	addresses: string[];
+	transports: string[] | null;
+	addresses: string[] | null;
 	published: number;
 	version: string;
 	caps: string;

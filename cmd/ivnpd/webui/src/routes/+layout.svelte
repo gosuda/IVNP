@@ -56,6 +56,22 @@
 		color: inherit;
 	}
 
+	:global(summary) {
+		cursor: pointer;
+		font-weight: 650;
+		overflow-wrap: anywhere;
+	}
+
+	:global(summary:focus-visible),
+	:global(a:focus-visible) {
+		outline: 3px solid var(--color-focus);
+		outline-offset: 3px;
+	}
+
+	:global(summary:hover) { color: var(--color-accent); }
+	:global(summary:active) { color: var(--color-ink); }
+	:global(details[open] > summary) { margin-bottom: var(--space-4); }
+
 	:global(::selection) {
 		background: var(--color-accent);
 		color: var(--color-accent-ink);
@@ -83,6 +99,8 @@
 		font-weight: 700;
 		letter-spacing: -0.02em;
 		line-height: 1.1;
+		min-width: 0;
+		overflow-wrap: anywhere;
 	}
 
 	:global(.cell-note),
@@ -232,6 +250,10 @@
 		min-height: 100vh;
 	}
 
+	@media (max-width: 520px) {
+		:global(.cell-head) { flex-direction: column; }
+		:global(.cell) { padding: var(--space-4); }
+	}
 	@media (prefers-reduced-motion: reduce) {
 		:global(*) {
 			scroll-behavior: auto !important;

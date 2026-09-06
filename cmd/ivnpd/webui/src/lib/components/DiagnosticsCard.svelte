@@ -1,54 +1,92 @@
 <script lang="ts">
 	import LiveChart from './LiveChart.svelte';
+	import DataStatus from './DataStatus.svelte';
 	import { formatBytes, metrics, telemetryHistory } from '../api';
 
 	$: history = $telemetryHistory;
+	$: timestamps = history.map((point) => point.timestamp);
 	$: heapSeries = [{ label: 'Heap', values: history.map((point) => point.heapBytes), tone: 'accent' as const }];
 	$: goroutineSeries = [{ label: 'Goroutines', values: history.map((point) => point.goroutines), tone: 'ink' as const }];
 </script>
 
 <section class="cell diagnostics-cell" aria-labelledby="diagnostics-title">
-	<div class="cell-head">
-		<div>
-			<p class="cell-note">Go runtime</p>
+	<details>
+		<summary>
 			<h2 class="cell-title" id="diagnostics-title">Process diagnostics</h2>
-		</div>
-		<strong>{formatBytes($metrics?.process.heap_inuse_bytes ?? 0)} heap</strong>
-	</div>
+			{#if $metrics}<span>{formatBytes($metrics.process.heap_inuse_bytes)} heap · {$metrics.process.goroutines.toLocaleString()} goroutines</span>{/if}
+		</summary>
+		<div class="diagnostics-content">
+			{#if $metrics}
+				<div class="process-charts">
+					<div>
+						<span class="label">Heap in use</span>
+						<LiveChart series={heapSeries} {timestamps} unit="bytes" formatValue={formatBytes} label="Collected heap memory use" zeroBased={false} height={110} />
+					</div>
+					<div>
+						<span class="label">Goroutines</span>
+						<LiveChart series={goroutineSeries} {timestamps} unit="goroutines" label="Collected goroutine count" zeroBased={false} height={110} />
+					</div>
+				</div>
 
-	<div class="process-charts">
-		<div>
-			<span class="label">Heap in use</span>
-			<LiveChart series={heapSeries} label="Heap memory use over the last 120 seconds" zeroBased={false} height={110} />
+				<p class="counter-note">Allocation, GC pause, and request/failure counters are cumulative for this process.</p>
+				<div class="diagnostic-grid">
+					<div><span>Heap objects</span><strong>{$metrics.process.heap_objects.toLocaleString()}</strong></div>
+					<div><span>Total allocated</span><strong>{formatBytes($metrics.process.allocated_bytes_total)}</strong></div>
+					<div><span>GC cycles</span><strong>{$metrics.process.gc_cycles.toLocaleString()}</strong></div>
+					<div><span>GC pause total</span><strong>{($metrics.process.gc_pause_ns / 1_000_000).toFixed(1)} ms</strong></div>
+					<div><span>Transport sessions</span><strong>{$metrics.transport.sessions.toLocaleString()}</strong></div>
+					<div><span>Handshake failures</span><strong>{$metrics.transport.handshake_failures.toLocaleString()}</strong></div>
+					<div><span>Proxy requests</span><strong>{$metrics.proxy.requests.toLocaleString()}</strong></div>
+					<div><span>Proxy active</span><strong>{$metrics.proxy.active.toLocaleString()}</strong></div>
+				</div>
+			{:else}
+				<p class="counter-note">Runtime diagnostics are unavailable until metrics are collected.</p>
+			{/if}
 		</div>
-		<div>
-			<span class="label">Goroutines</span>
-			<LiveChart series={goroutineSeries} label="Goroutine count over the last 120 seconds" zeroBased={false} height={110} />
-		</div>
-	</div>
-
-	<div class="diagnostic-grid">
-		<div><span>Heap objects</span><strong>{$metrics?.process.heap_objects.toLocaleString() ?? '0'}</strong></div>
-		<div><span>Total allocated</span><strong>{formatBytes($metrics?.process.allocated_bytes_total ?? 0)}</strong></div>
-		<div><span>GC cycles</span><strong>{$metrics?.process.gc_cycles.toLocaleString() ?? '0'}</strong></div>
-		<div><span>GC pause total</span><strong>{(($metrics?.process.gc_pause_ns ?? 0) / 1_000_000).toFixed(1)} ms</strong></div>
-		<div><span>Transport sessions</span><strong>{$metrics?.transport.sessions.toLocaleString() ?? '0'}</strong></div>
-		<div><span>Handshake failures</span><strong>{$metrics?.transport.handshake_failures.toLocaleString() ?? '0'}</strong></div>
-		<div><span>Proxy requests</span><strong>{$metrics?.proxy.requests.toLocaleString() ?? '0'}</strong></div>
-		<div><span>Proxy active</span><strong>{$metrics?.proxy.active.toLocaleString() ?? '0'}</strong></div>
-	</div>
+	</details>
+	<DataStatus resource="metrics" />
 </section>
 
 <style>
-	.diagnostics-cell {
+	.diagnostics-cell,
+	.diagnostics-content {
 		display: grid;
 		align-content: start;
-		gap: var(--space-5);
+		gap: var(--space-4);
 	}
 
-	.cell-head > strong {
+	summary {
+		cursor: pointer;
+	}
+
+	summary h2 {
+		display: inline;
+	}
+
+	summary > span {
+		display: block;
+		margin-top: var(--space-2);
 		font-size: var(--text-sm);
-		white-space: nowrap;
+		color: var(--color-muted);
+	}
+
+	summary:hover {
+		color: var(--color-accent);
+	}
+
+	summary:focus-visible {
+		outline: 3px solid var(--color-focus);
+		outline-offset: 2px;
+	}
+
+	.diagnostics-content {
+		margin-top: var(--space-5);
+	}
+
+	.counter-note {
+		margin: 0;
+		font-size: var(--text-xs);
+		color: var(--color-muted);
 	}
 
 	.process-charts {

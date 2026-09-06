@@ -7,7 +7,6 @@
 	import NetDBExplorerCard from '$lib/components/NetDBExplorerCard.svelte';
 	import DestinationsServicesCard from '$lib/components/DestinationsServicesCard.svelte';
 	import DiagnosticsCard from '$lib/components/DiagnosticsCard.svelte';
-	import QuickActionsCard from '$lib/components/QuickActionsCard.svelte';
 	import {
 		applyMetrics,
 		authRequired,
@@ -16,7 +15,9 @@
 		fetchNetDB,
 		fetchStatus,
 		fetchTunnels,
-		isConnected,
+		collectionState,
+		markMetricsInterrupted,
+		metricsStreamState,
 		metricsEventURL,
 		refreshDashboard,
 		routerStatus,
@@ -31,6 +32,8 @@
 	let accessToken = '';
 	let authenticating = false;
 	let authError = '';
+	let disposed = false;
+	let lastStreamSample = 0;
 
 	function stopFallback(): void {
 		if (fallbackTimer !== null) window.clearInterval(fallbackTimer);
@@ -39,37 +42,53 @@
 
 	function startFallback(): void {
 		if (fallbackTimer !== null) return;
-		fallbackTimer = window.setInterval(fetchMetrics, 2000);
+		fallbackTimer = window.setInterval(() => {
+			if (!$collectionState.metrics.loading) void fetchMetrics();
+		}, 2000);
 	}
 
 	function connectMetrics(): void {
 		eventSource?.close();
+		metricsStreamState.set('connecting');
+		lastStreamSample = Date.now();
 		eventSource = new EventSource(metricsEventURL());
-		eventSource.addEventListener('open', () => {
-			isConnected.set(true);
-			stopFallback();
-		});
 		eventSource.addEventListener('metrics', (event) => {
 			try {
 				const envelope = JSON.parse((event as MessageEvent<string>).data) as { type: 'metrics'; metrics: ObservabilityMetricsResponse };
 				applyMetrics(envelope.metrics);
+				lastStreamSample = Date.now();
+				metricsStreamState.set('open');
+				stopFallback();
 			} catch {
+				metricsStreamState.set('error');
+				markMetricsInterrupted('Metrics stream data could not be read');
 				startFallback();
 			}
 		});
 		eventSource.addEventListener('error', () => {
-			isConnected.set(false);
+			metricsStreamState.set('error');
+			if (!$collectionState.metrics.loading) void fetchMetrics();
 			startFallback();
 		});
 	}
 
 	async function initialize(): Promise<void> {
 		await refreshDashboard();
+		if (disposed) return;
 		connectMetrics();
 		summaryTimer = window.setInterval(() => {
-			void Promise.all([fetchStatus(), fetchTunnels(), fetchDestinations()]);
+			if (!$collectionState.status.loading) void fetchStatus();
+			if (!$collectionState.tunnels.loading) void fetchTunnels();
+			if (!$collectionState.destinations.loading) void fetchDestinations();
+			if (Date.now() - lastStreamSample > 5000 && fallbackTimer === null) {
+				metricsStreamState.set('error');
+				if (!$collectionState.metrics.loading) void fetchMetrics();
+				startFallback();
+			}
 		}, 5000);
-		netdbTimer = window.setInterval(() => void fetchNetDB(), 15000);
+		netdbTimer = window.setInterval(() => {
+			if (!$collectionState.netdb.loading) void fetchNetDB();
+		}, 15000);
 	}
 
 	async function authenticate(): Promise<void> {
@@ -79,7 +98,7 @@
 		setAccessToken(accessToken);
 		const status = await fetchStatus();
 		if (!status) {
-			authError = 'The bearer token was rejected.';
+			authError = $authRequired ? 'The bearer token was rejected.' : 'Router status could not be collected. Check the connection and retry.';
 			authenticating = false;
 			return;
 		}
@@ -91,6 +110,8 @@
 	onMount(() => {
 		void initialize();
 		return () => {
+			disposed = true;
+			metricsStreamState.set('closed');
 			eventSource?.close();
 			if (summaryTimer !== null) window.clearInterval(summaryTimer);
 			if (netdbTimer !== null) window.clearInterval(netdbTimer);
@@ -110,7 +131,6 @@
 	{#if $authRequired}
 		<main class="access-main">
 			<section class="access-panel" aria-labelledby="access-title">
-				<p class="cell-note">Remote console protection</p>
 				<h1 id="access-title">Bearer token required</h1>
 				<p>This console is bound for remote access. Enter the token configured in <code>IVNPD_WEBUI_TOKEN</code>. It remains in this browser tab only.</p>
 				<form on:submit|preventDefault={authenticate}>
@@ -126,18 +146,17 @@
 	{:else}
 		<main class="dashboard" aria-label="IVNP router dashboard">
 			<div class="hero"><RouterHeroCard /></div>
+			<div class="destinations"><DestinationsServicesCard /></div>
 			<div class="bandwidth"><BandwidthChartCard /></div>
 			<div class="tunnels"><TunnelMatrixCard /></div>
 			<div class="netdb"><NetDBExplorerCard /></div>
-			<div class="destinations"><DestinationsServicesCard /></div>
 			<div class="diagnostics"><DiagnosticsCard /></div>
-			<div class="operations"><QuickActionsCard /></div>
 		</main>
 	{/if}
 
 	<footer class="page-footer">
 		<span>IVNP {$routerStatus?.version ?? ''}</span>
-		<span>{$isConnected ? 'Runtime stream active' : 'Runtime stream unavailable'}</span>
+		<span>Browser metrics stream: {$metricsStreamState}</span>
 		<span>Network {$routerStatus?.network_id ?? '—'}</span>
 	</footer>
 </div>
@@ -160,8 +179,11 @@
 		min-width: 0;
 	}
 
-	.hero {
-		grid-column: span 7;
+	.hero,
+	.destinations,
+	.netdb,
+	.diagnostics {
+		grid-column: 1 / -1;
 	}
 
 	.bandwidth {
@@ -169,23 +191,7 @@
 	}
 
 	.tunnels {
-		grid-column: span 8;
-	}
-
-	.netdb {
-		grid-column: span 4;
-	}
-
-	.destinations {
 		grid-column: span 7;
-	}
-
-	.diagnostics {
-		grid-column: span 5;
-	}
-
-	.operations {
-		grid-column: 1 / -1;
 	}
 
 	.dashboard > div > :global(.cell) {

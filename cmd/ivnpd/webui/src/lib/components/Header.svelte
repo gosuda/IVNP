@@ -1,21 +1,22 @@
 <script lang="ts">
 	import {
-		addToast,
+		collectionState,
 		isConfigModalOpen,
-		isConnected,
+		metricsStreamState,
 		lastUpdated,
 		refreshDashboard,
-		routerStatus
+		resourceLabels
 	} from '../api';
 
 	let refreshing = false;
+	$: failedResources = Object.entries($collectionState).filter(([, state]) => state.error !== null);
+	$: failureText = failedResources.length === 5 ? 'Data collection failed' : 'Some data could not be refreshed';
 
 	async function refresh(): Promise<void> {
 		if (refreshing) return;
 		refreshing = true;
 		await refreshDashboard();
 		refreshing = false;
-		addToast({ type: 'info', title: 'Router data refreshed' });
 	}
 </script>
 
@@ -29,17 +30,11 @@
 	</div>
 
 	<div class="readout" aria-live="polite">
-		<span class:online={$isConnected} class="connection-mark" aria-hidden="true"></span>
-		<span>{$isConnected ? 'live' : 'disconnected'}</span>
-		{#if $routerStatus}
-			<span class="separator">/</span>
-			<span>{$routerStatus.reachability}</span>
-			<span class="separator">/</span>
-			<span>net {$routerStatus.network_id}</span>
-		{/if}
+		<span class:online={$metricsStreamState === 'open'} class="connection-mark" aria-hidden="true"></span>
+		<span>Metrics stream: {$metricsStreamState}</span>
 		{#if $lastUpdated}
 			<span class="separator">/</span>
-			<time datetime={$lastUpdated.toISOString()}>{$lastUpdated.toLocaleTimeString()}</time>
+			<span>Full refresh <time datetime={$lastUpdated.toISOString()}>{$lastUpdated.toLocaleTimeString()}</time></span>
 		{/if}
 	</div>
 
@@ -47,13 +42,23 @@
 		<button class="button" type="button" on:click={refresh} aria-busy={refreshing} disabled={refreshing}>
 			{refreshing ? 'Refreshing' : 'Refresh'}
 		</button>
-		<button class="button button--primary" type="button" on:click={() => isConfigModalOpen.set(true)}>
+		<button class="button button--primary" type="button" on:click={(event) => { event.currentTarget.focus(); isConfigModalOpen.set(true); }}>
 			Settings
 		</button>
 	</div>
 </header>
 
+{#if failedResources.length > 0}
+	<div class="collection-alert" role="status">
+		<div><strong>{failureText}</strong><span>{failedResources.map(([resource]) => resourceLabels[resource as keyof typeof resourceLabels]).join(', ')} · Retry here or in the affected section.</span></div>
+		<button class="button" type="button" on:click={refresh} disabled={refreshing} aria-busy={refreshing}>{refreshing ? 'Retrying' : 'Retry all'}</button>
+	</div>
+{/if}
+
 <style>
+	.collection-alert { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin: var(--space-3); padding: var(--space-4); border-left: var(--rule-heavy) solid var(--color-ink); background: var(--color-paper-2); font-size: var(--text-sm); }
+	.collection-alert span { display: block; color: var(--color-muted); }
+	@media (max-width: 520px) { .collection-alert { align-items: flex-start; flex-direction: column; } }
 	.header {
 		display: grid;
 		grid-template-columns: minmax(12rem, 1fr) auto auto;
@@ -108,6 +113,7 @@
 	.readout {
 		display: flex;
 		align-items: center;
+		flex-wrap: wrap;
 		gap: var(--space-2);
 		color: var(--color-ink-2);
 		font-family: var(--font-label);
@@ -115,7 +121,6 @@
 		font-weight: 600;
 		letter-spacing: 0.07em;
 		text-transform: uppercase;
-		white-space: nowrap;
 	}
 
 	.connection-mark {

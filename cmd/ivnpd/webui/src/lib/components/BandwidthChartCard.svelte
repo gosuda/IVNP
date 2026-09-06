@@ -1,8 +1,10 @@
 <script lang="ts">
 	import LiveChart from './LiveChart.svelte';
+	import DataStatus from './DataStatus.svelte';
 	import { formatBytes, formatRate, metrics, telemetryHistory } from '../api';
 
 	$: history = $telemetryHistory;
+	$: timestamps = history.map((point) => point.timestamp);
 	$: chartSeries = [
 		{ label: 'Inbound', values: history.map((point) => point.inRate), tone: 'accent' as const },
 		{ label: 'Outbound', values: history.map((point) => point.outRate), tone: 'ink' as const, dashed: true }
@@ -12,8 +14,7 @@
 <section class="cell bandwidth-cell" aria-labelledby="bandwidth-title">
 	<div class="cell-head">
 		<div>
-			<p class="cell-note">120 second trace</p>
-			<h2 class="cell-title" id="bandwidth-title">Bandwidth</h2>
+			<h2 class="cell-title" id="bandwidth-title">Transport throughput</h2>
 		</div>
 		<div class="legend" aria-label="Chart legend">
 			<span><i class="accent"></i>Inbound</span>
@@ -21,29 +22,30 @@
 		</div>
 	</div>
 
-	<LiveChart series={chartSeries} label="Inbound and outbound bandwidth over the last 120 seconds" height={176} />
+	<DataStatus resource="metrics" />
+	<LiveChart series={chartSeries} {timestamps} unit="bytes/s" formatValue={formatRate} label="Inbound and outbound transport throughput" height={176} />
 
 	<div class="readouts">
 		<div>
-			<span>Inbound now</span>
-			<strong>{formatRate($metrics?.bandwidth.in_rate_bps ?? 0)}</strong>
+			<span>Latest inbound</span>
+			<strong>{$metrics ? formatRate($metrics.bandwidth.in_rate_bps) : '—'}</strong>
 		</div>
 		<div>
-			<span>Outbound now</span>
-			<strong>{formatRate($metrics?.bandwidth.out_rate_bps ?? 0)}</strong>
+			<span>Latest outbound</span>
+			<strong>{$metrics ? formatRate($metrics.bandwidth.out_rate_bps) : '—'}</strong>
 		</div>
 		<div>
-			<span>Received</span>
-			<strong>{formatBytes($metrics?.bandwidth.in_total_bytes ?? 0)}</strong>
+			<span>Received total</span>
+			<strong>{$metrics ? formatBytes($metrics.bandwidth.in_total_bytes) : '—'}</strong>
 		</div>
 		<div>
-			<span>Sent</span>
-			<strong>{formatBytes($metrics?.bandwidth.out_total_bytes ?? 0)}</strong>
+			<span>Sent total</span>
+			<strong>{$metrics ? formatBytes($metrics.bandwidth.out_total_bytes) : '—'}</strong>
 		</div>
-		<div>
-			<span>Configured cap</span>
-			<strong>{formatRate($metrics?.bandwidth.rate_limit_bps ?? 0)}</strong>
-		</div>
+	</div>
+	<div class="tunnel-limit">
+		<span>Configured tunnel bandwidth limit <strong>{$metrics ? formatRate($metrics.bandwidth.rate_limit_bps) : '—'}</strong></span>
+		<p>This limit applies to tunnel traffic, not the combined transport throughput shown above.</p>
 	</div>
 </section>
 
@@ -85,7 +87,7 @@
 
 	.readouts {
 		display: grid;
-		grid-template-columns: repeat(5, minmax(0, 1fr));
+		grid-template-columns: repeat(4, minmax(0, 1fr));
 		border-top: var(--rule-heavy) solid var(--color-ink);
 	}
 
@@ -112,6 +114,21 @@
 		font-size: var(--text-sm);
 		overflow-wrap: anywhere;
 	}
+
+	.tunnel-limit {
+		padding-top: var(--space-3);
+		border-top: var(--rule-thin) solid var(--color-rule);
+		font-size: var(--text-xs);
+		color: var(--color-muted);
+	}
+
+	.tunnel-limit strong {
+		margin-left: var(--space-2);
+		color: var(--color-ink);
+		white-space: nowrap;
+	}
+
+	.tunnel-limit p { margin: var(--space-2) 0 0; }
 
 	@media (max-width: 720px) {
 		.readouts {

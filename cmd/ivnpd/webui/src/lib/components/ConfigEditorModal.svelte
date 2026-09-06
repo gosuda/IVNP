@@ -21,7 +21,16 @@
 	let closeButton: HTMLButtonElement;
 	let dialogElement: HTMLDivElement;
 
-	onMount(async () => {
+	onMount(() => {
+		const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		closeButton.focus();
+		void loadConfig();
+		return () => { if (trigger?.isConnected) trigger.focus(); };
+	});
+
+	async function loadConfig(): Promise<void> {
+		loading = true;
+		loadError = '';
 		try {
 			config = await fetchConfig();
 			draft = structuredClone(config);
@@ -31,9 +40,8 @@
 			loadError = error instanceof Error ? error.message : 'Configuration could not be loaded';
 		} finally {
 			loading = false;
-			closeButton?.focus();
 		}
-	});
+	}
 
 	function close(): void {
 		if (!saving) isConfigModalOpen.set(false);
@@ -41,6 +49,7 @@
 
 	function handleKeydown(event: KeyboardEvent): void {
 		if (event.key === 'Escape') {
+			event.preventDefault();
 			close();
 			return;
 		}
@@ -134,7 +143,6 @@
 	<div class="dialog" role="dialog" aria-modal="true" aria-labelledby="config-title" bind:this={dialogElement}>
 		<header>
 			<div>
-				<p class="cell-note">Operating configuration</p>
 				<h2 id="config-title">Router settings</h2>
 			</div>
 			<button class="close" type="button" bind:this={closeButton} on:click={close} aria-label="Close settings">×</button>
@@ -162,7 +170,7 @@
 			{#if loading}
 				<div class="empty">Loading configuration</div>
 			{:else if loadError}
-				<div class="empty">{loadError}</div>
+				<div class="empty" role="alert"><p>{loadError}</p><button class="button" type="button" on:click={loadConfig}>Retry loading</button></div>
 			{:else if draft}
 				{#if draft.restart_required}
 					<p class="restart-banner">Saved configuration differs from the running router. Restart ivnpd to apply topology changes.</p>
@@ -303,7 +311,6 @@
 		border-bottom: var(--rule-heavy) solid var(--color-ink);
 	}
 
-	header p,
 	header h2 {
 		margin: 0;
 	}

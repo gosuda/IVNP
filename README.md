@@ -142,6 +142,21 @@ optional: its failure does not make a locally ready destination unusable.
 
 For complete, compile-checked programs, see `example_test.go`.
 
+## Router console
+
+`ivnpd` serves its embedded console at `http://127.0.0.1:7070` by default.
+Use `-webui-listen` to change the address or `-webui=false` to disable it.
+The console separates router readiness, configured service endpoints, and
+browser data collection. Enabled service settings do not prove listener or
+end-to-end availability. Failed collections retain the last successful values
+with an interruption notice and collection time; uncollected values are not zero.
+
+Charts retain a 120-second timestamp window and label their actual sample span.
+Tunnel build success uses cumulative completed attempts, not the chart interval.
+NetDB refresh preserves the applied search. Router identifiers, individual
+tunnels, and process diagnostics are available through disclosures; reseed and
+probe controls live beside their respective network summaries.
+
 ## Receive IRC server messages
 
 Start the router and leave it running:
