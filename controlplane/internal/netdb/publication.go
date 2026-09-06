@@ -102,6 +102,9 @@ type LeaseSetPublisher struct {
 	storeType       foundation.I2NPStoreType
 	hash            foundation.Hash
 
+	// opMu drains sends before mutation or Close; mu keeps ACK/readiness access
+	// independent of network I/O and protects confirmed replacement and closed.
+	opMu             sync.Mutex
 	mu               sync.Mutex
 	leases           []foundation.NetworkDatabaseLease
 	storePayload     []byte // immutable signed LeaseSet bytes, not a Store envelope
@@ -187,12 +190,11 @@ func (p *LeaseSetPublisher) Maintain(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
-	p.mu.Lock()
+	p.opMu.Lock()
+	defer p.opMu.Unlock()
 	if p.closed {
-		p.mu.Unlock()
 		return 0, nil
 	}
-	defer p.mu.Unlock()
 	return p.publish(ctx, false)
 }
 
@@ -207,12 +209,11 @@ func (p *LeaseSetPublisher) Publish(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
-	p.mu.Lock()
+	p.opMu.Lock()
+	defer p.opMu.Unlock()
 	if p.closed {
-		p.mu.Unlock()
 		return 0, nil
 	}
-	defer p.mu.Unlock()
 	return p.publish(ctx, true)
 }
 
@@ -223,10 +224,8 @@ func (p *LeaseSetPublisher) Confirmed() bool {
 		return false
 	}
 	p.mu.Lock()
-	confirmed := p.confirmed
-	closed := p.closed
-	p.mu.Unlock()
-	return !closed && confirmed != nil && confirmed.confirmationCount() > 0
+	defer p.mu.Unlock()
+	return !p.closed && p.confirmed != nil && p.confirmed.confirmationCount() > 0
 }
 
 // Close retires outstanding publication tokens and releases all copied
@@ -235,6 +234,8 @@ func (p *LeaseSetPublisher) Close() {
 	if p == nil {
 		return
 	}
+	p.opMu.Lock()
+	defer p.opMu.Unlock()
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -284,9 +285,13 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 				p.hash = hash
 				p.storePayload = nil
 				p.leases = nil
+				p.mu.Lock()
 				if p.confirmed != nil {
-					p.confirmed = newConfirmedPublication(p.database, p.sender, p.confirmed.route, p.confirmed.registry, p.now, p.random, hash, p.storeType, p.confirmed.preferred, p.confirmed.logger)
+					previous := p.confirmed
+					previous.close()
+					p.confirmed = newConfirmedPublication(p.database, p.sender, previous.route, previous.registry, p.now, p.random, hash, p.storeType, previous.preferred, previous.logger)
 				}
+				p.mu.Unlock()
 			}
 		}
 		if err := local2.ReplaceInboundLeases(inbound); err != nil {
@@ -509,7 +514,9 @@ func (p *LeaseSetPublisher) marshalLeaseSet(now uint64) ([]byte, error) {
 // HandleDeliveryStatus accepts only a current, timely acknowledgement for a
 // LeaseSet publication attempt.
 func (p *LeaseSetPublisher) HandleDeliveryStatus(status foundation.I2NPDeliveryStatusMessage) bool {
-	if p.confirmed == nil {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.confirmed == nil {
 		return false
 	}
 	return p.confirmed.handle(status)

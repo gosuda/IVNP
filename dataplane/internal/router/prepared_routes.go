@@ -34,12 +34,28 @@ type PreparedRoute struct {
 	LocalLeaseSet2 bool
 }
 
+// PreparedRouteReceipt identifies one installation without retaining its keys.
+// Copies remain safe after replacement, eviction, or policy invalidation.
+type PreparedRouteReceipt struct {
+	Remote          foundation.Hash
+	Generation      uint64
+	Circuit         dataplanetunnel.CircuitToken
+	Gateway         foundation.Hash
+	TunnelID        uint32
+	Expires         uint64
+	owner           foundation.Hash
+	installation    uint64
+	responseVersion uint64
+}
+
 type preparedRouteEntry struct {
-	route   PreparedRoute
-	active  sync.WaitGroup
-	used    uint64
-	wiping  atomic.Bool
-	drained chan struct{}
+	route           PreparedRoute
+	active          sync.WaitGroup
+	used            uint64
+	wiping          atomic.Bool
+	drained         chan struct{}
+	installation    uint64
+	responseVersion uint64
 }
 
 func (r *preparedRouteEntry) retire() {
@@ -99,7 +115,7 @@ func (s *PreparedRouteSender) InstallRoute(route PreparedRoute) error {
 	route.KeyData = append([]byte(nil), route.KeyData...)
 	route.LocalLeaseSet = append([]byte(nil), route.LocalLeaseSet...)
 	s.routeClock++
-	s.routes[route.Remote] = &preparedRouteEntry{route: route, used: s.routeClock, drained: make(chan struct{})}
+	s.routes[route.Remote] = &preparedRouteEntry{route: route, used: s.routeClock, installation: s.routeClock, drained: make(chan struct{})}
 	s.routesMu.Unlock()
 	if previous != nil {
 		s.retireRouteEntry(previous)
@@ -182,6 +198,56 @@ func (s *PreparedRouteSender) HasRoute(remote foundation.Hash, generation uint64
 	defer s.routesMu.Unlock()
 	route := s.routes[remote]
 	return route != nil && route.route.Generation == generation && route.route.Expires > s.now()
+}
+
+func (s *PreparedRouteSender) RouteReceipt(remote foundation.Hash) (PreparedRouteReceipt, bool) {
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	s.routesMu.Lock()
+	defer s.routesMu.Unlock()
+	entry := s.routes[remote]
+	if s.released || entry == nil || entry.route.Expires <= s.now() {
+		return PreparedRouteReceipt{}, false
+	}
+	route := &entry.route
+	return PreparedRouteReceipt{Remote: remote, Generation: route.Generation, Circuit: route.Circuit, Gateway: route.Gateway, TunnelID: route.TunnelID, Expires: route.Expires, owner: s.owner, installation: entry.installation, responseVersion: entry.responseVersion}, true
+}
+
+func (s *PreparedRouteSender) MarkRouteResponsive(receipt PreparedRouteReceipt) {
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	s.routesMu.Lock()
+	defer s.routesMu.Unlock()
+	if entry := s.routes[receipt.Remote]; !s.released && receipt.matches(s.owner, entry) {
+		entry.responseVersion++
+	}
+}
+
+// RetireUnresponsiveRoute detaches the observed installation unless a later handshake succeeded.
+// Admitted sends retain ownership until completion; retirement never resets crypto.
+func (s *PreparedRouteSender) RetireUnresponsiveRoute(receipt PreparedRouteReceipt) bool {
+	s.lifecycleMu.RLock()
+	s.routesMu.Lock()
+	entry := s.routes[receipt.Remote]
+	if s.released || !receipt.matches(s.owner, entry) || entry.responseVersion != receipt.responseVersion {
+		s.routesMu.Unlock()
+		s.lifecycleMu.RUnlock()
+		return false
+	}
+	delete(s.routes, receipt.Remote)
+	s.retiring[entry] = struct{}{}
+	s.routesMu.Unlock()
+	// The route-capacity bound also bounds these draining retirements. Release
+	// joins them through the transferred lifecycle read lock.
+	go func() {
+		defer s.lifecycleMu.RUnlock()
+		s.retireRouteEntry(entry)
+	}()
+	return true
+}
+
+func (r PreparedRouteReceipt) matches(owner foundation.Hash, entry *preparedRouteEntry) bool {
+	return entry != nil && r.owner == owner && r.installation != 0 && r.installation == entry.installation && r.Generation == entry.route.Generation
 }
 
 func (s *PreparedRouteSender) retireRouteEntry(route *preparedRouteEntry) {

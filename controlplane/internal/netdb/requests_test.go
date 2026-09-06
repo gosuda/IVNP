@@ -24,14 +24,16 @@ func (r requestTestRoute) DatabaseLookupReplyRoute() (foundation.Hash, uint32, b
 type requestTestSender struct {
 	mu       sync.Mutex
 	messages []foundation.I2NPMessage
+	peers    []foundation.Hash
 	contexts []error
 	err      error
 }
 
-func (s *requestTestSender) Send(ctx context.Context, _ RouterRef, message foundation.I2NPMessage) error {
+func (s *requestTestSender) Send(ctx context.Context, peer RouterRef, message foundation.I2NPMessage) error {
 	s.mu.Lock()
 	message.Payload = append([]byte(nil), message.Payload...)
 	s.messages = append(s.messages, message)
+	s.peers = append(s.peers, peer.Hash)
 	s.contexts = append(s.contexts, ctx.Err())
 	s.mu.Unlock()
 	return s.err
@@ -496,37 +498,39 @@ func TestRequestManagerReservesCandidateCapacityForSearchReplyReferrals(t *testi
 }
 
 func TestRequestManagerPrefersProvenResponder(t *testing.T) {
-	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
-	for value := byte(1); value <= 4; value++ {
-		addRequestTestFloodfill(database, requestTestHash(value))
-	}
-	preferred := requestTestHash(4)
-	responders := NewResponderProfiles(4)
-	responders.Record(preferred)
-	manager, err := NewRequestManager(database, new(requestTestSender), requestTestRoute{gateway: requestTestHash(8)}, RequestManagerConfig{
-		Capacity: 1, MaxCandidates: 4, TimeoutMillis: 50_000, Now: func() uint64 { return 100 }, Responders: responders,
+	synctest.Test(t, func(t *testing.T) {
+		database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+		for value := byte(1); value <= 4; value++ {
+			addRequestTestFloodfill(database, requestTestHash(value))
+		}
+		preferred := signedResponderRouter(t, 4, 100, true)
+		if err := database.AdmitRouterInfo(preferred, false, 100); err != nil {
+			t.Fatal(err)
+		}
+		responders := NewResponderProfiles(ResponderProfilesConfig{MaxPeers: 4, Now: func() uint64 { return 100 }})
+		responders.Record(preferred.Hash())
+		sender := new(requestTestSender)
+		manager, err := NewRequestManager(database, sender, requestTestRoute{gateway: requestTestHash(8)}, RequestManagerConfig{
+			Capacity: 1, MaxCandidates: 4, TimeoutMillis: 50_000, Now: func() uint64 { return 100 }, Responders: responders,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer manager.Close()
+		if _, err = manager.LookupLeaseSet(context.Background(), requestTestHash(9)); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		sender.mu.Lock()
+		defer sender.mu.Unlock()
+		if len(sender.peers) != 1 || sender.peers[0] != preferred.Hash() {
+			t.Fatalf("lookup peers = %v, want proven responder first", sender.peers)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	key := requestTestHash(9)
-	if _, err = manager.LookupLeaseSet(context.Background(), key); err != nil {
-		t.Fatal(err)
-	}
-	manager.mu.Lock()
-	req := manager.pending[requestKey{key: key}]
-	_, selected := req.sent[preferred]
-	manager.mu.Unlock()
-	if !selected {
-		t.Fatal("proven responder was not selected before unproven candidates")
-	}
-	if err = manager.Close(); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestResponderProfilesEvictsOldestPeer(t *testing.T) {
-	profiles := NewResponderProfiles(2)
+	profiles := NewResponderProfiles(ResponderProfilesConfig{MaxPeers: 2, Now: func() uint64 { return 100 }})
 	first, second, third := requestTestHash(1), requestTestHash(2), requestTestHash(3)
 	profiles.Record(first)
 	profiles.Record(second)

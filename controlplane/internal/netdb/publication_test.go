@@ -1,12 +1,15 @@
 package netdb
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"gosuda.org/ivnp/foundation"
 )
@@ -357,5 +360,180 @@ func TestLeaseSetPublisherDoesNotRepublishWhileDiscoveryPending(t *testing.T) {
 	}
 	if len(publishSender.published) != 1 {
 		t.Fatalf("pending discovery published %d stores, want 1", len(publishSender.published))
+	}
+}
+
+func TestLeaseSetPublisherConfirmsBeforeReplicationDrains(t *testing.T) {
+	for _, operation := range []string{"Maintain", "Publish"} {
+		t.Run(operation, func(t *testing.T) {
+			identity, private := ed25519Identity(t)
+			local, err := NewLocalLeaseSet(identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+			for _, value := range []byte{3, 4, 5} {
+				addRequestTestFloodfill(database, requestTestHash(value))
+			}
+			messages := make(chan foundation.I2NPMessage, PublicationFloodfillK)
+			release := make(chan struct{})
+			releaseSends := sync.OnceFunc(func() { close(release) })
+			var completedSends atomic.Int32
+			var workers sync.WaitGroup
+			defer func() {
+				releaseSends()
+				workers.Wait()
+			}()
+			signingKey, _ := identity.SigningKeyParts()
+			publisher, err := NewLeaseSetPublisher(LeaseSetPublisherConfig{
+				Local: local, Database: database,
+				InboundLeases: &publisherLeaseSource{leases: []foundation.NetworkDatabaseLease{{TunnelID: 7, EndDate: 600_000}}},
+				Sender: LeaseSetPublishSenderFunc(func(_ context.Context, peer RouterRef, message foundation.I2NPMessage) error {
+					defer completedSends.Add(1)
+					payload := bytes.Clone(message.Payload)
+					messages <- message
+					if peer.Hash != requestTestHash(3) {
+						<-release
+					}
+					if !bytes.Equal(message.Payload, payload) {
+						return errors.New("publication payload changed before Send returned")
+					}
+					return nil
+				}),
+				EncryptionKey: bytes.Repeat([]byte{1}, 256), SigningKey: signingKey,
+				Sign: func(unsigned []byte) ([]byte, error) { return ed25519.Sign(private, unsigned), nil },
+				Now:  func() uint64 { return 1_000 }, Random: func() uint32 { return 19 }, FloodfillLimit: 3,
+				ReplyPath: publicationTestRoute{gateway: requestTestHash(8)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(publisher.Close)
+			encryptionKey := publisher.encryptionKey
+			finished := make(chan struct{})
+			workers.Go(func() {
+				defer close(finished)
+				publish := publisher.Maintain
+				if operation == "Publish" {
+					publish = publisher.Publish
+				}
+				if sent, err := publish(t.Context()); err != nil || sent != PublicationFloodfillK {
+					t.Errorf("%s() = %d, %v", operation, sent, err)
+				}
+			})
+			var first foundation.I2NPMessage
+			for range PublicationFloodfillK {
+				select {
+				case first = <-messages:
+				case <-time.After(5 * time.Second):
+					t.Fatal("publication did not start all replication sends")
+				}
+			}
+			store, err := foundation.I2NPParseDatabaseStore(first.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ready := make(chan bool, 1)
+			workers.Go(func() {
+				accepted := publisher.HandleDeliveryStatus(foundation.I2NPDeliveryStatusMessage{MessageID: store.ReplyToken, Timestamp: 1_000})
+				ready <- accepted && publisher.Confirmed()
+			})
+			select {
+			case confirmed := <-ready:
+				if !confirmed {
+					t.Fatal("first current-generation ACK did not make publication ready")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("readiness blocked on sibling network sends")
+			}
+			select {
+			case <-finished:
+				t.Fatal("publication returned before sibling sends drained")
+			default:
+			}
+			closing := make(chan struct{})
+			workers.Go(func() {
+				close(closing)
+				publisher.Close()
+				if got := completedSends.Load(); got != PublicationFloodfillK {
+					t.Errorf("Close returned with %d/%d sends completed", got, PublicationFloodfillK)
+				}
+			})
+			<-closing
+			if !bytes.Equal(encryptionKey, bytes.Repeat([]byte{1}, 256)) {
+				t.Fatal("Close wiped encryption material while publication was active")
+			}
+			releaseSends()
+			workers.Wait()
+			if publisher.Confirmed() {
+				t.Error("closed publisher remained ready")
+			}
+			if !bytes.Equal(encryptionKey, make([]byte, 256)) {
+				t.Error("Close retained copied encryption key")
+			}
+		})
+	}
+}
+
+func TestEncryptedLeaseSetPublisherRejectsReplacedGenerationAcknowledgements(t *testing.T) {
+	for _, advance := range []time.Duration{time.Second, 24 * time.Hour} {
+		t.Run(advance.String(), func(t *testing.T) {
+			destination, _, encrypted, now := encryptedTestSet(t, EncryptedLeaseSetAuthorization{})
+			defer destination.ReleaseSensitive()
+			database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+			for _, value := range []byte{3, 4, 5} {
+				addRequestTestFloodfill(database, requestTestHash(value))
+			}
+			sender := &publisherSender{}
+			registry := NewPublicationTokenRegistry(func() uint64 { return now }, func() uint32 { return 19 })
+			defer registry.Close()
+			publisher, err := NewLeaseSetPublisher(LeaseSetPublisherConfig{
+				Encrypted: encrypted, Database: database, Sender: sender,
+				InboundLeases: InboundLeaseSourceFunc(func(uint64) []foundation.NetworkDatabaseLease {
+					return []foundation.NetworkDatabaseLease{{Gateway: foundation.Hash{1}, TunnelID: 7, EndDate: now + 600_000}}
+				}),
+				Now: func() uint64 { return now }, Random: func() uint32 { return 23 }, FloodfillLimit: 3,
+				Registry: registry, ReplyPath: publicationTestRoute{gateway: requestTestHash(8)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer publisher.Close()
+			if sent, err := publisher.Publish(t.Context()); err != nil || sent != PublicationFloodfillK {
+				t.Fatalf("initial Publish() = %d, %v", sent, err)
+			}
+			acknowledged, err := foundation.I2NPParseDatabaseStore(sender.published[0].message.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !publisher.HandleDeliveryStatus(foundation.I2NPDeliveryStatusMessage{MessageID: acknowledged.ReplyToken, Timestamp: now}) || !publisher.Confirmed() {
+				t.Fatal("initial generation did not become ready")
+			}
+			pending, err := foundation.I2NPParseDatabaseStore(sender.published[1].message.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stale := foundation.I2NPDeliveryStatusMessage{MessageID: pending.ReplyToken, Timestamp: now}
+			now += uint64(advance / time.Millisecond)
+			if sent, err := publisher.Maintain(t.Context()); err != nil || sent != PublicationFloodfillK {
+				t.Fatalf("replacement Maintain() = %d, %v", sent, err)
+			}
+			if registry.HandleDeliveryStatus(stale) || publisher.HandleDeliveryStatus(stale) {
+				t.Fatal("replaced generation accepted a pending ACK")
+			}
+			if publisher.Confirmed() {
+				t.Fatal("replacement inherited readiness from its previous generation")
+			}
+			current, err := foundation.I2NPParseDatabaseStore(sender.published[PublicationFloodfillK].message.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (current.Key != pending.Key) != (advance == 24*time.Hour) {
+				t.Fatal("publication key rotation did not match the day boundary")
+			}
+			if !publisher.HandleDeliveryStatus(foundation.I2NPDeliveryStatusMessage{MessageID: current.ReplyToken, Timestamp: now}) || !publisher.Confirmed() {
+				t.Fatal("current-generation ACK did not restore readiness")
+			}
+		})
 	}
 }

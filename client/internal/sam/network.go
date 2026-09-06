@@ -32,10 +32,13 @@ var (
 
 // Config configures a SAM client STREAM session.
 type Config struct {
-	Address          string
-	ID               string
-	Destination      string
-	LeaseSetEncTypes []foundation.CryptoKeyType
+	Address     string
+	ID          string
+	Destination string
+	// PrepareDestination optionally warms one host, full destination, or b32 target
+	// during session creation when the bridge advertises IVNP_PREPARE support.
+	PrepareDestination string
+	LeaseSetEncTypes   []foundation.CryptoKeyType
 	// LeaseSetType is the requested I2CP LeaseSet type (e.g. 3 for LeaseSet2).
 	LeaseSetType  uint8
 	SignatureType foundation.SigningKeyType
@@ -75,6 +78,9 @@ func New(cfg Config) (*Network, error) {
 	if strings.ContainsAny(cfg.ID, " \t\r\n") {
 		return nil, ErrAddress
 	}
+	if cfg.PrepareDestination != "" && !validPreparationTarget(cfg.PrepareDestination) {
+		return nil, ErrAddress
+	}
 	if cfg.SignatureType == 0 {
 		cfg.SignatureType = foundation.SigningEdDSASHA512Ed25519
 	}
@@ -88,6 +94,9 @@ func New(cfg Config) (*Network, error) {
 	}
 	for key, value := range cfg.SessionOptions {
 		if !validSessionOption(key, value) {
+			return nil, ErrAddress
+		}
+		if strings.EqualFold(key, "IVNP_PREPARE") {
 			return nil, ErrAddress
 		}
 	}
@@ -121,6 +130,9 @@ func (n *Network) Start(ctx context.Context) error {
 	line.WriteString("SESSION CREATE STYLE=STREAM ID=" + n.cfg.ID + " DESTINATION=" + destination)
 	if transient {
 		line.WriteString(" SIGNATURE_TYPE=" + strconv.Itoa(int(n.cfg.SignatureType)))
+	}
+	if control.prepareDestination && n.cfg.PrepareDestination != "" {
+		line.WriteString(" IVNP_PREPARE=" + n.cfg.PrepareDestination)
 	}
 	line.WriteString(" i2cp.leaseSetEncType=" + cryptoTypes(n.cfg.LeaseSetEncTypes))
 	if n.cfg.LeaseSetType != 0 {
@@ -322,13 +334,15 @@ func (n *Network) open(ctx context.Context) (*control, error) {
 		return nil, statusError("HELLO REPLY", fields)
 	}
 	control.version = version
+	control.prepareDestination = fields["IVNP_PREPARE"] == "1"
 	return control, nil
 }
 
 type control struct {
 	net.Conn
-	reader  *bufio.Reader
-	version [2]int
+	reader             *bufio.Reader
+	version            [2]int
+	prepareDestination bool
 }
 
 func (c *control) command(line string) (map[string]string, error) {

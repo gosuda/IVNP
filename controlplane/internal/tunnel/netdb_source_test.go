@@ -134,6 +134,32 @@ func TestJavaClientSubtiersMapGatewayMiddleAndEndpoint(t *testing.T) {
 	}
 }
 
+func TestBootstrapInboundEndpointRequiresLocalTransportReachability(t *testing.T) {
+	unreachable, reachable := foundation.Hash{1}, foundation.Hash{2}
+	policy := peerSelectionPolicy{
+		direction: Inbound, directFirst: true, exploratory: true,
+		eligible: func(peer foundation.Hash) bool { return peer == reachable },
+	}
+	selected := []hopCandidate{{hop: ShortBuildHop{Router: foundation.Hash{9}}}}
+	candidates := []hopCandidate{
+		{hop: ShortBuildHop{Router: unreachable}, reachable: true},
+		{hop: ShortBuildHop{Router: reachable}, reachable: true},
+	}
+	choice := selectDiverseHop(candidates, selected, 2, 0, policy)
+	if choice < 0 || candidates[choice].hop.Router != reachable {
+		t.Fatal("bootstrap endpoint cannot return a build response over a local transport")
+	}
+	policy.connected = func(peer foundation.Hash) bool { return peer == unreachable }
+	if !peerAllowedAtPosition(candidates[0], 1, 2, policy) {
+		t.Fatal("established endpoint session did not satisfy the return path")
+	}
+	policy.connected = nil
+	policy.directFirst = false
+	if !peerAllowedAtPosition(candidates[0], 1, 2, policy) {
+		t.Fatal("established carrier required a new direct endpoint connection")
+	}
+}
+
 func TestPoolSelectionKeyKeepsSubtiersStableWhileBuildTargetsVaryMembership(t *testing.T) {
 	table := controlplanenetdb.NewTable(foundation.Hash{}, 64)
 	peers := make([]foundation.Hash, 0, 32)

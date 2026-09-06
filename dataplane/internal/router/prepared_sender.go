@@ -132,6 +132,16 @@ func (s *PreparedRouteSender) BandwidthSnapshot() DestinationBandwidthSnapshot {
 	return s.limiter.Snapshot()
 }
 func (s *PreparedRouteSender) SendTunnel(ctx context.Context, delivery dataplanestreamingtunnel.Delivery) error {
+	return s.sendTunnel(ctx, delivery, nil)
+}
+
+// SendTunnelOnRoute rejects replacement rather than sending a handshake on an
+// installation different from the one its feedback can retire.
+func (s *PreparedRouteSender) SendTunnelOnRoute(ctx context.Context, delivery dataplanestreamingtunnel.Delivery, receipt PreparedRouteReceipt) error {
+	return s.sendTunnel(ctx, delivery, &receipt)
+}
+
+func (s *PreparedRouteSender) sendTunnel(ctx context.Context, delivery dataplanestreamingtunnel.Delivery, receipt *PreparedRouteReceipt) error {
 	if s == nil || delivery.Protocol == 0 {
 		return dataplanestreamingtunnel.ErrTunnelProtocol
 	}
@@ -152,6 +162,9 @@ func (s *PreparedRouteSender) SendTunnel(ctx context.Context, delivery dataplane
 		return err
 	}
 	defer entry.active.Done()
+	if receipt != nil && (!receipt.matches(s.owner, entry) || receipt.Remote != delivery.To) {
+		return ErrPreparedRouteMissing
+	}
 	route := &entry.route
 	if s.limiter != nil {
 		if err := s.limiter.Wait(ctx, uint64(len(delivery.Payload))); err != nil {

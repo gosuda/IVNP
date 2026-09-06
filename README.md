@@ -130,10 +130,15 @@ defer connection.Close()
 
 The zero `DestinationSpec` generates a new transient local destination. A
 non-nil `DestinationSpec.Local` is cloned; the caller retains ownership of its
-input key material. `WaitReady` waits for usable inbound and outbound tunnels,
-so pass a bounded context. Closing the endpoint releases its destination
+input key material. `WaitReady` waits for usable inbound and outbound tunnels
+and confirmed LeaseSet publication, so pass a bounded context. Closing the endpoint releases its destination
 runtime; closing the node releases every remaining endpoint and wipes
 node-owned sensitive state.
+
+`PreparingDestinationEndpoint.PrepareDestination(ctx, remoteHash)` can run
+concurrently with `WaitReady`. It waits for the destination's own circuit pair,
+then prepares a remote route without sending application data. Preparation is
+optional: its failure does not make a locally ready destination unusable.
 
 For complete, compile-checked programs, see `example_test.go`.
 
@@ -145,7 +150,7 @@ Start the router and leave it running:
 go run ./cmd/ivnpd -config ivnp.conf
 ```
 
-After its tunnel pools are ready, run in another terminal:
+Once the SAM listener is available, run in another terminal; session creation waits for destination readiness:
 
 ```sh
 go run ./cmd/toyirc -sam 127.0.0.1:7656 -server irc.postman.i2p -port 6667 -timeout 5m
@@ -157,3 +162,46 @@ channel messages. This checks an actual IRC registration, not just a SAM or
 transport connection. Cold-start reseeding and tunnel construction may take
 several minutes. Set `[paths] data_dir` explicitly when isolating router state;
 the default `./data` is relative to the daemon's working directory.
+
+To retain the SAM destination and reconnect IRC streams after disconnection:
+
+```sh
+go run ./cmd/toyirc -persistent -server irc.postman.i2p -timeout 1h
+```
+
+Persistent mode keeps answering PING after welcome until interruption or the
+overall timeout. It does not join channels or send channel messages. Reconnecting
+streams reuses the same destination; restarting `toyirc` creates a new transient
+identity and does not restore its old tunnels.
+
+Closing a SAM STREAM CONNECT attachment cancels its pending resolution and dial
+without closing the root session. Pipelined bytes remain buffered for relay;
+a full command buffer applies bounded backpressure until handoff or timeout.
+
+Outbound streaming handshakes have a 45-second default budget, capped by the
+caller deadline. A genuine unanswered handshake retires only its observed route
+installation, allowing a subsequent dial to select another circuit or remote
+lease. Caller cancellation does not penalize routes; later successful handshakes
+and newer installations protect against stale failure feedback. Established
+streams do not inherit the handshake timeout.
+
+On bridges advertising `IVNP_PREPARE=1`, `toyirc` supplies its IRC target during
+session creation. Remote preparation overlaps local LeaseSet confirmation using
+destination-owned tunnels. Slow or failed preparation does not add a readiness
+requirement. Bridges without this capability receive standard SAM commands.
+
+The router saves bounded successful NetDB responder hints in `netdb.responders`
+alongside `netdb.routers`. Hints expire after 24 hours and are reused only with
+fresh verified floodfill RouterInfos; configured static seeds are not persisted
+as observed successes. Selection rotates eligible hints rather than pinning every
+lookup to one peer. Neither cache replaces signature checks or tunnel readiness.
+
+Initial inbound builds establish the return-hop transport before sending the
+bootstrap request, without reducing the configured hop count. Later builds using
+an established carrier do not add this direct preflight.
+
+RouterInfo seeding shares bounded encoding and per-transport-session caches
+across destinations in one router. Snapshot changes, session replacement, and
+expiry trigger reseeding; failed sends are not cached as successes. Router
+shutdown releases cached session references. Compression reuses bounded scratch
+state while returning independently owned deterministic gzip bytes.

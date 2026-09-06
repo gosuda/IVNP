@@ -62,6 +62,7 @@ type (
 	NetworkDatabaseRequestManagerConfig      = netdb.RequestManagerConfig
 	NetworkDatabaseRequestSender             = netdb.RequestSender
 	NetworkDatabaseResponderProfiles         = netdb.ResponderProfiles
+	NetworkDatabaseResponderProfilesConfig   = netdb.ResponderProfilesConfig
 	NetworkDatabaseRouterInfoContacts        = netdb.RouterInfoContacts
 	NetworkDatabaseRouterInfoLoadResult      = netdb.RouterInfoLoadResult
 	NetworkDatabaseRouterInfoPublisher       = netdb.RouterInfoPublisher

@@ -22,7 +22,8 @@ var (
 	ErrTransportMuxConfig = errors.New("router: invalid transport mux configuration")
 	// ErrTransportUnavailable reports a verified peer without an address usable
 	// by one of the configured transports.
-	ErrTransportUnavailable = errors.New("router: supported transport unavailable for peer")
+	ErrTransportUnavailable           = errors.New("router: supported transport unavailable for peer")
+	errTransportSessionAttemptTimeout = errors.New("router: transport session attempt timed out")
 )
 
 type preferredSessionManager interface {
@@ -37,9 +38,10 @@ type activeSessionCounter interface {
 }
 
 const (
-	minimumSSU2IPv4Peers = 10
-	minimumSSU2IPv6Peers = 30
-	minimumIntroducers   = 5
+	minimumSSU2IPv4Peers           = 10
+	minimumSSU2IPv6Peers           = 30
+	minimumIntroducers             = 5
+	transportSessionAttemptTimeout = 10 * time.Second
 )
 
 type transportCapabilities struct {
@@ -260,14 +262,19 @@ func (m *TransportMux) PrepareSession(ctx context.Context, peer foundation.Hash)
 	if !ok {
 		return nil, ErrTransportUnavailable
 	}
-	err := ensureTransportSession(ctx, primary, peer)
+	attempts := 1
+	if alternate != nil {
+		attempts++
+	}
+	err := ensureTransportSession(ctx, primary, peer, attempts)
 	if err == nil {
 		return m.prepareTransportSession(primary, peer)
 	}
-	if alternate == nil || !IsRetryableTransportError(err) || ctx.Err() != nil {
+	retryable := IsRetryableTransportError(err) || errors.Is(err, errTransportSessionAttemptTimeout)
+	if alternate == nil || !retryable || ctx.Err() != nil {
 		return nil, err
 	}
-	if alternateErr := ensureTransportSession(ctx, alternate, peer); alternateErr != nil {
+	if alternateErr := ensureTransportSession(ctx, alternate, peer, 1); alternateErr != nil {
 		return nil, errors.Join(err, alternateErr)
 	}
 	return m.prepareTransportSession(alternate, peer)
@@ -281,12 +288,29 @@ func (m *TransportMux) prepareTransportSession(manager dataplane.RouterTransport
 	return provider.PreparedSession(peer)
 }
 
-func ensureTransportSession(ctx context.Context, manager dataplane.RouterTransportManager, peer foundation.Hash) error {
+func ensureTransportSession(ctx context.Context, manager dataplane.RouterTransportManager, peer foundation.Hash, attempts int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	ensurer, ok := manager.(controlplanetunnel.SessionEnsurer)
 	if !ok {
 		return dataplane.RouterErrSessionUnavailable
 	}
-	return ensurer.EnsureSession(ctx, peer)
+	timeout := transportSessionAttemptTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		// Keep an equal share of the remaining caller budget for the alternate.
+		timeout = min(timeout, time.Until(deadline)/time.Duration(attempts))
+	}
+	attemptCtx, cancel := context.WithTimeoutCause(ctx, timeout, errTransportSessionAttemptTimeout)
+	defer cancel()
+	err := ensurer.EnsureSession(attemptCtx, peer)
+	if parentErr := ctx.Err(); parentErr != nil {
+		return parentErr
+	}
+	if errors.Is(err, context.DeadlineExceeded) && errors.Is(context.Cause(attemptCtx), errTransportSessionAttemptTimeout) {
+		return errors.Join(err, errTransportSessionAttemptTimeout)
+	}
+	return err
 }
 
 func (m *TransportMux) sessionManager(_ context.Context, peer foundation.Hash) (dataplane.RouterTransportManager, bool, error) {

@@ -3,6 +3,7 @@ package sam
 import (
 	"cmp"
 	"context"
+	"encoding/base32"
 	"errors"
 	"fmt"
 	"net"
@@ -10,11 +11,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/internal/ingress"
 )
 
 func (s *Server) dispatch(ctx context.Context, connection *serverConnection, cmd command) (bool, error) {
@@ -97,7 +100,7 @@ func (s *Server) dispatch(ctx context.Context, connection *serverConnection, cmd
 }
 
 func (s *Server) createSession(ctx context.Context, connection *serverConnection, cmd command) error {
-	if !onlyOptions(cmd.values, "ID", "STYLE", "DESTINATION", "PORT", "HOST", "FROM_PORT", "TO_PORT", "PROTOCOL", "HEADER", "SIGNATURE_TYPE", "I2CP.LEASESETTYPE", "I2CP.LEASESETENCTYPE", "I2CP.LEASESETAUTHTYPE", "I2CP.LEASESETSECRET", "I2CP.LEASESETCLIENT.*") {
+	if !onlyOptions(cmd.values, "ID", "STYLE", "DESTINATION", "IVNP_PREPARE", "PORT", "HOST", "FROM_PORT", "TO_PORT", "PROTOCOL", "HEADER", "SIGNATURE_TYPE", "I2CP.LEASESETTYPE", "I2CP.LEASESETENCTYPE", "I2CP.LEASESETAUTHTYPE", "I2CP.LEASESETSECRET", "I2CP.LEASESETCLIENT.*") {
 		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_OPTIONS")
 	}
 	if connection.root != nil {
@@ -110,6 +113,10 @@ func (s *Server) createSession(ctx context.Context, connection *serverConnection
 	style, ok := parseStyle(cmd.values["STYLE"])
 	if !ok {
 		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_STYLE")
+	}
+	target, preparationRequested := cmd.values["IVNP_PREPARE"]
+	if preparationRequested && !validPreparationTarget(target) {
+		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=INVALID_OPTION")
 	}
 	fromPort, toPort, listenPort, protocol, listenProtocol, rawHeader, udpTarget, err := s.sessionTransport(connection, style, cmd.values, false)
 	if err != nil {
@@ -176,9 +183,10 @@ func (s *Server) createSession(ctx context.Context, connection *serverConnection
 		}
 		return connection.writeLine("SESSION STATUS RESULT=" + result)
 	}
-	if ready, ok := endpoint.(destination.ReadyDestinationEndpoint); ok {
+	ready, hasReadiness := endpoint.(destination.ReadyDestinationEndpoint)
+	if hasReadiness || preparationRequested {
 		readyCtx, cancel := context.WithTimeout(ctx, s.config.ReadinessTimeout)
-		err = waitReadyConnection(readyCtx, connection, ready)
+		err = waitReadyConnection(readyCtx, connection, sessionReadiness{server: s, endpoint: endpoint, ready: ready, target: target})
 		cancel()
 		if err != nil {
 			cleanupErr := s.destroyDestination(endpoint)
@@ -214,41 +222,151 @@ func (s *Server) createSession(ctx context.Context, connection *serverConnection
 	}
 	return connection.writeLine("SESSION STATUS RESULT=OK DESTINATION=" + string(private))
 }
-func waitReadyConnection(parent context.Context, connection *serverConnection, ready destination.ReadyDestinationEndpoint) error {
-	ctx, cancel := context.WithCancel(parent)
+
+type sessionReadiness struct {
+	server   *Server
+	endpoint destination.DestinationEndpoint
+	ready    destination.ReadyDestinationEndpoint
+	target   string
+}
+
+func (r sessionReadiness) WaitReady(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	readyDone := make(chan error, 1)
-	monitorDone := make(chan error, 1)
-	go func() {
-		_, err := connection.reader.Peek(1)
-		monitorDone <- err
-	}()
-	go func() { readyDone <- ready.WaitReady(ctx) }()
-	select {
-	case monitorErr := <-monitorDone:
-		if monitorErr != nil {
-			cancel()
-			<-readyDone
-			return net.ErrClosed
-		}
-		// A pipelined byte is buffered, not consumed. It proves the connection
-		// is still live; readiness may finish without another socket reader.
-		return <-readyDone
-	case readyErr := <-readyDone:
-		// Wake the disconnect monitor before the command loop resumes reading.
-		_ = connection.SetReadDeadline(time.Now())
-		monitorErr := <-monitorDone
-		_ = connection.SetReadDeadline(time.Time{})
-		if monitorErr != nil {
-			if networkErr, ok := monitorErr.(net.Error); ok && networkErr.Timeout() {
-				return readyErr
-			}
-			if readyErr == nil {
-				return net.ErrClosed
-			}
-		}
-		return readyErr
+	if r.ready == nil {
+		return ctx.Err()
 	}
+	var preparationDone chan struct{}
+	if prepare, ok := r.endpoint.(destination.PreparingDestinationEndpoint); ok && r.target != "" {
+		preparationDone = make(chan struct{})
+		go func() {
+			defer close(preparationDone)
+			target, err := r.server.resolveTarget(ctx, r.target)
+			if err != nil {
+				return
+			}
+			hash, err := preparationTargetHash(target)
+			if err == nil {
+				// A remote lookup miss must not discard a usable local destination.
+				_ = prepare.PrepareDestination(ctx, hash)
+			}
+		}()
+	}
+	err := errors.Join(r.ready.WaitReady(ctx), ctx.Err())
+	cancel()
+	if preparationDone != nil {
+		<-preparationDone
+	}
+	return err
+}
+
+func preparationTargetHash(target string) (foundation.Hash, error) {
+	var hash foundation.Hash
+	if encoded, ok := strings.CutSuffix(strings.ToLower(target), ".b32.i2p"); ok {
+		decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(encoded))
+		if err != nil || len(decoded) != len(hash) {
+			return hash, ErrAddress
+		}
+		copy(hash[:], decoded)
+		return hash, nil
+	}
+	identity, err := foundation.ParseDestination([]byte(target))
+	if err != nil {
+		return hash, ErrAddress
+	}
+	return identity.Hash(), nil
+}
+
+func validPreparationTarget(target string) bool {
+	if target == "" || len(target) > 4096 || strings.ContainsAny(target, " \t\r\n:\"\\") {
+		return false
+	}
+	if _, err := preparationTargetHash(target); err == nil {
+		return true
+	}
+	hostname := strings.ToLower(target)
+	if strings.HasSuffix(hostname, ".b32.i2p") || len(hostname) > 253 || !strings.HasSuffix(hostname, ".i2p") {
+		return false
+	}
+	for _, label := range strings.Split(hostname, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			letter := c >= 'a' && c <= 'z'
+			digit := c >= '0' && c <= '9'
+			if !letter && !digit && c != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+func waitReadyConnection(parent context.Context, connection *serverConnection, ready destination.ReadyDestinationEndpoint) error {
+	ctx, stopWatching := watchConnection(parent, connection)
+	defer stopWatching()
+	readyErr := ready.WaitReady(ctx)
+	if err := stopWatching(); err != nil {
+		return err
+	}
+	return readyErr
+}
+
+// watchConnection owns reader until stopWatching joins it. Pipelined bytes stay
+// in the command buffer for the next command or stream relay.
+func watchConnection(parent context.Context, connection *serverConnection) (context.Context, func() error) {
+	ctx, cancel := context.WithCancelCause(parent)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	interrupted := make(chan struct{})
+	interrupt := context.AfterFunc(ctx, func() {
+		_ = connection.SetReadDeadline(time.Now())
+		close(interrupted)
+	})
+	go func() {
+		defer close(done)
+		defer func() {
+			if value := recover(); value != nil {
+				cancel(ingress.Report(value, connection.panicReporter, ingress.BoundarySAMWorker, connection.RemoteAddr()))
+			}
+		}()
+		for {
+			if connection.reader.Buffered() == connection.reader.Size() {
+				// A full pipeline applies bounded backpressure. EOF behind unread
+				// data is observable only after handoff; the context bounds the wait.
+				select {
+				case <-stop:
+				case <-ctx.Done():
+				}
+				return
+			}
+			_, err := connection.reader.Peek(connection.reader.Buffered() + 1)
+			if err == nil {
+				continue
+			}
+			select {
+			case <-stop:
+				if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+					return
+				}
+			default:
+			}
+			cancel(net.ErrClosed)
+			return
+		}
+	}()
+	return ctx, sync.OnceValue(func() error {
+		close(stop)
+		_ = connection.SetReadDeadline(time.Now())
+		<-done
+		err := context.Cause(ctx)
+		cancel(context.Canceled)
+		if !interrupt() {
+			<-interrupted
+		}
+		_ = connection.SetReadDeadline(connection.commandDeadline)
+		return err
+	})
 }
 
 func (s *Server) addSubsession(connection *serverConnection, cmd command) error {

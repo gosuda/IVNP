@@ -46,6 +46,7 @@ const (
 	DefaultTunnelSendQueue    = 128
 	DefaultRetransmitAfter    = dataplanestreaming.InitialRTO
 	DefaultTunnelRetries      = 8
+	DefaultHandshakeTimeout   = 45 * time.Second
 	gracefulDisconnectTimeout = 5 * time.Minute
 	localMaxPayloadSize       = MaxPacketSize - HeaderLen
 	defaultPeerMaxPayloadSize = 1730
@@ -83,6 +84,20 @@ type TunnelSender interface {
 	SendTunnel(context.Context, Delivery) error
 }
 
+// HandshakeFeedback pins SYN sends to the route observed by its terminal
+// feedback. Caller cancellation invokes neither terminal method.
+type HandshakeFeedback interface {
+	TunnelSender
+	Established()
+	NoResponse()
+}
+
+// HandshakeObserver prepares the first-stream route in the dial goroutine,
+// before a delivery worker admits the SYN. Established streams use Sender.
+type HandshakeObserver interface {
+	PrepareHandshake(context.Context, foundation.Hash) (HandshakeFeedback, error)
+}
+
 // TunnelNetworkConfig configures a local tunnel-backed streaming network.
 type TunnelNetworkConfig struct {
 	Destination     *foundation.LocalDestination
@@ -91,6 +106,9 @@ type TunnelNetworkConfig struct {
 	ReadQueue       int
 	RetransmitAfter time.Duration
 	MaxRetries      int
+	// Nonpositive HandshakeTimeout selects DefaultHandshakeTimeout.
+	HandshakeTimeout  time.Duration
+	HandshakeObserver HandshakeObserver
 }
 
 // TunnelNetwork manages streaming connections routed over I2P tunnels.
@@ -106,6 +124,8 @@ type TunnelNetwork struct {
 	readCapacity         int
 	retransmit           time.Duration
 	maxRetries           int
+	handshakeTimeout     time.Duration
+	handshakeObserver    HandshakeObserver
 
 	mu             sync.RWMutex
 	listeners      map[uint16]*tunnelListener
@@ -118,6 +138,7 @@ type TunnelNetwork struct {
 	outboundMu     sync.RWMutex
 	outbound       chan sendRequest
 	retryUpdates   chan *tunnelConn
+	cleanup        chan struct{}
 	completionPool sync.Pool
 	deliveryQueues []chan sendRequest
 	closeOnce      sync.Once
@@ -174,6 +195,9 @@ func NewTunnelNetwork(config TunnelNetworkConfig) (*TunnelNetwork, error) {
 	if config.MaxRetries <= 0 {
 		config.MaxRetries = DefaultTunnelRetries
 	}
+	if config.HandshakeTimeout <= 0 {
+		config.HandshakeTimeout = DefaultHandshakeTimeout
+	}
 	lifetime, cancel := context.WithCancel(context.Background())
 	deliveryWorkers := parallelism.Workers(DefaultTunnelSendQueue)
 	deliveryCapacity := max(1, (DefaultTunnelSendQueue+deliveryWorkers-1)/deliveryWorkers)
@@ -189,6 +213,8 @@ func NewTunnelNetwork(config TunnelNetworkConfig) (*TunnelNetwork, error) {
 		readCapacity:         config.ReadQueue,
 		retransmit:           config.RetransmitAfter,
 		maxRetries:           config.MaxRetries,
+		handshakeTimeout:     config.HandshakeTimeout,
+		handshakeObserver:    config.HandshakeObserver,
 		listeners:            make(map[uint16]*tunnelListener),
 		byID:                 make(map[uint32]*tunnelConn),
 		inbound:              make(map[inboundKey]*tunnelConn),
@@ -197,6 +223,7 @@ func NewTunnelNetwork(config TunnelNetworkConfig) (*TunnelNetwork, error) {
 		done:                 make(chan struct{}),
 		outbound:             make(chan sendRequest, DefaultTunnelSendQueue),
 		retryUpdates:         make(chan *tunnelConn, DefaultTunnelSendQueue),
+		cleanup:              make(chan struct{}, 1),
 		deliveryQueues:       make([]chan sendRequest, deliveryWorkers),
 	}
 	network.wg.Add(1 + deliveryWorkers)
@@ -252,7 +279,7 @@ func (n *TunnelNetwork) DialI2P(ctx context.Context, address string) (net.Conn, 
 
 // DialI2PFromPort opens an authenticated Streaming connection using localPort.
 // A zero localPort selects a cryptographically-random ephemeral virtual port.
-func (n *TunnelNetwork) DialI2PFromPort(ctx context.Context, address string, localPort uint16) (net.Conn, error) {
+func (n *TunnelNetwork) DialI2PFromPort(ctx context.Context, address string, localPort uint16) (_ net.Conn, err error) {
 	target, port, err := parsePeerAddress(address)
 	if err != nil {
 		return nil, err
@@ -260,34 +287,75 @@ func (n *TunnelNetwork) DialI2PFromPort(ctx context.Context, address string, loc
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
-
+	handshake, cancel := context.WithTimeout(ctx, n.handshakeTimeout)
+	stopNetwork := context.AfterFunc(n.ctx, cancel)
+	defer stopNetwork()
+	defer cancel()
+	var feedback HandshakeFeedback
+	if n.handshakeObserver != nil {
+		feedback, err = n.handshakeObserver.PrepareHandshake(handshake, target)
+		if err != nil {
+			if ctx.Err() != nil {
+				err = ctx.Err()
+			}
+			return nil, err
+		}
+	}
 	localPort = cmp.Or(localPort, randomPort())
-
 	localID, err := n.allocateID()
 	if err != nil {
 		return nil, err
 	}
 	connection := n.newConn(localID, 0, target, foundation.Identity{}, localPort, port, true)
+	connection.handshakeCtx = handshake
+	connection.handshakeFeedback = feedback
 	if err = n.register(connection); err != nil {
 		return nil, err
 	}
-	if err = connection.sendSynchronize(ctx, true); err != nil {
-		connection.abort(false)
+	defer func() {
+		if err != nil {
+			connection.abort(false)
+		}
+	}()
+	if err = connection.sendSynchronize(handshake, true); err != nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
 		return nil, err
 	}
 	select {
 	case <-connection.established:
+	case <-connection.done:
+	case <-handshake.Done():
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	connection.mu.Lock()
+	unanswered := connection.remoteID == 0
+	retriesExhausted := connection.handshakeFailed
+	peerTimedOut := unanswered && (errors.Is(handshake.Err(), context.DeadlineExceeded) || retriesExhausted)
+	if peerTimedOut {
+		connection.handshakeFailed = true
+	}
+	connection.mu.Unlock()
+	if !unanswered && !connection.isDone() {
+		if feedback != nil {
+			feedback.Established()
+		}
 		if err = connection.sendACK(); err != nil {
-			connection.abort(false)
 			return nil, err
 		}
 		return connection, nil
-	case <-connection.done:
-		return nil, net.ErrClosed
-	case <-ctx.Done():
-		connection.abort(true)
-		return nil, ctx.Err()
 	}
+	if peerTimedOut {
+		connection.abort(false)
+		if feedback != nil {
+			feedback.NoResponse()
+		}
+		return nil, timeoutError{}
+	}
+	return nil, net.ErrClosed
 }
 
 // ListenI2P registers one local virtual I2P port. An address host is optional;
@@ -599,12 +667,36 @@ func (n *TunnelNetwork) maintain() {
 				request.finish(ErrTunnelBackpressure)
 				continue
 			}
+			if request.connection.isDone() && !request.allowClosed {
+				request.finish(net.ErrClosed)
+				continue
+			}
 			now = time.Now()
 			requests.push(request, request.connection.paceDue(now))
 			retries.upsert(request.connection, request.connection.retryDue())
 		case connection := <-n.retryUpdates:
 			connection.retryUpdateQueued.Store(tunnelRetryUpdateIdle)
 			retries.upsert(connection, connection.retryDue())
+		case <-n.cleanup:
+			for index := len(retries.items) - 1; index >= 0; index-- {
+				if retries.items[index].connection.isDone() {
+					retries.remove(index)
+				}
+			}
+			// Rebuild the pacing heap without retaining abandoned packet leases.
+			pending := requests.items
+			requests.items = requests.items[:0]
+			for _, scheduled := range pending {
+				if scheduled.request.connection.isDone() && !scheduled.request.allowClosed {
+					scheduled.request.finish(net.ErrClosed)
+				} else {
+					requests.items = append(requests.items, scheduled)
+				}
+			}
+			clear(pending[len(requests.items):])
+			for index := len(requests.items)/2 - 1; index >= 0; index-- {
+				requests.down(index)
+			}
 		case <-timer.C:
 			now = time.Now()
 			n.queueDueRetries(now, &requests, &retries)
@@ -652,7 +744,7 @@ func (n *TunnelNetwork) queueDueRetries(now time.Time, requests *sendSchedule, r
 				}
 				break
 			}
-			requests.push(sendRequest{connection: connection, wire: resend.wire, lease: resend.lease, ctx: n.ctx}, connection.paceDue(now))
+			requests.push(sendRequest{connection: connection, wire: resend.wire, lease: resend.lease, ctx: connection.deliveryContext()}, connection.paceDue(now))
 		}
 		retries.upsert(connection, connection.retryDue())
 	}
@@ -685,8 +777,10 @@ func (n *TunnelNetwork) deliveryWorker(jobs <-chan sendRequest) {
 	for request := range jobs {
 		if err := request.ctx.Err(); err != nil {
 			request.finish(err)
+		} else if request.connection.isDone() && !request.allowClosed {
+			request.finish(net.ErrClosed)
 		} else {
-			request.finish(n.deliver(request.connection, request.wire))
+			request.finish(n.deliver(request.ctx, request.connection, request.wire))
 		}
 	}
 }
@@ -698,6 +792,7 @@ type sendRequest struct {
 	ctx            context.Context
 	result         *sendCompletion
 	abortOnFailure bool
+	allowClosed    bool
 }
 
 func (r sendRequest) finish(err error) {
@@ -737,8 +832,26 @@ func (c *sendCompletion) release() {
 	}
 }
 
-func (n *TunnelNetwork) deliver(connection *tunnelConn, wire []byte) error {
-	return n.sender.SendTunnel(n.ctx, Delivery{
+func (n *TunnelNetwork) deliver(ctx context.Context, connection *tunnelConn, wire []byte) error {
+	if err := n.ctx.Err(); err != nil {
+		return err
+	}
+	if ctx.Done() != n.ctx.Done() {
+		requestCtx, cancel := context.WithCancel(ctx)
+		stop := context.AfterFunc(n.ctx, cancel)
+		defer func() {
+			stop()
+			cancel()
+		}()
+		ctx = requestCtx
+	}
+	sender := n.sender
+	connection.mu.Lock()
+	if connection.remoteID == 0 && connection.handshakeFeedback != nil {
+		sender = connection.handshakeFeedback
+	}
+	connection.mu.Unlock()
+	return sender.SendTunnel(ctx, Delivery{
 		From: n.localHash, To: connection.peer, FromPort: connection.localPort, ToPort: connection.remotePort,
 		Protocol: ProtocolStreaming, Payload: wire,
 	})
@@ -925,7 +1038,8 @@ func (h *retrySchedule) fix(index int) {
 }
 
 type tunnelConn struct {
-	network *TunnelNetwork
+	network           *TunnelNetwork
+	handshakeFeedback HandshakeFeedback
 
 	localID, remoteID uint32
 	peer              foundation.Hash
@@ -936,6 +1050,8 @@ type tunnelConn struct {
 	remotePort        uint16
 	outbound          bool
 	inboundKey        *inboundKey
+	handshakeCtx      context.Context
+	handshakeFailed   bool
 
 	mu                 sync.Mutex
 	nextSequence       uint32
@@ -984,6 +1100,15 @@ type pendingPacket struct {
 	sent          time.Time
 	retries       int
 	retransmitted bool
+}
+
+func (c *tunnelConn) deliveryContext() context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.remoteID == 0 && c.handshakeCtx != nil {
+		return c.handshakeCtx
+	}
+	return c.network.ctx
 }
 
 func (p pendingPacket) release() {
@@ -1053,7 +1178,7 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 	var fastRetransmit []leasedSend
 	var deferred []deferredDelivery
 	c.mu.Lock()
-	if c.isDoneLocked() {
+	if c.isDoneLocked() || c.handshakeFailed {
 		c.mu.Unlock()
 		return net.ErrClosed
 	}
@@ -1411,7 +1536,10 @@ func (c *tunnelConn) sendWire(ctx context.Context, wire []byte) error {
 // Automatic protocol replies must not hold an ingress worker across route
 // preparation. The queue owns the wire until delivery or explicit rejection.
 func (c *tunnelConn) queueProtocolOwned(wire []byte, lease *wireLease) error {
-	request := sendRequest{connection: c, wire: wire, lease: lease, ctx: c.network.ctx, abortOnFailure: true}
+	return c.queueProtocolRequest(sendRequest{connection: c, wire: wire, lease: lease, ctx: c.network.ctx, abortOnFailure: true})
+}
+
+func (c *tunnelConn) queueProtocolRequest(request sendRequest) error {
 	var err error
 	c.network.outboundMu.RLock()
 	select {
@@ -1484,6 +1612,7 @@ func (c *tunnelConn) retry(now time.Time) []leasedSend {
 	rto := c.rto.RTO()
 	if c.remoteID == 0 && len(c.synchronize) != 0 && now.Sub(c.syncSent) >= rto {
 		if c.syncRetries >= c.network.maxRetries {
+			c.handshakeFailed = true
 			closeConnection = true
 		} else {
 			c.syncRetries++
@@ -1711,7 +1840,7 @@ func (c *tunnelConn) abort(sendReset bool) {
 		c.mu.Unlock()
 		if len(wire) != 0 {
 			wire, lease := leaseWire(wire)
-			_ = c.queueProtocolOwned(wire, lease)
+			_ = c.queueProtocolRequest(sendRequest{connection: c, wire: wire, lease: lease, ctx: c.network.ctx, allowClosed: true})
 		}
 	}
 	c.closeOnce.Do(func() {
@@ -1722,9 +1851,15 @@ func (c *tunnelConn) abort(sendReset bool) {
 			delete(c.pending, sequence)
 		}
 		c.releaseSynchronizeLocked()
+		c.preSynchronize = nil
+		clear(c.reordered)
 		c.mu.Unlock()
 		c.network.unregister(c)
 		c.signalWake()
+		select {
+		case c.network.cleanup <- struct{}{}:
+		default:
+		}
 	})
 }
 

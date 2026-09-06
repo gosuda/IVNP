@@ -104,7 +104,8 @@ type (
 	RouterPeerTestResult             = router.PeerTestResult
 	// RouterPreparedRoute is owner- and generation-scoped. InstallRoute copies
 	// its key and LeaseSet slices; callers retain their original buffers.
-	RouterPreparedRoute = router.PreparedRoute
+	RouterPreparedRoute        = router.PreparedRoute
+	RouterPreparedRouteReceipt = router.PreparedRouteReceipt
 	// RouterPreparedRouteSender never resolves or dials on a miss. Invalidation
 	// drains admitted uses before wiping retired route snapshots.
 	RouterPreparedRouteSender       = router.PreparedRouteSender
@@ -170,6 +171,8 @@ type (
 	StreamingTunnelTunnelNetwork       = streamingtunnel.TunnelNetwork
 	StreamingTunnelTunnelNetworkConfig = streamingtunnel.TunnelNetworkConfig
 	StreamingTunnelTunnelSender        = streamingtunnel.TunnelSender
+	StreamingTunnelHandshakeFeedback   = streamingtunnel.HandshakeFeedback
+	StreamingTunnelHandshakeObserver   = streamingtunnel.HandshakeObserver
 	TunnelBlock                        = tunnel.Block
 	TunnelBlockIterator                = tunnel.BlockIterator
 	TunnelCircuitInfo                  = tunnel.CircuitInfo
@@ -296,6 +299,7 @@ const (
 	StreamingProtocolOpen                   = streaming.Open
 	StreamingProtocolReset                  = streaming.Reset
 	StreamingTunnelDefaultRetransmitAfter   = streamingtunnel.DefaultRetransmitAfter
+	StreamingTunnelDefaultHandshakeTimeout  = streamingtunnel.DefaultHandshakeTimeout
 	StreamingTunnelDefaultTunnelAcceptQueue = streamingtunnel.DefaultTunnelAcceptQueue
 	StreamingTunnelDefaultTunnelReadQueue   = streamingtunnel.DefaultTunnelReadQueue
 	StreamingTunnelDefaultTunnelRetries     = streamingtunnel.DefaultTunnelRetries

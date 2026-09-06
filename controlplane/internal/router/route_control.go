@@ -94,6 +94,8 @@ type StreamingTunnelSender struct {
 	seedCache            [streamingSeedCacheCapacity]streamingSeedCacheEntry
 	seedNext             uint8
 	leaseNext            atomic.Uint64
+	failedRoutes         map[failedRoutePath]uint64
+	failedRouteCapacity  int
 }
 
 type routePreparationKey struct {
@@ -101,8 +103,80 @@ type routePreparationKey struct {
 	generation uint64
 }
 type routePreparation struct {
-	done chan struct{}
-	err  error
+	done    chan struct{}
+	err     error
+	cancel  context.CancelFunc
+	waiters int
+}
+
+type failedRoutePath struct {
+	remote   foundation.Hash
+	circuit  dataplane.TunnelCircuitToken
+	gateway  foundation.Hash
+	tunnelID uint32
+}
+
+type streamingHandshakeFeedback struct {
+	sender  *StreamingTunnelSender
+	receipt dataplane.RouterPreparedRouteReceipt
+}
+
+func (s *StreamingTunnelSender) PrepareHandshake(ctx context.Context, remote foundation.Hash) (dataplane.StreamingTunnelHandshakeFeedback, error) {
+	if err := s.PrepareDestination(ctx, remote); err != nil {
+		return nil, err
+	}
+	receipt, ok := s.execution.RouteReceipt(remote)
+	if !ok {
+		return nil, dataplane.RouterErrPreparedRouteMissing
+	}
+	return &streamingHandshakeFeedback{sender: s, receipt: receipt}, nil
+}
+
+func (f *streamingHandshakeFeedback) SendTunnel(ctx context.Context, delivery dataplane.StreamingTunnelDelivery) error {
+	s := f.sender
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.released {
+		return dataplane.RouterErrDataPlaneConfig
+	}
+	if err := s.waitForRatchetReply(ctx, delivery.To); err != nil {
+		return err
+	}
+	return s.execution.SendTunnelOnRoute(ctx, delivery, f.receipt)
+}
+
+func (f *streamingHandshakeFeedback) Established() {
+	f.sender.execution.MarkRouteResponsive(f.receipt)
+}
+
+func (f *streamingHandshakeFeedback) NoResponse() {
+	s := f.sender
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.released {
+		return
+	}
+	s.remoteMu.Lock()
+	defer s.remoteMu.Unlock()
+	if !s.execution.RetireUnresponsiveRoute(f.receipt) {
+		return
+	}
+	now := s.now()
+	var oldest failedRoutePath
+	var earliest uint64
+	for path, expires := range s.failedRoutes {
+		if expires <= now {
+			delete(s.failedRoutes, path)
+			continue
+		}
+		if earliest == 0 || expires < earliest {
+			oldest, earliest = path, expires
+		}
+	}
+	if len(s.failedRoutes) >= s.failedRouteCapacity {
+		delete(s.failedRoutes, oldest)
+	}
+	s.failedRoutes[failedRoutePath{remote: f.receipt.Remote, circuit: f.receipt.Circuit, gateway: f.receipt.Gateway, tunnelID: f.receipt.TunnelID}] = f.receipt.Expires
 }
 
 func NewStreamingTunnelSender(config StreamingTunnelSenderConfig) (*StreamingTunnelSender, error) {
@@ -143,6 +217,7 @@ func NewStreamingTunnelSender(config StreamingTunnelSenderConfig) (*StreamingTun
 		tunnels: config.Tunnels, prepareTunnel: config.PrepareTunnel, replySlots: make(chan struct{}, config.PreparationCapacity), logger: config.Logger,
 		awaitControl: config.AwaitControl,
 		replyGates:   make(map[foundation.Hash]*ratchetReplyGate), replyGateCapacity: config.RouteCapacity,
+		failedRoutes: make(map[failedRoutePath]uint64), failedRouteCapacity: config.RouteCapacity,
 		seedRouterInfo: config.SeedRouterInfo, now: config.Now, remoteELS: policies, generation: 1,
 		localPublication: publication, localPublicationType: publicationType,
 		pending: make(map[routePreparationKey]*routePreparation), pendingCapacity: config.PreparationCapacity,
@@ -233,6 +308,7 @@ func (s *StreamingTunnelSender) ReleaseSensitive() {
 	releaseRemoteELSPolicies(s.remoteELS)
 	s.remoteELS = nil
 	clear(s.replyGates)
+	clear(s.failedRoutes)
 	s.remoteMu.Unlock()
 	s.seedMu.Lock()
 	clear(s.seedCache[:])
@@ -274,7 +350,29 @@ func (s *StreamingTunnelSender) retireFailedRoute(remote foundation.Hash, err er
 	return err
 }
 
+// PrepareDestination resolves and caches a route without sending application data.
+// The last departing waiter cancels and joins its coalesced preparation worker.
+func (s *StreamingTunnelSender) PrepareDestination(ctx context.Context, remote foundation.Hash) error {
+	if s == nil {
+		return dataplane.RouterErrDataPlaneConfig
+	}
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.released {
+		return dataplane.RouterErrDataPlaneConfig
+	}
+	for {
+		err := s.prepare(ctx, remote)
+		if !errors.Is(err, dataplane.RouterErrRouteGeneration) {
+			return err
+		}
+	}
+}
+
 func (s *StreamingTunnelSender) prepare(ctx context.Context, remote foundation.Hash) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.remoteMu.Lock()
 	if s.waiters >= s.waiterCapacity {
 		s.remoteMu.Unlock()
@@ -290,6 +388,18 @@ func (s *StreamingTunnelSender) prepare(ctx context.Context, remote foundation.H
 	if pending == nil {
 		return nil
 	}
+	defer func() {
+		s.remoteMu.Lock()
+		pending.waiters--
+		last := pending.waiters == 0
+		if last {
+			pending.cancel()
+		}
+		s.remoteMu.Unlock()
+		if last {
+			<-pending.done
+		}
+	}()
 	select {
 	case <-pending.done:
 		return pending.err
@@ -303,6 +413,7 @@ func (s *StreamingTunnelSender) startPreparation(remote foundation.Hash) (*route
 	defer s.remoteMu.Unlock()
 	key := routePreparationKey{remote: remote, generation: s.generation}
 	if pending, ok := s.pending[key]; ok {
+		pending.waiters++
 		return pending, nil
 	}
 	if s.execution.HasRoute(remote, s.generation) {
@@ -315,15 +426,16 @@ func (s *StreamingTunnelSender) startPreparation(remote foundation.Hash) (*route
 	if encrypted {
 		policy.Secret = append([]byte(nil), policy.Secret...)
 	}
-	pending := &routePreparation{done: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(s.preparationCtx, s.preparationTimeout)
+	pending := &routePreparation{done: make(chan struct{}), cancel: cancel, waiters: 1}
 	s.pending[key] = pending
 	s.preparing.Add(1)
 	go func() {
+		defer close(pending.done)
 		defer s.preparing.Done()
 		defer clear(policy.Secret)
 		defer clear(policy.Authorization.DHPrivate[:])
 		defer clear(policy.Authorization.PSK[:])
-		ctx, cancel := context.WithTimeout(s.preparationCtx, s.preparationTimeout)
 		defer cancel()
 		route, err := s.resolveRoute(ctx, remote, key.generation, policy, encrypted)
 		if err == nil {
@@ -342,7 +454,6 @@ func (s *StreamingTunnelSender) startPreparation(remote foundation.Hash) (*route
 		s.remoteMu.Lock()
 		pending.err = err
 		delete(s.pending, key)
-		close(pending.done)
 		s.remoteMu.Unlock()
 	}()
 	return pending, nil
@@ -367,32 +478,69 @@ func (s *StreamingTunnelSender) resolveRoute(ctx context.Context, remote foundat
 	}
 	now := s.now()
 	var lease foundation.NetworkDatabaseLease
+	pick := s.leaseNext.Add(1) - 1
+	leaseCount := 0
 	if set2 != nil {
 		key, keyErr := set2.SelectUsableEncryptionKey(now, foundation.CryptoX25519, foundation.CryptoMLKEM1024X25519, foundation.CryptoMLKEM768X25519)
 		if keyErr != nil {
 			return route, keyErr
 		}
 		route.KeyType, route.KeyData = key.Type, append([]byte(nil), key.Data...)
-		lease, err = selectLease2(*set2, now, s.leaseNext.Add(1)-1)
+		lease, err = selectLease2(*set2, now, pick)
+		leaseCount = set2.LeaseCount()
 		route.Expires = leaseSet2Deadline(*set2)
 		if encrypted {
 			route.Expires = min(route.Expires, encryptedExpires)
 		}
 	} else {
 		route.Legacy = true
-		lease, route.LegacyKey, err = selectLegacyLease(*legacy, now, s.leaseNext.Add(1)-1)
+		lease, route.LegacyKey, err = selectLegacyLease(*legacy, now, pick)
+		leaseCount = legacy.LeaseCount()
 		route.Expires = lease.EndDate
 	}
 	if err != nil {
 		return route, err
 	}
-	outbound, ok := s.pool.Select(controlplanetunnel.Outbound, now)
-	if !ok {
+	var outbound controlplanetunnel.Entry
+	var circuit dataplane.TunnelCircuitInfo
+	found := false
+	entries := s.pool.Snapshot(now)
+	for attempt := 0; attempt < leaseCount && !found; attempt++ {
+		if attempt != 0 {
+			if set2 != nil {
+				lease, err = selectLease2(*set2, now, pick+uint64(attempt))
+			} else {
+				lease, _, err = selectLegacyLease(*legacy, now, pick+uint64(attempt))
+			}
+			if err != nil {
+				return route, err
+			}
+		}
+		for _, entry := range entries {
+			if entry.Direction != controlplanetunnel.Outbound || entry.Owner != s.owner {
+				continue
+			}
+			candidate, ok := s.tunnels.InspectCircuit(entry.ID)
+			if !ok || candidate.Token != entry.Circuit || candidate.Owner != s.owner {
+				continue
+			}
+			if candidate.ExpiresAt != 0 && candidate.ExpiresAt <= now {
+				continue
+			}
+			s.remoteMu.RLock()
+			failedUntil := s.failedRoutes[failedRoutePath{remote: remote, circuit: entry.Circuit, gateway: lease.Gateway, tunnelID: lease.TunnelID}]
+			s.remoteMu.RUnlock()
+			if failedUntil > now || (found && entry.Expires <= outbound.Expires) {
+				continue
+			}
+			outbound, circuit, found = entry, candidate, true
+		}
+	}
+	if !found {
 		return route, dataplane.TunnelErrCircuitNotFound
 	}
-	circuit, ok := s.tunnels.InspectCircuit(outbound.ID)
-	if !ok || circuit.Token != outbound.Circuit || circuit.Owner != s.owner || outbound.Owner != s.owner {
-		return route, dataplane.TunnelErrCircuitNotFound
+	if route.Legacy {
+		route.Expires = lease.EndDate
 	}
 	if circuit.ExpiresAt != 0 {
 		route.Expires = min(route.Expires, circuit.ExpiresAt)

@@ -3,6 +3,7 @@ package sam
 import (
 	"bufio"
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -105,6 +106,146 @@ func TestWaitReadyConnectionBlocksUntilReady(t *testing.T) {
 		close(ready)
 		if err := <-result; err != nil {
 			t.Fatalf("waitReadyConnection after readiness: %v", err)
+		}
+	})
+}
+
+type preparationEndpoint struct {
+	*readinessEndpoint
+	prepare func(context.Context, foundation.Hash) error
+}
+
+func (e *preparationEndpoint) PrepareDestination(ctx context.Context, target foundation.Hash) error {
+	return e.prepare(ctx, target)
+}
+
+func TestPreparationCompletesBeforePublicationReadiness(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		monitor := &readinessMonitorConn{wake: make(chan struct{})}
+		defer monitor.Close()
+		connection := &serverConnection{Conn: monitor, reader: bufio.NewReader(monitor)}
+		published := make(chan struct{})
+		prepared := make(chan struct{})
+		target := foundation.Hash{9}
+		endpoint := &preparationEndpoint{
+			readinessEndpoint: &readinessEndpoint{ready: published},
+			prepare: func(_ context.Context, hash foundation.Hash) error {
+				if hash != target {
+					return ErrAddress
+				}
+				close(prepared)
+				return nil
+			},
+		}
+		result := make(chan error, 1)
+		go func() {
+			result <- waitReadyConnection(t.Context(), connection, sessionReadiness{server: &Server{}, endpoint: endpoint, ready: endpoint, target: foundation.B32(target)})
+		}()
+		<-prepared
+		synctest.Wait()
+		select {
+		case err := <-result:
+			t.Fatalf("session became ready before publication: %v", err)
+		default:
+		}
+		close(published)
+		if err := <-result; err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestDisconnectJoinsReadinessAndPreparation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client, server := net.Pipe()
+		defer client.Close()
+		defer server.Close()
+		connection := &serverConnection{Conn: server, reader: bufio.NewReader(server)}
+		entered, stopped := make(chan struct{}), make(chan struct{})
+		readyEntered := make(chan struct{})
+		endpoint := &preparationEndpoint{
+			readinessEndpoint: &readinessEndpoint{ready: make(chan struct{}), entered: readyEntered},
+			prepare: func(ctx context.Context, _ foundation.Hash) error {
+				close(entered)
+				<-ctx.Done()
+				defer close(stopped)
+				return ctx.Err()
+			},
+		}
+		result := make(chan error, 1)
+		go func() {
+			result <- waitReadyConnection(t.Context(), connection, sessionReadiness{server: &Server{}, endpoint: endpoint, ready: endpoint, target: foundation.B32(foundation.Hash{1})})
+		}()
+		<-entered
+		<-readyEntered
+		if _, err := client.Write([]byte("PING pending\n")); err != nil {
+			t.Fatal(err)
+		}
+		client.Close()
+		if err := <-result; !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("disconnected readiness = %v", err)
+		}
+		select {
+		case <-stopped:
+		default:
+			t.Fatal("readiness returned before preparation stopped")
+		}
+	})
+}
+
+func TestPreparationFailureDoesNotFailLocalReadiness(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		published, prepared := make(chan struct{}), make(chan struct{})
+		endpoint := &preparationEndpoint{
+			readinessEndpoint: &readinessEndpoint{ready: published},
+			prepare: func(context.Context, foundation.Hash) error {
+				close(prepared)
+				return ErrUnavailable
+			},
+		}
+		result := make(chan error, 1)
+		go func() {
+			result <- (sessionReadiness{server: &Server{}, endpoint: endpoint, ready: endpoint, target: foundation.B32(foundation.Hash{1})}).WaitReady(t.Context())
+		}()
+		<-prepared
+		synctest.Wait()
+		select {
+		case err := <-result:
+			t.Fatalf("remote miss ended local readiness: %v", err)
+		default:
+		}
+		close(published)
+		if err := <-result; err != nil {
+			t.Fatalf("remote miss rejected usable local destination: %v", err)
+		}
+	})
+}
+
+func TestLocalReadinessCancelsAndJoinsSlowPreparation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		published, entered, stopped := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		endpoint := &preparationEndpoint{
+			readinessEndpoint: &readinessEndpoint{ready: published},
+			prepare: func(ctx context.Context, _ foundation.Hash) error {
+				close(entered)
+				<-ctx.Done()
+				defer close(stopped)
+				return ctx.Err()
+			},
+		}
+		result := make(chan error, 1)
+		go func() {
+			result <- (sessionReadiness{server: &Server{}, endpoint: endpoint, ready: endpoint, target: foundation.B32(foundation.Hash{1})}).WaitReady(t.Context())
+		}()
+		<-entered
+		close(published)
+		if err := <-result; err != nil {
+			t.Fatalf("ready session waited for remote lookup: %v", err)
+		}
+		select {
+		case <-stopped:
+		default:
+			t.Fatal("preparation still running after local readiness returned")
 		}
 	})
 }

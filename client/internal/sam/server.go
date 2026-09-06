@@ -256,10 +256,14 @@ func (s *Server) acceptLoop() {
 
 type serverConnection struct {
 	net.Conn
-	reader  *bufio.Reader
-	writeMu sync.Mutex
-	root    *samSession
+	reader          *bufio.Reader
+	writeMu         sync.Mutex
+	root            *samSession
+	commandDeadline time.Time
+	panicReporter   ingress.Reporter
 }
+
+func (c *serverConnection) Read(dst []byte) (int, error) { return c.reader.Read(dst) }
 
 func (c *serverConnection) writeLine(line string) error {
 	c.writeMu.Lock()
@@ -280,7 +284,7 @@ func (c *serverConnection) writeFrame(header, body []byte) error {
 func (s *Server) serveConnection(raw net.Conn) (result error) {
 	defer ingress.Recover(&result, s.config.PanicReporter, ingress.BoundaryClientConnection, raw.RemoteAddr())
 	defer raw.Close()
-	connection := &serverConnection{Conn: raw, reader: bufio.NewReaderSize(raw, s.config.MaxCommandBytes+1)}
+	connection := &serverConnection{Conn: raw, reader: bufio.NewReaderSize(raw, s.config.MaxCommandBytes+1), panicReporter: s.config.PanicReporter}
 	_ = raw.SetReadDeadline(time.Now().Add(s.config.HandshakeTimeout))
 	line, err := connection.readLine(s.config.MaxCommandBytes)
 	if err != nil {
@@ -303,7 +307,7 @@ func (s *Server) serveConnection(raw net.Conn) (result error) {
 		_ = connection.writeLine("HELLO REPLY RESULT=NOVERSION")
 		return ErrProtocol
 	}
-	if err = connection.writeLine("HELLO REPLY RESULT=OK VERSION=3.3"); err != nil {
+	if err = connection.writeLine("HELLO REPLY RESULT=OK VERSION=3.3 IVNP_PREPARE=1"); err != nil {
 		return err
 	}
 	_ = raw.SetReadDeadline(time.Time{})
@@ -313,13 +317,15 @@ func (s *Server) serveConnection(raw net.Conn) (result error) {
 		}
 	}()
 	for {
+		connection.commandDeadline = time.Time{}
 		if connection.root != nil {
 			// A root SAM control socket owns the Destination for the full
 			// session lifetime and is normally idle while STREAM attachments
 			// carry traffic. CommandTimeout protects pre-session clients only.
 			_ = raw.SetReadDeadline(time.Time{})
 		} else if s.config.CommandTimeout > 0 {
-			_ = raw.SetReadDeadline(time.Now().Add(s.config.CommandTimeout))
+			connection.commandDeadline = time.Now().Add(s.config.CommandTimeout)
+			_ = raw.SetReadDeadline(connection.commandDeadline)
 		}
 		line, err = connection.readLine(s.config.MaxCommandBytes)
 		if err != nil {

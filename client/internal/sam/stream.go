@@ -55,14 +55,26 @@ func (s *Server) handleStream(connection *serverConnection, cmd command) (bool, 
 		if target == "" {
 			return true, connection.writeLine("STREAM STATUS RESULT=INVALID_KEY")
 		}
-		resolved, resolveErr := s.resolveTarget(session.ctx, target)
-		if resolveErr != nil {
-			return true, connection.writeLine("STREAM STATUS RESULT=CANT_REACH_PEER")
-		}
 		port, portErr := uintValue(cmd.values, "TO_PORT", 16, uint64(session.toPort))
 		fromPort, fromPortErr := uintValue(cmd.values, "FROM_PORT", 16, uint64(session.fromPort))
 		if portErr != nil || fromPortErr != nil {
 			return true, connection.writeLine("STREAM STATUS RESULT=I2P_ERROR MESSAGE=INVALID_PORT")
+		}
+		deadline := connection.commandDeadline
+		if deadline.IsZero() {
+			deadline = time.Now().Add(s.config.CommandTimeout)
+		}
+		connectCtx, cancel := context.WithDeadline(session.ctx, deadline)
+		defer cancel()
+		_ = connection.SetWriteDeadline(deadline)
+		connectCtx, stopWatching := watchConnection(connectCtx, connection)
+		defer stopWatching()
+		resolved, resolveErr := s.resolveTarget(connectCtx, target)
+		if resolveErr != nil {
+			if err := stopWatching(); err != nil {
+				return true, err
+			}
+			return true, connection.writeLine("STREAM STATUS RESULT=CANT_REACH_PEER")
 		}
 		address := net.JoinHostPort(resolved, itoa16(uint16(port)))
 		var outbound net.Conn
@@ -70,16 +82,25 @@ func (s *Server) handleStream(connection *serverConnection, cmd command) (bool, 
 		if fromPort != 0 {
 			source, ok := session.endpoint.(destination.SourcePortDestinationEndpoint)
 			if !ok {
+				if err := stopWatching(); err != nil {
+					return true, err
+				}
 				return true, connection.writeLine("STREAM STATUS RESULT=I2P_ERROR MESSAGE=FROM_PORT_UNSUPPORTED")
 			}
-			outbound, dialErr = source.DialI2PFromPort(session.ctx, address, uint16(fromPort))
+			outbound, dialErr = source.DialI2PFromPort(connectCtx, address, uint16(fromPort))
 		} else {
-			outbound, dialErr = session.endpoint.DialI2P(session.ctx, address)
+			outbound, dialErr = session.endpoint.DialI2P(connectCtx, address)
+		}
+		monitorErr := stopWatching()
+		if outbound != nil {
+			defer outbound.Close()
+		}
+		if monitorErr != nil {
+			return true, monitorErr
 		}
 		if dialErr != nil {
 			return true, connection.writeLine("STREAM STATUS RESULT=CANT_REACH_PEER")
 		}
-		defer outbound.Close()
 		if err = session.attach(outbound); err != nil {
 			_ = outbound.Close()
 			return true, err
@@ -95,7 +116,7 @@ func (s *Server) handleStream(connection *serverConnection, cmd command) (bool, 
 			}
 		}
 		_ = connection.SetDeadline(timeZero)
-		return true, s.relay(connection.Conn, outbound, connection.Conn)
+		return true, s.relay(connection.Conn, outbound, connection)
 	case "ACCEPT":
 		acceptCtx, stopWatching := s.attachmentContext(session.ctx, connection.Conn)
 		inbound, acceptErr := session.acceptAttachment(acceptCtx)

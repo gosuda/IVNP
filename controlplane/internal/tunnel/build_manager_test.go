@@ -111,6 +111,70 @@ func (s *sessionCaptureTunnelSender) EnsureSession(_ context.Context, peer found
 	return nil
 }
 
+type replyReadyBuildSender struct {
+	buildCaptureSender
+	replyPeer  foundation.Hash
+	replyErr   error
+	replyReady bool
+}
+
+func (s *replyReadyBuildSender) EnsureSession(_ context.Context, peer foundation.Hash) error {
+	if peer == s.replyPeer {
+		if s.replyErr != nil {
+			return s.replyErr
+		}
+		s.replyReady = true
+	}
+	return nil
+}
+
+func (s *replyReadyBuildSender) Send(ctx context.Context, peer foundation.Hash, message foundation.I2NPMessage) error {
+	if !s.replyReady {
+		return errors.New("creator has no inbound build return session")
+	}
+	return s.buildCaptureSender.Send(ctx, peer, message)
+}
+
+func TestBootstrapInboundEstablishesReturnSessionBeforeSending(t *testing.T) {
+	for _, unavailable := range []bool{false, true} {
+		t.Run(map[bool]string{false: "reachable", true: "unavailable"}[unavailable], func(t *testing.T) {
+			const now = uint64(1_700_000_000_000)
+			first, _ := testShortBuildHop(t, "bootstrap-first", 1)
+			last, _ := testShortBuildHop(t, "bootstrap-last", 2)
+			sender := &replyReadyBuildSender{replyPeer: last.Router}
+			if unavailable {
+				sender.replyErr = errors.New("reply transport unavailable")
+			}
+			profiles := NewPeerProfiles(PeerProfilesConfig{})
+			manager, err := NewBuildManager(BuildManagerConfig{
+				Runtime: dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: sender}),
+				Sender:  sender, ReplyKeys: newBuildReplyRegistry(), Profiles: profiles,
+				LocalRouter: foundation.Hash{9}, LocalDelivery: func(foundation.I2NPMessage) error { return nil },
+				Now: func() uint64 { return now }, Random: new(buildCounterReader),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(manager.ReleaseSensitive)
+			_, err = manager.StartInbound(t.Context(), InboundBuild{
+				CircuitID: 3, Hops: []ShortBuildHop{first, last}, ExpiresAt: now + 600_000,
+			})
+			if unavailable {
+				if !errors.Is(err, sender.replyErr) || manager.Pending() != 0 || len(sender.take()) != 0 {
+					t.Fatalf("unreachable return path admitted a build: %v", err)
+				}
+				if profiles.EligibleAt(last.Router, now) || !profiles.EligibleAt(first.Router, now) {
+					t.Fatal("return transport failure was not isolated to its peer")
+				}
+				return
+			}
+			if err != nil || len(sender.take()) != 1 {
+				t.Fatalf("prepared return path did not permit the bootstrap build: %v", err)
+			}
+		})
+	}
+}
+
 func TestBuildManagerSeparatesTransportFailureFromBuildHistory(t *testing.T) {
 	now := uint64(1_000)
 	sessionErr := errors.New("session failed")

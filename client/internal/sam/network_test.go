@@ -240,6 +240,77 @@ func TestNetworkRejectsUnsafeSessionOptions(t *testing.T) {
 		t.Fatalf("unsafe session option key error = %v, want %v", err, ErrAddress)
 	}
 }
+
+func TestPreparationHintRequiresBridgeCapability(t *testing.T) {
+	for _, capability := range []string{"", " IVNP_PREPARE=1"} {
+		t.Run("hello"+capability, func(t *testing.T) {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			private := testPrivateDestination(t)
+			command := make(chan string, 1)
+			finished := make(chan struct{})
+			go func() {
+				defer close(finished)
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+				reader := bufio.NewReader(conn)
+				if _, err := reader.ReadString('\n'); err != nil {
+					return
+				}
+				if _, err := io.WriteString(conn, "HELLO REPLY RESULT=OK VERSION=3.1"+capability+"\n"); err != nil {
+					return
+				}
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					return
+				}
+				command <- line
+				_, _ = io.WriteString(conn, "SESSION STATUS RESULT=OK DESTINATION="+private+"\n")
+			}()
+			t.Cleanup(func() { listener.Close(); <-finished })
+			network, err := New(Config{Address: listener.Addr().String(), PrepareDestination: "irc.example.i2p"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer network.Close()
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			if err := network.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			cmd, err := parseCommand(<-command, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, present := cmd.values["IVNP_PREPARE"]
+			if capability == "" && present {
+				t.Fatalf("standard bridge received private preparation field %q", got)
+			}
+			if capability != "" && got != "irc.example.i2p" {
+				t.Fatalf("capable bridge preparation target = %q", got)
+			}
+		})
+	}
+}
+
+func TestPreparationTargetRejectsCommandInjectionAndMalformedAddresses(t *testing.T) {
+	for _, target := range []string{"irc.i2p\nSESSION CREATE", "irc.i2p IVNP_PREPARE=other.i2p", "irc.i2p:6667", "short.b32.i2p", "bad\".i2p", "bad..i2p"} {
+		t.Run(target, func(t *testing.T) {
+			if _, err := New(Config{PrepareDestination: target}); !errors.Is(err, ErrAddress) {
+				t.Fatalf("invalid preparation target accepted: %v", err)
+			}
+		})
+	}
+	if _, err := New(Config{SessionOptions: map[string]string{"ivnp_prepare": "irc.i2p"}}); !errors.Is(err, ErrAddress) {
+		t.Fatalf("capability bypass accepted through SessionOptions: %v", err)
+	}
+}
 func TestNetworkDoesNotPingSAM31Session(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

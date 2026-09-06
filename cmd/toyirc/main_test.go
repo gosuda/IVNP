@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -52,7 +53,7 @@ func TestExchangeIRCCompletesWelcomeAndPong(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	var output strings.Builder
-	if err := exchangeIRC(ctx, clientConnection, "ivtest", &output); err != nil {
+	if err := exchangeIRC(ctx, clientConnection, "ivtest", &output, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-serverErr; err != nil {
@@ -75,7 +76,7 @@ func TestExchangeIRCRejectsOversizedLine(t *testing.T) {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := exchangeIRC(ctx, clientConnection, "ivtest", io.Discard); err == nil || !strings.Contains(err.Error(), "oversized IRC line") {
+	if err := exchangeIRC(ctx, clientConnection, "ivtest", io.Discard, false); err == nil || !strings.Contains(err.Error(), "oversized IRC line") {
 		t.Fatalf("oversized line error = %v", err)
 	}
 }
@@ -120,6 +121,44 @@ func TestRunIRC2PReusesSAMSessionAcrossDialRetries(t *testing.T) {
 	if network.starts != 1 || network.dials != 2 {
 		t.Fatalf("SAM lifecycle starts=%d dials=%d, want 1/2", network.starts, network.dials)
 	}
+}
+
+func TestPersistentIRCSurvivesRegistrationDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+		defer cancel()
+		connection, server := net.Pipe()
+		defer connection.Close()
+		defer server.Close()
+		done := make(chan error, 1)
+		go func() {
+			done <- exchangeIRC(ctx, connection, "ivtest", io.Discard, true)
+		}()
+		reader := bufio.NewReader(server)
+		for range 2 {
+			if _, err := reader.ReadString('\n'); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := io.WriteString(server, ":irc.example 001 ivtest :welcome\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		elapsed := time.NewTimer(91 * time.Second)
+		defer elapsed.Stop()
+		<-elapsed.C
+		if _, err := io.WriteString(server, "PING :still-connected\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		pong, err := reader.ReadString('\n')
+		if err != nil || pong != "PONG :still-connected\r\n" {
+			t.Fatalf("registered connection response = %q, %v", pong, err)
+		}
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled connection = %v", err)
+		}
+	})
 }
 
 func TestIRC2PIntegration(t *testing.T) {

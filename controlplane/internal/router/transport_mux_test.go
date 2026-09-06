@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	controlplanenetdb "gosuda.org/ivnp/controlplane/internal/netdb"
@@ -315,6 +316,119 @@ func TestTransportMuxFallsBackBeforeDelivery(t *testing.T) {
 	if ssuSends != 0 || ntcpSends != 1 {
 		t.Fatalf("delivery calls = SSU2 %d, NTCP2 %d; want 0, 1", ssuSends, ntcpSends)
 	}
+}
+
+func TestTransportMuxFallsBackAfterAttemptDeadline(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		deadline time.Duration
+	}{
+		{name: "short caller deadline", deadline: 8 * time.Second},
+		{name: "long caller deadline", deadline: time.Minute},
+		{name: "no caller deadline"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				database, peer := muxTestPeer(t, true, true)
+				ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
+				ssu2.ensureRelease <- nil
+				mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := t.Context()
+				if test.deadline != 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, test.deadline)
+					defer cancel()
+				}
+				started := time.Now()
+				if err := mux.Send(ctx, peer, foundation.I2NPMessage{Payload: []byte("once")}); err != nil {
+					t.Fatalf("Send after primary timeout = %v", err)
+				}
+				if err := ctx.Err(); err != nil {
+					t.Fatalf("fallback exhausted caller deadline: %v", err)
+				}
+				if elapsed := time.Since(started); elapsed > transportSessionAttemptTimeout {
+					t.Fatalf("primary stalled for %v, limit %v", elapsed, transportSessionAttemptTimeout)
+				}
+				_, _, _, primaryWrites := ntcp2.counts()
+				_, _, _, alternateWrites := ssu2.counts()
+				if primaryWrites != 0 || alternateWrites != 1 {
+					t.Fatalf("message writes = primary %d, alternate %d; want 0, 1", primaryWrites, alternateWrites)
+				}
+			})
+		})
+	}
+}
+
+func TestTransportMuxCancellationStopsSetupWithoutFallback(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		database, peer := muxTestPeer(t, true, true)
+		ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
+		mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- mux.Send(ctx, peer, foundation.I2NPMessage{}) }()
+		<-ntcp2.ensureStarted
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("Send after cancellation = %v, want context.Canceled", err)
+		}
+		select {
+		case <-ssu2.ensureStarted:
+			t.Fatal("caller cancellation started alternate setup")
+		default:
+		}
+		_, _, _, primaryWrites := ntcp2.counts()
+		_, _, _, alternateWrites := ssu2.counts()
+		if primaryWrites != 0 || alternateWrites != 0 {
+			t.Fatalf("canceled setup wrote messages: primary %d, alternate %d", primaryWrites, alternateWrites)
+		}
+	})
+}
+
+func TestTransportMuxDoesNotFallbackOnPermanentSetupFailure(t *testing.T) {
+	database, peer := muxTestPeer(t, true, true)
+	ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
+	want := errors.New("invalid local credentials")
+	ntcp2.ensureRelease <- want
+	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mux.EnsureSession(t.Context(), peer); !errors.Is(err, want) {
+		t.Fatalf("EnsureSession = %v, want %v", err, want)
+	}
+	select {
+	case <-ssu2.ensureStarted:
+		t.Fatal("permanent setup failure started alternate setup")
+	default:
+	}
+}
+
+func TestTransportMuxBoundsAlternateSetupWithoutCallerDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		database, peer := muxTestPeer(t, true, true)
+		ntcp2, ssu2 := newMuxSessionTransport(), newMuxSessionTransport()
+		ntcp2.ensureRelease <- dataplane.RouterErrNTCP2Session
+		mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now()
+		err = mux.EnsureSession(t.Context(), peer)
+		if !errors.Is(err, dataplane.RouterErrNTCP2Session) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("EnsureSession = %v, want primary failure and alternate deadline", err)
+		}
+		if elapsed := time.Since(started); elapsed > transportSessionAttemptTimeout {
+			t.Fatalf("alternate stalled for %v, limit %v", elapsed, transportSessionAttemptTimeout)
+		}
+	})
 }
 
 func TestTransportMuxDoesNotRetryEstablishedWrite(t *testing.T) {

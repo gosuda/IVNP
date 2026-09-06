@@ -357,7 +357,38 @@ type destinationRuntimeFactory struct {
 	logger                   *slog.Logger
 	requestTunnelMaintenance func(*destinationRuntime)
 	prepareTunnel            func(context.Context, foundation.Hash) error
+	seedRouterInfo           tunnel.RouterInfoSeeder
 	awaitControl             func(context.Context) error
+}
+
+type destinationRequestPath struct {
+	pool       *tunnel.Pool
+	tunnels    *dataplane.TunnelRuntime
+	maintainer *tunnel.PairedPoolMaintainer
+	now        func() uint64
+}
+
+func (p destinationRequestPath) Pair(now uint64) (tunnel.CircuitPair, bool) {
+	pair, ok := p.maintainer.Pair(now)
+	if !ok {
+		return pair, false
+	}
+	for _, id := range [...]uint32{pair.InboundLocalID, pair.OutboundID} {
+		entry, found := p.pool.Get(id, now)
+		circuit, installed := p.tunnels.InspectCircuit(id)
+		if !found || !installed || entry.Owner != p.pool.Owner() || circuit.Owner != entry.Owner || circuit.Token != entry.Circuit {
+			return tunnel.CircuitPair{}, false
+		}
+	}
+	return pair, true
+}
+
+func (p destinationRequestPath) SendBlock(ctx context.Context, id uint32, block dataplane.TunnelBlock) error {
+	entry, found := p.pool.Get(id, p.now())
+	if !found || entry.Direction != tunnel.Outbound || entry.Owner != p.pool.Owner() {
+		return dataplane.TunnelErrCircuitNotFound
+	}
+	return p.tunnels.SendBlockPrepared(ctx, entry.Circuit, block)
 }
 
 func (f *destinationRuntimeFactory) create(name string, destination *foundation.LocalDestination, policy *state.SecureStateEncryptedLeaseSetPolicy, remotePolicies []state.SecureStateRemoteELSAuthorization, requestedCrypto []uint16) (*destinationRuntime, error) {
@@ -411,8 +442,11 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 		LocalDelivery: func(message foundation.I2NPMessage) error { return f.service.HandleI2NP(message, f.now(), false) },
 		Now:           f.now, MaxPending: f.cfg.Tunnel.BuildPendingCapacity, Profiles: profiles, Logger: f.logger, Metrics: f.metrics,
 		OnBuildEvent: func() {
-			if runtime != nil && f.requestTunnelMaintenance != nil {
-				f.requestTunnelMaintenance(runtime)
+			if runtime != nil {
+				runtime.notifyChanged()
+				if f.requestTunnelMaintenance != nil {
+					f.requestTunnelMaintenance(runtime)
+				}
 			}
 		},
 	})
@@ -468,11 +502,13 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 			_ = health.Close()
 		}
 	}()
-	replyRoute := daemonReplyRoute{local: f.localRouter, maintainer: maintainer, now: f.now}
+	requestPath := destinationRequestPath{pool: pool, tunnels: f.tunnels, maintainer: maintainer, now: f.now}
+	replyRoute := daemonReplyRoute{maintainer: requestPath, now: f.now}
 	requests, err := netdb.NewRequestManager(f.database, muxRequestSender{
-		sender: f.transport, tunnels: f.tunnels, pairs: maintainer, now: f.now, replyKeys: f.replyKeys,
+		sender: f.transport, tunnels: requestPath, pairs: requestPath, now: f.now, replyKeys: f.replyKeys,
+		private:             true,
 		staticKeyLookup:     tunnel.NewNetDBBuildStaticKeyLookup(f.database.Routers()),
-		seedReplyRouterInfo: buildReplyRouterInfoSeeder(f.database, f.transport, f.now),
+		seedReplyRouterInfo: f.seedRouterInfo,
 	}, replyRoute, netdb.RequestManagerConfig{
 		Capacity: f.cfg.NetDB.LookupCapacity, MaxCandidates: daemonNetDBLookupCandidates, MaxWaiters: 64,
 		TimeoutMillis: daemonDestinationNetDBLookupTimeoutMillis, Now: f.now, Metrics: f.metrics, Responders: f.responders, Logger: f.logger,
@@ -506,7 +542,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	sender, err := router.NewStreamingTunnelSender(router.StreamingTunnelSenderConfig{
 		Owner: owner, PrepareTunnel: f.prepareTunnel, AwaitControl: f.awaitControl,
 		Database: f.database, Requests: requests, Ratchet: ratchet, RemoteELS: remoteELS,
-		Tunnels: f.tunnels, Pool: pool, SeedRouterInfo: buildReplyRouterInfoSeeder(f.database, f.transport, f.now),
+		Tunnels: f.tunnels, Pool: pool, SeedRouterInfo: f.seedRouterInfo,
 		Now: f.now, NextID: randomMessageID, Limiter: bandwidth, Metrics: f.metrics, Logger: f.logger,
 	})
 	if err != nil {
@@ -530,7 +566,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 		Local2: localLeaseSet, Database: f.database, InboundLeases: inboundLeaseSource{pool: pool}, Sender: muxLeaseSetSender{
 			sender: f.transport, tunnels: f.tunnels, pairs: maintainer, now: f.now,
 			staticKeyLookup:     tunnel.NewNetDBBuildStaticKeyLookup(f.database.Routers()),
-			seedReplyRouterInfo: buildReplyRouterInfoSeeder(f.database, f.transport, f.now),
+			seedReplyRouterInfo: f.seedRouterInfo,
 		},
 		Discovery: requests, Sign: destination.Sign, Now: f.now, Random: randomNonZeroID, FloodfillLimit: netdb.PublicationFloodfillK,
 		RepublishBefore: uint64(f.cfg.Tunnel.RenewBefore.Milliseconds()), Registry: f.publicationTokens,
@@ -553,6 +589,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	published := &destinationPublisher{publisher: publisher, sender: sender}
 
 	runtime = &destinationRuntime{name: name, local: destination, ratchet: ratchet, pool: pool, profiles: profiles, build: build, maintainer: maintainer, health: health, requests: requests, publisher: published, tunnels: f.tunnels, sender: sender, bandwidth: bandwidth, now: f.now}
+	runtime.requestPath = requestPath
 	runtime.unregister = append(runtime.unregister,
 		f.buildReplies.register(build),
 		f.requests.register(requests),
@@ -568,7 +605,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	}
 	runtime.unregister = append(runtime.unregister, removeGarlic)
 	session, createErr := f.destinations.Create(dataplane.RouterDestinationSessionConfig{
-		Streaming: dataplane.StreamingTunnelTunnelNetworkConfig{Destination: destination, Sender: sender}, Default: name == "default", Release: runtime.release,
+		Streaming: dataplane.StreamingTunnelTunnelNetworkConfig{Destination: destination, Sender: sender, HandshakeObserver: sender}, Default: name == "default", Release: runtime.release,
 	})
 	if createErr != nil {
 		runtime.release()

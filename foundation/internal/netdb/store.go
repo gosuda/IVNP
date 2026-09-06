@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"errors"
+	"sync"
 	"time"
 
 	"gosuda.org/ivnp/foundation/internal/i2np"
@@ -58,27 +59,43 @@ func MarshalDatabaseStore(key foundation.Hash, typeID i2np.StoreType, data []byt
 	return payload, nil
 }
 
+// One compressor bounds retained deflate state independently of caller concurrency.
+var routerInfoCompressor struct {
+	sync.Mutex
+	writer *gzip.Writer
+	buffer bytes.Buffer
+}
+
 // CompressRouterInfo returns the deterministic gzip representation used in
 // RouterInfo stores. The explicit header avoids publication-generation drift.
 func CompressRouterInfo(raw []byte) ([]byte, error) {
 	if len(raw) == 0 || len(raw) > i2np.MaxRouterInfoBytes {
 		return nil, ErrInvalidDatabaseStore
 	}
-	var compressed bytes.Buffer
-	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
-	if err != nil {
-		return nil, err
+	routerInfoCompressor.Lock()
+	defer routerInfoCompressor.Unlock()
+	compressed := &routerInfoCompressor.buffer
+	compressed.Reset()
+	writer := routerInfoCompressor.writer
+	if writer == nil {
+		var err error
+		writer, err = gzip.NewWriterLevel(compressed, gzip.BestCompression)
+		if err != nil {
+			return nil, err
+		}
+		routerInfoCompressor.writer = writer
+	} else {
+		writer.Reset(compressed)
 	}
 	writer.Header.ModTime = time.Unix(0, 0)
 	writer.Header.OS = 255
-	if _, err = writer.Write(raw); err == nil {
-		err = writer.Close()
-	}
+	_, err := writer.Write(raw)
+	err = errors.Join(err, writer.Close())
 	if err != nil {
 		return nil, err
 	}
 	if compressed.Len() == 0 || compressed.Len() > 0xffff {
 		return nil, ErrInvalidDatabaseStore
 	}
-	return compressed.Bytes(), nil
+	return bytes.Clone(compressed.Bytes()), nil
 }

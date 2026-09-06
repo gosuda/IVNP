@@ -8,8 +8,11 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"gosuda.org/ivnp/controlplane/internal/netdb"
+	"gosuda.org/ivnp/controlplane/internal/tunnel"
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
@@ -64,6 +67,90 @@ func TestNeutralDestinationControllerUsesDaemonOwnedIsolatedGraph(t *testing.T) 
 	}
 	if len(d.clientRuntimeSnapshot()) != len(beforeRuntime) {
 		t.Fatal("DestroyDestination left transient owner registered")
+	}
+}
+
+func TestPreparationWaitsForDestinationPair(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg := daemonTestConfig(t)
+		cfg.Tunnel.Enabled = true
+		d, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer d.Close()
+		endpoint, err := d.DestinationController().CreateDestination(t.Context(), destination.DestinationSpec{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer endpoint.Close()
+		preparation := endpoint.(destination.PreparingDestinationEndpoint)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { result <- preparation.PrepareDestination(ctx, foundation.Hash{19}) }()
+		synctest.Wait()
+		select {
+		case err := <-result:
+			t.Fatalf("preparation reached resolver before its owner pair existed: %v", err)
+		default:
+		}
+		cancel()
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("pair wait cancellation = %v", err)
+		}
+	})
+}
+
+type missingDestinationPair struct{}
+
+func (missingDestinationPair) Pair(uint64) (tunnel.CircuitPair, bool) {
+	return tunnel.CircuitPair{}, false
+}
+
+func TestDestinationLookupDoesNotFallBackAfterPairLoss(t *testing.T) {
+	payload, err := netdb.BuildDatabaseLookup(foundation.Hash{3}, netdb.LeaseSetLookup, requestReplyRouteCapture{gateway: foundation.Hash{2}, tunnel: 7}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct := new(requestDirectCapture)
+	throughTunnel := new(requestTunnelCapture)
+	sender := muxRequestSender{sender: direct, tunnels: throughTunnel, pairs: missingDestinationPair{}, now: func() uint64 { return 100 }, private: true}
+	message := foundation.I2NPMessage{Header: foundation.I2NPHeader{Type: foundation.I2NPDatabaseLookup, ID: 9, Expiration: 1000}, Payload: payload}
+	if err := sender.Send(t.Context(), netdb.RouterRef{Hash: foundation.Hash{1}}, message); !errors.Is(err, dataplane.TunnelErrCircuitNotFound) {
+		t.Fatalf("lookup after owner pair loss = %v", err)
+	}
+	if direct.calls != 0 || throughTunnel.calls != 0 {
+		t.Fatalf("lookup escaped lost pair: direct=%d tunnel=%d", direct.calls, throughTunnel.calls)
+	}
+}
+
+func TestDestinationLookupRejectsReusedOutboundCircuit(t *testing.T) {
+	const now = uint64(100)
+	owner := foundation.Hash{1}
+	wire := new(requestDirectCapture)
+	runtime := dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: wire, Now: func() uint64 { return now }})
+	token, err := runtime.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 1, Owner: owner, FirstHop: foundation.Hash{2}, NextTunnelID: 3, ExpiresAt: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := tunnel.NewOwnedPool(owner, 1)
+	if err := pool.Add(tunnel.Entry{ID: 1, Owner: owner, Circuit: token, Direction: tunnel.Outbound, Expires: 1000}, now); err != nil {
+		t.Fatal(err)
+	}
+	runtime.RemoveCircuit(token)
+	replacement, err := runtime.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 1, Owner: foundation.Hash{9}, FirstHop: foundation.Hash{2}, NextTunnelID: 3, ExpiresAt: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.RemoveCircuit(replacement)
+	path := destinationRequestPath{pool: pool, tunnels: runtime, now: func() uint64 { return now }}
+	err = path.SendBlock(t.Context(), 1, dataplane.TunnelBlock{Delivery: dataplane.TunnelDeliveryRouter, Gateway: foundation.Hash{4}, Last: true, Data: []byte{1}})
+	if !errors.Is(err, dataplane.TunnelErrCircuitNotFound) {
+		t.Fatalf("lookup on reused circuit = %v", err)
+	}
+	if wire.calls != 0 {
+		t.Fatal("lookup escaped through a replacement owner's circuit")
 	}
 }
 func TestClientDestinationRejectsRemovedCryptoType5(t *testing.T) {

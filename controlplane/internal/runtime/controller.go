@@ -147,6 +147,9 @@ type destinationRuntime struct {
 	maintenanceQueued       atomic.Bool
 	tunnelMaintenanceDirty  atomic.Bool
 	tunnelMaintenanceQueued atomic.Bool
+	changeMu                sync.Mutex
+	changed                 chan struct{}
+	requestPath             destinationRequestPath
 }
 
 func (r *destinationRuntime) release() {
@@ -156,6 +159,7 @@ func (r *destinationRuntime) release() {
 	r.once.Do(func() {
 		r.maintenanceMu.Lock()
 		r.released.Store(true)
+		r.notifyChanged()
 		// Cancel and join every destination-owned control-plane owner before
 		// removing its reply handlers. Late authenticated replies then observe
 		// a closed owner rather than stranded pending state.
@@ -204,6 +208,24 @@ func (r *destinationRuntime) active() bool {
 	return r != nil && !r.released.Load()
 }
 
+func (r *destinationRuntime) changes() <-chan struct{} {
+	r.changeMu.Lock()
+	defer r.changeMu.Unlock()
+	if r.changed == nil {
+		r.changed = make(chan struct{})
+	}
+	return r.changed
+}
+
+func (r *destinationRuntime) notifyChanged() {
+	r.changeMu.Lock()
+	defer r.changeMu.Unlock()
+	if r.changed != nil {
+		close(r.changed)
+		r.changed = nil
+	}
+}
+
 func (r *destinationRuntime) maintain(ctx context.Context, now uint64) error {
 	if r == nil {
 		return nil
@@ -242,6 +264,7 @@ func (r *destinationRuntime) maintainTunnels(ctx context.Context) (int, error) {
 	}
 	r.maintenanceMu.Lock()
 	defer r.maintenanceMu.Unlock()
+	defer r.notifyChanged()
 	if r.released.Load() || r.maintainer == nil {
 		return 0, nil
 	}
@@ -250,49 +273,51 @@ func (r *destinationRuntime) maintainTunnels(ctx context.Context) (int, error) {
 
 // Controller manages the lifecycle of an embedded IVNP router and its associated local services.
 type Controller struct {
-	config     state.ConfigurationOperating
-	store      *state.SecureStateStore
-	stateLock  *state.SecureStateLock
-	bundle     state.SecureStateBundle
-	database   *netdb.Database
-	netdbStore *netdb.RouterInfoStore
-	explorer   *netdb.Explorer
-	localInfo  *router.LocalRouterInfo
-	router     *router.Router
-	registry   *observability.Registry
-	logger     *slog.Logger
-	clock      dataplane.RouterClock
+	config         state.ConfigurationOperating
+	store          *state.SecureStateStore
+	stateLock      *state.SecureStateLock
+	bundle         state.SecureStateBundle
+	database       *netdb.Database
+	netdbStore     *netdb.RouterInfoStore
+	responderStore *netdb.ResponderProfileStore
+	explorer       *netdb.Explorer
+	localInfo      *router.LocalRouterInfo
+	router         *router.Router
+	registry       *observability.Registry
+	logger         *slog.Logger
+	clock          dataplane.RouterClock
 
-	service               *dataplane.RouterService
-	tunnels               *dataplane.TunnelRuntime
-	pool                  *tunnel.Pool
-	profiles              *tunnel.PeerProfiles
-	tunnelHealth          *tunnel.Health
-	replyKeys             *dataplane.GarlicReplyKeyRegistry
-	buildManager          *tunnel.BuildManager
-	maintainer            *tunnel.PairedPoolMaintainer
-	requests              *netdb.RequestManager
-	destinations          *dataplane.RouterDestinationManager
-	garlicSessions        []*dataplane.GarlicSessionManager
-	garlicReceiver        *dataplane.RouterGarlicReceiver
-	statusMux             *router.DeliveryStatusMux
-	publication           *router.PublicationMaintenance
-	destinationFactory    *destinationRuntimeFactory
-	buildReplies          *destinationBuildReplyRegistry
-	requestHandlers       *destinationRequestRegistry
-	destinationPublishers *destinationPublisherRegistry
-	clientRuntimes        []*destinationRuntime
-	clientRuntimesMu      sync.RWMutex
-	destinationMu         sync.Mutex
-	maintenanceDone       chan struct{}
-	explorationDone       chan struct{}
-	publicationWake       chan struct{}
-	destinationWake       chan *destinationRuntime
-	destinationTunnelWake chan *destinationRuntime
-	bootstrapPoolsStarted atomic.Bool
-	tunnelWake            chan struct{}
-	netdbSaveWake         chan struct{}
-	startReady            chan struct{}
+	service                *dataplane.RouterService
+	tunnels                *dataplane.TunnelRuntime
+	pool                   *tunnel.Pool
+	profiles               *tunnel.PeerProfiles
+	tunnelHealth           *tunnel.Health
+	replyKeys              *dataplane.GarlicReplyKeyRegistry
+	buildManager           *tunnel.BuildManager
+	maintainer             *tunnel.PairedPoolMaintainer
+	requests               *netdb.RequestManager
+	destinations           *dataplane.RouterDestinationManager
+	garlicSessions         []*dataplane.GarlicSessionManager
+	garlicReceiver         *dataplane.RouterGarlicReceiver
+	statusMux              *router.DeliveryStatusMux
+	publication            *router.PublicationMaintenance
+	destinationFactory     *destinationRuntimeFactory
+	releaseRouterInfoSeeds func()
+	buildReplies           *destinationBuildReplyRegistry
+	requestHandlers        *destinationRequestRegistry
+	destinationPublishers  *destinationPublisherRegistry
+	clientRuntimes         []*destinationRuntime
+	clientRuntimesMu       sync.RWMutex
+	destinationMu          sync.Mutex
+	maintenanceDone        chan struct{}
+	explorationDone        chan struct{}
+	publicationWake        chan struct{}
+	destinationWake        chan *destinationRuntime
+	destinationTunnelWake  chan *destinationRuntime
+	bootstrapPoolsStarted  atomic.Bool
+	tunnelWake             chan struct{}
+	netdbSaveWake          chan struct{}
+	startReady             chan struct{}
 
 	mu           sync.Mutex
 	started      bool
@@ -450,6 +475,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	database.SetMetrics(registry)
 	registry.SetNetDBRouters(uint64(database.Routers().Len()))
 	var netdbStore *netdb.RouterInfoStore
+	var responderStore *netdb.ResponderProfileStore
 	netdbStateDir := cfg.StateDir
 	if netdbStateDir == "" && cfg.StatePath != "" {
 		netdbStateDir = filepath.Dir(cfg.StatePath)
@@ -634,6 +660,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	)
 	statusMux = router.NewDeliveryStatusMux(routerPublisher)
 	newOK := false
+	seedRouterInfo, releaseRouterInfoSeeds := buildReplyRouterInfoSeeder(database, mux, now)
 	defer func() {
 		if newOK {
 			return
@@ -653,6 +680,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		if buildManager != nil {
 			buildManager.ReleaseSensitive()
 		}
+		releaseRouterInfoSeeds()
 		bundle.ReleaseSensitive()
 	}()
 	if cfg.Tunnel.Enabled {
@@ -677,11 +705,23 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		tunnels = dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: dataSender, Now: now})
 		pool = tunnel.NewPool(cfg.Tunnel.ExploratoryPoolCapacity)
 		profiles = tunnel.NewPeerProfiles(tunnel.PeerProfilesConfig{})
-		responders = netdb.NewResponderProfiles(0)
+		responders = netdb.NewResponderProfiles(netdb.ResponderProfilesConfig{Now: now})
+		if netdbStateDir != "" {
+			responderStore, err = netdb.NewResponderProfileStore(netdb.ResponderProfileStoreConfig{
+				Path: filepath.Join(netdbStateDir, "netdb.responders"), Profiles: responders,
+				Database: database, NetworkID: cfg.Network.ID, Now: now,
+			})
+			if err != nil {
+				return nil, err
+			}
+			if err := responderStore.Load(); err != nil {
+				logger.Warn("ignoring invalid NetDB responder history", "error", err)
+			}
+		}
 		eligible := transportPeerEligibility(mux)
 		connected := transportPeerConnection(mux)
 		for _, peer := range bootstrapPeers {
-			responders.Record(peer)
+			responders.Seed(peer)
 		}
 		replyKeys = dataplane.GarlicNewReplyKeyRegistry(daemonReplyKeyCapacity(cfg.Tunnel.BuildPendingCapacity, cfg.State.MaxDestinations))
 		replySender, replyErr := router.NewBuildReplySender(router.BuildReplySenderConfig{Sender: mux, Service: service, LocalRouter: bundle.Router.Hash, Now: now, NextID: randomMessageID, Logger: logger})
@@ -742,7 +782,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		replyRoute := daemonReplyRoute{local: bundle.Router.Hash, maintainer: maintainer, now: now}
 		requests, err = netdb.NewRequestManager(database, muxRequestSender{
 			sender: mux, tunnels: tunnels, pairs: maintainer, now: now, replyKeys: replyKeys,
-			seedReplyRouterInfo: buildReplyRouterInfoSeeder(database, mux, now),
+			seedReplyRouterInfo: seedRouterInfo,
 		}, replyRoute, netdb.RequestManagerConfig{
 			Capacity: cfg.NetDB.LookupCapacity, MaxCandidates: daemonNetDBLookupCandidates, MaxWaiters: 64,
 			TimeoutMillis: daemonNetDBLookupTimeoutMillis, Now: now, Metrics: registry, Responders: responders, Logger: logger,
@@ -783,6 +823,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			metrics:           registry,
 			logger:            logger,
 			prepareTunnel:     prepareSession,
+			seedRouterInfo:    seedRouterInfo,
 			awaitControl: func(ctx context.Context) error {
 				if d == nil {
 					return net.ErrClosed
@@ -848,11 +889,13 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		config: cfg, store: store, stateLock: stateLock, bundle: bundle, database: database, netdbStore: netdbStore, explorer: explorer, localInfo: localInfo, router: runtime, registry: registry, logger: logger, clock: clock,
 		service: service, tunnels: tunnels, pool: pool, profiles: profiles, tunnelHealth: health, replyKeys: replyKeys, buildManager: buildManager, maintainer: maintainer, requests: requests, destinations: destinations, garlicSessions: garlicSessions, garlicReceiver: garlicReceiver, statusMux: statusMux, publication: publication,
 		destinationFactory: destinationFactory, buildReplies: buildReplies, requestHandlers: requestHandlers, destinationPublishers: destinationPublishers, clientRuntimes: clientRuntimes,
-		startReady:            make(chan struct{}),
-		destinationWake:       make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
-		destinationTunnelWake: make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
-		tunnelWake:            make(chan struct{}, 1),
-		netdbSaveWake:         make(chan struct{}, 1),
+		responderStore:         responderStore,
+		releaseRouterInfoSeeds: releaseRouterInfoSeeds,
+		startReady:             make(chan struct{}),
+		destinationWake:        make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
+		destinationTunnelWake:  make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
+		tunnelWake:             make(chan struct{}, 1),
+		netdbSaveWake:          make(chan struct{}, 1),
 	}
 	for _, clientRuntime := range d.clientRuntimes {
 		clientRuntime.onRelease = d.removeClientRuntime
@@ -1085,6 +1128,11 @@ func (d *Controller) netdbSaveLoop() {
 					d.recordMaintenanceError(err)
 				}
 			}
+			if d.responderStore != nil {
+				if err := d.responderStore.Save(); err != nil && d.ctx.Err() == nil {
+					d.recordMaintenanceError(err)
+				}
+			}
 		}
 	}
 }
@@ -1211,7 +1259,7 @@ func (d *Controller) maintainOnce(now uint64) {
 	case d.publicationWake <- struct{}{}:
 	default:
 	}
-	if d.netdbStore != nil {
+	if d.netdbStore != nil || d.responderStore != nil {
 		select {
 		case d.netdbSaveWake <- struct{}{}:
 		default:
@@ -1466,8 +1514,15 @@ func (d *Controller) teardown() error {
 		if d.explorer != nil {
 			d.explorer.Close()
 		}
+		if d.releaseRouterInfoSeeds != nil {
+			d.releaseRouterInfoSeeds()
+			d.releaseRouterInfoSeeds = nil
+		}
 		if d.netdbStore != nil {
 			result = errors.Join(result, d.netdbStore.Save())
+		}
+		if d.responderStore != nil {
+			result = errors.Join(result, d.responderStore.Save())
 		}
 		if d.store != nil {
 			result = errors.Join(result, d.store.Save(d.bundle))
@@ -1923,15 +1978,22 @@ type muxRequestSender struct {
 	replyKeys           *dataplane.GarlicReplyKeyRegistry
 	staticKeyLookup     tunnel.BuildStaticKeyLookup
 	seedReplyRouterInfo tunnel.RouterInfoSeeder
+	private             bool
 }
 
 func (s muxRequestSender) Send(ctx context.Context, peer netdb.RouterRef, message foundation.I2NPMessage) error {
+	if s.private && message.Header.Type != foundation.I2NPDatabaseLookup {
+		return dataplane.TunnelErrCircuitNotFound
+	}
 	if message.Header.Type != foundation.I2NPDatabaseLookup {
 		return s.sender.Send(ctx, peer.Hash, message)
 	}
 	lookup, err := foundation.I2NPParseDatabaseLookup(message.Payload)
 	if err != nil {
 		return err
+	}
+	if s.private && !lookup.ReplyThroughTunnel() {
+		return dataplane.TunnelErrCircuitNotFound
 	}
 	if s.seedReplyRouterInfo != nil && lookup.ReplyThroughTunnel() {
 		if err = s.seedReplyRouterInfo(ctx, peer.Hash, lookup.From); err != nil {
@@ -1962,7 +2024,11 @@ func (s muxRequestSender) Send(ctx context.Context, peer netdb.RouterRef, messag
 		copy(payload[len(message.Payload)+33:], replyKey.Tag[:])
 		message.Payload = payload
 	}
-	err = sendNetDBThroughPair(ctx, peer, message, s.sender, s.tunnels, s.pairs, s.now, s.staticKeyLookup, s.seedReplyRouterInfo)
+	direct := s.sender
+	if s.private {
+		direct = nil
+	}
+	err = sendNetDBThroughPair(ctx, peer, message, direct, s.tunnels, s.pairs, s.now, s.staticKeyLookup, s.seedReplyRouterInfo)
 	if err != nil && registered {
 		s.replyKeys.RemoveGarlicReplyKey(replyTag)
 	}
@@ -2007,10 +2073,16 @@ func (s muxLeaseSetSender) Eligible(peer netdb.RouterRef) bool {
 
 func sendNetDBThroughPair(ctx context.Context, peer netdb.RouterRef, message foundation.I2NPMessage, sender dataplane.TunnelSender, tunnels requestTunnelSender, pairs requestPairSource, now func() uint64, staticKeyLookup tunnel.BuildStaticKeyLookup, seedReplyRouterInfo tunnel.RouterInfoSeeder) error {
 	if tunnels == nil || pairs == nil || now == nil {
+		if sender == nil {
+			return dataplane.TunnelErrCircuitNotFound
+		}
 		return sender.Send(ctx, peer.Hash, message)
 	}
 	pair, ok := pairs.Pair(now())
 	if !ok {
+		if sender == nil {
+			return dataplane.TunnelErrCircuitNotFound
+		}
 		return sender.Send(ctx, peer.Hash, message)
 	}
 	if seedReplyRouterInfo != nil && pair.OutboundEndpoint != (foundation.Hash{}) {
@@ -2068,7 +2140,7 @@ func transportAcceptsAnyPeer(foundation.Hash) bool { return true }
 
 type daemonReplyRoute struct {
 	local      foundation.Hash
-	maintainer *tunnel.PairedPoolMaintainer
+	maintainer requestPairSource
 	now        func() uint64
 }
 
@@ -2156,29 +2228,11 @@ func nowFromClock(clock dataplane.RouterClock) func() uint64 {
 	return func() uint64 { return uint64(clock.Now().UnixMilli()) }
 }
 
-func buildReplyRouterInfoSeeder(database *netdb.Database, sender dataplane.TunnelSender, now func() uint64) tunnel.RouterInfoSeeder {
+func buildReplyRouterInfoSeeder(database *netdb.Database, sender dataplane.TunnelSender, now func() uint64) (tunnel.RouterInfoSeeder, func()) {
+	var seeds replyRouterInfoSeeds
 	return func(ctx context.Context, endpoint, replyRouter foundation.Hash) error {
-		ref, ok := database.Routers().Get(replyRouter)
-		if !ok {
-			return fmt.Errorf("daemon: reply-gateway RouterInfo unavailable")
-		}
-		compressed, err := foundation.NetworkDatabaseCompressRouterInfo(ref.Info.Bytes())
-		if err != nil {
-			return err
-		}
-		payload, err := foundation.NetworkDatabaseMarshalDatabaseStore(replyRouter, foundation.I2NPStoreRouterInfo, compressed, 0, foundation.Hash{}, 0)
-		if err != nil {
-			return err
-		}
-		messageID, err := randomMessageID()
-		if err != nil {
-			return err
-		}
-		return sender.Send(ctx, endpoint, foundation.I2NPMessage{
-			Header:  foundation.I2NPHeader{Type: foundation.I2NPDatabaseStore, ID: messageID, Expiration: now() + 60_000},
-			Payload: payload,
-		})
-	}
+		return seeds.seed(ctx, database, sender, now, endpoint, replyRouter)
+	}, seeds.close
 }
 
 func randomNonZeroID() uint32 {

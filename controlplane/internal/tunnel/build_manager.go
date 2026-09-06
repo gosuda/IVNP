@@ -683,6 +683,14 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 		if err := m.ensureBuildSession(ctx, build.Hops[0].Router, build.Hops, "inbound", "first_hop"); err != nil {
 			return 0, err
 		}
+		// A firewalled creator needs an established return session before the
+		// last hop can deliver the bootstrap build response.
+		replyPeer := build.Hops[len(build.Hops)-1].Router
+		if replyPeer != build.Hops[0].Router {
+			if err := m.ensureBuildSession(ctx, replyPeer, build.Hops, "inbound", "reply_hop"); err != nil {
+				return 0, err
+			}
+		}
 	}
 	var messageIDStorage [foundation.I2NPMaxVariableBuildRecords + 1]uint32
 	messageIDs := messageIDStorage[:len(build.Hops)+1]

@@ -703,6 +703,10 @@ func peerAllowedAtPosition(candidate hopCandidate, selected, wanted int, policy 
 			return false
 		}
 	}
+	bootstrapReply := policy.direction == Inbound && policy.directFirst && selected+1 == wanted
+	if bootstrapReply && !connected && policy.eligible != nil && !policy.eligible(candidate.hop.Router) {
+		return false
+	}
 	if selected+1 == wanted && policy.direction == Outbound &&
 		!connected && policy.endpointMask != 0 && candidate.transports&policy.endpointMask == 0 {
 		return false

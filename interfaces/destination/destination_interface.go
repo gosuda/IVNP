@@ -115,6 +115,13 @@ type ReadyDestinationEndpoint interface {
 	WaitReady(context.Context) error
 }
 
+// PreparingDestinationEndpoint resolves a remote LeaseSet through this endpoint's
+// owner-bound tunnels without waiting for local publication or opening a stream.
+// Callers must bound ctx; successful preparation remains subject to route expiry.
+type PreparingDestinationEndpoint interface {
+	PrepareDestination(context.Context, foundation.Hash) error
+}
+
 // DestinationController manages the lifecycle of local destinations for client protocols like SAM.
 type DestinationController interface {
 	CreateDestination(context.Context, DestinationSpec) (DestinationEndpoint, error)

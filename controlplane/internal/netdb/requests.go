@@ -300,9 +300,9 @@ func (m *RequestManager) lookup(ctx context.Context, typeID LookupType, key foun
 		fallbacks:  make([]foundation.Hash, 0, len(allTargets)),
 	}
 	if m.responders != nil {
-		responsive := m.responders.Candidates(make([]foundation.Hash, 0, 1))
-		for _, candidate := range responsive {
-			if ref, known := m.database.Routers().Get(candidate); known && ref.Floodfill && m.addCandidateLocked(req, candidate) {
+		var responsive [1]foundation.Hash
+		for _, candidate := range m.responders.Candidates(responsive[:0], m.database) {
+			if m.addCandidateLocked(req, candidate) {
 				req.seed = candidate
 			}
 		}
@@ -408,7 +408,7 @@ func (m *RequestManager) HandleDatabaseSearchReply(ctx context.Context, reply fo
 		}
 		return
 	}
-	if m.responders != nil {
+	if m.responders != nil && req.deadline > m.now() && responderEligible(m.database, reply.From, m.now()) {
 		m.responders.Record(reply.From)
 	}
 	req.responseDeadline = 0
@@ -676,7 +676,7 @@ func (m *RequestManager) prepareSendLocked(key requestKey, req *pendingRequest) 
 	var peer RouterRef
 	found := false
 	if req.seed != (foundation.Hash{}) && len(req.attempted) == 0 {
-		if current, known := m.database.Routers().Get(req.seed); known {
+		if current, known := m.database.Routers().Get(req.seed); known && responderRefEligible(current, m.now()) {
 			selected, peer, found = req.seed, current, true
 		}
 	}
@@ -689,7 +689,7 @@ func (m *RequestManager) prepareSendLocked(key requestKey, req *pendingRequest) 
 				continue
 			}
 			current, known := m.database.Routers().Get(candidate)
-			if !known {
+			if !known || (candidate == req.seed && !responderRefEligible(current, m.now())) {
 				continue
 			}
 			if !found || distanceLess(req.routingKey, candidate, selected) {

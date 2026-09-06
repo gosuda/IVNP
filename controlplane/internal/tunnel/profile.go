@@ -146,6 +146,9 @@ func (p *PeerProfiles) RecordTransportSuccess(peer foundation.Hash, now uint64) 
 		return
 	}
 	p.mu.Lock()
+	if _, exists := p.transport[peer]; !exists && len(p.transport) >= p.maxPeers {
+		p.evictTransportLocked()
+	}
 	state := p.transport[peer]
 	state.failures = 0
 	state.lastSuccess = now

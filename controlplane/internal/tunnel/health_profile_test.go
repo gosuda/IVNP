@@ -75,6 +75,24 @@ func TestPeerProfilesKeepTransportCooldownSeparate(t *testing.T) {
 	}
 }
 
+func TestTransportSuccessEvictsOldestBoundedHistory(t *testing.T) {
+	profiles := NewPeerProfiles(PeerProfilesConfig{MaxPeers: 2})
+	oldest, recent, connected := foundation.Hash{1}, foundation.Hash{2}, foundation.Hash{3}
+	profiles.RecordTransportFailure(oldest, 100)
+	profiles.RecordTransportFailure(recent, 101)
+	profiles.RecordTransportSuccess(connected, 102)
+	if !profiles.EligibleAt(oldest, 102) {
+		t.Fatal("new transport success did not evict the oldest bounded history entry")
+	}
+	if profiles.EligibleAt(recent, 102) {
+		t.Fatal("new transport success removed the more recent failure cooldown")
+	}
+	profiles.RecordTransportSuccess(connected, 103)
+	if profiles.EligibleAt(recent, 103) {
+		t.Fatal("refreshing an existing success evicted unrelated history")
+	}
+}
+
 func TestPeerProfilesDeriveJavaSelectionTiersFromHistory(t *testing.T) {
 	profiles := NewPeerProfiles(PeerProfilesConfig{Window: 8})
 	fast := foundation.Hash{3}

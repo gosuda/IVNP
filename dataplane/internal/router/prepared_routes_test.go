@@ -268,3 +268,93 @@ func TestDetachedRouteAdmissionIsBoundedAndReclaimed(t *testing.T) {
 		}
 	})
 }
+
+func TestStaleHandshakeReceiptCannotRetireNewInstallation(t *testing.T) {
+	sender, route := preparedTestSender(t, func() uint64 { return 1000 }, 1, func(context.Context, dataplanetunnel.CircuitToken, dataplanetunnel.Block) error { return nil })
+	if err := sender.InstallRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	old, ok := sender.RouteReceipt(route.Remote)
+	if !ok {
+		t.Fatal("missing initial route")
+	}
+	// Identical route content in the same generation is still a new installation.
+	if err := sender.InstallRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	delivery := dataplanestreamingtunnel.Delivery{From: route.Owner, To: route.Remote, Protocol: 6, Payload: []byte{1}}
+	if err := sender.SendTunnelOnRoute(t.Context(), delivery, old); !errors.Is(err, ErrPreparedRouteMissing) {
+		t.Fatalf("old SYN used newer installation: %v", err)
+	}
+	if sender.RetireUnresponsiveRoute(old) {
+		t.Fatal("old handshake retired newer installation")
+	}
+	if err := sender.SendRatchetReply(t.Context(), route.Remote, []byte{1}); err != nil {
+		t.Fatalf("replacement cannot send: %v", err)
+	}
+}
+
+func TestFreshHandshakeFailureCanRetirePreviouslyResponsiveRoute(t *testing.T) {
+	sender, route := preparedTestSender(t, func() uint64 { return 1000 }, 1, func(context.Context, dataplanetunnel.CircuitToken, dataplanetunnel.Block) error { return nil })
+	if err := sender.InstallRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	earlier, ok := sender.RouteReceipt(route.Remote)
+	if !ok {
+		t.Fatal("missing route before successful handshake")
+	}
+	sender.MarkRouteResponsive(earlier)
+	if sender.RetireUnresponsiveRoute(earlier) {
+		t.Fatal("stale failure overrode a subsequent successful handshake")
+	}
+	later, ok := sender.RouteReceipt(route.Remote)
+	if !ok || !sender.RetireUnresponsiveRoute(later) {
+		t.Fatal("historical success prevented recovery from a new handshake failure")
+	}
+	if err := sender.SendRatchetReply(t.Context(), route.Remote, []byte{1}); !errors.Is(err, ErrPreparedRouteMissing) {
+		t.Fatalf("failed route admitted another send: %v", err)
+	}
+}
+
+func TestHandshakeRetirementDoesNotWaitForAdmittedWrite(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		defer once.Do(func() { close(release) })
+		sender, route := preparedTestSender(t, func() uint64 { return 1000 }, 1, func(context.Context, dataplanetunnel.CircuitToken, dataplanetunnel.Block) error {
+			close(entered)
+			<-release
+			return nil
+		})
+		if err := sender.InstallRoute(route); err != nil {
+			t.Fatal(err)
+		}
+		receipt, ok := sender.RouteReceipt(route.Remote)
+		if !ok {
+			t.Fatal("missing route")
+		}
+		retained := sender.routes[route.Remote].route
+		sent := make(chan error, 1)
+		go func() { sent <- sender.SendRatchetReply(t.Context(), route.Remote, []byte{1}) }()
+		<-entered
+		if !sender.RetireUnresponsiveRoute(receipt) {
+			t.Fatal("unresponsive installation not retired")
+		}
+		if err := sender.SendRatchetReply(t.Context(), route.Remote, []byte{2}); !errors.Is(err, ErrPreparedRouteMissing) {
+			t.Fatalf("retired route admitted payload: %v", err)
+		}
+		if retained.KeyData[0] != 9 {
+			t.Fatal("active write lost encryption key ownership")
+		}
+		once.Do(func() { close(release) })
+		if err := <-sent; err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		for _, value := range retained.KeyData {
+			if value != 0 {
+				t.Fatal("drained route retained key material")
+			}
+		}
+	})
+}

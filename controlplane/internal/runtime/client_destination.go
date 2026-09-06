@@ -230,6 +230,38 @@ func (e *clientDestinationEndpoint) SubscribeBounded(route destination.Destinati
 	}
 	return session.SubscribeBounded(route, capacity, maxBytes, shared)
 }
+
+func (e *clientDestinationEndpoint) PrepareDestination(ctx context.Context, target foundation.Hash) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		session, err := e.session()
+		if err != nil {
+			return err
+		}
+		runtime := e.runtime
+		changed := runtime.changes()
+		if !runtime.active() {
+			return net.ErrClosed
+		}
+		if runtime.pool.Owner() != session.Hash() {
+			return dataplane.RouterErrGarlicDestination
+		}
+		if _, ok := runtime.requestPath.Pair(runtime.now()); ok {
+			return runtime.sender.PrepareDestination(ctx, target)
+		}
+		if e.wake != nil {
+			e.wake(runtime)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
 func (e *clientDestinationEndpoint) WaitReady(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -273,3 +305,4 @@ func (e *clientDestinationEndpoint) Close() error {
 
 var _ destination.DestinationController = clientDestinationController{}
 var _ destination.DestinationEndpoint = (*clientDestinationEndpoint)(nil)
+var _ destination.PreparingDestinationEndpoint = (*clientDestinationEndpoint)(nil)

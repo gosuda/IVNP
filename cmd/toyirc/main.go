@@ -26,6 +26,7 @@ type ircConfig struct {
 	server     string
 	port       int
 	nick       string
+	persistent bool
 }
 
 type ircNetwork interface {
@@ -40,10 +41,11 @@ func main() {
 	flag.StringVar(&config.server, "server", "irc.postman.i2p", "IRC I2P hostname or destination")
 	flag.IntVar(&config.port, "port", 6667, "IRC destination port")
 	flag.StringVar(&config.nick, "nick", "", "IRC nickname")
+	flag.BoolVar(&config.persistent, "persistent", false, "keep the SAM session and reconnect IRC streams until timeout")
 	flag.DurationVar(&timeout, "timeout", maxRunTime, "overall connection timeout")
 	flag.Parse()
-	if timeout <= 0 || timeout > maxRunTime {
-		fmt.Fprintln(os.Stderr, "timeout must be between 1ns and 5m")
+	if timeout <= 0 || (!config.persistent && timeout > maxRunTime) {
+		fmt.Fprintln(os.Stderr, "timeout must be positive and at most 5m unless persistent mode is enabled")
 		os.Exit(2)
 	}
 	if config.nick == "" {
@@ -73,7 +75,8 @@ func runIRC2P(ctx context.Context, config ircConfig, output io.Writer) error {
 	}
 	network, err := client.SimpleAnonymousMessagingNew(client.SimpleAnonymousMessagingConfig{
 		Address: config.samAddress, SignatureType: foundation.SigningEdDSASHA512Ed25519,
-		LeaseSetEncTypes: []foundation.CryptoKeyType{foundation.CryptoX25519},
+		LeaseSetEncTypes:   []foundation.CryptoKeyType{foundation.CryptoX25519},
+		PrepareDestination: config.server,
 	})
 	if err != nil {
 		return fmt.Errorf("toyirc: create SAM session: %w", err)
@@ -92,9 +95,7 @@ func runIRC2PNetwork(ctx context.Context, config ircConfig, output io.Writer, ne
 	address := net.JoinHostPort(config.server, strconv.Itoa(config.port))
 	var lastErr error
 	for {
-		attemptContext, cancel := context.WithTimeout(ctx, 90*time.Second)
-		lastErr = runIRC2PAttempt(attemptContext, network, config, address, output)
-		cancel()
+		lastErr = runIRC2PAttempt(ctx, network, config, address, output)
 		if lastErr == nil {
 			_, err := fmt.Fprintf(output, "connected to %s as %s\n", address, config.nick)
 			return err
@@ -113,24 +114,28 @@ func runIRC2PNetwork(ctx context.Context, config ircConfig, output io.Writer, ne
 }
 
 func runIRC2PAttempt(ctx context.Context, network ircNetwork, config ircConfig, address string, output io.Writer) error {
-	connection, err := network.DialI2P(ctx, address)
+	dialContext, cancel := context.WithTimeout(ctx, 90*time.Second)
+	connection, err := network.DialI2P(dialContext, address)
+	cancel()
 	if err != nil {
 		return fmt.Errorf("toyirc: connect %s: %w", address, err)
 	}
 	defer connection.Close()
-	return exchangeIRC(ctx, connection, config.nick, output)
+	return exchangeIRC(ctx, connection, config.nick, output, config.persistent)
 }
 
-func exchangeIRC(ctx context.Context, connection net.Conn, nick string, output io.Writer) error {
+func exchangeIRC(ctx context.Context, connection net.Conn, nick string, output io.Writer, persistent bool) error {
 	if ctx == nil || connection == nil || !validNick(nick) || output == nil {
 		return errors.New("toyirc: invalid IRC connection")
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := connection.SetDeadline(deadline); err != nil {
-			return err
-		}
+	registrationDeadline := time.Now().Add(90 * time.Second)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(registrationDeadline) {
+		registrationDeadline = deadline
 	}
-	stop := context.AfterFunc(ctx, func() { _ = connection.SetDeadline(time.Now()) })
+	if err := connection.SetDeadline(registrationDeadline); err != nil {
+		return err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
 	defer stop()
 	if err := writeIRC(connection, "NICK "+nick); err != nil {
 		return fmt.Errorf("toyirc: send NICK: %w", err)
@@ -163,6 +168,13 @@ func exchangeIRC(ctx context.Context, connection net.Conn, nick string, output i
 		command := ircCommand(message)
 		switch command {
 		case "001":
+			if persistent {
+				deadline, _ := ctx.Deadline()
+				if err := connection.SetDeadline(deadline); err != nil {
+					return err
+				}
+				continue
+			}
 			_ = writeIRC(connection, "QUIT :integration complete")
 			return nil
 		case "ERROR":

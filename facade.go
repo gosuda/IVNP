@@ -54,6 +54,9 @@ type (
 	// LeaseSet publication. Give WaitReady a bounded context during bootstrap.
 	ReadyDestinationEndpoint = destination.ReadyDestinationEndpoint
 
+	// PreparingDestinationEndpoint prepares a remote route without opening a stream.
+	PreparingDestinationEndpoint = destination.PreparingDestinationEndpoint
+
 	// DestinationSpec with Local nil creates a transient identity; supplied keys
 	// are cloned, so the caller retains ownership of the original.
 	DestinationSpec = destination.DestinationSpec

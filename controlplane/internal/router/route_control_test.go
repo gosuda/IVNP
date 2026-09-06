@@ -190,6 +190,55 @@ func TestSenderRetirementCancelsBlockedPreparation(t *testing.T) {
 	})
 }
 
+func TestDestinationPreparationIsReusedWithoutSendingPayload(t *testing.T) {
+	var preparations atomic.Int32
+	sender, deliveries, wire := routeControlFixture(t, func(context.Context, foundation.Hash) error {
+		preparations.Add(1)
+		return nil
+	})
+	if err := sender.PrepareDestination(t.Context(), deliveries[0].To); err != nil {
+		t.Fatal(err)
+	}
+	wire.mu.Lock()
+	sentBeforeDial := len(wire.messages)
+	wire.mu.Unlock()
+	if sentBeforeDial != 0 {
+		t.Fatalf("preparation sent %d application frames", sentBeforeDial)
+	}
+	if err := sender.SendTunnel(t.Context(), deliveries[0]); err != nil {
+		t.Fatal(err)
+	}
+	if got := preparations.Load(); got != 1 {
+		t.Fatalf("prepared route was not reused: preparations=%d", got)
+	}
+}
+
+func TestLastPreparationWaiterCancelsAndJoinsWorker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered, stopped := make(chan struct{}), make(chan struct{})
+		sender, deliveries, _ := routeControlFixture(t, func(ctx context.Context, _ foundation.Hash) error {
+			close(entered)
+			<-ctx.Done()
+			defer close(stopped)
+			return ctx.Err()
+		})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { result <- sender.PrepareDestination(ctx, deliveries[0].To) }()
+		<-entered
+		cancel()
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled preparation = %v", err)
+		}
+		select {
+		case <-stopped:
+		default:
+			t.Fatal("preparation returned before worker stopped")
+		}
+	})
+}
+
 func TestRatchetReplyAdmissionBoundsOwnedPacketBytes(t *testing.T) {
 	sender, _, _ := routeControlFixture(t, nil)
 	reservation, err := sender.ReserveRatchetReply(foundation.Hash{8})
@@ -299,5 +348,133 @@ func TestRoutePreparationRejectsReusedOrForeignCircuit(t *testing.T) {
 				t.Fatal("payload escaped through an unselected installation")
 			}
 		})
+	}
+}
+
+func TestSilentRouteRecoverySelectsAlternatePreparedCircuit(t *testing.T) {
+	sender, deliveries, _ := routeControlFixture(t, nil)
+	first, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, ok := sender.execution.RouteReceipt(deliveries[0].To)
+	if !ok {
+		t.Fatal("missing prepared route")
+	}
+	// Both circuits remain eligible; failure must not tear down a shared tunnel.
+	pool := controlplanetunnel.NewOwnedPool(sender.owner, 2)
+	for _, entry := range sender.pool.Snapshot(1000) {
+		if err := pool.Add(entry, 1000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alternate, err := sender.tunnels.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 11, Owner: sender.owner, FirstHop: foundation.Hash{8}, NextTunnelID: 12, ExpiresAt: 95000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sender.tunnels.RemoveCircuit(alternate) })
+	if err := pool.Add(controlplanetunnel.Entry{ID: 11, Owner: sender.owner, Circuit: alternate, Direction: controlplanetunnel.Outbound, Expires: 95000}, 1000); err != nil {
+		t.Fatal(err)
+	}
+	sender.pool = pool
+	first.NoResponse()
+	if sender.execution.HasRoute(deliveries[0].To, 1) {
+		t.Fatal("silent route remained cached")
+	}
+	second, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, ok := sender.execution.RouteReceipt(deliveries[0].To)
+	if !ok || replacement.Circuit != alternate || replacement.Circuit == receipt.Circuit {
+		t.Fatalf("replacement route = %+v", replacement)
+	}
+	if err := sender.SendTunnel(t.Context(), deliveries[0]); err != nil {
+		t.Fatalf("alternate route send = %v", err)
+	}
+	second.Established()
+	first.NoResponse()
+	if err := sender.SendTunnel(t.Context(), deliveries[0]); err != nil {
+		t.Fatalf("stale timeout retired connected replacement: %v", err)
+	}
+	if pool.Count(controlplanetunnel.Outbound, 1000) != 2 {
+		t.Fatal("per-destination timeout retired shared circuit")
+	}
+}
+
+func TestSilentRouteDoesNotReuseOnlyFailedPath(t *testing.T) {
+	sender, deliveries, _ := routeControlFixture(t, nil)
+	feedback, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedback.NoResponse()
+	if err := sender.PrepareDestination(t.Context(), deliveries[0].To); !errors.Is(err, dataplane.TunnelErrCircuitNotFound) {
+		t.Fatalf("only silent path was reused: %v", err)
+	}
+}
+
+func TestConnectedRouteSurvivesAnotherHandshakeTimeout(t *testing.T) {
+	sender, deliveries, _ := routeControlFixture(t, nil)
+	silent, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connected, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connected.Established()
+	silent.NoResponse()
+	if err := sender.SendTunnel(t.Context(), deliveries[0]); err != nil {
+		t.Fatalf("connected route retired: %v", err)
+	}
+}
+
+func TestSilentRoutesExhaustRemoteLeasesBeforeReusingFailure(t *testing.T) {
+	sender, _, _ := routeControlFixture(t, nil)
+	remote, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.ReleaseSensitive()
+	local, err := controlplanenetdb.NewLocalLeaseSet2(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.ReplaceInboundLeases([]foundation.NetworkDatabaseLease{
+		{Gateway: foundation.Hash{10}, TunnelID: 11, EndDate: 90000},
+		{Gateway: foundation.Hash{20}, TunnelID: 21, EndDate: 90000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw := make([]byte, foundation.NetworkDatabaseMaxLeaseSetBytes)
+	n, err := local.MarshalTo(raw, 1000, remote.Sign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.database.HandleDatabaseStore(foundation.I2NPDatabaseStoreMessage{Key: remote.Hash(), Type: foundation.I2NPStoreLeaseSet2, Data: raw[:n]}, false, 1000); err != nil {
+		t.Fatal(err)
+	}
+	first, err := sender.PrepareHandshake(t.Context(), remote.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, ok := sender.execution.RouteReceipt(remote.Hash())
+	if !ok {
+		t.Fatal("missing first lease route")
+	}
+	first.NoResponse()
+	second, err := sender.PrepareHandshake(t.Context(), remote.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	alternate, ok := sender.execution.RouteReceipt(remote.Hash())
+	if !ok || alternate.Circuit != initial.Circuit || alternate.TunnelID == initial.TunnelID {
+		t.Fatalf("alternate lease = %+v; first = %+v", alternate, initial)
+	}
+	second.NoResponse()
+	if err := sender.PrepareDestination(t.Context(), remote.Hash()); !errors.Is(err, dataplane.TunnelErrCircuitNotFound) {
+		t.Fatalf("exhausted silent leases were reused: %v", err)
 	}
 }
