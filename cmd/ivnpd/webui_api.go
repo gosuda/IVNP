@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking"
 	"gosuda.org/ivnp/observability"
 )
 
@@ -419,7 +419,7 @@ func (s *WebUIServer) handleNetDB(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func netDBRouterView(router networking.NetworkDatabaseRouterRef, now uint64) netDBRouterItem {
+func netDBRouterView(router controlplane.NetworkDatabaseRouterRef, now uint64) netDBRouterItem {
 	item := netDBRouterItem{
 		Hash: foundation.EncodeI2PBase64(router.Hash[:]), B32: foundation.B32(router.Hash),
 		Floodfill: router.Floodfill, Published: router.Info.Published,
@@ -526,7 +526,7 @@ func (s *WebUIServer) handleActionTunnelProbe(w http.ResponseWriter, r *http.Req
 	}
 	if err := s.node.TriggerTunnelProbe(r.Context()); err != nil {
 		status := http.StatusConflict
-		if !errors.Is(err, networking.TunnelErrProbeNotReady) && !errors.Is(err, networking.TunnelErrProbePending) {
+		if !errors.Is(err, controlplane.TunnelErrProbeNotReady) && !errors.Is(err, controlplane.TunnelErrProbePending) {
 			status = http.StatusServiceUnavailable
 		}
 		writeAPIError(w, status, err.Error())
@@ -555,8 +555,8 @@ func endpointString(endpoint struct {
 	return net.JoinHostPort(endpoint.Host, strconv.Itoa(int(endpoint.Port)))
 }
 
-func tunnelDirection(direction networking.TunnelDirection) string {
-	if direction == networking.TunnelInbound {
+func tunnelDirection(direction controlplane.TunnelDirection) string {
+	if direction == controlplane.TunnelInbound {
 		return "inbound"
 	}
 	return "outbound"

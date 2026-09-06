@@ -9,25 +9,25 @@ import (
 )
 
 type (
-	AddressBookConfig                        = addressbook.Config
-	AddressBookService                       = addressbook.Service
-	ClientByteBudget                         = frontend.ByteBudget
-	ClientControl                            = frontend.Control
-	ClientControlConfig                      = frontend.ControlConfig
-	ClientDestination                        = frontend.Destination
-	ClientDestinationCatalog                 = frontend.DestinationCatalog
-	ClientDestinationController              = frontend.DestinationController
-	ClientDestinationEndpoint                = frontend.DestinationEndpoint
-	ClientDestinationRoute                   = frontend.DestinationRoute
-	ClientDestinationSpec                    = frontend.DestinationSpec
-	ClientHTTPProxy                          = frontend.HTTPProxy
-	ClientHTTPProxyConfig                    = frontend.HTTPProxyConfig
-	ClientLeaseSetPolicy                     = frontend.LeaseSetPolicy
-	ClientMessageSubscription                = frontend.MessageSubscription
-	ClientReadinessDetails                   = frontend.ReadinessDetails
-	ClientSOCKS5Config                       = frontend.SOCKS5Config
-	ClientSOCKS5Proxy                        = frontend.SOCKS5Proxy
-	ClientStatus                             = frontend.Status
+	AddressBookConfig   = addressbook.Config
+	AddressBookService  = addressbook.Service
+	ClientByteBudget    = frontend.ByteBudget
+	ClientControl       = frontend.Control
+	ClientControlConfig = frontend.ControlConfig
+
+	ClientDestinationCatalog    = frontend.DestinationCatalog
+	ClientDestinationController = frontend.DestinationController
+	ClientDestinationEndpoint   = frontend.DestinationEndpoint
+	ClientDestinationRoute      = frontend.DestinationRoute
+	ClientDestinationSpec       = frontend.DestinationSpec
+	ClientHTTPProxy             = frontend.HTTPProxy
+	ClientHTTPProxyConfig       = frontend.HTTPProxyConfig
+	ClientLeaseSetPolicy        = frontend.LeaseSetPolicy
+	ClientMessageSubscription   = frontend.MessageSubscription
+
+	ClientSOCKS5Config = frontend.SOCKS5Config
+	ClientSOCKS5Proxy  = frontend.SOCKS5Proxy
+
 	ClientStatusProvider                     = frontend.StatusProvider
 	RegistrationSigner                       = registration.Signer
 	SimpleAnonymousMessagingConfig           = sam.Config

@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/ingress"
-	"gosuda.org/ivnp/networking"
 )
 
 type panicRecorder struct{ reports chan ingress.Panic }
@@ -76,7 +76,7 @@ func (*panicSubscription) Close() error { return nil }
 
 type panicSendEndpoint struct{ *loopEndpoint }
 
-func (e *panicSendEndpoint) SendMessage(context.Context, networking.StreamingTunnelDelivery) error {
+func (e *panicSendEndpoint) SendMessage(context.Context, dataplane.StreamingTunnelDelivery) error {
 	panic("destination send")
 }
 
@@ -141,7 +141,7 @@ func TestSAMWorkerPanicContainmentAndCleanup(t *testing.T) {
 		connection := newPanicConn()
 		server := &Server{config: ServerConfig{PanicReporter: recorder}}
 		session := &samSession{server: server, ctx: ctx, control: &serverConnection{Conn: connection}, style: styleRaw}
-		message := destination.NewReceivedMessage(networking.StreamingTunnelDelivery{Payload: []byte("owned")}, nil)
+		message := destination.NewReceivedMessage(dataplane.StreamingTunnelDelivery{Payload: []byte("owned")}, nil)
 		session.receiveLoop(&panicSubscription{message: message})
 		awaitPanicReport(t, recorder.reports, ingress.BoundarySAMWorker)
 		if message.Delivery.Payload != nil {

@@ -1,0 +1,5226 @@
+package router
+
+import (
+	"bytes"
+	"cmp"
+	"compress/gzip"
+	"context"
+	"crypto/ecdh"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/netip"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	dataplanessu2 "gosuda.org/ivnp/dataplane/internal/transport/ssu2"
+	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/ingress"
+	"gosuda.org/ivnp/internal/parallelism"
+	"gosuda.org/ivnp/observability"
+)
+
+const (
+	defaultSSU2NetworkID         = 2
+	defaultSSU2HandshakeTimeout  = 30 * time.Second
+	defaultSSU2MaxSessions       = 256
+	defaultSSU2MaxPending        = 64
+	defaultSSU2MaxClockSkew      = 2 * time.Minute
+	defaultSSU2TokenLifetime     = 10 * time.Minute
+	ssu2RetransmitInterval       = time.Second
+	ssu2MaximumRTO               = time.Minute
+	ssu2MaxRetransmits           = 5
+	ssu2MaxTrackedPackets        = 256
+	ssu2MaximumSendWindow        = 1024 * 1024
+	ssu2InitialSlowStart         = ssu2MaximumSendWindow / 2
+	ssu2MinimumNetworkMTU        = 1280
+	ssu2MaximumNetworkMTU        = 1500
+	ssu2MTUStep                  = 64
+	ssu2DefaultIdleTimeout       = 10 * time.Minute
+	ssu2MaxFragmentedMessages    = 64
+	ssu2FragmentLifetime         = 30 * time.Second
+	ssu2MinimumIPv4PacketSize    = ssu2MinimumNetworkMTU - 20 - 8
+	ssu2MinimumIPv6PacketSize    = ssu2MinimumNetworkMTU - 40 - 8
+	ssu2EstablishRetransmitDelay = 1250 * time.Millisecond
+	ssu2RelayResponseTimeout     = 15 * time.Second
+
+	ssu2ReceiveBatchCount = 4
+	ssu2ReceiveBatchSize  = 32
+	ssu2DispatchQueueSize = 64
+	ssu2EgressSlots       = 32
+	ssu2ACKDelay          = time.Millisecond
+	ssu2MaxNewTokens      = 1024
+	ssu2RelayTarget       = 3
+	ssu2RelayPublishMin   = 100 * time.Millisecond
+	ssu2RelayPublishMax   = 30 * time.Second
+	ssu2ACKIdle           = false
+	ssu2ACKPending        = true
+)
+
+var (
+	ErrSSU2ManagerConfig = errors.New("router: invalid SSU2 manager configuration")
+	ErrSSU2Peer          = errors.New("router: invalid SSU2 peer RouterInfo")
+	ErrSSU2Session       = errors.New("router: SSU2 session unavailable")
+	ErrSSU2Introduction  = errors.New("router: SSU2 introduction unavailable")
+)
+
+// PeerTestOutcome is the protocol result for one address family. Symmetric
+// NAT is published as firewalled because it still requires introducers.
+type PeerTestOutcome uint8
+
+const (
+	PeerTestUnknown PeerTestOutcome = iota
+	PeerTestOK
+	PeerTestFirewalled
+	PeerTestSymmetricNAT
+)
+
+// PeerTestResult records a completed, authenticated Peer Test evaluation.
+type PeerTestResult struct {
+	Nonce      uint32
+	Outcome    PeerTestOutcome
+	Diagnostic string
+}
+
+// SSU2ManagerConfig contains the private static X25519 key and public SSU2
+// introduction key advertised in the local RouterInfo's SSU/SSU2 address.
+type SSU2ManagerConfig struct {
+	Peers            TransportPeerSource
+	StaticPrivate    []byte
+	IntroKey         []byte
+	NetworkID        uint8
+	HandshakeTimeout time.Duration
+	MaxClockSkew     time.Duration
+	TokenLifetime    time.Duration
+	IdleTimeout      time.Duration
+	MaxSessions      int
+	MaxPending       int
+	OnPeerTest       func(dataplanessu2.PeerTestBlock, net.Addr)
+	// OnPeerTestResult observes a completed authenticated Peer Test outcome.
+	// LocalInfo is updated and signed before this callback is invoked.
+	OnPeerTestResult      func(PeerTestResult)
+	PublishPeerTestResult func(context.Context, PeerTestResult)
+	PanicReporter         ingress.Reporter
+	Metrics               *observability.Registry
+	Logger                *slog.Logger
+	// SignControl signs SSU2 relay control inputs. It is required when
+	// LocalInfo does not expose the concrete local signing owner.
+	SignControl func([]byte) ([]byte, error)
+	// IntroductionEndpoint returns the observed or configured external UDP
+	// endpoint used in Relay Responses and Requests for firewalled routers.
+	IntroductionEndpoint func() (netip.AddrPort, error)
+}
+
+type ssu2BatchConnection interface {
+	ReadBatch(*dataplanessu2.Batch) (int, error)
+	WriteBatchPrefix(*dataplanessu2.Batch, int) (int, error)
+	KernelDrops() uint64
+	Close() error
+}
+
+// SSU2Manager is the native UDP SSU2 transport manager. It performs the
+// address-validation retry exchange, Noise XK setup, fragmented Session
+// Confirmed reassembly, RouterInfo/static-key binding validation, and delivery
+// of complete SSU2 I2NP blocks to Router's transport callback.
+type SSU2Manager struct {
+	peers                 TransportPeerSource
+	staticPrivate         []byte
+	introKey              []byte
+	tokenSecret           [sha256.Size]byte
+	networkID             uint8
+	timeout               time.Duration
+	maxClockSkew          time.Duration
+	tokenLifetime         time.Duration
+	idleTimeout           time.Duration
+	maxSessions           int
+	maxPending            int
+	onPeerTest            func(dataplanessu2.PeerTestBlock, net.Addr)
+	onPeerTestResult      func(PeerTestResult)
+	publishPeerTestResult func(context.Context, PeerTestResult)
+	signControl           func([]byte) ([]byte, error)
+	introductionEndpoint  func() (netip.AddrPort, error)
+	mu                    sync.RWMutex
+	started               bool
+	conn                  *net.UDPConn
+	ipv6Available         atomic.Bool
+	batchConn             ssu2BatchConnection
+	bindings              TransportBindings
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	err                   error
+	done                  chan struct{}
+	close                 sync.Once
+	wg                    sync.WaitGroup
+	setupSlots            chan struct{}
+	egressMu              sync.RWMutex
+
+	receiveFree    chan *ssu2ReceiveBatch
+	authQueue      chan ssu2ReceiveJob
+	setupFree      chan *ssu2SetupPacket
+	setupQueue     chan *ssu2SetupPacket
+	dispatchQueues []chan *ssu2DispatchBatch
+	dispatchFree   chan *ssu2DispatchBatch
+	ackQueue       chan *ssu2TransportSession
+	egressFree     chan *ssu2EgressSlot
+	egressQueue    chan *ssu2EgressSlot
+	ioStats        ssu2IOStats
+	metrics        *observability.Registry
+	logger         *slog.Logger
+	kernelDrops    atomic.Uint64
+
+	sessionsByPeer      map[foundation.Hash]*ssu2TransportSession
+	sessionsByID        map[uint64]*ssu2TransportSession
+	outbound            map[foundation.Hash]*ssu2OutboundPending
+	outboundAddr        map[netip.AddrPort]*ssu2OutboundPending
+	inbound             map[uint64]*ssu2InboundPending
+	introducers         map[uint32]foundation.Hash
+	relayGrants         map[foundation.Hash]ssu2RelayTagLease
+	advertisedRelays    map[foundation.Hash]ssu2RelayTagLease
+	relayTagPending     map[foundation.Hash]time.Time
+	relayPublish        chan struct{}
+	relayRevision       uint64
+	publishedRevision   uint64
+	relayPublishMu      sync.Mutex
+	newTokens           map[string]ssu2NewTokenLease
+	peerTests           map[uint32]*ssu2PeerTestState
+	symmetricEvidence   map[string]ssu2PeerTestEvidence
+	relayRequests       map[uint32]*ssu2RelayRequest
+	relayForwards       map[uint32]ssu2RelayForward
+	deferredRelayIntros map[uint32]ssu2DeferredRelayIntro
+	relayStoreJobs      chan ssu2RelayStoreJob
+	routerInfoStoresMu  sync.RWMutex
+	routerInfoStores    map[foundation.Hash]ssu2RouterInfoStoreSnapshot
+	reporter            ingress.Reporter
+}
+
+// IOStats is the single atomic source for SSU2 socket accounting.
+type IOStats struct {
+	DatagramsReceived uint64
+	DatagramsSent     uint64
+	BytesReceived     uint64
+	BytesSent         uint64
+	Dropped           uint64
+}
+
+type ssu2IOStats struct {
+	datagramsReceived atomic.Uint64
+	datagramsSent     atomic.Uint64
+	bytesReceived     atomic.Uint64
+	bytesSent         atomic.Uint64
+	dropped           atomic.Uint64
+}
+
+func (s *ssu2IOStats) snapshot() IOStats {
+	return IOStats{
+		DatagramsReceived: s.datagramsReceived.Load(),
+		DatagramsSent:     s.datagramsSent.Load(),
+		BytesReceived:     s.bytesReceived.Load(),
+		BytesSent:         s.bytesSent.Load(),
+		Dropped:           s.dropped.Load(),
+	}
+}
+
+type ssu2ReceiveBatch struct {
+	batch     *dataplanessu2.Batch
+	remaining atomic.Int32
+	addresses [ssu2ReceiveBatchSize]netip.AddrPort
+}
+type ssu2PacketAddr struct{ value netip.AddrPort }
+
+func (a ssu2PacketAddr) Network() string          { return "udp" }
+func (a ssu2PacketAddr) String() string           { return a.value.String() }
+func (a ssu2PacketAddr) AddrPort() netip.AddrPort { return a.value }
+
+type ssu2ReceiveJob struct {
+	batch *ssu2ReceiveBatch
+	index uint8
+}
+
+type ssu2DispatchItem struct {
+	peer    foundation.Hash
+	message foundation.I2NPMessage
+}
+
+// ssu2DispatchBatch is leased to one authenticated receive batch until every
+// borrowed I2NP view has been delivered synchronously.  Its fixed storage keeps
+// the receive path allocation-free and makes buffer ownership explicit.
+type ssu2DispatchBatch struct {
+	items [ssu2ReceiveBatchSize * 8]ssu2DispatchItem
+	count uint8
+	done  chan error
+}
+type ssu2EgressSlot struct {
+	data   [dataplanessu2.MaxIPv4PacketLen]byte
+	length int
+	addr   netip.AddrPort
+	zone   uint32
+	relay  bool
+	wait   bool
+	flow   uint64
+	done   chan error
+}
+
+type ssu2EgressOptions struct {
+	relay bool
+	wait  bool
+	flow  uint64
+}
+
+func (m *SSU2Manager) releaseSensitive() {
+	clear(m.staticPrivate)
+	clear(m.introKey)
+	clear(m.tokenSecret[:])
+	m.clearIOBuffers()
+}
+
+func (m *SSU2Manager) clearIOBuffers() {
+	if m == nil {
+		return
+	}
+	clearReceive := func(received *ssu2ReceiveBatch) {
+		if received == nil || received.batch == nil {
+			return
+		}
+		for index := range received.batch.Packets() {
+			clear(received.batch.Packets()[index].Data)
+			received.batch.Packets()[index].Len = 0
+		}
+	}
+	clearSlot := func(slot *ssu2EgressSlot) {
+		if slot != nil {
+			clear(slot.data[:])
+			slot.length = 0
+		}
+	}
+	for {
+		select {
+		case received := <-m.receiveFree:
+			clearReceive(received)
+		case job := <-m.authQueue:
+			clearReceive(job.batch)
+		case job := <-m.setupFree:
+			clear(job.data[:])
+		case job := <-m.setupQueue:
+			clear(job.data[:])
+		case slot := <-m.egressFree:
+			clearSlot(slot)
+		case slot := <-m.egressQueue:
+			clearSlot(slot)
+		default:
+			return
+		}
+	}
+}
+
+type ssu2TransportSession struct {
+	peer       foundation.Hash
+	sendID     uint64
+	receiveID  uint64
+	remoteMu   sync.RWMutex
+	remote     net.Addr
+	send       *dataplanessu2.DataCipher
+	receive    *dataplanessu2.DataCipher
+	lifetimeMu sync.RWMutex
+
+	sendMu                sync.Mutex
+	packetMu              ssu2SendMutex
+	closing               bool
+	receiveMu             sync.Mutex
+	nextPacket            uint32
+	sendPacket            [dataplanessu2.MaxIPv4PacketLen]byte
+	frameMu               ssu2SendMutex
+	frame                 [dataplanessu2.MaxIPv4PacketLen]byte
+	received              dataplanessu2.ACKTracker
+	sent                  map[uint32]*ssu2SentPacket
+	sentSlots             []ssu2SentPacket
+	sentStore             []byte
+	sendWindowBytes       int
+	sendWindowRemaining   int
+	slowStartThreshold    int
+	rto                   time.Duration
+	rtt                   time.Duration
+	rttDeviation          time.Duration
+	lastCongestion        time.Time
+	sendCapacityAvailable chan struct{}
+	largeMTU              int
+	mtu                   atomic.Int32
+	packetsTransmitted    uint64
+	packetsRetransmitted  uint64
+	fragmentMu            sync.Mutex
+	ackMu                 sync.Mutex
+	ackQueued             atomic.Bool
+	ackPayload            [3 + 5 + 2*dataplanessu2.MaxACKRanges]byte
+	fragments             map[uint32]*ssu2FragmentAssembly
+
+	activityMu   sync.Mutex
+	lastActivity time.Time
+	pathMu       sync.Mutex
+	candidate    *ssu2PathCandidate
+	releaseOnce  sync.Once
+}
+
+type ssu2PathCandidate struct {
+	remote    *net.UDPAddr
+	challenge [8]byte
+	expires   time.Time
+}
+
+func (s *ssu2TransportSession) ReleaseSensitive() {
+	if s == nil {
+		return
+	}
+	s.releaseOnce.Do(func() {
+		// Publish terminal state and wake capacity waiters before taking the
+		// lifetime writer lock. Authenticated handlers hold a lifetime read
+		// lock while reliable control sends may wait for retained slots.
+		s.sendMu.Lock()
+		s.closing = true
+		if s.sendCapacityAvailable != nil {
+			close(s.sendCapacityAvailable)
+			s.sendCapacityAvailable = nil
+		}
+		s.sendMu.Unlock()
+		// The lifetime barrier prevents authenticated receive processing from
+		// repopulating fragments/path state after terminal cleanup. Cipher
+		// users additionally serialize on their directional locks.
+		s.lifetimeMu.Lock()
+		defer s.lifetimeMu.Unlock()
+		// Terminal release follows the nested user order: framing, ACK,
+		// receive, packet serialization, then send state.
+		s.frameMu.Lock()
+		s.ackMu.Lock()
+		s.receiveMu.Lock()
+		s.packetMu.Lock()
+		s.sendMu.Lock()
+		if s.send != nil {
+			s.send.ReleaseSensitive()
+			s.send = nil
+		}
+		if s.receive != nil {
+			s.receive.ReleaseSensitive()
+			s.receive = nil
+		}
+		clear(s.sendPacket[:])
+		clear(s.frame[:])
+		for index := range s.sentSlots {
+			s.sentSlots[index].release()
+		}
+		for _, packet := range s.sent {
+			packet.release()
+		}
+		clear(s.sent)
+		clear(s.sentStore)
+		s.sentSlots = nil
+		s.sentStore = nil
+		s.sendMu.Unlock()
+		s.packetMu.Unlock()
+		clear(s.ackPayload[:])
+		s.receiveMu.Unlock()
+		s.ackMu.Unlock()
+		s.frameMu.Unlock()
+		s.fragmentMu.Lock()
+		for _, fragment := range s.fragments {
+			clear(fragment.first)
+			for _, data := range fragment.following {
+				clear(data)
+			}
+			clear(fragment.following)
+		}
+		clear(s.fragments)
+		s.fragmentMu.Unlock()
+		s.pathMu.Lock()
+		if s.candidate != nil {
+			clear(s.candidate.challenge[:])
+			s.candidate.remote = nil
+			s.candidate = nil
+		}
+		s.pathMu.Unlock()
+		s.remoteMu.Lock()
+		s.remote = nil
+		s.remoteMu.Unlock()
+	})
+}
+
+func (s *ssu2TransportSession) remoteAddr() net.Addr {
+	s.remoteMu.RLock()
+	remote := s.remote
+	s.remoteMu.RUnlock()
+	return remote
+}
+
+func (s *ssu2TransportSession) setRemote(remote net.Addr) {
+	s.remoteMu.Lock()
+	s.remote = remote
+	s.remoteMu.Unlock()
+}
+
+type ssu2SentPacket struct {
+	payload      []byte
+	sentAt       time.Time
+	firstSentAt  time.Time
+	windowBytes  int
+	packetSize   int
+	latestPacket uint32
+	nackThrough  uint32
+	attempts     uint8
+	nacks        uint8
+	fast         bool
+	acknowledged bool
+	ackNext      *ssu2SentPacket
+	inUse        bool
+}
+
+func (s *ssu2TransportSession) initReliability(largeMTU int) {
+	largeMTU = min(max(largeMTU, ssu2MinimumNetworkMTU), ssu2MaximumNetworkMTU)
+	s.largeMTU = largeMTU
+	s.mtu.Store(ssu2MinimumNetworkMTU)
+	s.sendWindowBytes = 3 * ssu2MinimumNetworkMTU
+	s.sendWindowRemaining = s.sendWindowBytes
+	s.slowStartThreshold = ssu2InitialSlowStart
+	s.rto = ssu2RetransmitInterval
+	s.sendCapacityAvailable = make(chan struct{})
+	s.sent = make(map[uint32]*ssu2SentPacket, ssu2MaxTrackedPackets)
+	s.sentSlots = make([]ssu2SentPacket, ssu2MaxTrackedPackets)
+	s.sentStore = make([]byte, ssu2MaxTrackedPackets*dataplanessu2.MaxIPv4PacketLen)
+	for index := range s.sentSlots {
+		start := index * dataplanessu2.MaxIPv4PacketLen
+		s.sentSlots[index].payload = s.sentStore[start:start]
+	}
+}
+
+func (s *ssu2TransportSession) retainPayload(payload []byte, now time.Time) *ssu2SentPacket {
+	if len(payload) > dataplanessu2.MaxIPv4PacketLen {
+		return nil
+	}
+	for index := range s.sentSlots {
+		slot := &s.sentSlots[index]
+		if slot.inUse {
+			continue
+		}
+		storage := s.sentStore[index*dataplanessu2.MaxIPv4PacketLen : (index+1)*dataplanessu2.MaxIPv4PacketLen]
+		copy(storage, payload)
+		slot.payload = storage[:len(payload)]
+		slot.sentAt = now
+		slot.firstSentAt = now
+		slot.windowBytes = 0
+		slot.packetSize = 0
+		slot.latestPacket = 0
+		slot.nackThrough = 0
+		slot.attempts = 0
+		slot.nacks = 0
+		slot.fast = false
+		slot.acknowledged = false
+		slot.ackNext = nil
+		slot.inUse = true
+		return slot
+	}
+	return nil
+}
+
+func (p *ssu2SentPacket) release() {
+	if p == nil {
+		return
+	}
+	clear(p.payload)
+	p.payload = p.payload[:0]
+	p.sentAt = time.Time{}
+	p.firstSentAt = time.Time{}
+	p.windowBytes = 0
+	p.packetSize = 0
+	p.latestPacket = 0
+	p.nackThrough = 0
+	p.attempts = 0
+	p.nacks = 0
+	p.fast = false
+	p.acknowledged = false
+	p.ackNext = nil
+	p.inUse = false
+}
+
+type ssu2FragmentAssembly struct {
+	header    foundation.I2NPTransportHeader
+	first     []byte
+	following map[uint8][]byte
+	last      uint8
+	size      int
+	updated   time.Time
+}
+type ssu2OutboundPending struct {
+	peer          foundation.Hash
+	remote        *net.UDPAddr
+	address       ssu2PeerAddress
+	initiator     *dataplanessu2.Initiator
+	destinationID uint64
+	sourceID      uint64
+	tokenSent     bool
+	confirming    bool
+	phase         string
+	parseMu       sync.Mutex
+	releaseOnExit atomic.Bool
+	releaseOnce   sync.Once
+	packet        [dataplanessu2.MaxIPv4PacketLen]byte
+	ready         chan struct{}
+	err           error
+	timer         *time.Timer
+}
+
+type ssu2InboundPending struct {
+	reassemblyMu sync.Mutex
+	remote       net.Addr
+	sendID       uint64
+	responder    *dataplanessu2.Responder
+	reassembly   *dataplanessu2.ConfirmedReassembler
+	timer        *time.Timer
+}
+
+type ssu2RelayRequest struct {
+	target     foundation.Hash
+	introducer foundation.Hash
+	address    ssu2PeerAddress
+	endpoint   netip.AddrPort
+	ready      chan struct{}
+	expires    time.Time
+	timer      *time.Timer
+	started    bool
+	completed  bool
+	err        error
+}
+
+type ssu2RelayForward struct {
+	alice   *ssu2TransportSession
+	charlie *ssu2TransportSession
+	expires time.Time
+}
+
+type ssu2RelayTagLease struct {
+	peer     foundation.Hash
+	tag      uint32
+	expires  time.Time
+	renewing bool
+}
+
+type ssu2NewTokenLease struct {
+	peer        foundation.Hash
+	endpoint    string
+	destination uint64
+	token       uint64
+	expires     time.Time
+}
+
+// ssu2PeerTestState records only authenticated observations. It is bounded by
+type ssu2PeerTestState struct {
+	nonce            uint32
+	bob              foundation.Hash
+	alice            foundation.Hash
+	charlie          foundation.Hash
+	message6Received bool
+	endpoint         netip.AddrPort
+	expires          time.Time
+	message4         *dataplanessu2.PeerTestBlock
+	message5         *dataplanessu2.PeerTestBlock
+	message7         *dataplanessu2.PeerTestBlock
+	message5Peer     foundation.Hash
+	message5Source   netip.AddrPort
+	message7Source   netip.AddrPort
+	message6Sent     bool
+	timer            *time.Timer
+	sixTimer         *time.Timer
+	diagnostic       string
+}
+
+type ssu2PeerTestEvidence struct {
+	endpoint netip.AddrPort
+	observed netip.AddrPort
+	count    uint8
+}
+type ssu2DeferredRelayIntro struct {
+	bob     *ssu2TransportSession
+	intro   dataplanessu2.RelayIntro
+	attempt uint8
+	expires time.Time
+}
+
+// ssu2RelayStoreJob transfers a validated relay forward to the bounded
+// control-plane queue. Dynamically sized workers keep RouterInfo compression
+// out of the UDP receive loop.
+type ssu2RelayStoreJob struct {
+	nonce     uint32
+	request   dataplanessu2.RelayRequest
+	alice     *ssu2TransportSession
+	charlie   *ssu2TransportSession
+	aliceInfo foundation.NetworkDatabaseRouterInfo
+	localHash foundation.Hash
+}
+
+// ssu2RouterInfoStoreSnapshot holds immutable RouterInfo-store bytes shared
+// through SSU2Manager.routerInfoStores.
+type ssu2RouterInfoStoreSnapshot struct {
+	raw        []byte
+	compressed []byte
+	hash       foundation.Hash
+}
+
+type ssu2PeerAddress struct {
+	host       string
+	port       uint16
+	mtu        int
+	introducer bool
+	static     [32]byte
+	intro      [32]byte
+}
+
+// NewSSU2Manager constructs an SSU2 manager without opening a UDP socket.
+func NewSSU2Manager(config SSU2ManagerConfig) (*SSU2Manager, error) {
+	if len(config.StaticPrivate) != 32 || len(config.IntroKey) != 32 {
+		return nil, ErrSSU2ManagerConfig
+	}
+	if _, err := ecdh.X25519().NewPrivateKey(config.StaticPrivate); err != nil {
+		return nil, ErrSSU2ManagerConfig
+	}
+	if config.NetworkID == 0 {
+		config.NetworkID = defaultSSU2NetworkID
+	}
+	if config.NetworkID != defaultSSU2NetworkID {
+		return nil, ErrSSU2ManagerConfig
+	}
+	if config.HandshakeTimeout <= 0 {
+		config.HandshakeTimeout = defaultSSU2HandshakeTimeout
+	}
+	if config.MaxClockSkew <= 0 {
+		config.MaxClockSkew = defaultSSU2MaxClockSkew
+	}
+	if config.TokenLifetime <= 0 {
+		config.TokenLifetime = defaultSSU2TokenLifetime
+	}
+	if config.IdleTimeout <= 0 {
+		config.IdleTimeout = ssu2DefaultIdleTimeout
+	}
+	if config.MaxSessions <= 0 {
+		config.MaxSessions = defaultSSU2MaxSessions
+	}
+	if config.MaxPending <= 0 {
+		config.MaxPending = defaultSSU2MaxPending
+	}
+	var tokenSecret [sha256.Size]byte
+	if _, err := rand.Read(tokenSecret[:]); err != nil {
+		return nil, err
+	}
+	return &SSU2Manager{
+		peers:                 config.Peers,
+		staticPrivate:         append([]byte(nil), config.StaticPrivate...),
+		introKey:              append([]byte(nil), config.IntroKey...),
+		tokenSecret:           tokenSecret,
+		networkID:             config.NetworkID,
+		timeout:               config.HandshakeTimeout,
+		maxClockSkew:          config.MaxClockSkew,
+		tokenLifetime:         config.TokenLifetime,
+		idleTimeout:           config.IdleTimeout,
+		maxSessions:           config.MaxSessions,
+		maxPending:            config.MaxPending,
+		signControl:           config.SignControl,
+		introductionEndpoint:  config.IntroductionEndpoint,
+		onPeerTestResult:      config.OnPeerTestResult,
+		publishPeerTestResult: config.PublishPeerTestResult,
+		onPeerTest:            config.OnPeerTest,
+		reporter:              config.PanicReporter,
+		metrics:               config.Metrics,
+		logger:                config.Logger,
+		done:                  make(chan struct{}),
+		setupSlots:            make(chan struct{}, config.MaxPending),
+		sessionsByPeer:        make(map[foundation.Hash]*ssu2TransportSession),
+		sessionsByID:          make(map[uint64]*ssu2TransportSession),
+		outbound:              make(map[foundation.Hash]*ssu2OutboundPending),
+		outboundAddr:          make(map[netip.AddrPort]*ssu2OutboundPending),
+		inbound:               make(map[uint64]*ssu2InboundPending),
+		introducers:           make(map[uint32]foundation.Hash),
+		relayGrants:           make(map[foundation.Hash]ssu2RelayTagLease),
+		advertisedRelays:      make(map[foundation.Hash]ssu2RelayTagLease),
+		relayTagPending:       make(map[foundation.Hash]time.Time),
+		newTokens:             make(map[string]ssu2NewTokenLease),
+		peerTests:             make(map[uint32]*ssu2PeerTestState),
+		symmetricEvidence:     make(map[string]ssu2PeerTestEvidence),
+		relayRequests:         make(map[uint32]*ssu2RelayRequest),
+		relayForwards:         make(map[uint32]ssu2RelayForward),
+		deferredRelayIntros:   make(map[uint32]ssu2DeferredRelayIntro),
+		routerInfoStores:      make(map[foundation.Hash]ssu2RouterInfoStoreSnapshot),
+	}, nil
+}
+
+// Start takes ownership of bindings.SSU2 and begins receiving authenticated
+// UDP packets. A local signed SSU2 RouterInfo address must bind both configured
+// key materials before the manager will process network traffic.
+func (m *SSU2Manager) Start(parent context.Context, bindings TransportBindings) error {
+	if bindings.SSU2 == nil || bindings.LocalInfo == nil ||
+		bindings.HandleI2NPContext == nil || bindings.Clock == nil {
+		return ErrSSU2ManagerConfig
+	}
+	staticPublic, err := ecdhPublic(m.staticPrivate)
+	if err != nil || !hasSSU2Keys(bindings.LocalInfo.Snapshot(), staticPublic, m.introKey) {
+		return ErrSSU2ManagerConfig
+	}
+	if parent ==
+		nil {
+		parent = context.Background()
+	}
+
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	batchConn, err := dataplanessu2.NewUDPBatchConn(bindings.SSU2)
+	if err != nil {
+		return err
+	}
+	receiveFree := make(chan *ssu2ReceiveBatch, ssu2ReceiveBatchCount)
+	for range ssu2ReceiveBatchCount {
+		batch, err := dataplanessu2.NewBatch(ssu2ReceiveBatchSize, dataplanessu2.MaxIPv4PacketLen)
+		if err != nil {
+			return err
+		}
+		receiveFree <- &ssu2ReceiveBatch{batch: batch}
+	}
+	egressFree := make(chan *ssu2EgressSlot, ssu2EgressSlots)
+	for range ssu2EgressSlots {
+		egressFree <- &ssu2EgressSlot{done: make(chan error, 1)}
+	}
+
+	m.mu.Lock()
+	if m.started {
+		m.mu.Unlock()
+		return ErrStarted
+	}
+	m.started = true
+	m.conn = bindings.SSU2
+	m.batchConn = batchConn
+	m.ipv6Available.Store(ssu2IPv6Available(bindings.SSU2))
+	m.bindings = bindings
+	m.ctx, m.cancel = context.WithCancel(parent)
+	m.relayStoreJobs = make(chan ssu2RelayStoreJob, m.maxPending)
+	m.relayPublish = make(chan struct{}, 1)
+	m.receiveFree = receiveFree
+	m.authQueue = make(chan ssu2ReceiveJob, ssu2ReceiveBatchCount*ssu2ReceiveBatchSize)
+	m.setupFree = make(chan *ssu2SetupPacket, m.maxPending)
+	m.setupQueue = make(chan *ssu2SetupPacket, m.maxPending)
+	for range m.maxPending {
+		m.setupFree <- new(ssu2SetupPacket)
+	}
+	m.ackQueue = make(chan *ssu2TransportSession, m.maxSessions)
+	authWorkers := parallelism.Workers(cap(m.authQueue))
+	dispatchWorkers := parallelism.Workers(ssu2DispatchQueueSize)
+	relayWorkers := parallelism.Workers(m.maxPending)
+	setupWorkers := parallelism.Workers(m.maxPending)
+	dispatchCapacity := max(1, (ssu2DispatchQueueSize+dispatchWorkers-1)/dispatchWorkers)
+	m.dispatchQueues = make([]chan *ssu2DispatchBatch, dispatchWorkers)
+	for index := range m.dispatchQueues {
+		m.dispatchQueues[index] = make(chan *ssu2DispatchBatch, dispatchCapacity)
+	}
+	m.dispatchFree = make(chan *ssu2DispatchBatch, ssu2DispatchQueueSize)
+	for range ssu2DispatchQueueSize {
+		m.dispatchFree <- &ssu2DispatchBatch{done: make(chan error, 1)}
+	}
+	m.egressFree = egressFree
+	m.egressQueue = make(chan *ssu2EgressSlot, ssu2EgressSlots)
+	if m.metrics != nil {
+		if batchConn.VectorIOEnabled() {
+			m.metrics.SetSSU2VectorIOEnabled(1)
+		}
+		if batchConn.KernelDropAccounting() {
+			m.metrics.SetSSU2KernelDropAccounting(1)
+		}
+	}
+	m.mu.Unlock()
+
+	m.wg.Add(5 + authWorkers + dispatchWorkers + relayWorkers + setupWorkers)
+	go m.readLoop()
+	for range authWorkers {
+		go m.authLoop()
+	}
+	for range setupWorkers {
+		go m.setupLoop()
+	}
+	for _, queue := range m.dispatchQueues {
+		go m.dispatchLoop(queue)
+	}
+	go m.ackLoop()
+	go m.egressLoop()
+	go m.retransmitLoop()
+	for range relayWorkers {
+		go m.relayStoreLoop()
+	}
+	go m.relayPublicationLoop()
+	go func() {
+		<-m.ctx.Done()
+		_ = m.Close()
+	}()
+	go func() {
+		m.wg.Wait()
+		close(m.done)
+	}()
+	return nil
+}
+
+// Close unblocks UDP reception and releases all callers waiting for a pending
+// retry or handshake result.
+func (m *SSU2Manager) Close() error {
+	var closeErr error
+	m.close.Do(func() {
+		sessions := make(map[*ssu2TransportSession]struct{})
+		m.mu.Lock()
+		outbounds := make([]*ssu2OutboundPending, 0, len(m.outbound))
+		inbounds := make([]*ssu2InboundPending, 0, len(m.inbound))
+		batchConn := m.batchConn
+		conn := m.conn
+		cancel := m.cancel
+		for _, pending := range m.outbound {
+			if m.finishOutboundLocked(pending, ErrSSU2Session) {
+				outbounds = append(outbounds, pending)
+			}
+		}
+		for id, pending := range m.inbound {
+			if pending.timer != nil {
+				pending.timer.Stop()
+			}
+			delete(m.inbound, id)
+			inbounds = append(inbounds, pending)
+		}
+		for _, session := range m.sessionsByID {
+			sessions[session] = struct{}{}
+		}
+		for nonce, relay := range m.relayRequests {
+			m.finishRelayRequestLocked(nonce, relay, ErrSSU2Session)
+		}
+		clear(m.relayForwards)
+		clear(m.deferredRelayIntros)
+		clear(m.introducers)
+		clear(m.relayGrants)
+		clear(m.advertisedRelays)
+		clear(m.relayTagPending)
+		m.relayRevision++
+		clear(m.newTokens)
+		clear(m.symmetricEvidence)
+		for _, state := range m.peerTests {
+			if state.timer != nil {
+				state.timer.Stop()
+			}
+			if state.sixTimer != nil {
+				state.sixTimer.Stop()
+			}
+		}
+		clear(m.peerTests)
+		clear(m.sessionsByPeer)
+		clear(m.sessionsByID)
+		m.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		if batchConn != nil {
+			closeErr = batchConn.Close()
+		} else if conn != nil {
+			closeErr = conn.Close()
+		}
+		for _, pending := range outbounds {
+			pending.releaseSensitive()
+		}
+		for _, pending := range inbounds {
+			pending.reassemblyMu.Lock()
+			pending.responder.ReleaseSensitive()
+			pending.reassembly.ReleaseSensitive()
+			pending.reassemblyMu.Unlock()
+		}
+		m.syncRelayTagPublication()
+		publishCtx, publishCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, _ = m.publishRelaySnapshot(publishCtx)
+		publishCancel()
+		for session := range sessions {
+			session.ReleaseSensitive()
+		}
+	})
+	return closeErr
+}
+
+// Wait blocks until packet reception has stopped. After it returns, manager
+// permanent key copies have been overwritten.
+func (m *SSU2Manager) Wait() error {
+	m.mu.RLock()
+	started, done := m.started, m.done
+	m.mu.RUnlock()
+	if !started {
+		m.releaseSensitive()
+		return nil
+	}
+	<-done
+	m.releaseSensitive()
+	m.mu.RLock()
+	err := m.err
+	m.mu.RUnlock()
+	return err
+}
+
+func (m *SSU2Manager) Status() TransportStatus {
+	m.mu.RLock()
+	status := TransportStatus{Running: m.started && m.ctx != nil && m.ctx.Err() == nil, Error: m.err}
+	m.mu.RUnlock()
+	return status
+}
+
+// EnsureSession authenticates a bidirectional SSU2 session without emitting an
+// I2NP message.
+func (m *SSU2Manager) EnsureSession(ctx context.Context, peer foundation.Hash) error {
+	if ctx ==
+		nil {
+		ctx = context.Background()
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if m.HasSession(peer) {
+		return nil
+	}
+	select {
+	case m.setupSlots <- struct{}{}:
+		defer func() { <-m.setupSlots }()
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-m.contextDone():
+		return ErrSSU2Session
+	}
+	_, err := m.establish(ctx, peer)
+	if errors.Is(err, ErrSSU2Peer) {
+		if err = m.introduceFromRouterInfo(ctx, peer); err == nil {
+			_, err = m.establish(ctx, peer)
+		}
+	}
+	if err != nil {
+		m.recordOutboundFailure(peer, err)
+	}
+	return err
+}
+
+func (m *SSU2Manager) HasSession(peer foundation.Hash) bool {
+	if m == nil {
+		return false
+	}
+	return m.sessionForSend(peer) != nil
+}
+
+func (m *SSU2Manager) ActiveSessionCount() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	count := len(m.sessionsByPeer)
+	m.mu.RUnlock()
+	return count
+}
+func (m *SSU2Manager) introducersRequired(_ bool) bool {
+	bindings := m.currentBindings()
+	if bindings.LocalInfo == nil {
+		return false
+	}
+	options := bindings.LocalInfo.Snapshot().Options.Iterator()
+	for {
+		name, value, ok, err := options.Next()
+		if err != nil || !ok {
+			return true
+		}
+		if bytes.Equal(name, []byte("caps")) {
+			return !bytes.ContainsRune(value, 'R')
+		}
+	}
+}
+
+func (m *SSU2Manager) introducerCount(ipv6 bool) int {
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	count := 0
+	for peer := range m.advertisedRelays {
+		session := m.sessionsByPeer[peer]
+		if session == nil {
+			continue
+		}
+		endpoint, ok := addrPortKey(session.remoteAddr())
+		if ok && endpoint.Addr().Is6() == ipv6 {
+			count++
+		}
+	}
+	m.mu.RUnlock()
+	return count
+}
+
+func (m *SSU2Manager) DropSession(peer foundation.Hash) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	session := m.sessionsByPeer[peer]
+	if session != nil {
+		m.removeSessionLocked(session)
+	}
+	m.mu.Unlock()
+	if session == nil {
+		return false
+	}
+	session.ReleaseSensitive()
+	return true
+}
+
+// Send consumes an installed authenticated session without initiating setup.
+func (m *SSU2Manager) Send(ctx context.Context, peer foundation.Hash, message foundation.I2NPMessage) error {
+	session := m.sessionForSend(peer)
+	if session == nil {
+		return ErrSessionUnavailable
+	}
+	return (ssu2SessionSender{manager: m, session: session}).send(ctx, message, false)
+}
+
+// SendPeerTest sends an authenticated out-of-session phase-5, -6, or -7 Peer
+// Test packet to a verified SSU2 RouterInfo. Signature generation remains with
+// the caller because its signing key is outside transport ownership.
+func (m *SSU2Manager) SendPeerTest(ctx context.Context, peer foundation.Hash, test dataplanessu2.PeerTestBlock) error {
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if test.Message < 5 || test.Message > 7 || m.peers == nil {
+		return ErrSSU2Peer
+	}
+	m.mu.RLock()
+	running := m.runningLocked()
+	m.mu.RUnlock()
+	if !running {
+		return ErrSSU2Session
+	}
+	info, ok := m.peers.RouterInfo(peer)
+	if !ok {
+		return ErrSSU2Peer
+	}
+	address, err := m.selectSSU2Address(info)
+	if err != nil {
+		return err
+	}
+	remote, err := net.ResolveUDPAddr("udp", net.JoinHostPort(address.host, strconv.Itoa(int(address.port))))
+	if err != nil {
+		return ErrSSU2Peer
+	}
+	var payloadStorage [dataplanessu2.MaxIPv4PacketLen]byte
+	payload, err := ssu2DateTimeBlockTo(payloadStorage[:0], m.now())
+	if err != nil {
+		return err
+	}
+	payload, err = dataplanessu2.MarshalPeerTestBlock(payload, test)
+	if err != nil {
+		return err
+	}
+	destinationID, sourceID := dataplanessu2.PeerTestConnectionIDs(test.Nonce)
+	if test.Message == 6 {
+		destinationID, sourceID = sourceID, destinationID
+	}
+	packetNumber, err := randomPacketNumber()
+	if err != nil {
+		return err
+	}
+
+	var packetStorage [dataplanessu2.MaxIPv4PacketLen]byte
+	packet, err := dataplanessu2.BuildPeerTest(packetStorage[:], address.intro[:], destinationID, sourceID, packetNumber, payload)
+	if err != nil {
+		return err
+	}
+	return m.writeRelayToContext(ctx, packet, remote, uint64(test.Nonce))
+}
+
+// maybeStartPeerTest activates peer testing for newly established outbound
+// sessions while retaining one bounded in-flight test per Bob.
+func (m *SSU2Manager) maybeStartPeerTest(bob foundation.Hash) {
+	m.mu.RLock()
+	running := m.runningLocked()
+	for _, state := range m.peerTests {
+		if state.bob == bob {
+			running = false
+			break
+		}
+	}
+	ctx := m.ctx
+	m.mu.RUnlock()
+	if running {
+		go func() { _ = m.StartPeerTest(ctx, bob) }()
+	}
+}
+
+// StartPeerTest begins the Alice side of the SSU2 Peer Test process over an
+// existing authenticated session with Bob.
+func (m *SSU2Manager) StartPeerTest(ctx context.Context, bob foundation.Hash) error {
+
+	if ctx == nil {
+		ctx = context.
+			Background()
+	}
+	session, err := m.establish(ctx, bob)
+	if err != nil {
+		return err
+	}
+	endpoint, err := m.localSSU2Endpoint()
+	if err != nil {
+		return err
+	}
+	nonce, err := randomPacketNumber()
+	if err != nil || nonce == 0 {
+		return ErrSSU2Session
+	}
+	bindings := m.currentBindings()
+	if bindings.LocalInfo == nil {
+		return ErrSSU2Session
+	}
+	test := dataplanessu2.PeerTestBlock{Message: 1, Nonce: nonce, Timestamp: uint32(m.now().Unix()), Address: endpoint}
+	input, err := dataplanessu2.PeerTestSignatureInput(nil, bob[:], nil, test)
+	if err != nil {
+		return err
+	}
+	test.Signature, err = m.signSSU2Control(input)
+	clear(input)
+	if err != nil || len(test.Signature) == 0 {
+		return ErrSSU2Session
+	}
+	var payloadStorage [dataplanessu2.MaxIPv4PacketLen]byte
+	payload, err := dataplanessu2.MarshalPeerTestBlock(payloadStorage[:0], test)
+	if err != nil {
+		return err
+	}
+	state := &ssu2PeerTestState{
+		nonce: nonce, bob: bob, alice: bindings.LocalInfo.Hash(), endpoint: endpoint,
+		expires: m.now().Add(m.timeout),
+	}
+	m.mu.Lock()
+	if !m.runningLocked() || len(m.peerTests) >= m.maxPending || m.peerTests[nonce] != nil {
+		m.mu.Unlock()
+		return ErrSSU2Session
+	}
+	m.peerTests[nonce] = state
+	state.timer = time.AfterFunc(m.timeout, func() { m.expirePeerTest(nonce, state) })
+	m.mu.Unlock()
+	if err = m.sendSessionData(session, payload, true); err != nil {
+		m.expirePeerTest(nonce, state)
+		return err
+	}
+	return nil
+}
+
+// RegisterIntroducer registers this manager as Bob for relayTag. The selected
+// Charlie must have a live native SSU2 session when a Relay Request arrives.
+func (m *SSU2Manager) RegisterIntroducer(relayTag uint32, charlie foundation.Hash) error {
+	if relayTag == 0 {
+		return ErrSSU2Introduction
+	}
+	m.mu.Lock()
+	m.introducers[relayTag] = charlie
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *SSU2Manager) handleRelayTagRequest(session *ssu2TransportSession) {
+	now := m.now()
+	m.mu.Lock()
+	lease, exists := m.relayGrants[session.peer]
+	if exists && !lease.expires.After(now) {
+		delete(m.relayGrants, session.peer)
+		if m.introducers[lease.tag] == session.peer {
+			delete(m.introducers, lease.tag)
+		}
+		exists = false
+	}
+	if !exists && len(m.relayGrants) >= m.maxPending {
+		m.mu.Unlock()
+		return
+	}
+	if !exists {
+		for lease.tag == 0 {
+			tag, err := randomPacketNumber()
+			if err != nil {
+				m.mu.Unlock()
+				return
+			}
+			if _, collision := m.introducers[tag]; !collision {
+				lease.tag = tag
+			}
+		}
+	}
+	lease.peer = session.peer
+	lease.expires = now.Add(m.tokenLifetime)
+	m.relayGrants[session.peer] = lease
+	m.introducers[lease.tag] = session.peer
+	m.mu.Unlock()
+
+	var storage [32]byte
+	block, err := dataplanessu2.MarshalRelayTagBlock(storage[:0], dataplanessu2.RelayTag{Tag: lease.tag, Expiration: uint32(lease.expires.Unix())})
+	if err == nil {
+		_ = m.sendSessionData(session, block, true)
+	}
+}
+
+func (m *SSU2Manager) handleRelayTag(session *ssu2TransportSession, tag dataplanessu2.RelayTag) {
+	expires := time.Unix(int64(tag.Expiration), 0)
+	now := m.now()
+	if tag.Tag == 0 || !expires.After(now) || expires.Sub(now) > m.tokenLifetime {
+		return
+	}
+	changed := false
+	m.mu.Lock()
+	existing, exists := m.advertisedRelays[session.peer]
+	pendingUntil, requested := m.relayTagPending[session.peer]
+	handleRelayTagSelected := m.runningLocked() && requested && pendingUntil.After(now)
+	if handleRelayTagSelected {
+		handleRelayTagSelected = (exists || len(m.advertisedRelays) < ssu2RelayTarget)
+	}
+	if handleRelayTagSelected {
+		delete(m.relayTagPending, session.peer)
+		m.advertisedRelays[session.peer] = ssu2RelayTagLease{peer: session.peer, tag: tag.Tag, expires: expires}
+		changed = !exists || existing.tag != tag.Tag || !existing.expires.Equal(expires)
+		if changed {
+			m.relayRevision++
+		}
+	}
+	m.mu.Unlock()
+	if changed {
+		m.syncRelayTagPublication()
+	}
+	m.maintainIntroducers()
+}
+
+// RequestRelayTag negotiates a renewable relay lease on a live SSU2 session.
+func (m *SSU2Manager) RequestRelayTag(ctx context.Context, peer foundation.Hash) error {
+	if ctx ==
+		nil {
+		ctx = context.Background()
+	}
+
+	session, err := m.establish(ctx, peer)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if !m.runningLocked() {
+		m.mu.Unlock()
+		return ErrSSU2Session
+	}
+	m.relayTagPending[peer] = m.nowLocked().Add(m.timeout)
+	m.mu.Unlock()
+	if err = m.requestRelayTagOnSession(session); err != nil {
+		m.mu.Lock()
+		delete(m.relayTagPending, peer)
+		m.mu.Unlock()
+	}
+	return err
+}
+
+func (m *SSU2Manager) requestRelayTagOnSession(session *ssu2TransportSession) error {
+	var storage [8]byte
+	block, err := dataplanessu2.MarshalRelayTagRequestBlock(storage[:0], dataplanessu2.RelayTagRequest{})
+	if err != nil {
+		return err
+	}
+	return m.sendSessionData(session, block, true)
+}
+
+// RemoveIntroducer stops accepting new Relay Requests for relayTag.
+func (m *SSU2Manager) RemoveIntroducer(relayTag uint32) {
+	m.mu.Lock()
+	peer, found := m.introducers[relayTag]
+	delete(m.introducers, relayTag)
+	if found {
+		if lease, ok := m.relayGrants[peer]; ok && lease.tag == relayTag {
+			delete(m.relayGrants, peer)
+		}
+	}
+	m.mu.Unlock()
+}
+
+// ssu2IntroducerPublisher is implemented by the sole local RouterInfo owner.
+type ssu2IntroducerPublisher interface {
+	UpdateSSU2Introducers(context.Context, []SSU2Introducer) error
+}
+
+func (m *SSU2Manager) syncRelayTagPublication() {
+	m.mu.RLock()
+	queue := m.relayPublish
+	m.mu.RUnlock()
+	if queue == nil {
+		return
+	}
+	select {
+	case queue <- struct{}{}:
+	default:
+	}
+}
+
+func (m *SSU2Manager) relayPublicationSnapshot() (ssu2IntroducerPublisher, uint64, []SSU2Introducer) {
+	m.mu.RLock()
+	bindings := m.bindings
+	revision := m.relayRevision
+	now := m.nowLocked()
+	leases := make([]SSU2Introducer, 0, ssu2RelayTarget)
+	for _, lease := range m.advertisedRelays {
+		if lease.expires.After(now) {
+			leases = append(leases, SSU2Introducer{Peer: lease.peer, RelayTag: lease.tag, Expiration: lease.expires})
+		}
+	}
+	m.mu.RUnlock()
+	sort.Slice(leases, func(i, j int) bool {
+		if leases[i].Expiration.Equal(leases[j].Expiration) {
+			return leases[i].RelayTag < leases[j].RelayTag
+		}
+		return leases[i].Expiration.Before(leases[j].Expiration)
+	})
+	if len(leases) > ssu2RelayTarget {
+		leases = leases[:ssu2RelayTarget]
+	}
+	publisher, _ := bindings.LocalInfo.(ssu2IntroducerPublisher)
+	return publisher, revision, leases
+}
+
+func (m *SSU2Manager) publishRelaySnapshot(ctx context.Context) (bool, error) {
+	m.relayPublishMu.Lock()
+	defer m.relayPublishMu.Unlock()
+	publisher, revision, leases := m.relayPublicationSnapshot()
+	if publisher == nil {
+		return true, nil
+	}
+	if err := publisher.UpdateSSU2Introducers(ctx, leases); err != nil {
+		return false, err
+	}
+	m.mu.Lock()
+	m.publishedRevision = revision
+	current := m.relayRevision
+	m.mu.Unlock()
+	return current == revision, nil
+}
+
+func (m *SSU2Manager) relayPublicationLoop() {
+	defer m.wg.Done()
+	backoff := ssu2RelayPublishMin
+	for {
+		select {
+		case <-m.contextDone():
+			return
+		case <-m.relayPublish:
+		}
+		for {
+			attemptTimeout := min(m.timeout, 5*time.Second)
+			if attemptTimeout <= 0 {
+				attemptTimeout = 5 * time.Second
+			}
+			attemptCtx, cancelAttempt := context.WithTimeout(m.ctx, attemptTimeout)
+			converged, err := m.publishRelaySnapshot(attemptCtx)
+			cancelAttempt()
+			if err == nil {
+				backoff = ssu2RelayPublishMin
+				if converged {
+					break
+				}
+				continue
+			}
+			if m.logger != nil && !errors.Is(err, context.Canceled) {
+				m.logger.Warn("SSU2 introducer publication retry", "error", err, "backoff", backoff)
+			}
+			timer := time.NewTimer(backoff)
+			select {
+			case <-timer.C:
+			case <-m.contextDone():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			}
+			backoff = min(backoff*2, ssu2RelayPublishMax)
+		}
+	}
+}
+func (m *SSU2Manager) maintainIntroducers() {
+	now := m.now()
+	type candidate struct {
+		peer    foundation.Hash
+		session *ssu2TransportSession
+	}
+	var candidates []candidate
+	changed := false
+	m.mu.Lock()
+	for peer, lease := range m.advertisedRelays {
+		if !lease.expires.After(now) {
+			delete(m.advertisedRelays, peer)
+			changed = true
+		}
+	}
+	for peer, until := range m.relayTagPending {
+		if !until.After(now) {
+			delete(m.relayTagPending, peer)
+		}
+	}
+	if changed {
+		m.relayRevision++
+	}
+	pendingNew := 0
+	for peer := range m.relayTagPending {
+		if _, advertised := m.advertisedRelays[peer]; !advertised {
+			pendingNew++
+		}
+	}
+	needed := ssu2RelayTarget - len(m.advertisedRelays) - pendingNew
+	if needed > 0 {
+		for peer, session := range m.sessionsByPeer {
+			if _, exists := m.advertisedRelays[peer]; exists {
+				continue
+			}
+			if _, pending := m.relayTagPending[peer]; pending {
+				continue
+			}
+			candidates = append(candidates, candidate{peer: peer, session: session})
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			return bytes.Compare(candidates[i].peer[:], candidates[j].peer[:]) < 0
+		})
+		if len(candidates) > needed {
+			candidates = candidates[:needed]
+		}
+		for _, selected := range candidates {
+			m.relayTagPending[selected.peer] = now.Add(m.timeout)
+		}
+	}
+	m.mu.Unlock()
+	if changed {
+		m.syncRelayTagPublication()
+	}
+	for _, selected := range candidates {
+		if err := m.requestRelayTagOnSession(selected.session); err != nil {
+			m.mu.Lock()
+			delete(m.relayTagPending, selected.peer)
+			m.mu.Unlock()
+		}
+	}
+}
+
+// Introduce establishes target through an existing or newly-created session
+// with introducer. endpoint is Alice's reachable UDP endpoint advertised in
+// the signed Relay Request. relayTag is the tag target delegated to introducer
+// in target's RouterInfo.
+func (m *SSU2Manager) Introduce(ctx context.Context, introducer, target foundation.Hash, relayTag uint32, endpoint netip.AddrPort) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if relayTag == 0 || !validSSU2Endpoint(endpoint) || m.peers == nil {
+		return ErrSSU2Introduction
+	}
+	address, err := m.ssu2KeysForPeer(target)
+	if err != nil {
+		return err
+	}
+	introducerSession, err := m.establish(ctx, introducer)
+	if err != nil {
+		return err
+	}
+	nonce, err := randomRelayNonce()
+	if err != nil {
+		return err
+	}
+	request := dataplanessu2.RelayRequest{
+		Nonce:     nonce,
+		RelayTag:  relayTag,
+		Timestamp: uint32(m.now().Unix()),
+		Endpoint:  endpoint,
+	}
+	unsigned, err := dataplanessu2.RelayRequestSignatureInput(nil, introducer[:], target[:], request)
+	if err != nil {
+		return err
+	}
+	request.Signature, err = m.signSSU2Control(unsigned)
+	clear(unsigned)
+	if err != nil || len(request.Signature) == 0 {
+		return ErrSSU2Introduction
+	}
+	payload, err := dataplanessu2.MarshalRelayRequestBlock(nil, request)
+	if err != nil {
+		return err
+	}
+	responseTimeout := min(m.timeout, ssu2RelayResponseTimeout)
+	relay := &ssu2RelayRequest{
+		target:     target,
+		introducer: introducer,
+		address:    address,
+		endpoint:   endpoint,
+		ready:      make(chan struct{}),
+		expires:    m.now().Add(responseTimeout),
+	}
+	m.mu.Lock()
+	if !m.runningLocked() || len(m.relayRequests) >= m.maxPending {
+		m.mu.Unlock()
+		return ErrSSU2Introduction
+	}
+	if m.relayRequests[nonce] != nil {
+		m.mu.Unlock()
+		return ErrSSU2Introduction
+	}
+	m.relayRequests[nonce] = relay
+	relay.timer = time.AfterFunc(responseTimeout, func() {
+		m.mu.Lock()
+		m.finishRelayRequestLocked(nonce, relay, ErrSSU2Introduction)
+		m.mu.Unlock()
+	})
+	m.mu.Unlock()
+	if err = m.sendSessionData(introducerSession, payload, false); err != nil {
+		m.mu.Lock()
+		m.finishRelayRequestLocked(nonce, relay, err)
+		m.mu.Unlock()
+		return err
+	}
+	retryDelay := ssu2EstablishRetransmitDelay
+	retry := time.NewTimer(retryDelay)
+	defer retry.Stop()
+	for {
+		select {
+		case <-relay.ready:
+			if relay.err != nil {
+				return relay.err
+			}
+			_, returnErr := m.establish(ctx, target)
+			return returnErr
+		case <-retry.C:
+			if err = m.sendSessionData(introducerSession, payload, false); err != nil {
+				m.mu.Lock()
+				m.finishRelayRequestLocked(nonce, relay, err)
+				m.mu.Unlock()
+				return err
+			}
+			retryDelay = min(2*retryDelay, responseTimeout)
+			retry.Reset(retryDelay)
+		case <-ctx.Done():
+			m.mu.Lock()
+			m.finishRelayRequestLocked(nonce, relay, ctx.Err())
+			m.mu.Unlock()
+			return ctx.Err()
+		case <-m.contextDone():
+			return ErrSSU2Session
+		}
+	}
+}
+func (m *SSU2Manager) establish(ctx context.Context, peer foundation.Hash) (*ssu2TransportSession, error) {
+	var stale *ssu2TransportSession
+	m.mu.Lock()
+	if !m.runningLocked() {
+		m.mu.Unlock()
+		return nil, ErrSSU2Session
+	}
+	if session := m.sessionsByPeer[peer]; session != nil {
+		if !session.idle(m.nowLocked(), m.idleTimeout) {
+			m.mu.Unlock()
+			return session, nil
+		}
+		m.removeSessionLocked(session)
+		stale = session
+	}
+	pending := m.outbound[peer]
+	if pending == nil {
+		m.mu.Unlock()
+		if stale != nil {
+			stale.ReleaseSensitive()
+			stale = nil
+		}
+		address, remote, err := m.resolveOutbound(peer)
+		if err != nil {
+			return nil, err
+		}
+		m.mu.Lock()
+		if !m.runningLocked() {
+			m.mu.Unlock()
+			return nil, ErrSSU2Session
+		}
+		if session := m.sessionsByPeer[peer]; session != nil {
+			m.mu.Unlock()
+			return session, nil
+		}
+		pending = m.outbound[peer]
+		if pending == nil {
+			pending, err = m.newOutboundLocked(peer, address, remote)
+		}
+		if err != nil {
+			m.mu.Unlock()
+			if stale != nil {
+				stale.ReleaseSensitive()
+			}
+			return nil, err
+		}
+	}
+	cachedToken := m.cachedNewTokenLocked(peer, pending.remote, pending.destinationID)
+	sendToken := !pending.tokenSent
+	if sendToken {
+		pending.tokenSent = true
+	}
+	ready := pending.ready
+	m.mu.Unlock()
+	if stale != nil {
+		stale.ReleaseSensitive()
+	}
+
+	if sendToken {
+		if cachedToken != 0 {
+			m.sendSessionRequest(pending, cachedToken)
+		} else if err := m.sendTokenRequest(pending); err != nil {
+			m.failOutbound(pending, err)
+		}
+	}
+	select {
+	case <-ready:
+		m.mu.RLock()
+		err := pending.err
+		session := m.sessionsByPeer[peer]
+		m.mu.RUnlock()
+		if err != nil {
+			return nil, err
+		}
+		if session == nil {
+			return nil, ErrSSU2Session
+		}
+		return session, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-m.contextDone():
+		return nil, ErrSSU2Session
+	}
+}
+
+func (m *SSU2Manager) resolveOutbound(peer foundation.Hash) (ssu2PeerAddress, *net.UDPAddr, error) {
+	if m.peers == nil {
+		return ssu2PeerAddress{}, nil, ErrSSU2Session
+	}
+	info, err := m.peers.DialRouterInfo(peer, uint64(m.now().UnixMilli()))
+	if err != nil {
+		return ssu2PeerAddress{}, nil, errors.Join(ErrSSU2Peer, err)
+	}
+	address, err := m.selectSSU2Address(info)
+	if err != nil {
+		return ssu2PeerAddress{}, nil, err
+	}
+	remote, err := net.ResolveUDPAddr("udp", net.JoinHostPort(address.host, strconv.Itoa(int(address.port))))
+	if err != nil {
+		return ssu2PeerAddress{}, nil, ErrSSU2Peer
+	}
+	return address, remote, nil
+}
+
+func (m *SSU2Manager) newOutboundLocked(peer foundation.Hash, address ssu2PeerAddress, remote *net.UDPAddr) (*ssu2OutboundPending, error) {
+	destinationID := m.cachedNewTokenDestinationLocked(peer, remote)
+	var err error
+	if destinationID == 0 {
+		destinationID, _, err = randomConnectionIDs()
+		if err != nil {
+			return nil, err
+		}
+	}
+	_, sourceID, err := randomConnectionIDs()
+	if err != nil {
+		return nil, err
+	}
+	return m.newOutboundToLocked(peer, address, remote, destinationID, sourceID)
+}
+
+func (m *SSU2Manager) newIntroducedOutboundLocked(peer foundation.Hash, address ssu2PeerAddress, endpoint netip.AddrPort, destinationID, sourceID uint64) (*ssu2OutboundPending, error) {
+	if !validSSU2Endpoint(endpoint) {
+		return nil, ErrSSU2Introduction
+	}
+	remote := &net.UDPAddr{IP: endpoint.Addr().AsSlice(), Port: int(endpoint.Port())}
+	return m.newOutboundToLocked(peer, address, remote, destinationID, sourceID)
+}
+
+func (m *SSU2Manager) newOutboundToLocked(peer foundation.Hash, address ssu2PeerAddress, remote *net.UDPAddr, destinationID, sourceID uint64) (*ssu2OutboundPending, error) {
+	if len(m.outbound)+len(m.inbound) >= m.maxPending || m.outbound[peer] != nil || remote == nil || remote.Port <= 0 {
+		return nil, ErrSSU2Session
+	}
+	pending := &ssu2OutboundPending{
+		peer:          peer,
+		remote:        remote,
+		address:       address,
+		destinationID: destinationID,
+		sourceID:      sourceID,
+		ready:         make(chan struct{}),
+		phase:         "token_request",
+	}
+	pending.timer = time.AfterFunc(m.timeout, func() {
+		m.mu.Lock()
+		finished := false
+		if m.outbound[peer] == pending {
+			finished = m.finishOutboundLocked(pending, ssu2HandshakeError{phase: pending.phase})
+		}
+		m.mu.Unlock()
+		if finished {
+			pending.releaseSensitive()
+		}
+	})
+	m.outbound[peer] = pending
+	endpoint, _ := addrPortKey(pending.remote)
+	m.outboundAddr[endpoint] = pending
+	return pending, nil
+}
+
+func (m *SSU2Manager) sendTokenRequest(pending *ssu2OutboundPending) error {
+	packetNumber, err := randomPacketNumber()
+	if err != nil {
+		return err
+	}
+	payload, err := ssu2DateTimePayload(m.now())
+	if err != nil {
+		return err
+	}
+	packet, err := dataplanessu2.BuildTokenRequest(make([]byte, dataplanessu2.MaxIPv4PacketLen), pending.address.intro[:], pending.destinationID, pending.sourceID, packetNumber, payload)
+	if err != nil {
+		return err
+	}
+	if err = m.writeTo(packet, pending.remote); err != nil {
+		return err
+	}
+	if m.logger != nil {
+		m.logger.Debug("public transport handshake phase", "transport", "SSU2", "peer", routerHashDiagnostic(pending.peer), "endpoint", pending.remote.String(), "phase", "token_request_sent")
+	}
+	return nil
+}
+
+func (m *SSU2Manager) readLoop() {
+	defer m.wg.Done()
+	for {
+		select {
+		case received := <-m.receiveFree:
+			if m.readBatch(received) {
+				return
+			}
+		case <-m.contextDone():
+			return
+		}
+	}
+}
+
+func (m *SSU2Manager) readBatch(received *ssu2ReceiveBatch) bool {
+	n, err := m.batchConn.ReadBatch(received.batch)
+	if n > 0 {
+		m.processReceivedBatch(received, n)
+	} else {
+		select {
+		case m.receiveFree <- received:
+		case <-m.contextDone():
+			return true
+		}
+	}
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, dataplanessu2.ErrDatagramTruncated) {
+		m.ioStats.dropped.Add(1)
+		return false
+	}
+	if m.contextErr() == nil && !errors.Is(err, net.ErrClosed) {
+		m.recordSSU2Error(err)
+		_ = m.Close()
+	}
+	return true
+}
+
+func (m *SSU2Manager) processReceivedBatch(received *ssu2ReceiveBatch, count int) {
+	m.ioStats.datagramsReceived.Add(uint64(count))
+	m.recordReceivedBatchMetrics(count)
+	packets := received.batch.Packets()
+	received.remaining.Store(int32(count))
+	for index := range count {
+		m.enqueueReceivedPacket(received, index, packets[index])
+	}
+}
+
+func (m *SSU2Manager) recordReceivedBatchMetrics(count int) {
+	if m.metrics == nil {
+		return
+	}
+	m.metrics.AddSSU2ReceivedDatagrams(uint64(count))
+	if count > 1 {
+		m.metrics.IncSSU2ReceiveMultiBatches()
+	}
+	kernelDrops := m.batchConn.KernelDrops()
+	previousDrops := m.kernelDrops.Swap(kernelDrops)
+	if kernelDrops > previousDrops {
+		m.metrics.AddSSU2KernelDrops(kernelDrops - previousDrops)
+	}
+}
+
+func (m *SSU2Manager) enqueueReceivedPacket(received *ssu2ReceiveBatch, index int, packet dataplanessu2.Datagram) {
+	m.ioStats.bytesReceived.Add(uint64(packet.Len))
+	if m.metrics != nil {
+		m.metrics.AddTransportReceivedBytes(uint64(packet.Len))
+	}
+	if packet.Len < dataplanessu2.MinPacketLen || packet.Len > len(packet.Data) || !packet.Addr.IsValid() {
+		m.ioStats.dropped.Add(1)
+		if m.metrics != nil {
+			m.metrics.AddSSU2EnqueuedDatagrams(1)
+			m.metrics.AddSSU2ProcessedDatagrams(1)
+		}
+		m.receiveComplete(received)
+		return
+	}
+	if !m.establishedPacket(packet.Data[:packet.Len]) {
+		m.enqueueSetupPacket(packet)
+		m.receiveComplete(received)
+		return
+	}
+	received.addresses[index] = packet.Addr
+	select {
+	case m.authQueue <- ssu2ReceiveJob{batch: received, index: uint8(index)}:
+		if m.metrics != nil {
+			m.metrics.AddSSU2EnqueuedDatagrams(1)
+			m.metrics.IncSSU2IngressQueueDepth()
+		}
+	default:
+		m.ioStats.dropped.Add(1)
+		if m.metrics != nil {
+			m.metrics.AddSSU2ReceiveQueueDrops(1)
+		}
+		m.receiveComplete(received)
+	}
+}
+
+func (m *SSU2Manager) authLoop() {
+	defer m.wg.Done()
+	for {
+		select {
+		case job := <-m.authQueue:
+			packet := job.batch.batch.Packets()[job.index]
+			if err := m.handlePacketRecovered(packet.Data[:packet.Len], job.batch.addresses[job.index]); err != nil && m.logger != nil {
+				// ingress.Report already records the recovered panic. The
+				// authenticated worker must drop only this datagram; closing the
+				// manager here would turn one hostile packet into router-wide
+				// loss of every SSU2 session.
+				m.logger.Warn("dropped SSU2 datagram after recovered panic", "remote", job.batch.addresses[job.index], "error", err)
+			}
+			if m.metrics != nil {
+				m.metrics.AddSSU2ProcessedDatagrams(1)
+				m.metrics.DecSSU2IngressQueueDepth()
+			}
+			m.receiveComplete(job.batch)
+		case <-m.contextDone():
+			return
+		}
+	}
+}
+
+func (m *SSU2Manager) receiveComplete(received *ssu2ReceiveBatch) {
+	if received.remaining.Add(-1) != 0 {
+		return
+	}
+	select {
+	case m.receiveFree <- received:
+	case <-m.contextDone():
+	}
+}
+
+func (m *SSU2Manager) handlePacketRecovered(packet []byte, remote netip.AddrPort) (err error) {
+	defer recoverSSU2Packet(&err, m, remote)
+	m.handlePacket(packet, remote)
+	return nil
+}
+
+func recoverSSU2Packet(errp *error, manager *SSU2Manager, remote netip.AddrPort) {
+	recovered := recover()
+	if recovered == nil {
+		return
+	}
+	*errp = ingress.Report(recovered, manager.reporter, ingress.BoundarySSU2Packet, ssu2PacketAddr{value: remote})
+}
+
+func (m *SSU2Manager) retransmitLoop() {
+	defer m.wg.Done()
+	ticker := time.NewTicker(ssu2RetransmitInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.contextDone():
+			return
+		case now := <-ticker.C:
+			m.mu.RLock()
+			sessions := make([]*ssu2TransportSession, 0, len(m.sessionsByID))
+			for _, session := range m.sessionsByID {
+				sessions = append(sessions, session)
+			}
+			m.mu.RUnlock()
+			for _, session := range sessions {
+				if session.idle(now, m.idleTimeout) || m.retransmitOne(session, now) {
+					m.removeSession(session)
+					continue
+				}
+				session.expireFragments(now)
+				session.expirePath(now)
+			}
+			m.expireIntroductions(now)
+			m.expireExtensions(now)
+		}
+	}
+}
+
+func (m *SSU2Manager) retransmitOne(session *ssu2TransportSession, now time.Time) bool {
+	session.packetMu.Lock()
+	defer session.packetMu.Unlock()
+
+	session.sendMu.Lock()
+	var target *ssu2SentPacket
+	for _, sent := range session.sent {
+		if sent.latestPacket == 0 {
+			continue
+		}
+		if sent.sentAt.IsZero() || now.Sub(sent.sentAt) >= session.rto {
+			target = sent
+			break
+		}
+	}
+	if target == nil {
+		session.sendMu.Unlock()
+		return false
+	}
+	if target.attempts >= ssu2MaxRetransmits {
+		session.sendMu.Unlock()
+		return true
+	}
+	if session.closing || session.send == nil {
+		session.sendMu.Unlock()
+		return false
+	}
+	packetNumber := session.nextPacket
+	if packetNumber == 0 {
+		session.sendMu.Unlock()
+		return true
+	}
+	session.noteCongestionLocked(now, target)
+	packet, err := session.send.SealDataTo(session.sendPacket[:], ssu2DataHeader(session.sendID, packetNumber, session.shouldRequestImmediateACKLocked()), target.payload)
+	if err != nil {
+		session.sendMu.Unlock()
+		return false
+	}
+	session.nextPacket++
+	target.sentAt = now
+	target.attempts++
+	target.latestPacket = packetNumber
+	target.nacks = 0
+	target.fast = false
+	session.sent[packetNumber] = target
+	remote := session.remoteAddr()
+	session.sendMu.Unlock()
+
+	if m.writeTo(packet, remote) != nil {
+		return true
+	}
+	session.touch(now)
+	return false
+}
+
+func (m *SSU2Manager) handlePacket(packet []byte, remote netip.AddrPort) {
+	// A retry or SessionCreated is address-bound to a single local pending
+	// connection and is the only inbound class whose first header key is remote.
+	endpoint := netip.AddrPortFrom(remote.Addr().Unmap(), remote.Port())
+	m.mu.RLock()
+	outbound := m.outboundAddr[endpoint]
+	m.mu.RUnlock()
+	if outbound != nil {
+		if m.handleOutbound(packet, outbound) {
+			return
+		}
+	}
+
+	if header, err := dataplanessu2.PeekSessionRequest(packet, m.introKey); err == nil {
+		m.handleSessionRequest(packet, ssu2PacketAddr{value: remote}, header)
+		return
+	}
+	if destinationID, err := dataplanessu2.PeekDestinationID(packet, m.introKey); err == nil {
+		m.mu.RLock()
+		known := m.inbound[destinationID] != nil || m.sessionsByID[destinationID] != nil
+		m.mu.RUnlock()
+		if known {
+			m.handleSessionPacket(packet, remote)
+			return
+		}
+	}
+	header, payload, err := dataplanessu2.ParseOutOfSession(packet, m.introKey)
+	if err != nil || !m.timestampValid(payload) {
+		return
+	}
+	remoteAddr := ssu2PacketAddr{value: remote}
+	switch header.Type {
+	case dataplanessu2.TokenRequest:
+		m.handleTokenRequest(header, remoteAddr)
+	case dataplanessu2.PeerTest:
+		m.handlePeerTest(header, payload, remoteAddr)
+	case dataplanessu2.HolePunch:
+		m.handleHolePunch(header, payload, remoteAddr)
+	}
+}
+
+func (m *SSU2Manager) handleOutbound(packet []byte, pending *ssu2OutboundPending) bool {
+	if len(packet) > len(pending.packet) {
+		return true
+	}
+	pending.parseMu.Lock()
+	defer func() {
+		pending.parseMu.Unlock()
+		if pending.releaseOnExit.Load() {
+			pending.releaseSensitive()
+		}
+	}()
+	scratch := pending.packet[:len(packet)]
+	copy(scratch, packet)
+	if header, payload, err := dataplanessu2.ParseRetry(scratch, pending.address.intro[:]); err == nil {
+		if header.DestinationID != pending.sourceID || header.SourceID != pending.destinationID || header.Token == 0 || !m.timestampValid(payload) {
+			return true
+		}
+		m.mu.Lock()
+		if m.outbound[pending.peer] == pending {
+			pending.phase = "session_request"
+		}
+		m.mu.Unlock()
+		m.sendSessionRequestLocked(pending, header.Token)
+		if m.logger != nil {
+			m.logger.Debug("public transport handshake phase", "transport", "SSU2", "peer", routerHashDiagnostic(pending.peer), "endpoint", pending.remote.String(), "phase", "retry_authenticated")
+		}
+		return true
+	}
+	if pending.initiator == nil {
+		return false
+	}
+	copy(scratch, packet)
+	if header, payload, err := pending.initiator.ParseSessionCreated(scratch); err == nil {
+		if header.DestinationID != pending.sourceID || header.SourceID != pending.destinationID || !m.timestampValid(payload) {
+			m.markOutboundFailed(pending, ErrSSU2Session)
+			return true
+		}
+		m.mu.Lock()
+		if m.outbound[pending.peer] != pending || pending.confirming {
+			m.mu.Unlock()
+			return true
+		}
+		pending.confirming = true
+		pending.phase = "session_confirmed"
+		m.mu.Unlock()
+		m.sendSessionConfirmed(pending)
+		if m.logger != nil {
+			m.logger.Debug("public transport handshake phase", "transport", "SSU2", "peer", routerHashDiagnostic(pending.peer), "endpoint", pending.remote.String(), "phase", "session_created_authenticated")
+		}
+		return true
+	}
+	return false
+}
+
+func (m *SSU2Manager) handlePeerTest(header dataplanessu2.LongHeader, payload []byte, remote net.Addr) {
+	if header.Token != 0 {
+		return
+	}
+	iterator := dataplanessu2.NewBlockIterator(payload)
+	for {
+		block, ok, err := iterator.Next()
+		if err != nil || !ok {
+			return
+		}
+		if block.Type != dataplanessu2.BlockPeerTest {
+			continue
+		}
+		test, err := dataplanessu2.ParsePeerTestBlock(block.Data)
+		if err != nil || test.Message < 5 || test.Message > 7 || !m.relayTimestampValid(test.Timestamp) {
+			return
+		}
+		destinationID, sourceID := dataplanessu2.PeerTestConnectionIDs(test.Nonce)
+		if test.Message == 6 {
+			destinationID, sourceID = sourceID, destinationID
+		}
+		if header.DestinationID != destinationID || header.SourceID != sourceID {
+			return
+		}
+		if m.handleOutOfSessionPeerTest(test, remote) {
+			m.mu.RLock()
+			handler := m.onPeerTest
+			m.mu.RUnlock()
+			if handler != nil {
+				handler(test, remote)
+			}
+		}
+		return
+	}
+}
+func (m *SSU2Manager) handleSessionPeerTest(session *ssu2TransportSession, test dataplanessu2.PeerTestBlock) {
+	if test.Message < 1 || test.Message > 4 || !m.relayTimestampValid(test.Timestamp) {
+		return
+	}
+	switch test.Message {
+	case 1:
+		m.handlePeerTestOne(session, test)
+	case 2:
+		m.handlePeerTestTwo(session, test)
+	case 3:
+		m.handlePeerTestThree(session, test)
+	case 4:
+		m.handlePeerTestFour(session, test)
+	}
+}
+
+func (m *SSU2Manager) handlePeerTestOne(alice *ssu2TransportSession, test dataplanessu2.PeerTestBlock) {
+	bindings := m.currentBindings()
+	if bindings.LocalInfo == nil || !peerTestEndpointMatches(alice.remoteAddr(), test.Address) ||
+		!m.verifyPeerTest(alice.peer, bindings.LocalInfo.Hash(), foundation.Hash{}, test) {
+		m.sendPeerTestReject(alice, test, 5)
+		return
+	}
+	charlie := m.peerTestCharlie(alice, test.Address.Addr().Is4())
+	if charlie == nil {
+		m.sendPeerTestReject(alice, test, 2)
+		return
+	}
+	state := &ssu2PeerTestState{
+		nonce: test.Nonce, bob: bindings.LocalInfo.Hash(), alice: alice.peer,
+		charlie: charlie.peer, endpoint: test.Address, expires: m.now().Add(m.timeout),
+	}
+	m.mu.Lock()
+	if !m.runningLocked() || len(m.peerTests) >= m.maxPending || m.peerTests[test.Nonce] != nil {
+		m.mu.Unlock()
+		m.sendPeerTestReject(alice, test, 3)
+		return
+	}
+	m.peerTests[test.Nonce] = state
+	state.timer = time.AfterFunc(m.timeout, func() { m.expirePeerTest(test.Nonce, state) })
+	m.mu.Unlock()
+	forward := test
+	forward.Message, forward.HasHash, forward.Hash = 2, true, alice.peer
+	if err := m.sendPeerTestBlock(charlie, forward); err != nil {
+		m.expirePeerTest(test.Nonce, state)
+		m.sendPeerTestReject(alice, test, 2)
+	}
+}
+
+func (m *SSU2Manager) handlePeerTestTwo(bob *ssu2TransportSession, test dataplanessu2.PeerTestBlock) {
+	if !test.HasHash || !m.verifyPeerTest(test.Hash, bob.peer, foundation.Hash{}, test) {
+		return
+	}
+	bindings := m.currentBindings()
+	if bindings.LocalInfo == nil {
+		return
+	}
+	response := dataplanessu2.PeerTestBlock{Message: 3, Nonce: test.Nonce, Timestamp: uint32(m.now().Unix()), Address: test.Address}
+	input, err := dataplanessu2.PeerTestSignatureInput(nil, bob.peer[:], test.Hash[:], response)
+	if err != nil {
+		return
+	}
+	response.Signature, err = m.signSSU2Control(input)
+	clear(input)
+	if err != nil || len(response.Signature) == 0 {
+		return
+	}
+	state := &ssu2PeerTestState{
+		nonce: test.Nonce, bob: bob.peer, alice: test.Hash, charlie: bindings.LocalInfo.Hash(),
+		endpoint: test.Address, expires: m.now().Add(m.timeout),
+	}
+	m.mu.Lock()
+	if !m.runningLocked() || len(m.peerTests) >= m.maxPending || m.peerTests[test.Nonce] != nil {
+		m.mu.Unlock()
+		return
+	}
+	m.peerTests[test.Nonce] = state
+	state.timer = time.AfterFunc(m.timeout, func() { m.expirePeerTest(test.Nonce, state) })
+	m.mu.Unlock()
+	if m.sendPeerTestBlock(bob, response) != nil {
+		m.expirePeerTest(test.Nonce, state)
+		return
+	}
+	// Message 5 is out-of-session and may arrive before Bob forwards message 4.
+	phase5 := response
+	phase5.Message = 5
+	_ = m.SendPeerTest(m.ctx, test.Hash, phase5)
+}
+
+func (m *SSU2Manager) handlePeerTestThree(charlie *ssu2TransportSession, test dataplanessu2.PeerTestBlock) {
+	m.mu.RLock()
+	state := m.peerTests[test.Nonce]
+	bindings := m.bindings
+	m.mu.RUnlock()
+	if state == nil || bindings.LocalInfo == nil || state.charlie != charlie.peer ||
+		!m.verifyPeerTest(charlie.peer, bindings.LocalInfo.Hash(), state.alice, test) {
+		return
+	}
+	m.mu.RLock()
+	alice := m.sessionsByPeer[state.alice]
+	m.mu.RUnlock()
+	if alice == nil {
+		return
+	}
+	forward := test
+	forward.Message, forward.HasHash, forward.Hash = 4, true, charlie.peer
+	if m.sendPeerTestBlock(alice, forward) == nil {
+		m.expirePeerTest(test.Nonce, state)
+	}
+}
+func (m *SSU2Manager) handlePeerTestFour(bob *ssu2TransportSession, test dataplanessu2.PeerTestBlock) {
+	m.mu.RLock()
+	state := m.peerTests[test.Nonce]
+	if state == nil || state.bob != bob.peer || !test.HasHash {
+		m.mu.RUnlock()
+		return
+	}
+	alice := state.alice
+	m.mu.RUnlock()
+	if !m.verifyPeerTest(test.Hash, state.bob, alice, test) {
+		return
+	}
+	if test.Code != 0 {
+		m.completePeerTest(state, PeerTestResult{Nonce: test.Nonce, Outcome: PeerTestFirewalled, Diagnostic: "peer test rejected"})
+		return
+	}
+	test.Signature = nil
+	copy := test
+	m.mu.Lock()
+	if m.peerTests[test.Nonce] == state {
+		state.charlie = test.Hash
+		state.message4 = &copy
+		if state.message5 != nil && state.message5Peer != test.Hash {
+			state.message5 = nil
+			state.message5Source = netip.AddrPort{}
+			state.message5Peer = foundation.Hash{}
+		}
+	}
+	result, done := m.peerTestResultLocked(state, false)
+	m.mu.Unlock()
+	if done {
+		m.completePeerTest(state, result)
+		return
+	}
+	m.schedulePeerTestSix(state)
+}
+
+func (m *SSU2Manager) handleOutOfSessionPeerTest(test dataplanessu2.PeerTestBlock, remote net.Addr) bool {
+	source, sourceOK := peerTestSource(remote)
+	if !sourceOK {
+		return false
+	}
+	m.mu.RLock()
+	state := m.peerTests[test.Nonce]
+	if state == nil || !state.expires.After(m.nowLocked()) || m.bindings.LocalInfo == nil {
+		m.mu.RUnlock()
+		return false
+	}
+	local := m.bindings.LocalInfo.Hash()
+	var expected foundation.Hash
+	switch test.Message {
+	case 5:
+		if state.alice != local {
+			m.mu.RUnlock()
+			return false
+		}
+		expected = state.charlie
+	case 7:
+		if state.alice != local || state.charlie == (foundation.Hash{}) {
+			m.mu.RUnlock()
+			return false
+		}
+		expected = state.charlie
+	case 6:
+		if state.charlie != local || state.alice == (foundation.Hash{}) {
+			m.mu.RUnlock()
+			return false
+		}
+		expected = state.alice
+	default:
+		m.mu.RUnlock()
+		return false
+	}
+	m.mu.RUnlock()
+	if expected == (foundation.Hash{}) {
+		var found bool
+		expected, found = m.peerTestPeerAtEndpoint(source)
+		if !found {
+			return false
+		}
+	} else if !m.peerTestEndpointApproved(expected, source) {
+		return false
+	}
+
+	test.Signature = nil
+	copy := test
+	m.mu.Lock()
+	if m.peerTests[test.Nonce] != state || !state.expires.After(m.nowLocked()) {
+		m.mu.Unlock()
+		return false
+	}
+	switch test.Message {
+	case 5:
+		if state.message5 != nil || (state.charlie != (foundation.Hash{}) && state.charlie != expected) {
+			m.mu.Unlock()
+			return false
+		}
+		state.message5, state.message5Source, state.message5Peer = &copy, source, expected
+	case 6:
+		if state.message6Received {
+			m.mu.Unlock()
+			return false
+		}
+		state.message6Received = true
+		alice := state.alice
+		m.mu.Unlock()
+		response := test
+		response.Message = 7
+		_ = m.SendPeerTest(m.ctx, alice, response)
+		return true
+	case 7:
+		if state.message7 != nil {
+			m.mu.Unlock()
+			return false
+		}
+		state.message7, state.message7Source = &copy, source
+	}
+	result, done := m.peerTestResultLocked(state, false)
+	m.mu.Unlock()
+	if done {
+		m.completePeerTest(state, result)
+	}
+	return true
+}
+
+func (m *SSU2Manager) sendPeerTestBlock(session *ssu2TransportSession, test dataplanessu2.PeerTestBlock) error {
+	var storage [dataplanessu2.MaxIPv4PacketLen]byte
+	payload, err := dataplanessu2.MarshalPeerTestBlock(storage[:0], test)
+	if err != nil {
+		return err
+	}
+	return m.sendSessionData(session, payload, true)
+}
+func (m *SSU2Manager) sendPeerTestReject(alice *ssu2TransportSession, request dataplanessu2.PeerTestBlock, code uint8) {
+	bindings := m.currentBindings()
+	if bindings.LocalInfo == nil {
+		return
+	}
+	reject := dataplanessu2.PeerTestBlock{Message: 4, Code: code, Nonce: request.Nonce, Timestamp: uint32(m.now().Unix()), Address: request.Address, HasHash: true}
+	bobHash := bindings.LocalInfo.Hash()
+	input, err := dataplanessu2.PeerTestSignatureInput(nil, bobHash[:], alice.peer[:], reject)
+	if err != nil {
+		return
+	}
+	reject.Signature, err = m.signSSU2Control(input)
+	clear(input)
+	if err == nil {
+		_ = m.sendPeerTestBlock(alice, reject)
+	}
+}
+
+func (m *SSU2Manager) verifyPeerTest(peer, bob, alice foundation.Hash, test dataplanessu2.PeerTestBlock) bool {
+	info, known := m.routerInfo(peer)
+	if !known {
+		return false
+	}
+	input, err := dataplanessu2.PeerTestSignatureInput(nil, bob[:], alice[:], test)
+	if err != nil {
+		return false
+	}
+	valid, verifyErr := info.Identity.Verify(input, test.Signature)
+	clear(input)
+	return verifyErr == nil && valid
+}
+
+func (m *SSU2Manager) peerTestEndpointApproved(peer foundation.Hash, source netip.AddrPort) bool {
+	info, ok := m.routerInfo(peer)
+	return ok && peerTestInfoEndpointApproved(info, source)
+}
+
+func peerTestInfoEndpointApproved(info foundation.NetworkDatabaseRouterInfo, source netip.AddrPort) bool {
+	if !source.IsValid() {
+		return false
+	}
+	address, err := selectSSU2Address(info)
+	if err != nil {
+		return false
+	}
+	host, err := netip.ParseAddr(address.host)
+	if err != nil {
+		return false
+	}
+	expected := netip.AddrPortFrom(host.Unmap(), address.port)
+	return expected == netip.AddrPortFrom(source.Addr().Unmap(), source.Port())
+}
+
+func (m *SSU2Manager) peerTestPeerAtEndpoint(source netip.AddrPort) (foundation.Hash, bool) {
+	if m.peers == nil {
+		return foundation.Hash{}, false
+	}
+	return m.peers.PeerAtEndpoint(source)
+}
+
+func (m *SSU2Manager) peerTestCharlie(alice *ssu2TransportSession, ipv4 bool) *ssu2TransportSession {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, session := range m.sessionsByPeer {
+		if session == alice || !m.sessionActive(session) {
+			continue
+		}
+		remote, ok := session.remoteAddr().(*net.UDPAddr)
+		if ok && remote.IP.To4() != nil == ipv4 {
+			return session
+		}
+	}
+	return nil
+}
+
+func peerTestEndpointMatches(remote net.Addr, endpoint netip.AddrPort) bool {
+	source, ok := remote.(interface{ AddrPort() netip.AddrPort })
+	if !ok || endpoint.Port() < 1024 {
+		return false
+	}
+	address := source.AddrPort().Addr()
+	if !address.IsValid() || address.Is4In6() || address.Is4() != endpoint.Addr().Is4() {
+		return false
+	}
+	if address.Is4() {
+		return address == endpoint.Addr()
+	}
+	address16, endpoint16 := address.As16(), endpoint.Addr().As16()
+	return bytes.Equal(address16[:8], endpoint16[:8])
+}
+
+// peerTestSourceMatches accepts out-of-session phases only from the Charlie
+// endpoint currently authenticated in RouterInfo; the PeerTest address is
+// Alice's observed endpoint and is not a substitute for the UDP source.
+func peerTestSource(remote net.Addr) (netip.AddrPort, bool) {
+	source, ok := remote.(interface{ AddrPort() netip.AddrPort })
+	if !ok {
+		return netip.AddrPort{}, false
+	}
+	endpoint := source.AddrPort()
+	return endpoint, endpoint.IsValid()
+}
+func (m *SSU2Manager) schedulePeerTestSix(state *ssu2PeerTestState) {
+	delay := min(max(m.timeout/4, 500*time.Millisecond), 3*time.Second)
+	m.mu.Lock()
+	if m.peerTests[state.nonce] != state || state.message6Sent || state.sixTimer != nil {
+		m.mu.Unlock()
+		return
+	}
+	state.sixTimer = time.AfterFunc(delay, func() {
+		m.mu.Lock()
+		if m.peerTests[state.nonce] != state || state.message6Sent || state.message4 == nil {
+			m.mu.Unlock()
+			return
+		}
+		state.message6Sent = true
+		charlie, phase4 := state.charlie, *state.message4
+		m.mu.Unlock()
+		phase4.Message, phase4.HasHash, phase4.Signature = 6, false, nil
+		_ = m.SendPeerTest(m.ctx, charlie, phase4)
+	})
+	m.mu.Unlock()
+}
+
+func (m *SSU2Manager) expirePeerTest(nonce uint32, state *ssu2PeerTestState) {
+	m.mu.Lock()
+	if m.peerTests[nonce] != state {
+		m.mu.Unlock()
+		return
+	}
+	result, done := m.peerTestResultLocked(state, true)
+	if !done {
+		result, done = PeerTestResult{Nonce: nonce, Outcome: PeerTestUnknown, Diagnostic: "peer test timed out"}, true
+	}
+	m.mu.Unlock()
+	if done {
+		m.completePeerTest(state, result)
+	}
+}
+
+func (m *SSU2Manager) peerTestResultLocked(state *ssu2PeerTestState, final bool) (PeerTestResult, bool) {
+	if state.message4 == nil {
+		if final {
+			return PeerTestResult{Nonce: state.nonce, Outcome: PeerTestUnknown, Diagnostic: "missing message 4"}, true
+		}
+		return PeerTestResult{}, false
+	}
+	if state.message4.Code != 0 {
+		return PeerTestResult{Nonce: state.nonce, Outcome: PeerTestFirewalled, Diagnostic: "peer test rejected"}, true
+	}
+	if state.message5 != nil && len(state.message5.Signature) != 0 {
+		phase3 := *state.message5
+		phase3.Message = 3
+		if !m.verifyPeerTest(state.charlie, state.bob, state.alice, phase3) {
+			state.diagnostic = "invalid message 5 signature"
+			state.message5 = nil
+		}
+	}
+	if state.message7 != nil && len(state.message7.Signature) != 0 {
+		phase4 := *state.message7
+		phase4.Message, phase4.HasHash, phase4.Hash = 4, true, state.charlie
+		if !m.verifyPeerTest(state.charlie, state.bob, state.alice, phase4) {
+			state.diagnostic = "invalid message 7 signature"
+			state.message7 = nil
+		}
+	}
+	if state.message5 != nil && state.message7 != nil {
+		diagnostic := ""
+		if state.message4.Address != state.message7.Address {
+			diagnostic = "Charlie observed a different endpoint"
+		}
+		return PeerTestResult{Nonce: state.nonce, Outcome: PeerTestOK, Diagnostic: diagnostic}, true
+	}
+	if state.message5 == nil && state.message7 != nil {
+		expected, observed := state.message4.Address, state.message7.Address
+		if expected == observed {
+			return PeerTestResult{Nonce: state.nonce, Outcome: PeerTestFirewalled, Diagnostic: "messages 4 and 7 match; message 5 absent"}, true
+		}
+		if expected.Addr() == observed.Addr() {
+			key := expected.Addr().String()
+			evidence := m.symmetricEvidence[key]
+			if evidence.endpoint == expected && evidence.observed == observed {
+				evidence.count++
+			} else {
+				evidence = ssu2PeerTestEvidence{endpoint: expected, observed: observed, count: 1}
+			}
+			m.symmetricEvidence[key] = evidence
+			if evidence.count >= 2 {
+				return PeerTestResult{Nonce: state.nonce, Outcome: PeerTestSymmetricNAT, Diagnostic: "confirmed symmetric NAT endpoint translation"}, true
+			}
+			return PeerTestResult{Nonce: state.nonce, Outcome: PeerTestFirewalled, Diagnostic: "possible symmetric NAT; confirmation required"}, true
+		}
+		return PeerTestResult{Nonce: state.nonce, Outcome: PeerTestFirewalled, Diagnostic: "message 7 IP differs from message 4"}, true
+	}
+	if final {
+		return PeerTestResult{Nonce: state.nonce, Outcome: PeerTestUnknown, Diagnostic: "peer test timed out before message 7"}, true
+	}
+	return PeerTestResult{}, false
+}
+
+func (m *SSU2Manager) completePeerTest(state *ssu2PeerTestState, result PeerTestResult) {
+	m.mu.Lock()
+	if m.peerTests[state.nonce] == state {
+		delete(m.peerTests, state.nonce)
+	}
+	if state.timer != nil {
+		state.timer.Stop()
+	}
+	if state.sixTimer != nil {
+		state.sixTimer.Stop()
+	}
+	publish, handler := m.publishPeerTestResult, m.onPeerTestResult
+	m.mu.Unlock()
+	if publish != nil {
+		publish(m.ctx, result)
+	}
+	if result.Outcome == PeerTestFirewalled || result.Outcome == PeerTestSymmetricNAT {
+		m.maintainIntroducers()
+	}
+	if handler != nil {
+		handler(result)
+	}
+}
+
+func (m *SSU2Manager) sendSessionRequest(pending *ssu2OutboundPending, token uint64) {
+	pending.parseMu.Lock()
+	m.sendSessionRequestLocked(pending, token)
+	pending.parseMu.Unlock()
+	if pending.releaseOnExit.Load() {
+		pending.releaseSensitive()
+	}
+}
+
+func (m *SSU2Manager) sendSessionRequestLocked(pending *ssu2OutboundPending, token uint64) {
+	m.mu.RLock()
+	active := m.outbound[pending.peer] == pending && !pending.confirming
+	m.mu.RUnlock()
+	if !active || pending.initiator != nil {
+		return
+	}
+	initiator, err := dataplanessu2.NewInitiator(pending.address.static[:], pending.address.intro[:], pending.destinationID, pending.sourceID)
+	if err != nil {
+		m.markOutboundFailed(pending, err)
+		return
+	}
+	pending.initiator = initiator
+	m.mu.Lock()
+	if m.outbound[pending.peer] != pending || pending.confirming {
+		m.mu.Unlock()
+		m.markOutboundFailed(pending, ErrSSU2Session)
+		return
+	}
+	pending.phase = "session_request"
+	m.mu.Unlock()
+	packetNumber, err := randomPacketNumber()
+	if err == nil {
+		var payload []byte
+		payload, err = ssu2DateTimePayload(m.now())
+		if err == nil {
+			var packetBuffer [dataplanessu2.MaxIPv4PacketLen]byte
+			packet, buildErr := initiator.BuildSessionRequest(packetBuffer[:], payload, packetNumber, token)
+			if buildErr != nil {
+				err = buildErr
+			} else {
+				err = m.writeTo(packet, pending.remote)
+			}
+			if err == nil && m.logger != nil {
+				m.logger.Debug("public transport handshake phase", "transport", "SSU2", "peer", routerHashDiagnostic(pending.peer), "endpoint", pending.remote.String(), "phase", "session_request_sent")
+			}
+		}
+	}
+	if err != nil {
+		m.markOutboundFailed(pending, err)
+	}
+}
+
+func (m *SSU2Manager) sendSessionConfirmed(pending *ssu2OutboundPending) {
+	maxPacket := ssu2RemotePacketSizeForMTU(pending.remote, pending.address.mtu)
+	payload, err := m.localConfirmedPayload(maxPacket)
+	if err != nil {
+		m.markOutboundFailed(pending, err)
+		return
+	}
+	packets, err := buildSSU2SessionConfirmedFragments(pending, m.staticPrivate, payload)
+	if err != nil {
+		m.markOutboundFailed(pending, err)
+		return
+	}
+	send, receive, err := pending.initiator.DataCiphers(m.introKey)
+	if err != nil {
+		m.markOutboundFailed(pending, err)
+		return
+	}
+	session := &ssu2TransportSession{peer: pending.peer, sendID: pending.destinationID, receiveID: pending.sourceID, remote: pending.remote, send: send, receive: receive, nextPacket: 1, fragments: make(map[uint32]*ssu2FragmentAssembly), lastActivity: m.now()}
+	session.initReliability(m.ssu2LargeMTU(pending.remote, pending.address.mtu))
+	installed := false
+	defer func() {
+		if !installed {
+			session.ReleaseSensitive()
+		}
+	}()
+	for _, packet := range packets {
+		if err = m.writeTo(packet, pending.remote); err != nil {
+			m.markOutboundFailed(pending, err)
+			return
+		}
+	}
+	m.mu.Lock()
+	if m.outbound[pending.peer] != pending || !m.installSessionLocked(session) {
+		m.mu.Unlock()
+		m.markOutboundFailed(pending, ErrSSU2Session)
+		return
+	}
+	m.finishOutboundLocked(pending, nil)
+	sessionCount := len(m.sessionsByPeer)
+	m.mu.Unlock()
+	installed = true
+	if m.metrics != nil {
+		m.metrics.IncTransportConnections()
+		m.metrics.SetTransportSSU2Sessions(uint64(sessionCount))
+	}
+	if m.logger != nil {
+		m.logger.Info("authenticated public transport session established", "transport", "SSU2", "peer", routerHashDiagnostic(pending.peer), "endpoint", pending.remote.String())
+	}
+	_ = m.sendNewToken(session)
+	m.maybeStartPeerTest(session.peer)
+}
+
+func (m *SSU2Manager) handleTokenRequest(header dataplanessu2.LongHeader, remote net.Addr) {
+	if dataplanessu2.SameConnectionID(header.DestinationID, header.SourceID) {
+		return
+	}
+	m.mu.Lock()
+	if !m.runningLocked() {
+		m.mu.Unlock()
+		return
+	}
+	token, err := m.newTokenLocked(remote, header.DestinationID, header.SourceID)
+	m.mu.Unlock()
+	if err != nil {
+		return
+	}
+	m.sendRetry(remote, header, token)
+}
+
+func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, header dataplanessu2.LongHeader) {
+	m.mu.Lock()
+	if !m.runningLocked() || m.sessionsByID[header.DestinationID] != nil || m.inbound[header.DestinationID] != nil {
+		m.mu.Unlock()
+		return
+	}
+	if !m.consumeTokenLocked(header.Token, remote, header.DestinationID, header.SourceID) &&
+		!m.consumeNewTokenLocked(header.Token, remote) {
+		token, err := m.newTokenLocked(remote, header.DestinationID, header.SourceID)
+		m.mu.Unlock()
+		if err == nil {
+			m.sendRetry(remote, header, token)
+		}
+		return
+	}
+	if len(m.inbound)+len(m.outbound) >= m.maxPending {
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+	responder, requestHeader, payload, err := dataplanessu2.ParseSessionRequest(packet, m.staticPrivate, m.introKey)
+	if err != nil || requestHeader != header || !m.timestampValid(payload) {
+		return
+	}
+	retained := false
+	defer func() {
+		if !retained {
+			responder.ReleaseSensitive()
+		}
+	}()
+	createdPayload, err := ssu2SessionCreatedPayload(remote, m.now())
+	if err != nil {
+		return
+	}
+	packetNumber, err := randomPacketNumber()
+	if err != nil {
+		return
+	}
+	created, err := responder.BuildSessionCreated(make([]byte, dataplanessu2.MaxIPv4PacketLen), createdPayload, packetNumber)
+	if err != nil {
+		return
+	}
+	pending := &ssu2InboundPending{remote: cloneUDPAddress(remote), sendID: header.SourceID, responder: responder}
+	pending.reassembly = dataplanessu2.NewConfirmedReassembler(responder)
+	pending.timer = time.AfterFunc(m.timeout, func() {
+		m.mu.Lock()
+		if m.inbound[header.DestinationID] != pending {
+			m.mu.Unlock()
+			return
+		}
+		delete(m.inbound, header.DestinationID)
+		m.mu.Unlock()
+		pending.reassemblyMu.Lock()
+		pending.responder.ReleaseSensitive()
+		pending.reassembly.ReleaseSensitive()
+		pending.reassemblyMu.Unlock()
+	})
+	m.mu.Lock()
+	if !m.runningLocked() || m.sessionsByID[header.DestinationID] != nil || m.inbound[header.DestinationID] != nil {
+		m.mu.Unlock()
+		pending.timer.Stop()
+		pending.reassemblyMu.Lock()
+		pending.reassembly.ReleaseSensitive()
+		pending.reassemblyMu.Unlock()
+		return
+	}
+	m.inbound[header.DestinationID] = pending
+	retained = true
+	m.mu.Unlock()
+	if err = m.writeTo(created, remote); err != nil {
+		m.removeInbound(header.DestinationID, pending)
+	}
+}
+
+func (m *SSU2Manager) handleSessionPacket(packet []byte, remote netip.AddrPort) {
+	destinationID, err := dataplanessu2.PeekDestinationID(packet, m.introKey)
+	if err != nil {
+		return
+	}
+	m.mu.RLock()
+	pending := m.inbound[destinationID]
+	session := m.sessionsByID[destinationID]
+	m.mu.RUnlock()
+	if pending != nil {
+		m.handleSessionConfirmed(packet, pending, destinationID, ssu2PacketAddr{value: remote})
+		return
+	}
+	if session != nil {
+		m.handleDataFrom(session, packet, remote)
+	}
+}
+func (m *SSU2Manager) handleSessionConfirmed(packet []byte, pending *ssu2InboundPending, destinationID uint64, remote net.Addr) {
+	pending.reassemblyMu.Lock()
+	defer pending.reassemblyMu.Unlock()
+	if !sameUDPAddress(pending.remote, remote) {
+		return
+	}
+	m.mu.RLock()
+	active := m.inbound[destinationID] == pending
+	m.mu.RUnlock()
+	if !active {
+		return
+	}
+	static, payload, complete, err := pending.reassembly.Add(packet)
+	if err != nil || !complete {
+		return
+	}
+	peer, peerIntro, err := validateSSU2ConfirmedPayload(payload, static)
+	if err != nil || peer.Hash() == m.currentBindings().LocalInfo.Hash() || !m.admitSSU2Peer(peer, static, m.now()) {
+		m.removeInboundHeld(destinationID, pending)
+		return
+	}
+	send, receive, err := pending.responder.DataCiphers(peerIntro)
+	if err != nil {
+		m.removeInboundHeld(destinationID, pending)
+		return
+	}
+	session := &ssu2TransportSession{peer: peer.Hash(), sendID: pending.sendID, receiveID: destinationID, remote: cloneUDPAddress(remote), send: send, receive: receive, nextPacket: 1, fragments: make(map[uint32]*ssu2FragmentAssembly), lastActivity: m.now()}
+	session.initReliability(m.ssu2LargeMTU(remote, ssu2AdvertisedMTU(peer, remote)))
+	m.mu.Lock()
+	if m.inbound[destinationID] != pending || !m.installSessionLocked(session) {
+		m.mu.Unlock()
+		m.removeInboundHeld(destinationID, pending)
+		session.ReleaseSensitive()
+		return
+	}
+	delete(m.inbound, destinationID)
+	m.mu.Unlock()
+	pending.timer.Stop()
+	pending.responder.ReleaseSensitive()
+	pending.reassembly.ReleaseSensitive()
+	session.received.Observe(0)
+	m.queueACK(session)
+	_ = m.sendNewToken(session)
+}
+
+func (m *SSU2Manager) removeSession(session *ssu2TransportSession) {
+	m.mu.Lock()
+	m.removeSessionLocked(session)
+	m.mu.Unlock()
+	session.ReleaseSensitive()
+}
+
+func (m *SSU2Manager) removeSessionLocked(session *ssu2TransportSession) {
+	removed := false
+	if m.sessionsByID[session.receiveID] == session {
+		delete(m.sessionsByID, session.receiveID)
+	}
+	if m.sessionsByPeer[session.peer] == session {
+		delete(m.sessionsByPeer, session.peer)
+		removed = true
+	}
+	if removed && m.metrics != nil {
+		m.metrics.IncTransportDisconnections()
+		m.metrics.SetTransportSSU2Sessions(uint64(len(m.sessionsByPeer)))
+	}
+}
+
+func (m *SSU2Manager) handleData(session *ssu2TransportSession, packet []byte) {
+	remote, _ := addrPortKey(session.remoteAddr())
+	m.handleDataFrom(session, packet, remote)
+}
+
+func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byte, remote netip.AddrPort) {
+	session.lifetimeMu.RLock()
+	lifetimeHeld := true
+	defer func() {
+		if lifetimeHeld {
+			session.lifetimeMu.RUnlock()
+		}
+	}()
+	session.receiveMu.Lock()
+	if session.receive == nil {
+		session.receiveMu.Unlock()
+		return
+	}
+	// The receive loop owns packet until this call returns. Open in place so
+	// authenticated payloads do not require a second datagram-sized buffer.
+	plaintext := packet[dataplanessu2.ShortHeaderLen : len(packet)-dataplanessu2.PacketTagLen]
+	header, payload, err := session.receive.OpenDataTo(plaintext, packet)
+	if err != nil || header.Type != dataplanessu2.Data || header.DestinationID != session.receiveID {
+		session.receiveMu.Unlock()
+		return
+	}
+	if !session.received.ObserveNew(header.PacketNumber) {
+		session.receiveMu.Unlock()
+		return
+	}
+	session.receiveMu.Unlock()
+	if remote.IsValid() {
+		expected, expectedOK := addrPortKey(session.remoteAddr())
+		canonicalRemote := netip.AddrPortFrom(remote.Addr().Unmap(), remote.Port())
+		if !expectedOK || expected != canonicalRemote {
+			m.handleCandidatePath(session, payload, net.UDPAddrFromAddrPort(canonicalRemote))
+			return
+		}
+	}
+	now := m.now()
+	session.touch(now)
+	terminated := false
+	ackEliciting := false
+	var dispatch *ssu2DispatchBatch
+	defer func() {
+		if dispatch != nil {
+			m.releaseDispatchBatch(dispatch)
+		}
+	}()
+	iterator := dataplanessu2.NewBlockIterator(payload)
+	for {
+		block, ok, err := iterator.Next()
+		if err != nil {
+			return
+		}
+		if !ok {
+			break
+		}
+		switch block.Type {
+		case dataplanessu2.BlockACK:
+			var ranges [dataplanessu2.MaxACKRanges]dataplanessu2.ACKRange
+			acked, err := dataplanessu2.ParseACKRanges(block.Data, ranges[:0])
+			if err != nil {
+				return
+			}
+			session.acknowledge(acked, now)
+		case dataplanessu2.BlockI2NP:
+			ackEliciting = true
+			message, err := decodeSSU2I2NP(block.Data)
+			if err != nil {
+				return
+			}
+			dispatch, err = m.appendDispatchI2NP(dispatch, session.peer, message)
+			if err != nil {
+				return
+			}
+		case dataplanessu2.BlockPeerTest:
+			ackEliciting = true
+			test, err := dataplanessu2.ParsePeerTestBlock(block.Data)
+			if err != nil {
+				return
+			}
+			m.handleSessionPeerTest(session, test)
+		case dataplanessu2.BlockFirstFragment, dataplanessu2.BlockFollowOnFragment:
+			ackEliciting = true
+			message, complete, err := session.addFragment(block.Type, block.Data, m.now())
+			if err != nil {
+				return
+			}
+			if complete {
+				dispatch, err = m.appendDispatchI2NP(dispatch, session.peer, message)
+				if err != nil {
+					return
+				}
+			}
+		case dataplanessu2.BlockRelayTagRequest:
+			ackEliciting = true
+			m.handleRelayTagRequest(session)
+		case dataplanessu2.BlockRelayTag:
+			ackEliciting = true
+			tag, err := dataplanessu2.ParseRelayTagBlock(block.Data)
+			if err != nil {
+				return
+			}
+			m.handleRelayTag(session, tag)
+		case dataplanessu2.BlockNewToken:
+			ackEliciting = true
+			token, err := dataplanessu2.ParseNewTokenBlock(block.Data)
+			if err != nil {
+				return
+			}
+			m.storeNewToken(session, token)
+		case dataplanessu2.BlockRelayRequest:
+			ackEliciting = true
+			request, err := dataplanessu2.ParseRelayRequestBlock(block.Data)
+			if err != nil {
+				return
+			}
+			m.handleRelayRequest(session, request)
+		case dataplanessu2.BlockRelayIntro:
+			ackEliciting = true
+			intro, err := dataplanessu2.ParseRelayIntroBlock(block.Data)
+			if err != nil {
+				return
+			}
+			m.handleRelayIntro(session, intro)
+		case dataplanessu2.BlockRelayResponse:
+			ackEliciting = true
+			response, err := dataplanessu2.ParseRelayResponseBlock(block.Data)
+			if err != nil {
+				return
+			}
+			m.handleRelayResponse(session, response)
+			m.forwardRelayResponse(session, response, block.Data)
+		case dataplanessu2.BlockPathChallenge:
+			ackEliciting = true
+			challenge, err := dataplanessu2.ParsePathChallengeBlock(block.Data)
+			if err != nil {
+				return
+			}
+			session.frameMu.Lock()
+			response, _ := dataplanessu2.MarshalPathResponseBlock(session.frame[:0], dataplanessu2.PathResponse{Data: challenge.Data})
+			_ = m.sendSessionData(session, response, false)
+			session.frameMu.Unlock()
+		case dataplanessu2.BlockPathResponse:
+			ackEliciting = true
+		case dataplanessu2.BlockAddress, dataplanessu2.BlockDateTime, dataplanessu2.BlockPadding:
+		case dataplanessu2.BlockTermination:
+			terminated = true
+			ackEliciting = true
+		default:
+			ackEliciting = true
+		}
+	}
+	if dispatch != nil {
+		if m.dispatchI2NPBatch(dispatch) != nil {
+			return
+		}
+		dispatch = nil
+	}
+	if terminated {
+		lifetimeHeld = false
+		session.lifetimeMu.RUnlock()
+		m.removeSession(session)
+		return
+	}
+	if ackEliciting {
+		m.queueACK(session)
+	}
+}
+
+func (m *SSU2Manager) handleCandidatePath(session *ssu2TransportSession, payload []byte, remote net.Addr) {
+	candidate, ok := cloneUDPAddress(remote).(*net.UDPAddr)
+	if !ok || candidate == nil {
+		return
+	}
+	now := m.now()
+	session.pathMu.Lock()
+	current := session.candidate
+	if current != nil && !current.expires.After(now) {
+		clear(current.challenge[:])
+		session.candidate = nil
+		current = nil
+	}
+	if current == nil {
+		var challenge [8]byte
+		if _, err := rand.Read(challenge[:]); err != nil {
+			session.pathMu.Unlock()
+			return
+		}
+		current = &ssu2PathCandidate{remote: candidate, challenge: challenge, expires: now.Add(m.timeout)}
+		session.candidate = current
+	} else if !sameUDPAddress(current.remote, candidate) {
+		session.pathMu.Unlock()
+		return
+	}
+	challenge := current.challenge
+	session.pathMu.Unlock()
+
+	session.frameMu.Lock()
+	probe, err := dataplanessu2.MarshalPathChallengeBlock(session.frame[:0], dataplanessu2.PathChallenge{Data: challenge})
+	if err == nil {
+		err = m.sendSessionDataTo(session, candidate, probe)
+	}
+	session.frameMu.Unlock()
+	if err != nil {
+		return
+	}
+	iterator := dataplanessu2.NewBlockIterator(payload)
+	for {
+		block, ok, err := iterator.Next()
+		if err != nil || !ok {
+			return
+		}
+		switch block.Type {
+		case dataplanessu2.BlockPathChallenge:
+			request, err := dataplanessu2.ParsePathChallengeBlock(block.Data)
+			if err != nil {
+				return
+			}
+			session.frameMu.Lock()
+			response, _ := dataplanessu2.MarshalPathResponseBlock(session.frame[:0], dataplanessu2.PathResponse{Data: request.Data})
+			_ = m.sendSessionDataTo(session, candidate, response)
+			session.frameMu.Unlock()
+		case dataplanessu2.BlockPathResponse:
+			response, err := dataplanessu2.ParsePathResponseBlock(block.Data)
+			if err != nil {
+				return
+			}
+			session.pathMu.Lock()
+			live := session.candidate
+			valid := live != nil && live.expires.After(now) &&
+				sameUDPAddress(live.remote, candidate) && hmac.Equal(live.challenge[:], response.Data[:])
+			if valid {
+				// The source, challenge and bounded lifetime have all been
+				// authenticated; update the endpoint under the send lock.
+				session.setRemote(candidate)
+				clear(live.challenge[:])
+				session.candidate = nil
+			}
+			session.pathMu.Unlock()
+		}
+	}
+}
+
+func (m *SSU2Manager) sendSessionDataTo(session *ssu2TransportSession, remote net.Addr, payload []byte) error {
+	session.packetMu.Lock()
+	defer session.packetMu.Unlock()
+
+	session.sendMu.Lock()
+	if session.closing || !m.sessionActive(session) || session.nextPacket == 0 || session.send == nil {
+		session.sendMu.Unlock()
+		return ErrSSU2Session
+	}
+	packetNumber := session.nextPacket
+	packet, err := session.send.SealDataTo(session.sendPacket[:], dataplanessu2.ShortHeader{
+		DestinationID: session.sendID,
+		PacketNumber:  packetNumber,
+		Type:          dataplanessu2.Data,
+	}, payload)
+	if err != nil {
+		session.sendMu.Unlock()
+		return err
+	}
+	session.nextPacket++
+	session.sendMu.Unlock()
+	return m.writeTo(packet, remote)
+}
+func (m *SSU2Manager) sendData(session *ssu2TransportSession, payload []byte) error {
+	return m.sendSessionDataContext(context.Background(), session, payload, ssu2SessionDataOptions{
+		reliable:             true,
+		congestionControlled: true,
+		waitEgress:           true,
+	})
+}
+
+func (m *SSU2Manager) sendDataContext(ctx context.Context, session *ssu2TransportSession, payload []byte) error {
+	return m.sendSessionDataContext(ctx, session, payload, ssu2SessionDataOptions{
+		reliable:             true,
+		congestionControlled: true,
+		waitEgress:           true,
+	})
+}
+
+func (m *SSU2Manager) queueACK(session *ssu2TransportSession) {
+	if session == nil || !session.ackQueued.CompareAndSwap(ssu2ACKIdle, ssu2ACKPending) {
+		return
+	}
+	m.mu.RLock()
+	queue := m.ackQueue
+	m.mu.RUnlock()
+	if queue == nil {
+		session.ackQueued.Store(ssu2ACKIdle)
+		_ = m.sendACK(session)
+		return
+	}
+	select {
+	case queue <- session:
+	case <-m.contextDone():
+		session.ackQueued.Store(ssu2ACKIdle)
+	}
+}
+
+func (m *SSU2Manager) ackLoop() {
+	defer m.wg.Done()
+	timer := time.NewTimer(ssu2ACKDelay)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
+	pending := make([]*ssu2TransportSession, 0, m.maxSessions)
+	for {
+		select {
+		case session := <-m.ackQueue:
+			pending = append(pending, session)
+		case <-m.contextDone():
+			return
+		}
+		timer.Reset(ssu2ACKDelay)
+	collect:
+		for {
+			select {
+			case session := <-m.ackQueue:
+				pending = append(pending, session)
+			case <-timer.C:
+				break collect
+			case <-m.contextDone():
+				for _, session := range pending {
+					session.ackQueued.Store(ssu2ACKIdle)
+				}
+				return
+			}
+		}
+		for _, session := range pending {
+			session.ackQueued.Store(ssu2ACKIdle)
+			_ = m.sendACK(session)
+		}
+		clear(pending)
+		pending = pending[:0]
+	}
+}
+
+func (m *SSU2Manager) sendACK(session *ssu2TransportSession) error {
+	var ranges [dataplanessu2.MaxACKRanges]dataplanessu2.ACKRange
+	session.ackMu.Lock()
+	defer session.ackMu.Unlock()
+	payload := session.ackPayload[:]
+	session.receiveMu.Lock()
+	if session.receive == nil {
+		session.receiveMu.Unlock()
+		return ErrSSU2Session
+	}
+	ackData, err := dataplanessu2.MarshalACKRanges(payload[3:3], session.received.RangesInto(ranges[:0]))
+	session.receiveMu.Unlock()
+	if err != nil {
+		return err
+	}
+	payload[0] = dataplanessu2.BlockACK
+	binary.BigEndian.PutUint16(payload[1:3], uint16(len(ackData)))
+	return m.sendSessionDataQueued(session, payload[:3+len(ackData)], false)
+}
+
+type ssu2SessionDataOptions struct {
+	reliable             bool
+	congestionControlled bool
+	requestImmediateACK  bool
+	waitEgress           bool
+	interruptible        bool
+}
+
+func (m *SSU2Manager) sendSessionData(session *ssu2TransportSession, payload []byte, reliable bool) error {
+	return m.sendSessionDataContext(context.Background(), session, payload, ssu2SessionDataOptions{
+		reliable:   reliable,
+		waitEgress: true,
+	})
+}
+
+func (m *SSU2Manager) sendSessionDataQueued(session *ssu2TransportSession, payload []byte, reliable bool) error {
+	return m.sendSessionDataContext(context.Background(), session, payload, ssu2SessionDataOptions{
+		reliable: reliable,
+	})
+}
+
+func (m *SSU2Manager) sendSessionDataContext(ctx context.Context, session *ssu2TransportSession, payload []byte, options ssu2SessionDataOptions) error {
+	if len(payload) < 8 {
+		paddingLength := max(8-len(payload)-3, 0)
+		var minimumPayload [10]byte
+		padded := minimumPayload[:len(payload)+3+paddingLength]
+		copy(padded, payload)
+		padded[len(payload)] = dataplanessu2.BlockPadding
+		binary.BigEndian.PutUint16(padded[len(payload)+1:], uint16(paddingLength))
+		payload = padded
+	}
+
+	var (
+		packetSize  int
+		remote      net.Addr
+		retained    *ssu2SentPacket
+		windowBytes int
+	)
+	for {
+		session.sendMu.Lock()
+		if session.closing || !m.sessionActive(session) || session.send == nil {
+			session.sendMu.Unlock()
+			return ErrSSU2Session
+		}
+		remote = session.remoteAddr()
+		packetSize = ssu2NetworkPacketSize(remote, len(payload)+dataplanessu2.ShortHeaderLen+dataplanessu2.PacketTagLen)
+		capacityAvailable := !options.congestionControlled || session.sendWindowRemaining >= packetSize
+		if capacityAvailable && options.reliable {
+			retained = session.retainPayload(payload, m.now())
+			capacityAvailable = retained != nil
+		}
+		if capacityAvailable {
+			if options.congestionControlled {
+				windowBytes = packetSize
+				session.sendWindowRemaining -= windowBytes
+			}
+			session.sendMu.Unlock()
+			break
+		}
+		available := session.sendCapacityAvailable
+		session.sendMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-available:
+		}
+	}
+
+	if options.interruptible {
+		if err := session.packetMu.LockContext(ctx); err != nil {
+			session.sendMu.Lock()
+			session.releaseSendReservationLocked(retained, windowBytes)
+			session.sendMu.Unlock()
+			return err
+		}
+	} else {
+		session.packetMu.Lock()
+	}
+	defer session.packetMu.Unlock()
+	session.sendMu.Lock()
+	if err := ctx.Err(); err != nil {
+		session.releaseSendReservationLocked(retained, windowBytes)
+		session.sendMu.Unlock()
+		return err
+	}
+	if session.closing || !m.sessionActive(session) || session.send == nil {
+		session.releaseSendReservationLocked(retained, windowBytes)
+		session.sendMu.Unlock()
+		return ErrSSU2Session
+	}
+	packetNumber := session.nextPacket
+	if packetNumber == 0 {
+		session.releaseSendReservationLocked(retained, windowBytes)
+		session.sendMu.Unlock()
+		return ErrSSU2Session
+	}
+	requestImmediateACK := options.requestImmediateACK
+	if options.congestionControlled {
+		requestImmediateACK = session.shouldRequestImmediateACKLocked()
+	}
+	packet, err := session.send.SealDataTo(session.sendPacket[:], ssu2DataHeader(session.sendID, packetNumber, requestImmediateACK), payload)
+	if err != nil {
+		session.releaseSendReservationLocked(retained, windowBytes)
+		session.sendMu.Unlock()
+		return err
+	}
+	session.nextPacket++
+	now := m.now()
+	if options.reliable {
+		retained.sentAt = now
+		retained.firstSentAt = now
+		retained.latestPacket = packetNumber
+		retained.windowBytes = windowBytes
+		retained.packetSize = packetSize
+		session.sent[packetNumber] = retained
+	}
+	session.sendMu.Unlock()
+
+	if options.waitEgress {
+		err = m.writeToContext(ctx, packet, remote)
+	} else {
+		err = m.writeToQueued(packet, remote)
+	}
+	if err != nil {
+		session.sendMu.Lock()
+		session.releaseSendReservationLocked(retained, windowBytes)
+		session.sendMu.Unlock()
+		return err
+	}
+	if options.congestionControlled {
+		session.sendMu.Lock()
+		session.packetsTransmitted++
+		session.sendMu.Unlock()
+	}
+	session.touch(now)
+	return nil
+}
+func ssu2DataHeader(destinationID uint64, packetNumber uint32, requestImmediateACK bool) dataplanessu2.ShortHeader {
+	var immediateACK uint8
+	if requestImmediateACK {
+		immediateACK = 1
+	}
+	return dataplanessu2.ShortHeader{
+		DestinationID: destinationID,
+		PacketNumber:  packetNumber,
+		Type:          dataplanessu2.Data,
+		Fragment:      immediateACK,
+	}
+}
+
+func (s *ssu2TransportSession) touch(now time.Time) {
+	s.activityMu.Lock()
+	s.lastActivity = now
+	s.activityMu.Unlock()
+}
+
+func (s *ssu2TransportSession) idle(now time.Time, timeout time.Duration) bool {
+	s.activityMu.Lock()
+	last := s.lastActivity
+	s.activityMu.Unlock()
+	return last.IsZero() || now.Sub(last) >= timeout
+}
+
+func (s *ssu2TransportSession) expirePath(now time.Time) {
+	s.pathMu.Lock()
+	if s.candidate != nil && !s.candidate.expires.After(now) {
+		clear(s.candidate.challenge[:])
+		s.candidate.remote = nil
+		s.candidate = nil
+	}
+	s.pathMu.Unlock()
+}
+
+func (m *SSU2Manager) sessionActive(session *ssu2TransportSession) bool {
+	m.mu.RLock()
+	active := m.runningLocked() && m.sessionsByID[session.receiveID] == session && m.sessionsByPeer[session.peer] == session
+	m.mu.RUnlock()
+	return active
+}
+
+func (s *ssu2TransportSession) acknowledge(ranges []dataplanessu2.ACKRange, now time.Time) {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	highest := uint32(0)
+	for _, acked := range ranges {
+		highest = max(highest, acked.End)
+	}
+	var acknowledged *ssu2SentPacket
+	for number, sent := range s.sent {
+		if !sent.inUse || sent.acknowledged || !acknowledgedBy(ranges, number) {
+			continue
+		}
+		sent.acknowledged = true
+		sent.ackNext = acknowledged
+		acknowledged = sent
+		if sent.windowBytes != 0 {
+			s.messageACKedLocked(sent, now)
+		}
+	}
+	sendCapacityChanged := acknowledged != nil
+	if sendCapacityChanged {
+		for number, sent := range s.sent {
+			if sent.acknowledged {
+				delete(s.sent, number)
+			}
+		}
+		for acknowledged != nil {
+			next := acknowledged.ackNext
+			acknowledged.release()
+			acknowledged = next
+		}
+	}
+	for number, sent := range s.sent {
+		if !sent.inUse || number != sent.latestPacket || number >= highest || sent.nackThrough >= highest {
+			continue
+		}
+		sent.nackThrough = highest
+		sent.nacks++
+		if sent.nacks == 3 {
+			sent.fast = true
+			sent.sentAt = time.Time{}
+		}
+	}
+	if sendCapacityChanged {
+		s.signalSendCapacityLocked()
+	}
+}
+
+func (s *ssu2TransportSession) shouldRequestImmediateACKLocked() bool {
+	return s.sendWindowRemaining < s.sendWindowBytes/3
+}
+
+func (s *ssu2TransportSession) signalSendCapacityLocked() {
+	if s.sendCapacityAvailable == nil {
+		return
+	}
+	close(s.sendCapacityAvailable)
+	s.sendCapacityAvailable = make(chan struct{})
+}
+
+func (s *ssu2TransportSession) removeSentAliasesLocked(sent *ssu2SentPacket) {
+	for packetNumber, candidate := range s.sent {
+		if candidate == sent {
+			delete(s.sent, packetNumber)
+		}
+	}
+}
+
+func (s *ssu2TransportSession) releaseSendReservationLocked(sent *ssu2SentPacket, windowBytes int) {
+	if sent != nil && !sent.inUse {
+		return
+	}
+	if sent != nil {
+		s.removeSentAliasesLocked(sent)
+		sent.release()
+	}
+	if windowBytes != 0 {
+		s.sendWindowRemaining = min(s.sendWindowBytes, s.sendWindowRemaining+windowBytes)
+	}
+	s.signalSendCapacityLocked()
+}
+
+func (s *ssu2TransportSession) messageACKedLocked(sent *ssu2SentPacket, now time.Time) {
+	bytesACKed := sent.windowBytes
+	if sent.attempts == 0 {
+		grow := s.sendWindowBytes <= s.slowStartThreshold
+		if !grow {
+			if random, err := randomUint64(); err == nil {
+				grow = random%uint64(2*s.sendWindowBytes) < uint64(bytesACKed)
+			}
+		}
+		if grow {
+			s.sendWindowBytes = min(ssu2MaximumSendWindow, s.sendWindowBytes+bytesACKed)
+			s.sendWindowRemaining += bytesACKed
+		}
+		lifetime := now.Sub(sent.firstSentAt)
+		if lifetime > 0 {
+			s.recalculateRTOLocked(lifetime)
+		}
+		s.adjustMTULocked(sent.packetSize, true)
+	}
+	s.sendWindowRemaining = min(s.sendWindowBytes, s.sendWindowRemaining+bytesACKed)
+}
+
+func (s *ssu2TransportSession) recalculateRTOLocked(sample time.Duration) {
+	if s.rtt <= 0 {
+		s.rtt = sample
+		s.rttDeviation = sample / 2
+	} else {
+		deviation := sample - s.rtt
+		if deviation < 0 {
+			deviation = -deviation
+		}
+		s.rttDeviation = (3*s.rttDeviation + deviation) / 4
+		s.rtt = (7*s.rtt + sample) / 8
+	}
+	s.rto = min(ssu2MaximumRTO, max(ssu2RetransmitInterval, s.rtt+4*s.rttDeviation))
+}
+
+func (s *ssu2TransportSession) noteCongestionLocked(now time.Time, sent *ssu2SentPacket) {
+	mtu := int(s.mtu.Load())
+	s.packetsRetransmitted++
+	if sent.fast {
+		s.slowStartThreshold = max(s.sendWindowBytes/2, 2*mtu)
+		s.sendWindowBytes = min(ssu2MaximumSendWindow, s.slowStartThreshold+3*mtu)
+		s.sendWindowRemaining = s.sendWindowBytes
+	} else if s.lastCongestion.IsZero() || now.Sub(s.lastCongestion) >= s.rto {
+		s.lastCongestion = now
+		s.slowStartThreshold = max(s.sendWindowBytes/2, 2*mtu)
+		s.sendWindowBytes = ssu2MaximumNetworkMTU
+		s.sendWindowRemaining = min(s.sendWindowRemaining, s.sendWindowBytes)
+		s.rto = min(ssu2MaximumRTO, max(ssu2RetransmitInterval, 2*s.rto))
+	}
+	s.adjustMTULocked(sent.packetSize, false)
+}
+
+func (s *ssu2TransportSession) adjustMTULocked(packetSize int, success bool) {
+	mtu := int(s.mtu.Load())
+	if success {
+		wantLarge := s.packetsTransmitted != 0 && s.packetsRetransmitted*10 < s.packetsTransmitted
+		if wantLarge && mtu < s.largeMTU && packetSize > mtu-2*ssu2MTUStep {
+			s.mtu.Store(int32(min(mtu+ssu2MTUStep, s.largeMTU)))
+		}
+		return
+	}
+	if mtu > ssu2MinimumNetworkMTU && packetSize > mtu-4*ssu2MTUStep {
+		s.mtu.Store(int32(max(mtu-ssu2MTUStep, ssu2MinimumNetworkMTU)))
+	}
+}
+
+func acknowledgedBy(ranges []dataplanessu2.ACKRange, packet uint32) bool {
+	for _, interval := range ranges {
+		if packet >= interval.Start && packet <= interval.End {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *SSU2Manager) sendRetry(remote net.Addr, request dataplanessu2.LongHeader, token uint64) {
+	packetNumber, err := randomPacketNumber()
+	if err != nil {
+		return
+	}
+	payload, err := ssu2SessionCreatedPayload(remote, m.now())
+	if err != nil {
+		return
+	}
+	packet, err := dataplanessu2.BuildRetry(make([]byte, dataplanessu2.MaxIPv4PacketLen), m.introKey, request.SourceID, request.DestinationID, token, packetNumber, payload)
+	if err == nil {
+		_ = m.writeTo(packet, remote)
+	}
+}
+
+func (m *SSU2Manager) localConfirmedPayload(maxPacket int) ([]byte, error) {
+	bindings := m.currentBindings()
+	if bindings.LocalInfo == nil {
+		return nil, ErrSSU2ManagerConfig
+	}
+	info := bindings.LocalInfo.Snapshot()
+	valid, err := info.Verify()
+	if err != nil || !valid {
+		return nil, ErrSSU2ManagerConfig
+	}
+	staticPublic, err := ecdhPublic(m.staticPrivate)
+	if err != nil || !hasSSU2Keys(info, staticPublic, m.introKey) {
+		return nil, ErrSSU2ManagerConfig
+	}
+	raw := info.Bytes()
+	selected := raw
+	flags := byte(0)
+	rawPayloadSize := 3 + 2 + len(raw)
+	if len(raw) > 1000 || dataplanessu2.ShortHeaderLen+48+rawPayloadSize+dataplanessu2.PacketTagLen > maxPacket {
+		snapshot, compressErr := newSSU2RouterInfoStoreSnapshot(info)
+		if compressErr != nil {
+			return nil, compressErr
+		}
+		if len(snapshot.compressed) < len(raw) {
+			selected = snapshot.compressed
+			flags = 2
+		}
+	}
+	data := make([]byte, 2+len(selected))
+	data[0], data[1] = flags, 1
+	copy(data[2:], selected)
+	return dataplanessu2.MarshalBlock(nil, dataplanessu2.BlockRouterInfo, data)
+}
+
+func (m *SSU2Manager) admitSSU2Peer(peer foundation.NetworkDatabaseRouterInfo, static []byte, now time.Time) bool {
+	if m.peers == nil {
+		return false
+	}
+	if current, ok := m.peers.RouterInfo(peer.Hash()); ok && current.Published > peer.Published {
+		if !hasSSU2Static(current, static) {
+			return false
+		}
+	}
+	return m.peers.AdmitRouterInfo(peer, uint64(now.UnixMilli())) == nil
+}
+
+func (m *SSU2Manager) newTokenLocked(remote net.Addr, destinationID, sourceID uint64) (uint64, error) {
+	return m.retryToken(remote, destinationID, sourceID, m.tokenBucket(m.nowLocked()))
+}
+
+func newTokenCacheKey(peer foundation.Hash, remote net.Addr, destination uint64) string {
+	if remote == nil || destination == 0 {
+		return ""
+	}
+	return string(peer[:]) + "|" + remote.String() + "|" + strconv.FormatUint(destination, 10)
+}
+
+func (m *SSU2Manager) newNewTokenLocked(remote net.Addr) (dataplanessu2.NewToken, error) {
+	token, err := m.retryToken(remote, 0, 0, m.tokenBucket(m.nowLocked()))
+	if err != nil {
+		return dataplanessu2.NewToken{}, err
+	}
+	return dataplanessu2.NewToken{Token: token, Expiration: uint32(m.nowLocked().Add(m.tokenLifetime).Unix())}, nil
+}
+
+func (m *SSU2Manager) consumeNewTokenLocked(token uint64, remote net.Addr) bool {
+	if token == 0 {
+		return false
+	}
+	bucket := m.tokenBucket(m.nowLocked())
+	expected, err := m.retryToken(remote, 0, 0, bucket)
+	if err == nil && hmac.Equal(u64Bytes(token), u64Bytes(expected)) {
+		return true
+	}
+	if bucket == 0 {
+		return false
+	}
+	expected, err = m.retryToken(remote, 0, 0, bucket-1)
+	return err == nil && hmac.Equal(u64Bytes(token), u64Bytes(expected))
+}
+
+func (m *SSU2Manager) expireExtensions(now time.Time) {
+	type renewal struct {
+		peer    foundation.Hash
+		session *ssu2TransportSession
+	}
+	var renew []renewal
+	var expiredTests []struct {
+		nonce uint32
+		state *ssu2PeerTestState
+	}
+	publishChanged := false
+	m.mu.Lock()
+	for peer, lease := range m.relayGrants {
+		if lease.expires.After(now) {
+			continue
+		}
+		if m.introducers[lease.tag] == peer {
+			delete(m.introducers, lease.tag)
+		}
+		delete(m.relayGrants, peer)
+	}
+	for peer, lease := range m.advertisedRelays {
+		if !lease.expires.After(now) {
+			delete(m.advertisedRelays, peer)
+			delete(m.relayTagPending, peer)
+			publishChanged = true
+			continue
+		}
+		if !lease.renewing && lease.expires.Sub(now) <= m.tokenLifetime/3 {
+			if session := m.sessionsByPeer[peer]; session != nil {
+				lease.renewing = true
+				m.advertisedRelays[peer] = lease
+				m.relayTagPending[peer] = now.Add(m.timeout)
+				renew = append(renew, renewal{peer: peer, session: session})
+			}
+		}
+	}
+	if publishChanged {
+		m.relayRevision++
+	}
+	for key, lease := range m.newTokens {
+		if !lease.expires.After(now) {
+			delete(m.newTokens, key)
+		}
+	}
+	for nonce, state := range m.peerTests {
+		if !state.expires.After(now) {
+			expiredTests = append(expiredTests, struct {
+				nonce uint32
+				state *ssu2PeerTestState
+			}{nonce: nonce, state: state})
+		}
+	}
+	m.mu.Unlock()
+	if publishChanged {
+		m.syncRelayTagPublication()
+	}
+	for _, item := range renew {
+		if err := m.requestRelayTagOnSession(item.session); err != nil {
+			m.mu.Lock()
+			delete(m.relayTagPending, item.peer)
+			if lease, ok := m.advertisedRelays[item.peer]; ok {
+				lease.renewing = false
+				m.advertisedRelays[item.peer] = lease
+			}
+			m.mu.Unlock()
+		}
+	}
+	m.maintainIntroducers()
+	for _, expired := range expiredTests {
+		m.expirePeerTest(expired.nonce, expired.state)
+	}
+}
+
+func u64Bytes(value uint64) []byte {
+	var bytes [8]byte
+	binary.BigEndian.PutUint64(bytes[:], value)
+	return bytes[:]
+}
+
+func (m *SSU2Manager) sendNewToken(session *ssu2TransportSession) error {
+	m.mu.Lock()
+	if !m.runningLocked() {
+		m.mu.Unlock()
+		return ErrSSU2Session
+	}
+	token, err := m.newNewTokenLocked(session.remoteAddr())
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	var storage [32]byte
+	payload, err := dataplanessu2.MarshalNewTokenBlock(storage[:0], token)
+	if err != nil {
+		return err
+	}
+	return m.sendSessionData(session, payload, false)
+}
+
+func (m *SSU2Manager) storeNewToken(session *ssu2TransportSession, token dataplanessu2.NewToken) {
+	expires := time.Unix(int64(token.Expiration), 0)
+	now := m.now()
+	if !expires.After(now) || expires.Sub(now) > m.tokenLifetime {
+		return
+	}
+	remote := session.remoteAddr()
+	key := newTokenCacheKey(session.peer, remote, session.sendID)
+	if key == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.runningLocked() {
+		endpoint := remote.String()
+		for existingKey, lease := range m.newTokens {
+			if !lease.expires.After(now) || (lease.peer == session.peer && lease.endpoint == endpoint) {
+				delete(m.newTokens, existingKey)
+			}
+		}
+		if len(m.newTokens) >= ssu2MaxNewTokens {
+			evictKey := ""
+			var evictExpiry time.Time
+			for existingKey, lease := range m.newTokens {
+				storeNewTokenSelected := evictKey == "" || lease.expires.Before(evictExpiry)
+				if !storeNewTokenSelected {
+					storeNewTokenSelected = (lease.expires.Equal(evictExpiry) && existingKey < evictKey)
+				}
+				if storeNewTokenSelected {
+					evictKey, evictExpiry = existingKey, lease.expires
+				}
+			}
+			delete(m.newTokens, evictKey)
+		}
+		m.newTokens[key] = ssu2NewTokenLease{peer: session.peer, endpoint: endpoint, destination: session.sendID, token: token.Token, expires: expires}
+	}
+	m.mu.Unlock()
+}
+
+func (m *SSU2Manager) cachedNewTokenLocked(peer foundation.Hash, remote net.Addr, destination uint64) uint64 {
+	key := newTokenCacheKey(peer, remote, destination)
+	lease, ok := m.newTokens[key]
+	if !ok || lease.destination != destination || !lease.expires.After(m.nowLocked()) {
+		if ok {
+			delete(m.newTokens, key)
+		}
+		return 0
+	}
+	return lease.token
+}
+
+func (m *SSU2Manager) cachedNewTokenDestinationLocked(peer foundation.Hash, remote net.Addr) uint64 {
+	for _, lease := range m.newTokens {
+		if lease.peer == peer && lease.endpoint == remote.String() && lease.destination != 0 && lease.expires.After(m.nowLocked()) {
+			return lease.destination
+		}
+	}
+	return 0
+}
+
+func (m *SSU2Manager) consumeTokenLocked(token uint64, remote net.Addr, destinationID, sourceID uint64) bool {
+	bucket := m.tokenBucket(m.nowLocked())
+	expected, err := m.retryToken(remote, destinationID, sourceID, bucket)
+	if err == nil && token == expected {
+		return true
+	}
+	if bucket == 0 {
+		return false
+	}
+	expected, err = m.retryToken(remote, destinationID, sourceID, bucket-1)
+	return err == nil && token == expected
+}
+
+func (m *SSU2Manager) tokenBucket(now time.Time) uint64 {
+	seconds := uint64(m.tokenLifetime / time.Second)
+
+	seconds = cmp.Or(seconds, 1)
+
+	return uint64(now.Unix()) / seconds
+}
+
+func (m *SSU2Manager) retryToken(remote net.Addr, destinationID, sourceID, bucket uint64) (uint64, error) {
+	endpoint, ok := remote.(interface{ AddrPort() netip.AddrPort })
+	if !ok {
+		return 0, ErrSSU2Session
+	}
+	addr := endpoint.AddrPort()
+	if !addr.IsValid() || addr.Port() == 0 {
+		return 0, ErrSSU2Session
+	}
+	var ip [16]byte
+	ipLength := 16
+	if addr.Addr().Is4() {
+		ip4 := addr.Addr().As4()
+		copy(ip[:4], ip4[:])
+		ipLength = 4
+	} else {
+		ip = addr.Addr().As16()
+	}
+	var fields [26]byte
+	binary.BigEndian.PutUint16(fields[:2], addr.Port())
+	binary.BigEndian.PutUint64(fields[2:10], destinationID)
+	binary.BigEndian.PutUint64(fields[10:18], sourceID)
+	binary.BigEndian.PutUint64(fields[18:26], bucket)
+	mac := hmac.New(sha256.New, m.tokenSecret[:])
+	_, _ = mac.Write([]byte{byte(ipLength)})
+	_, _ = mac.Write(ip[:ipLength])
+	_, _ = mac.Write(fields[:])
+	sum := mac.Sum(nil)
+	token := binary.BigEndian.Uint64(sum[:8]) | 1
+	clear(sum)
+	return token, nil
+}
+
+func (m *SSU2Manager) installSessionLocked(session *ssu2TransportSession) bool {
+	if !m.runningLocked() || len(m.sessionsByID) >= m.maxSessions || m.sessionsByID[session.receiveID] != nil {
+		return false
+	}
+	m.sessionsByID[session.receiveID] = session
+	if m.sessionsByPeer[session.peer] == nil {
+		m.sessionsByPeer[session.peer] = session
+	}
+	return true
+}
+
+func (m *SSU2Manager) finishOutboundLocked(pending *ssu2OutboundPending, err error) bool {
+	if m.outbound[pending.peer] != pending {
+		return false
+	}
+	if pending.timer != nil {
+		pending.timer.Stop()
+	}
+	delete(m.outbound, pending.peer)
+	endpoint, _ := addrPortKey(pending.remote)
+	delete(m.outboundAddr, endpoint)
+	pending.err = err
+	pending.releaseOnExit.Store(true)
+	close(pending.ready)
+	return true
+}
+
+func (p *ssu2OutboundPending) releaseSensitive() {
+	p.releaseOnce.Do(func() {
+		p.parseMu.Lock()
+		if p.initiator != nil {
+			p.initiator.ReleaseSensitive()
+			p.initiator = nil
+		}
+		clear(p.packet[:])
+		p.parseMu.Unlock()
+	})
+}
+
+func (m *SSU2Manager) markOutboundFailed(pending *ssu2OutboundPending, err error) {
+	m.mu.Lock()
+	m.finishOutboundLocked(pending, err)
+	m.mu.Unlock()
+}
+
+func (m *SSU2Manager) failOutbound(pending *ssu2OutboundPending, err error) {
+	m.markOutboundFailed(pending, err)
+	pending.releaseSensitive()
+}
+
+type ssu2HandshakeError struct{ phase string }
+
+func (e ssu2HandshakeError) Error() string {
+	return fmt.Sprintf("router: SSU2 %s timeout", e.phase)
+}
+
+func (e ssu2HandshakeError) Unwrap() error { return ErrSSU2Session }
+
+func (m *SSU2Manager) recordOutboundFailure(peer foundation.Hash, err error) {
+	if m.metrics != nil {
+		m.metrics.IncTransportHandshakeFailures()
+	}
+	if m.logger != nil {
+		phase := ssu2FailurePhase(err)
+		m.logger.Warn("public transport handshake failed", "transport", "SSU2", "peer", routerHashDiagnostic(peer), "phase", phase, "error", err)
+	}
+}
+
+func ssu2FailurePhase(err error) string {
+	if handshake, ok := errors.AsType[ssu2HandshakeError](err); ok {
+		return handshake.phase + "_timeout"
+	}
+	switch {
+	case errors.Is(err, ErrSSU2Session):
+		return "session_install"
+	case errors.Is(err, ErrSSU2Peer):
+		return "router_info_or_endpoint"
+	case errors.Is(err, ErrSSU2Introduction):
+		return "introduction"
+	default:
+		return "handshake"
+	}
+}
+
+func (m *SSU2Manager) removeInbound(destinationID uint64, pending *ssu2InboundPending) {
+	m.mu.Lock()
+	if m.inbound[destinationID] == pending {
+		delete(m.inbound, destinationID)
+	}
+	m.mu.Unlock()
+	pending.reassemblyMu.Lock()
+	defer pending.reassemblyMu.Unlock()
+	m.removeInboundHeld(destinationID, pending)
+}
+
+// removeInboundHeld is called with pending.reassemblyMu held.
+func (m *SSU2Manager) removeInboundHeld(destinationID uint64, pending *ssu2InboundPending) {
+	m.mu.Lock()
+	if m.inbound[destinationID] == pending {
+		delete(m.inbound, destinationID)
+	}
+	m.mu.Unlock()
+	if pending.timer != nil {
+		pending.timer.Stop()
+	}
+	pending.responder.ReleaseSensitive()
+	pending.responder = nil
+	pending.reassembly.ReleaseSensitive()
+}
+
+// dispatchI2NP remains the narrow single-message entry point used by direct
+// callers; the live receive path always calls dispatchI2NPBatch once per UDP
+// packet.
+func (m *SSU2Manager) dispatchI2NP(peer foundation.Hash, message foundation.I2NPMessage) error {
+	batch, err := m.appendDispatchI2NP(nil, peer, message)
+	if err != nil {
+		return err
+	}
+	return m.dispatchI2NPBatch(batch)
+}
+
+func (m *SSU2Manager) runningLocked() bool {
+	return m.started && m.ctx != nil && m.ctx.Err() == nil
+}
+
+func (m *SSU2Manager) currentBindings() TransportBindings {
+	m.mu.RLock()
+	bindings := m.bindings
+	m.mu.RUnlock()
+	return bindings
+}
+
+func (m *SSU2Manager) borrowDispatchBatch() (*ssu2DispatchBatch, error) {
+	m.mu.RLock()
+	free, running := m.dispatchFree, m.runningLocked()
+	m.mu.RUnlock()
+	if free == nil {
+		// Direct, non-started callers use a stack-local batch; the live path
+		// always leases preallocated storage from dispatchFree.
+		return &ssu2DispatchBatch{}, nil
+	}
+	if !running {
+		return nil, ErrSSU2Session
+	}
+	select {
+	case batch := <-free:
+		return batch, nil
+	case <-m.contextDone():
+		return nil, ErrSSU2Session
+	}
+}
+
+func (m *SSU2Manager) releaseDispatchBatch(batch *ssu2DispatchBatch) {
+	if batch == nil {
+		return
+	}
+	for index := range int(batch.count) {
+		batch.items[index] = ssu2DispatchItem{}
+	}
+	batch.count = 0
+	m.mu.RLock()
+	free := m.dispatchFree
+	m.mu.RUnlock()
+	if free == nil {
+		return
+	}
+	select {
+	case free <- batch:
+	case <-m.contextDone():
+	}
+}
+
+func (m *SSU2Manager) appendDispatchI2NP(batch *ssu2DispatchBatch, peer foundation.Hash, message foundation.I2NPMessage) (*ssu2DispatchBatch, error) {
+	if batch == nil {
+		var err error
+		batch, err = m.borrowDispatchBatch()
+		if err != nil || batch == nil {
+			return batch, err
+		}
+	}
+	if int(batch.count) == len(batch.items) {
+		return batch, ErrSSU2Session
+	}
+	batch.items[batch.count] = ssu2DispatchItem{peer: peer, message: message}
+	batch.count++
+	return batch, nil
+}
+
+// dispatchI2NPBatch transfers a complete set of synchronous, borrowed message
+// views to the bounded dispatch stage. The caller retains the receive packet
+// until this returns, so HandleI2NP must not retain Payload.
+func (m *SSU2Manager) dispatchI2NPBatch(batch *ssu2DispatchBatch) error {
+	if batch == nil || batch.count == 0 {
+		m.releaseDispatchBatch(batch)
+		return nil
+	}
+	m.mu.RLock()
+	queues := m.dispatchQueues
+	running := m.runningLocked()
+	m.mu.RUnlock()
+	if len(queues) == 0 {
+		for index := range int(batch.count) {
+			if err := m.deliverI2NPRecovered(batch.items[index].peer, batch.items[index].message); err != nil {
+				m.releaseDispatchBatch(batch)
+				return err
+			}
+		}
+		m.releaseDispatchBatch(batch)
+		return nil
+	}
+	queue := queues[int(batch.items[0].peer[0])%len(queues)]
+	if !running {
+		m.releaseDispatchBatch(batch)
+		return ErrSSU2Session
+	}
+	select {
+	case queue <- batch:
+	case <-m.contextDone():
+		m.releaseDispatchBatch(batch)
+		return ErrSSU2Session
+	}
+	select {
+	case err := <-batch.done:
+		m.releaseDispatchBatch(batch)
+		return err
+	case <-m.contextDone():
+		err := <-batch.done
+		m.releaseDispatchBatch(batch)
+		return err
+	}
+}
+
+func (m *SSU2Manager) dispatchLoop(queue chan *ssu2DispatchBatch) {
+	defer m.wg.Done()
+	for {
+		select {
+		case batch := <-queue:
+			var err error
+			for index := range int(batch.count) {
+				if err = m.deliverI2NPRecovered(batch.items[index].peer, batch.items[index].message); err != nil {
+					break
+				}
+			}
+			batch.done <- err
+		case <-m.contextDone():
+			failQueuedDispatches(queue)
+			return
+		}
+	}
+}
+
+func failQueuedDispatches(queue chan *ssu2DispatchBatch) {
+	for {
+		select {
+		case batch := <-queue:
+			batch.done <- ErrSSU2Session
+		default:
+			return
+		}
+	}
+}
+
+func (m *SSU2Manager) deliverI2NPRecovered(peer foundation.Hash, message foundation.I2NPMessage) (err error) {
+	defer ingress.Recover(&err, m.reporter, ingress.BoundarySSU2Packet, nil)
+	return m.deliverI2NP(peer, message)
+}
+
+func (m *SSU2Manager) deliverI2NP(peer foundation.Hash, message foundation.I2NPMessage) error {
+	bindings := m.currentBindings()
+	if bindings.HandleI2NPContext == nil {
+		return ErrSSU2ManagerConfig
+	}
+	nowMillis := uint64(bindings.Clock.Now().UnixMilli())
+	return bindings.HandleI2NPContext(m.ctx, peer, message, nowMillis, false)
+}
+
+func (m *SSU2Manager) contextDone() <-chan struct{} {
+	m.mu.RLock()
+	ctx := m.ctx
+	m.mu.RUnlock()
+	if ctx == nil {
+		return closedSSU2Context
+	}
+	return ctx.Done()
+}
+
+var closedSSU2Context = func() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}()
+
+func (m *SSU2Manager) contextErr() error {
+	m.mu.RLock()
+	ctx := m.ctx
+	m.mu.RUnlock()
+	if ctx == nil {
+		return ErrSSU2Session
+	}
+	return ctx.Err()
+}
+
+func (m *SSU2Manager) writeTo(packet []byte, remote net.Addr) error {
+	return m.writeToContext(context.Background(), packet, remote)
+}
+
+func (m *SSU2Manager) writeToContext(ctx context.Context, packet []byte, remote net.Addr) error {
+	return m.writeToClass(ctx, packet, remote, ssu2EgressOptions{wait: true})
+}
+
+func (m *SSU2Manager) writeToQueued(packet []byte, remote net.Addr) error {
+	return m.writeToClass(context.Background(), packet, remote, ssu2EgressOptions{})
+}
+
+func (m *SSU2Manager) writeRelayTo(packet []byte, remote net.Addr, flow uint64) error {
+	return m.writeRelayToContext(context.Background(), packet, remote, flow)
+}
+
+func (m *SSU2Manager) writeRelayToContext(ctx context.Context, packet []byte, remote net.Addr, flow uint64) error {
+	return m.writeToClass(ctx, packet, remote, ssu2EgressOptions{relay: true, wait: true, flow: flow})
+}
+
+func (m *SSU2Manager) writeToClass(ctx context.Context, packet []byte, remote net.Addr, options ssu2EgressOptions) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(packet) == 0 || len(packet) > dataplanessu2.MaxIPv4PacketLen {
+		return ErrSSU2Session
+	}
+	endpoint, ok := remote.(interface{ AddrPort() netip.AddrPort })
+	if !ok {
+		return ErrSSU2Session
+	}
+	addrPort := endpoint.AddrPort()
+	if !addrPort.IsValid() {
+		return ErrSSU2Session
+	}
+	m.mu.RLock()
+	free := m.egressFree
+	queue := m.egressQueue
+	running := m.runningLocked()
+	m.mu.RUnlock()
+	if !running || free == nil || queue == nil {
+		if running && m.conn != nil {
+			if m.metrics != nil {
+				m.metrics.AddSSU2SendEnqueuedDatagrams(1)
+			}
+			n, err := m.conn.WriteToUDP(packet, net.UDPAddrFromAddrPort(addrPort))
+			if err == nil && n == len(packet) {
+				if m.metrics != nil {
+					m.metrics.AddSSU2SentDatagrams(1)
+					m.metrics.AddTransportSentBytes(uint64(n))
+				}
+				return nil
+			}
+			if m.metrics != nil {
+				m.metrics.AddSSU2SendFailedDatagrams(1)
+			}
+			if err == nil {
+				return ErrSSU2Session
+			}
+			return err
+		}
+		return ErrSSU2Session
+	}
+
+	m.egressMu.RLock()
+	slot, err := m.enqueueEgress(ctx, packet, addrPort, options.relay, options.wait, options.flow, free, queue)
+	m.egressMu.RUnlock()
+	if err != nil || !options.wait {
+		return err
+	}
+	err = <-slot.done
+	m.recycleEgressSlot(slot)
+	return err
+}
+
+func (m *SSU2Manager) enqueueEgress(ctx context.Context, packet []byte, addr netip.AddrPort, relay, wait bool, flow uint64, free, queue chan *ssu2EgressSlot) (*ssu2EgressSlot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var slot *ssu2EgressSlot
+	select {
+	case slot = <-free:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-m.contextDone():
+		return nil, ErrSSU2Session
+	}
+	copy(slot.data[:], packet)
+	slot.length = len(packet)
+	slot.addr = netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port())
+	slot.zone = 0
+	slot.relay = relay
+	slot.wait = wait
+	slot.flow = flow
+	select {
+	case queue <- slot:
+		if m.metrics != nil {
+			m.metrics.AddSSU2SendEnqueuedDatagrams(1)
+			m.metrics.IncSSU2EgressQueueDepth()
+		}
+		return slot, nil
+	case <-ctx.Done():
+		m.recycleEgressSlot(slot)
+		return nil, ctx.Err()
+	case <-m.contextDone():
+		m.recycleEgressSlot(slot)
+		return nil, ErrSSU2Session
+	}
+}
+
+func (m *SSU2Manager) recycleEgressSlot(slot *ssu2EgressSlot) {
+	if slot == nil {
+		return
+	}
+	clear(slot.data[:slot.length])
+	slot.length = 0
+	slot.relay = false
+	slot.wait = false
+	slot.flow = 0
+	select {
+	case m.egressFree <- slot:
+	case <-m.contextDone():
+	}
+}
+
+func (m *SSU2Manager) egressLoop() {
+	defer m.wg.Done()
+	defer m.failQueuedEgress()
+	batch, err := dataplanessu2.NewBatch(ssu2EgressSlots, dataplanessu2.MaxIPv4PacketLen)
+	if err != nil {
+		m.recordSSU2Error(err)
+		_ = m.Close()
+		return
+	}
+	packets := batch.Packets()
+	var slots [ssu2EgressSlots]*ssu2EgressSlot
+	for {
+		count, ok := m.collectEgressBatch(&slots)
+		if !ok {
+			return
+		}
+		activeSlots := slots[:count]
+		shuffleRelaySlots(activeSlots)
+		for index, slot := range activeSlots {
+			packets[index] = dataplanessu2.Datagram{Data: slot.data[:], Len: slot.length, Addr: slot.addr, Zone: slot.zone}
+		}
+		written, writeErr := m.batchConn.WriteBatchPrefix(batch, count)
+		m.recordEgressWrite(activeSlots, written)
+		m.completeEgressSlots(activeSlots, written, writeErr)
+		if errors.Is(writeErr, net.ErrClosed) {
+			if m.contextErr() == nil {
+				m.recordSSU2Error(writeErr)
+				_ = m.Close()
+			}
+			return
+		}
+	}
+}
+
+func (m *SSU2Manager) collectEgressBatch(slots *[ssu2EgressSlots]*ssu2EgressSlot) (int, bool) {
+	select {
+	case slots[0] = <-m.egressQueue:
+	case <-m.contextDone():
+		return 0, false
+	}
+	count := 1
+	for count < len(slots) {
+		select {
+		case slots[count] = <-m.egressQueue:
+			count++
+		default:
+			return count, true
+		}
+	}
+	return count, true
+}
+
+func shuffleRelaySlots(slots []*ssu2EgressSlot) {
+	for start := 0; start < len(slots); {
+		if !slots[start].relay || slots[start].flow == 0 {
+			start++
+			continue
+		}
+		end := start + 1
+		for end < len(slots) && slots[end].relay && slots[end].flow != 0 {
+			end++
+		}
+		shuffleIndependentRelayRun(slots[start:end])
+		start = end
+	}
+}
+
+func (m *SSU2Manager) recordEgressWrite(slots []*ssu2EgressSlot, written int) {
+	if written > 0 {
+		m.ioStats.datagramsSent.Add(uint64(written))
+		for _, slot := range slots[:written] {
+			m.ioStats.bytesSent.Add(uint64(slot.length))
+		}
+	}
+	if m.metrics == nil {
+		return
+	}
+	m.metrics.AddSSU2SentDatagrams(uint64(written))
+	if written > 1 {
+		m.metrics.IncSSU2SendMultiBatches()
+	}
+	for _, slot := range slots[:written] {
+		m.metrics.AddTransportSentBytes(uint64(slot.length))
+	}
+	if written < len(slots) {
+		m.metrics.AddSSU2SendFailedDatagrams(uint64(len(slots) - written))
+	}
+}
+
+func (m *SSU2Manager) completeEgressSlots(slots []*ssu2EgressSlot, written int, writeErr error) {
+	for index, slot := range slots {
+		if m.metrics != nil {
+			m.metrics.DecSSU2EgressQueueDepth()
+		}
+		var err error
+		switch {
+		case index < written:
+		case writeErr != nil:
+			err = writeErr
+		default:
+			err = ErrSSU2Session
+		}
+		if slot.wait {
+			slot.done <- err
+		} else {
+			m.recycleEgressSlot(slot)
+		}
+		slots[index] = nil
+	}
+}
+func shuffleIndependentRelayRun(slots []*ssu2EgressSlot) {
+	if len(slots) < 2 || len(slots) > ssu2EgressSlots {
+		return
+	}
+	var flows [ssu2EgressSlots]uint64
+	flowCount := 0
+	for _, slot := range slots {
+		known := false
+		for index := range flowCount {
+			if flows[index] == slot.flow {
+				known = true
+				break
+			}
+		}
+		if !known {
+			flows[flowCount] = slot.flow
+			flowCount++
+		}
+	}
+	if flowCount < 2 {
+		return
+	}
+	for index := flowCount - 1; index > 0; index-- {
+		limit := ^uint64(0) - (^uint64(0) % uint64(index+1))
+		var random uint64
+		var err error
+		for {
+			random, err = randomUint64()
+			if err != nil {
+				return
+			}
+			if random < limit {
+				break
+			}
+		}
+		swap := int(random % uint64(index+1))
+		flows[index], flows[swap] = flows[swap], flows[index]
+	}
+	var shuffled [ssu2EgressSlots]*ssu2EgressSlot
+	output := 0
+	for flowIndex := range flowCount {
+		for _, slot := range slots {
+			if slot.flow == flows[flowIndex] {
+				shuffled[output] = slot
+				output++
+			}
+		}
+	}
+	copy(slots, shuffled[:len(slots)])
+}
+
+func (m *SSU2Manager) failQueuedEgress() {
+	m.egressMu.Lock()
+	defer m.egressMu.Unlock()
+	for {
+		select {
+		case slot := <-m.egressQueue:
+			if slot != nil {
+				if m.metrics != nil {
+					m.metrics.DecSSU2EgressQueueDepth()
+				}
+				if slot.wait {
+					slot.done <- ErrSSU2Session
+				} else {
+					m.recycleEgressSlot(slot)
+				}
+				if m.metrics != nil {
+					m.metrics.AddSSU2SendFailedDatagrams(1)
+				}
+			}
+		default:
+			return
+		}
+	}
+}
+
+// IOStats reports SSU2 vector socket activity. These counters are updated only
+// at the read and write vector boundaries.
+func (m *SSU2Manager) IOStats() IOStats {
+	if m == nil {
+		return IOStats{}
+	}
+	return m.ioStats.snapshot()
+}
+
+func (m *SSU2Manager) recordSSU2Error(err error) {
+	m.mu.Lock()
+	if m.err == nil {
+		m.err = err
+	}
+	m.mu.Unlock()
+}
+
+func (m *SSU2Manager) now() time.Time {
+	return m.currentBindings().Clock.Now()
+}
+
+func (m *SSU2Manager) nowLocked() time.Time {
+	return m.bindings.Clock.Now()
+}
+
+func (m *SSU2Manager) timestampValid(payload []byte) bool {
+	iterator := dataplanessu2.NewBlockIterator(payload)
+	for {
+		block, ok, err := iterator.Next()
+		if err != nil || !ok {
+			return false
+		}
+		if block.Type != dataplanessu2.BlockDateTime {
+			continue
+		}
+		timestamp := binary.BigEndian.Uint32(block.Data)
+		delta := m.now().Unix() - int64(timestamp)
+		if delta < 0 {
+			delta = -delta
+		}
+		return time.Duration(delta)*time.Second <= m.maxClockSkew
+	}
+}
+
+func ssu2DateTimeBlockTo(dst []byte, now time.Time) ([]byte, error) {
+	var timestamp [4]byte
+	binary.BigEndian.PutUint32(timestamp[:], uint32(now.Unix()))
+	return dataplanessu2.MarshalBlock(dst, dataplanessu2.BlockDateTime, timestamp[:])
+}
+
+func ssu2DateTimeBlock(now time.Time) ([]byte, error) {
+	return ssu2DateTimeBlockTo(nil, now)
+}
+
+func ssu2DateTimePayload(now time.Time) ([]byte, error) {
+	payload, err := ssu2DateTimeBlock(now)
+	if err != nil {
+		return nil, err
+	}
+	return dataplanessu2.MarshalBlock(payload, dataplanessu2.BlockPadding, nil)
+}
+
+func ssu2SessionCreatedPayload(remote net.Addr, now time.Time) ([]byte, error) {
+	payload, err := ssu2DateTimeBlock(now)
+	if err != nil {
+		return nil, err
+	}
+	endpoint, ok := remote.(interface{ AddrPort() netip.AddrPort })
+	if !ok {
+		return nil, ErrSSU2Session
+	}
+	address := endpoint.AddrPort()
+	if !address.IsValid() || address.Port() == 0 {
+		return nil, ErrSSU2Session
+	}
+	var data [18]byte
+	binary.BigEndian.PutUint16(data[:2], address.Port())
+	if address.Addr().Is4() {
+		ip := address.Addr().As4()
+		copy(data[2:6], ip[:])
+		return dataplanessu2.MarshalBlock(payload, dataplanessu2.BlockAddress, data[:6])
+	}
+	ip := address.Addr().As16()
+	copy(data[2:], ip[:])
+	return dataplanessu2.MarshalBlock(payload, dataplanessu2.BlockAddress, data[:])
+}
+
+func buildSSU2SessionConfirmedFragments(pending *ssu2OutboundPending, staticPrivate, payload []byte) ([][]byte, error) {
+	return pending.initiator.BuildSessionConfirmedFragments(staticPrivate, payload, ssu2RemotePacketSizeForMTU(pending.remote, pending.address.mtu))
+}
+
+func ssu2SessionPacketSize(session *ssu2TransportSession) int {
+	if session == nil {
+		return ssu2MinimumIPv4PacketSize
+	}
+	mtu := cmp.Or(int(session.mtu.Load()), ssu2MinimumNetworkMTU)
+	return ssu2RemotePacketSizeForMTU(session.remoteAddr(), mtu)
+}
+
+func ssu2RemotePacketSize(remote net.Addr) int {
+	return ssu2RemotePacketSizeForMTU(remote, ssu2MinimumNetworkMTU)
+}
+func ssu2RemotePacketSizeForMTU(remote net.Addr, mtu int) int {
+	if mtu <= 0 {
+		mtu = ssu2MaximumNetworkMTU
+	}
+	mtu = min(max(mtu, ssu2MinimumNetworkMTU), ssu2MaximumNetworkMTU)
+	if endpoint, ok := addrPortKey(remote); ok && endpoint.Addr().Is6() {
+		return mtu - 40 - 8
+	}
+	return mtu - 20 - 8
+}
+
+func ssu2NetworkPacketSize(remote net.Addr, udpPayload int) int {
+	if endpoint, ok := addrPortKey(remote); ok && endpoint.Addr().Is6() {
+		return udpPayload + 40 + 8
+	}
+	return udpPayload + 20 + 8
+}
+
+// forEachSSU2I2NPFragment frames one payload at a time into caller-owned
+// storage. send must consume the view synchronously before returning. The last
+// marker lets the transport request one ACK per I2NP burst, matching Java's
+// sparse immediate-ACK policy without applying it to reliable control blocks.
+func forEachSSU2I2NPFragment(scratch []byte, message foundation.I2NPMessage, maxPacket int, send func([]byte, bool) error) error {
+	if maxPacket > dataplanessu2.MaxIPv4PacketLen || maxPacket < dataplanessu2.MinPacketLen || len(scratch) < maxPacket {
+		return ErrSSU2Session
+	}
+	maxFirst := maxPacket - dataplanessu2.ShortHeaderLen - dataplanessu2.PacketTagLen - 3 - foundation.I2NPTransportHeaderLen
+	maxNext := maxPacket - dataplanessu2.ShortHeaderLen - dataplanessu2.PacketTagLen - 3 - 5
+	if len(message.Payload) <= maxFirst {
+		payload, err := marshalSSU2I2NPTo(scratch, message)
+		if err != nil {
+			return err
+		}
+		return send(payload, true)
+	}
+	if len(message.Payload) > foundation.I2NPI2PDMaxPayload {
+		return foundation.I2NPErrPayloadTooLarge
+	}
+	expiration, ok := foundation.I2NPEncodeTransportExpiration(message.Header.Expiration)
+	if !ok {
+		return foundation.I2NPErrPayloadTooLarge
+	}
+	firstDataLen := foundation.I2NPTransportHeaderLen + maxFirst
+	first := scratch[:3+firstDataLen]
+	first[0] = dataplanessu2.BlockFirstFragment
+	binary.BigEndian.PutUint16(first[1:3], uint16(firstDataLen))
+	first[3] = byte(message.Header.Type)
+	binary.BigEndian.PutUint32(first[4:8], message.Header.ID)
+	binary.BigEndian.PutUint32(first[8:12], expiration)
+	copy(first[3+foundation.I2NPTransportHeaderLen:], message.Payload[:maxFirst])
+	if err := send(first, false); err != nil {
+		return err
+	}
+	for offset, number := maxFirst, uint8(1); offset < len(message.Payload); number++ {
+		if number == 0 {
+			return foundation.I2NPErrPayloadTooLarge
+		}
+		end := min(offset+maxNext, len(message.Payload))
+		dataLen := 5 + end - offset
+		follow := scratch[:3+dataLen]
+		follow[0] = dataplanessu2.BlockFollowOnFragment
+		binary.BigEndian.PutUint16(follow[1:3], uint16(dataLen))
+		follow[3] = number << 1
+		if end == len(message.Payload) {
+			follow[3] |= 1
+		}
+		binary.BigEndian.PutUint32(follow[4:8], message.Header.ID)
+		copy(follow[8:], message.Payload[offset:end])
+		if err := send(follow, end == len(message.Payload)); err != nil {
+			return err
+		}
+		offset = end
+	}
+	return nil
+}
+
+func marshalSSU2I2NPTo(dst []byte, message foundation.I2NPMessage) ([]byte, error) {
+	if len(message.Payload) > foundation.I2NPI2PDMaxPayload {
+		return nil, foundation.I2NPErrPayloadTooLarge
+	}
+	expiration, ok := foundation.I2NPEncodeTransportExpiration(message.Header.Expiration)
+	if !ok {
+		return nil, foundation.I2NPErrPayloadTooLarge
+	}
+	dataLen := foundation.I2NPTransportHeaderLen + len(message.Payload)
+	frameLen := 3 + dataLen
+	if len(dst) < frameLen {
+		return nil, io.ErrShortBuffer
+	}
+	payload := dst[:frameLen]
+	payload[0] = dataplanessu2.BlockI2NP
+	binary.BigEndian.PutUint16(payload[1:3], uint16(dataLen))
+	payload[3] = byte(message.Header.Type)
+	binary.BigEndian.PutUint32(payload[4:8], message.Header.ID)
+	binary.BigEndian.PutUint32(payload[8:12], expiration)
+	copy(payload[3+foundation.I2NPTransportHeaderLen:], message.Payload)
+	return payload, nil
+}
+
+func decodeSSU2I2NP(data []byte) (foundation.I2NPMessage, error) {
+	header, err := foundation.I2NPParseTransportHeader(data)
+	if err != nil {
+		return foundation.I2NPMessage{}, err
+	}
+	// data aliases the authenticated receive batch. Dispatch completes before
+	// that batch is returned to the socket, so this is a synchronous borrowed
+	// payload view, not an ownership transfer.
+	return foundation.I2NPMessage{
+		Header:  foundation.I2NPHeader{Type: header.Type, ID: header.ID, Expiration: header.Expiration},
+		Payload: data[foundation.I2NPTransportHeaderLen:],
+	}, nil
+}
+
+func (s *ssu2TransportSession) addFragment(kind uint8, data []byte, now time.Time) (foundation.I2NPMessage, bool, error) {
+	s.fragmentMu.Lock()
+	defer s.fragmentMu.Unlock()
+
+	var id uint32
+	var assembly *ssu2FragmentAssembly
+	switch kind {
+	case dataplanessu2.BlockFirstFragment:
+		header, err := foundation.I2NPParseTransportHeader(data)
+		if err != nil || len(data) == foundation.I2NPTransportHeaderLen {
+			return foundation.I2NPMessage{}, false, ErrSSU2Peer
+		}
+		id = header.ID
+		assembly = s.fragments[id]
+		if assembly == nil {
+			if len(s.fragments) >= ssu2MaxFragmentedMessages {
+				return foundation.I2NPMessage{}, false, ErrSSU2Session
+			}
+			assembly = &ssu2FragmentAssembly{header: header, following: make(map[uint8][]byte)}
+			s.fragments[id] = assembly
+		} else if assembly.first != nil && (assembly.header != header || !bytes.Equal(assembly.first, data[foundation.I2NPTransportHeaderLen:])) {
+			delete(s.fragments, id)
+			return foundation.I2NPMessage{}, false, ErrSSU2Peer
+		}
+		if assembly.first == nil {
+			assembly.first = append([]byte(nil), data[foundation.I2NPTransportHeaderLen:]...)
+			assembly.header = header
+			assembly.size += len(assembly.first)
+		}
+	case dataplanessu2.BlockFollowOnFragment:
+		if len(data) <= 5 {
+			return foundation.I2NPMessage{}, false, ErrSSU2Peer
+		}
+		number := data[0] >> 1
+		if number == 0 {
+			return foundation.I2NPMessage{}, false, ErrSSU2Peer
+		}
+		id = binary.BigEndian.Uint32(data[1:5])
+		assembly = s.fragments[id]
+		if assembly == nil {
+			if len(s.fragments) >= ssu2MaxFragmentedMessages {
+				return foundation.I2NPMessage{}, false, ErrSSU2Session
+			}
+			assembly = &ssu2FragmentAssembly{following: make(map[uint8][]byte)}
+			s.fragments[id] = assembly
+		}
+		if existing := assembly.following[number]; existing != nil {
+			if !bytes.Equal(existing, data[5:]) {
+				delete(s.fragments, id)
+				return foundation.I2NPMessage{}, false, ErrSSU2Peer
+			}
+		} else {
+			assembly.following[number] = append([]byte(nil), data[5:]...)
+			assembly.size += len(data) - 5
+		}
+		if data[0]&1 != 0 {
+			if assembly.last != 0 && assembly.last != number {
+				delete(s.fragments, id)
+				return foundation.I2NPMessage{}, false, ErrSSU2Peer
+			}
+			assembly.last = number
+		}
+	default:
+		return foundation.I2NPMessage{}, false, ErrSSU2Peer
+	}
+	assembly.updated = now
+	if assembly.size > foundation.I2NPI2PDMaxPayload || assembly.first == nil || assembly.last == 0 {
+		if assembly.size > foundation.I2NPI2PDMaxPayload {
+			delete(s.fragments, id)
+			return foundation.I2NPMessage{}, false, ErrSSU2Peer
+		}
+		return foundation.I2NPMessage{}, false, nil
+	}
+	payload := make([]byte, 0, assembly.size)
+	payload = append(payload, assembly.first...)
+	for number := uint8(1); number <= assembly.last; number++ {
+		part := assembly.following[number]
+		if part == nil {
+			return foundation.I2NPMessage{}, false, nil
+		}
+		payload = append(payload, part...)
+	}
+	if len(payload) != assembly.size {
+		delete(s.fragments, id)
+		return foundation.I2NPMessage{}, false, ErrSSU2Peer
+	}
+	message := foundation.I2NPMessage{
+		Header:  foundation.I2NPHeader{Type: assembly.header.Type, ID: assembly.header.ID, Expiration: assembly.header.Expiration},
+		Payload: payload,
+	}
+	delete(s.fragments, id)
+	return message, true, nil
+}
+
+func (s *ssu2TransportSession) expireFragments(now time.Time) {
+	s.fragmentMu.Lock()
+	defer s.fragmentMu.Unlock()
+	for id, assembly := range s.fragments {
+		if now.Sub(assembly.updated) >= ssu2FragmentLifetime {
+			delete(s.fragments, id)
+		}
+	}
+}
+
+func validateSSU2ConfirmedPayload(payload, static []byte) (foundation.NetworkDatabaseRouterInfo, []byte, error) {
+	iterator := dataplanessu2.NewBlockIterator(payload)
+	first, ok, err := iterator.Next()
+	validateSSU2ConfirmedPayloadRejected := err != nil || !ok || first.Type != dataplanessu2.BlockRouterInfo || len(first.Data) < 2 || first.Data[0]&^byte(3) != 0
+	if !validateSSU2ConfirmedPayloadRejected {
+		validateSSU2ConfirmedPayloadRejected = first.Data[1] != 1
+	}
+	if validateSSU2ConfirmedPayloadRejected {
+		return foundation.NetworkDatabaseRouterInfo{}, nil, ErrSSU2Peer
+	}
+	raw := first.Data[2:]
+	if first.Data[0]&2 != 0 {
+		raw, err = inflateSSU2RouterInfo(raw)
+		if err != nil {
+			return foundation.NetworkDatabaseRouterInfo{}, nil, ErrSSU2Peer
+		}
+	}
+	info, err := foundation.NetworkDatabaseParseRouterInfo(raw)
+	if err != nil {
+		return foundation.NetworkDatabaseRouterInfo{}, nil, ErrSSU2Peer
+	}
+	valid, err := info.Verify()
+	intro, found := ssu2IntroForStatic(info, static)
+	if err != nil || !valid || !found {
+		return foundation.NetworkDatabaseRouterInfo{}, nil, ErrSSU2Peer
+	}
+	for {
+		block, ok, err := iterator.Next()
+		if err != nil {
+			return foundation.NetworkDatabaseRouterInfo{}, nil, ErrSSU2Peer
+		}
+		if !ok {
+			return info, intro, nil
+		}
+		if block.Type != dataplanessu2.BlockOptions && block.Type != dataplanessu2.BlockPadding && block.Type != dataplanessu2.BlockI2NP {
+			return foundation.NetworkDatabaseRouterInfo{}, nil, ErrSSU2Peer
+		}
+	}
+}
+
+func inflateSSU2RouterInfo(compressed []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return nil, err
+	}
+	reader.Multistream(false)
+	defer reader.Close()
+	raw, err := io.ReadAll(io.LimitReader(reader, int64(foundation.NetworkDatabaseMaxRouterInfoBytes+1)))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > foundation.NetworkDatabaseMaxRouterInfoBytes {
+		return nil, fmt.Errorf("%w: decompressed RouterInfo exceeds maximum wire size", ErrSSU2Peer)
+	}
+	return raw, nil
+}
+
+func hasSSU2Keys(info foundation.NetworkDatabaseRouterInfo, static, intro []byte) bool {
+	candidate, ok := ssu2IntroForStatic(info, static)
+	return ok && bytes.Equal(candidate, intro)
+}
+
+func hasSSU2Static(info foundation.NetworkDatabaseRouterInfo, static []byte) bool {
+	_, ok := ssu2IntroForStatic(info, static)
+	return ok
+}
+
+func ssu2IntroForStatic(info foundation.NetworkDatabaseRouterInfo, static []byte) ([]byte, bool) {
+	addresses := info.Addresses()
+	for {
+		address, ok, err := addresses.Next()
+		if err != nil || !ok {
+			return nil, false
+		}
+		if !bytes.Equal(address.TransportStyle, []byte("SSU")) && !bytes.Equal(address.TransportStyle, []byte("SSU2")) {
+			continue
+		}
+		var advertisedStatic, intro, version []byte
+		options := address.Options.Iterator()
+		for {
+			name, value, ok, err := options.Next()
+			if err != nil || !ok {
+				break
+			}
+			switch string(name) {
+			case "s":
+				advertisedStatic = append(advertisedStatic[:0], value...)
+			case "i":
+				intro = append(intro[:0], value...)
+			case "v":
+				version = append(version[:0], value...)
+			}
+		}
+		decodedStatic, staticErr := foundation.DecodeI2PBase64(advertisedStatic)
+		decodedIntro, introErr := foundation.DecodeI2PBase64(intro)
+		valid := staticErr == nil && introErr == nil && len(decodedStatic) == 32 && len(decodedIntro) == 32 && supportsSSU2Version(string(version))
+		if valid && bytes.Equal(decodedStatic, static) {
+			return decodedIntro, true
+		}
+	}
+}
+
+func (m *SSU2Manager) selectSSU2Address(info foundation.NetworkDatabaseRouterInfo) (ssu2PeerAddress, error) {
+	available := ssu2IPv6Available(m.conn)
+	m.ipv6Available.Store(available)
+	return selectSSU2AddressForNetwork(info, available)
+}
+
+func ssu2IPv6Available(conn *net.UDPConn) bool {
+	if conn == nil {
+		return false
+	}
+	local, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || local.IP.To4() != nil {
+		return false
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, networkInterface := range interfaces {
+		if networkInterface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addresses, err := networkInterface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			prefix, err := netip.ParsePrefix(address.String())
+			if err != nil {
+				continue
+			}
+			ip := prefix.Addr()
+			if ip.Is6() && ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (m *SSU2Manager) ssu2LargeMTU(remote net.Addr, advertised int) int {
+	large := ssu2MaximumNetworkMTU
+	if advertised > ssu2MinimumNetworkMTU {
+		large = min(large, advertised)
+	}
+	endpoint, _ := addrPortKey(remote)
+	m.mu.RLock()
+	conn := m.conn
+	m.mu.RUnlock()
+	if local := ssu2LocalMTU(conn, endpoint.Addr().Is6()); local != 0 {
+		large = min(large, local)
+	}
+	return min(max(large, ssu2MinimumNetworkMTU), ssu2MaximumNetworkMTU)
+}
+
+func ssu2LocalMTU(conn *net.UDPConn, ipv6 bool) int {
+	if conn == nil {
+		return 0
+	}
+	local, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return 0
+	}
+	bound, _ := netip.AddrFromSlice(local.IP)
+	if bound.IsValid() {
+		bound = bound.Unmap()
+	}
+	best := 0
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return 0
+	}
+	for _, networkInterface := range interfaces {
+		if networkInterface.Flags&net.FlagUp == 0 || networkInterface.MTU < ssu2MinimumNetworkMTU {
+			continue
+		}
+		addresses, err := networkInterface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			prefix, err := netip.ParsePrefix(address.String())
+			if err != nil {
+				continue
+			}
+			ip := prefix.Addr().Unmap()
+			if ip.Is6() != ipv6 {
+				continue
+			}
+			if bound.IsValid() && !bound.IsUnspecified() && ip != bound {
+				continue
+			}
+			best = max(best, min(networkInterface.MTU, ssu2MaximumNetworkMTU))
+		}
+	}
+	return best
+}
+
+func ssu2AdvertisedMTU(info foundation.NetworkDatabaseRouterInfo, remote net.Addr) int {
+	endpoint, ok := addrPortKey(remote)
+	if !ok {
+		return 0
+	}
+	addresses := info.Addresses()
+	for {
+		address, next, err := addresses.Next()
+		if err != nil || !next {
+			return 0
+		}
+		if !bytes.Equal(address.TransportStyle, []byte("SSU")) && !bytes.Equal(address.TransportStyle, []byte("SSU2")) {
+			continue
+		}
+		var host string
+		mtu := 0
+		options := address.Options.Iterator()
+		for {
+			name, value, next, err := options.Next()
+			if err != nil || !next {
+				break
+			}
+			switch string(name) {
+			case "host":
+				host = string(value)
+			case "mtu":
+				mtu, _ = strconv.Atoi(string(value))
+			}
+		}
+		ip, err := netip.ParseAddr(host)
+		if err == nil && ip.Unmap() == endpoint.Addr().Unmap() {
+			if mtu <= 0 {
+				return 0
+			}
+			return min(max(mtu, ssu2MinimumNetworkMTU), ssu2MaximumNetworkMTU)
+		}
+	}
+}
+
+func selectSSU2Address(info foundation.NetworkDatabaseRouterInfo) (ssu2PeerAddress, error) {
+	return selectSSU2AddressForNetwork(info, true)
+}
+
+func selectSSU2AddressForNetwork(info foundation.NetworkDatabaseRouterInfo, allowIPv6 bool) (ssu2PeerAddress, error) {
+	addresses := info.Addresses()
+	for {
+		address, ok, err := addresses.Next()
+		if err != nil {
+			return ssu2PeerAddress{}, err
+		}
+		if !ok {
+			return ssu2PeerAddress{}, ErrSSU2Peer
+		}
+		if !bytes.Equal(address.TransportStyle, []byte("SSU")) && !bytes.Equal(address.TransportStyle, []byte("SSU2")) {
+			continue
+		}
+		var host, port, mtu, caps, static, intro, version string
+		options := address.Options.Iterator()
+		for {
+			name, value, ok, err := options.Next()
+			if err != nil || !ok {
+				break
+			}
+			switch string(name) {
+			case "host":
+				host = string(value)
+			case "port":
+				port = string(value)
+			case "mtu":
+				mtu = string(value)
+			case "caps":
+				caps = string(value)
+			case "s":
+				static = string(value)
+			case "i":
+				intro = string(value)
+			case "v":
+				version = string(value)
+			}
+		}
+		portNumber, err := strconv.ParseUint(port, 10, 16)
+		ip, ipErr := netip.ParseAddr(host)
+		invalidEndpoint := err != nil || ipErr != nil || portNumber == 0
+		if invalidEndpoint || !supportsSSU2Version(version) {
+			continue
+		}
+		if !allowIPv6 && ip.Is6() {
+			continue
+		}
+		staticKey, staticErr := foundation.DecodeI2PBase64([]byte(static))
+		introKey, introErr := foundation.DecodeI2PBase64([]byte(intro))
+		if staticErr != nil || introErr != nil || len(staticKey) != 32 || len(introKey) != 32 {
+			continue
+		}
+		var selected ssu2PeerAddress
+		selected.host, selected.port = host, uint16(portNumber)
+		selected.introducer = strings.ContainsRune(caps, 'C')
+		if advertisedMTU, mtuErr := strconv.Atoi(mtu); mtuErr == nil {
+			selected.mtu = min(max(advertisedMTU, ssu2MinimumNetworkMTU), ssu2MaximumNetworkMTU)
+		}
+		copy(selected.static[:], staticKey)
+		copy(selected.intro[:], introKey)
+		return selected, nil
+	}
+}
+
+func supportsSSU2Version(version string) bool {
+	for part := range strings.SplitSeq(version, ",") {
+		if part == "2" {
+			return true
+		}
+	}
+	return false
+}
+
+func addrPortKey(remote net.Addr) (netip.AddrPort, bool) {
+	endpoint, ok := remote.(interface{ AddrPort() netip.AddrPort })
+	if !ok {
+		return netip.AddrPort{}, false
+	}
+	addr := endpoint.AddrPort()
+	if !addr.IsValid() {
+		return netip.AddrPort{}, false
+	}
+	return netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port()), true
+}
+
+func sameUDPAddress(expected, actual net.Addr) bool {
+	left, leftOK := addrPortKey(expected)
+	right, rightOK := addrPortKey(actual)
+	return leftOK && rightOK && left == right
+}
+
+func cloneUDPAddress(remote net.Addr) net.Addr {
+	endpoint, ok := addrPortKey(remote)
+	if !ok {
+		return remote
+	}
+	return net.UDPAddrFromAddrPort(endpoint)
+}
+
+func randomConnectionIDs() (uint64, uint64, error) {
+	left, err := randomUint64()
+	if err != nil {
+		return 0, 0, err
+	}
+	for right := uint64(0); right == 0 || right == left; {
+		right, err = randomUint64()
+		if err != nil {
+			return 0, 0, err
+		}
+		if left != 0 && right != 0 && right != left {
+			return left, right, nil
+		}
+	}
+	return 0, 0, ErrSSU2Session
+}
+
+func randomPacketNumber() (uint32, error) {
+	var bytes [4]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint32(bytes[:]), nil
+}
+
+func randomUint64() (uint64, error) {
+	var bytes [8]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint64(bytes[:]), nil
+}
+
+var _ TransportManager = (*SSU2Manager)(nil)

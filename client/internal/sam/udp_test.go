@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/pool"
-	"gosuda.org/ivnp/networking"
 	"gosuda.org/ivnp/observability"
 )
 
@@ -246,7 +246,7 @@ type blockingUDPEndpoint struct {
 	canceled chan struct{}
 }
 
-func (e *blockingUDPEndpoint) SendMessage(ctx context.Context, _ networking.StreamingTunnelDelivery) error {
+func (e *blockingUDPEndpoint) SendMessage(ctx context.Context, _ dataplane.StreamingTunnelDelivery) error {
 	select {
 	case <-e.entered:
 	default:
@@ -328,7 +328,7 @@ func TestDatagramFrameUsesExactPayloadCapacity(t *testing.T) {
 	}
 	defer endpoint.Close()
 	payload := []byte("exact datagram")
-	overhead := datagramOverhead(networking.DatagramProtocolDatagram1, endpoint, nil)
+	overhead := datagramOverhead(dataplane.DatagramProtocolDatagram1, endpoint, nil)
 	session := &samSession{
 		server:           &Server{config: ServerConfig{MaxDatagramBytes: overhead + len(payload)}},
 		endpoint:         endpoint,

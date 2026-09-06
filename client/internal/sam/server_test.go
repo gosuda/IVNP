@@ -12,9 +12,9 @@ import (
 	"testing/synctest"
 	"time"
 
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/networking"
 )
 
 type loopController struct {
@@ -56,7 +56,7 @@ func (e *loopEndpoint) DialI2P(context.Context, string) (net.Conn, error) {
 func (e *loopEndpoint) ListenI2P(context.Context, string) (net.Listener, error) {
 	return nil, ErrUnsupported
 }
-func (e *loopEndpoint) SendMessage(_ context.Context, d networking.StreamingTunnelDelivery) error {
+func (e *loopEndpoint) SendMessage(_ context.Context, d dataplane.StreamingTunnelDelivery) error {
 	e.controller.mu.Lock()
 	target := e.controller.endpoints[d.To]
 	e.controller.mu.Unlock()
@@ -85,7 +85,7 @@ func (e *loopEndpoint) MarshalDatagramV1To(dst, payload []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return networking.DatagramMarshalV1To(dst, identity, payload, e.local.Sign)
+	return dataplane.DatagramMarshalV1To(dst, identity, payload, e.local.Sign)
 }
 func (e *loopEndpoint) MarshalDatagramV2To(dst []byte, target foundation.Hash, payload []byte) (int, error) {
 	identity, err := e.local.Identity()
@@ -93,15 +93,15 @@ func (e *loopEndpoint) MarshalDatagramV2To(dst []byte, target foundation.Hash, p
 		return 0, err
 	}
 	flags := uint16(2)
-	var offline networking.DatagramOfflineSignature
+	var offline dataplane.DatagramOfflineSignature
 	if meta, ok := e.local.OfflineSignature(); ok {
-		flags |= networking.DatagramFlagOffline
+		flags |= dataplane.DatagramFlagOffline
 		offline = meta
 	}
-	return networking.DatagramMarshalV2To(dst, target, identity, flags, foundation.Mapping{}, offline, payload, e.local.Sign)
+	return dataplane.DatagramMarshalV2To(dst, target, identity, flags, foundation.Mapping{}, offline, payload, e.local.Sign)
 }
 func (e *loopEndpoint) MarshalDatagramV3To(dst, payload []byte) (int, error) {
-	return networking.DatagramMarshalV3To(dst, e.local.Hash(), 3, foundation.Mapping{}, payload)
+	return dataplane.DatagramMarshalV3To(dst, e.local.Hash(), 3, foundation.Mapping{}, payload)
 }
 func (e *loopEndpoint) Subscribe(route destination.DestinationRoute, _ int) (destination.MessageSubscription, error) {
 	sub := &loopSubscription{ch: make(chan *destination.ReceivedMessage, 8), done: make(chan struct{})}

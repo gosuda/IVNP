@@ -7,11 +7,11 @@ import (
 	"strconv"
 	"strings"
 
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/internal/pool"
-	"gosuda.org/ivnp/networking"
 )
 
 func (s *Server) handleSend(connection *serverConnection, cmd command) error {
@@ -83,7 +83,7 @@ func (s *Server) handleSend(connection *serverConnection, cmd command) error {
 			protocol = uint8(parsed)
 		}
 	}
-	err = session.endpoint.SendMessage(session.ctx, networking.StreamingTunnelDelivery{From: session.endpoint.Hash(), To: hash, FromPort: uint16(fromPort), ToPort: uint16(toPort), Protocol: protocol, Payload: payload})
+	err = session.endpoint.SendMessage(session.ctx, dataplane.StreamingTunnelDelivery{From: session.endpoint.Hash(), To: hash, FromPort: uint16(fromPort), ToPort: uint16(toPort), Protocol: protocol, Payload: payload})
 	if err != nil {
 		return connection.writeLine(cmd.verb + " STATUS RESULT=CANT_REACH_PEER")
 	}
@@ -123,15 +123,15 @@ func (s *samSession) forwardReceivedMessage(message *destination.ReceivedMessage
 
 func marshalSessionDatagram(session *samSession, dst []byte, target foundation.Hash, payload []byte) (int, error) {
 	switch session.protocol {
-	case networking.DatagramProtocolDatagram1:
+	case dataplane.DatagramProtocolDatagram1:
 		return session.endpoint.MarshalDatagramV1To(dst, payload)
-	case networking.DatagramProtocolDatagram2:
+	case dataplane.DatagramProtocolDatagram2:
 		modern, ok := session.endpoint.(destination.ModernDatagramEndpoint)
 		if !ok {
 			return 0, ErrUnsupported
 		}
 		return modern.MarshalDatagramV2To(dst, target, payload)
-	case networking.DatagramProtocolDatagram3:
+	case dataplane.DatagramProtocolDatagram3:
 		modern, ok := session.endpoint.(destination.ModernDatagramEndpoint)
 		if !ok {
 			return 0, ErrUnsupported
@@ -141,7 +141,7 @@ func marshalSessionDatagram(session *samSession, dst []byte, target foundation.H
 	return 0, ErrProtocol
 }
 
-func (s *samSession) forwardDatagram(delivery networking.StreamingTunnelDelivery) {
+func (s *samSession) forwardDatagram(delivery dataplane.StreamingTunnelDelivery) {
 	source, payload, ok := s.parseReceivedDatagram(delivery)
 	if !ok {
 		return
@@ -163,19 +163,19 @@ func (s *samSession) forwardDatagram(delivery networking.StreamingTunnelDelivery
 	_ = s.control.writeFrame(header, payload)
 }
 
-func (s *samSession) parseReceivedDatagram(delivery networking.StreamingTunnelDelivery) (string, []byte, bool) {
-	packet, err := networking.DatagramParsePacket(s.protocol, delivery.Payload)
+func (s *samSession) parseReceivedDatagram(delivery dataplane.StreamingTunnelDelivery) (string, []byte, bool) {
+	packet, err := dataplane.DatagramParsePacket(s.protocol, delivery.Payload)
 	if err != nil {
 		return "", nil, false
 	}
 	switch s.protocol {
-	case networking.DatagramProtocolDatagram1:
+	case dataplane.DatagramProtocolDatagram1:
 		valid, err := packet.V1.Verify()
 		if err != nil || !valid || packet.V1.From.Hash() != delivery.From {
 			return "", nil, false
 		}
 		return foundation.EncodeI2PBase64(packet.V1.From.Bytes()), packet.V1.Payload, true
-	case networking.DatagramProtocolDatagram2:
+	case dataplane.DatagramProtocolDatagram2:
 		now := s.now()
 		if now < 0 || now > math.MaxUint32 {
 			return "", nil, false
@@ -185,7 +185,7 @@ func (s *samSession) parseReceivedDatagram(delivery networking.StreamingTunnelDe
 			return "", nil, false
 		}
 		return foundation.EncodeI2PBase64(packet.V2.From.Bytes()), packet.V2.Payload, true
-	case networking.DatagramProtocolDatagram3:
+	case dataplane.DatagramProtocolDatagram3:
 		// Datagram3 is unauthenticated by spec: no signature to verify and the
 		// source is a bare 32-byte hash supplied by the sender. The FROM value
 		// delivered to SAM clients is attacker-controlled and must not be
@@ -196,7 +196,7 @@ func (s *samSession) parseReceivedDatagram(delivery networking.StreamingTunnelDe
 	return "", nil, false
 }
 
-func (s *samSession) forwardRaw(delivery networking.StreamingTunnelDelivery) {
+func (s *samSession) forwardRaw(delivery dataplane.StreamingTunnelDelivery) {
 	if s.udpTarget == nil {
 		header, lease, ok := rawReceivedHeader(delivery.Protocol, delivery.FromPort, delivery.ToPort, len(delivery.Payload))
 		if !ok {
@@ -239,10 +239,10 @@ func datagramOverhead(protocol uint8, endpoint destination.DestinationEndpoint, 
 	if endpoint == nil {
 		return 0
 	}
-	if protocol == networking.DatagramProtocolDatagram3 {
+	if protocol == dataplane.DatagramProtocolDatagram3 {
 		return 34
 	}
-	if protocol != networking.DatagramProtocolDatagram1 && protocol != networking.DatagramProtocolDatagram2 {
+	if protocol != dataplane.DatagramProtocolDatagram1 && protocol != dataplane.DatagramProtocolDatagram2 {
 		return 0
 	}
 	identity, err := foundation.ParseDestination(endpoint.Destination())
@@ -254,7 +254,7 @@ func datagramOverhead(protocol uint8, endpoint destination.DestinationEndpoint, 
 		return 0
 	}
 	overhead := identity.EncodedLen() + signatureLen
-	if protocol == networking.DatagramProtocolDatagram2 {
+	if protocol == dataplane.DatagramProtocolDatagram2 {
 		// Flags word; options section is absent.
 		overhead += 2
 		if offline != nil {

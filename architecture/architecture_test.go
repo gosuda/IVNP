@@ -46,12 +46,8 @@ func TestImportLayersAreAcyclic(t *testing.T) {
 			continue
 		}
 		for _, imported := range pkg.Imports {
-			importedLayer, internalImport := packageLayer(imported)
-			if internalImport && importedLayer > importerLayer {
-				violations = append(violations, fmt.Sprintf("%s (L%d) imports %s (L%d)", importer, importerLayer, imported, importedLayer))
-			}
-			if owner := subsystemInternalOwner(imported); owner != "" && !strings.HasPrefix(importer, modulePath+"/"+owner) {
-				violations = append(violations, fmt.Sprintf("%s bypasses %s subsystem root via %s", importer, owner, imported))
+			if violation := importViolation(importer, importerLayer, imported); violation != "" {
+				violations = append(violations, violation)
 			}
 		}
 	}
@@ -61,11 +57,37 @@ func TestImportLayersAreAcyclic(t *testing.T) {
 	}
 }
 
+func importViolation(importer string, importerLayer int, imported string) string {
+	importedLayer, internalImport := packageLayer(imported)
+	if !internalImport {
+		return ""
+	}
+	if belongsToSubsystem(imported, "networking") {
+		return fmt.Sprintf("%s imports retired networking boundary %s", importer, imported)
+	}
+	if importedLayer > importerLayer {
+		return fmt.Sprintf("%s (L%d) imports %s (L%d)", importer, importerLayer, imported, importedLayer)
+	}
+	if belongsToSubsystem(importer, "dataplane") && belongsToSubsystem(imported, "state") {
+		return fmt.Sprintf("%s imports persistent control state %s", importer, imported)
+	}
+	if owner := subsystemInternalOwner(imported); owner != "" && !belongsToSubsystem(importer, owner) {
+		return fmt.Sprintf("%s bypasses %s subsystem root via %s", importer, owner, imported)
+	}
+	return ""
+}
+
+func belongsToSubsystem(path, subsystem string) bool {
+	root := modulePath + "/" + subsystem
+	return path == root || strings.HasPrefix(path, root+"/")
+}
+
 func TestSubsystemFacadeFilesExist(t *testing.T) {
 	for _, path := range []string{
 		"../foundation/foundation_subsystem.go",
 		"../cryptography/cryptography_subsystem.go",
-		"../networking/networking_subsystem.go",
+		"../controlplane/controlplane_subsystem.go",
+		"../dataplane/dataplane_subsystem.go",
 		"../client/client_subsystem.go",
 		"../state/state_subsystem.go",
 		"../observability/observability_subsystem.go",
@@ -82,7 +104,8 @@ func TestPublicImportsUseCanonicalPathsWithoutAliases(t *testing.T) {
 		modulePath:                             true,
 		modulePath + "/foundation":             true,
 		modulePath + "/cryptography":           true,
-		modulePath + "/networking":             true,
+		modulePath + "/controlplane":           true,
+		modulePath + "/dataplane":              true,
 		modulePath + "/client":                 true,
 		modulePath + "/state":                  true,
 		modulePath + "/observability":          true,
@@ -124,7 +147,7 @@ func TestPublicImportsUseCanonicalPathsWithoutAliases(t *testing.T) {
 }
 
 func subsystemInternalOwner(path string) string {
-	for _, subsystem := range []string{"cryptography", "foundation", "networking", "client", "state", "observability", "node"} {
+	for _, subsystem := range []string{"cryptography", "foundation", "controlplane", "dataplane", "client", "state", "observability", "node"} {
 		if strings.HasPrefix(path, modulePath+"/"+subsystem+"/internal/") {
 			return subsystem
 		}
@@ -151,9 +174,9 @@ func packageLayer(path string) (int, bool) {
 		return 7, true
 	case relative == "client", strings.HasPrefix(relative, "client/"):
 		return 6, true
-	case relative == "networking":
+	case relative == "controlplane", strings.HasPrefix(relative, "controlplane/"):
 		return 5, true
-	case strings.HasPrefix(relative, "networking/"):
+	case relative == "dataplane", strings.HasPrefix(relative, "dataplane/"):
 		return 4, true
 	case relative == "interfaces", strings.HasPrefix(relative, "interfaces/"),
 		relative == "state", strings.HasPrefix(relative, "state/"):

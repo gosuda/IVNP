@@ -4,6 +4,21 @@ IVNP is a Go 1.27 implementation of an embeddable I2P router and its client
 services. Applications should import `gosuda.org/ivnp`, the stable top-level
 facade.
 
+## Subsystems
+
+`controlplane` owns NetDB, peer and tunnel policy, destination lifecycle, and
+prepared routes. `dataplane` executes installed routes and authenticated transport
+sessions; it retains packet-local cryptographic and reliability state without
+performing NetDB discovery or connection setup on the bulk path. `node` composes
+these owners with the client services and coordinates startup and shutdown.
+
+The planes run in the same process. Route and circuit generations prevent stale
+work from adopting replacement state. Control ingress has independent item and
+byte limits, preserves private lookup provenance, and runs under bounded handler
+deadlines. Cross-subsystem imports use the canonical roots; the former
+`networking` package has been removed. Shared wire types and codecs are exported
+by `foundation`.
+
 ## Install
 
 ```sh

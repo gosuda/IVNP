@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/internal/ingress"
 )
 
@@ -563,9 +564,11 @@ func TestSOCKS5HonorsCapacity(t *testing.T) {
 	}
 }
 
-type testStatus struct{ status Status }
+type testStatus struct{ status controlplane.ManagementStatus }
 
-func (s testStatus) ClientStatus(context.Context) (Status, error) { return s.status, nil }
+func (s testStatus) ClientStatus(context.Context) (controlplane.ManagementStatus, error) {
+	return s.status, nil
+}
 
 type blockingStatus struct {
 	started  chan<- struct{}
@@ -573,21 +576,23 @@ type blockingStatus struct {
 	release  <-chan struct{}
 }
 
-func (s blockingStatus) ClientStatus(ctx context.Context) (Status, error) {
+func (s blockingStatus) ClientStatus(ctx context.Context) (controlplane.ManagementStatus, error) {
 	s.started <- struct{}{}
 	<-ctx.Done()
 	s.canceled <- struct{}{}
 	<-s.release
-	return Status{}, ctx.Err()
+	return controlplane.ManagementStatus{}, ctx.Err()
 }
 
-type testCatalog []Destination
+type testCatalog []controlplane.DestinationSummary
 
-func (c testCatalog) ListDestinations(context.Context) ([]Destination, error) { return c, nil }
+func (c testCatalog) ListDestinations(context.Context) ([]controlplane.DestinationSummary, error) {
+	return c, nil
+}
 
 type panicCatalog struct{}
 
-func (panicCatalog) ListDestinations(context.Context) ([]Destination, error) {
+func (panicCatalog) ListDestinations(context.Context) ([]controlplane.DestinationSummary, error) {
 	panic("fault injection")
 }
 
@@ -607,7 +612,7 @@ func TestControlContainsPanickingCatalogHandler(t *testing.T) {
 	control, err := NewControl(ControlConfig{
 		ListenAddress: "127.0.0.1:0",
 		BearerToken:   "secret",
-		Status:        testStatus{Status{Ready: true, State: "running"}},
+		Status:        testStatus{controlplane.ManagementStatus{Ready: true, State: "running"}},
 		Catalog:       panicCatalog{},
 		PanicReporter: reporter,
 	})
@@ -646,7 +651,7 @@ func TestControlAuthenticatesAndListsStatus(t *testing.T) {
 	control, err := NewControl(ControlConfig{
 		ListenAddress: "127.0.0.1:0",
 		BearerToken:   "secret",
-		Status: testStatus{Status{Ready: false, State: "starting", Readiness: ReadinessDetails{
+		Status: testStatus{controlplane.ManagementStatus{Ready: false, State: "starting", Readiness: controlplane.ReadinessDetails{
 			BootstrapStage: 3, NetDBRouters: 50, ProcessGoroutines: 7,
 		}}},
 		Catalog: testCatalog{{Name: "main", Address: testB32, Default: true}},
@@ -671,7 +676,7 @@ func TestControlAuthenticatesAndListsStatus(t *testing.T) {
 	if err != nil || response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("readiness response = %v, %v", response, err)
 	}
-	var readiness Status
+	var readiness controlplane.ManagementStatus
 	if err := json.NewDecoder(response.Body).Decode(&readiness); err != nil {
 		t.Fatal(err)
 	}
@@ -693,7 +698,7 @@ func TestControlAuthenticatesAndListsStatus(t *testing.T) {
 		t.Fatalf("destinations response = %v, %v", response, err)
 	}
 	var payload struct {
-		Destinations []Destination `json:"destinations"`
+		Destinations []controlplane.DestinationSummary `json:"destinations"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil || len(payload.Destinations) != 1 || payload.Destinations[0].Address != testB32 {
 		t.Fatalf("destination listing = %#v, %v", payload, err)

@@ -8,9 +8,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/networking"
 )
 
 type sessionStyle string
@@ -31,11 +31,11 @@ func isDatagramStyle(style sessionStyle) bool {
 func datagramStyleProtocol(style sessionStyle) uint8 {
 	switch style {
 	case styleDatagram2:
-		return networking.DatagramProtocolDatagram2
+		return dataplane.DatagramProtocolDatagram2
 	case styleDatagram3:
-		return networking.DatagramProtocolDatagram3
+		return dataplane.DatagramProtocolDatagram3
 	default:
-		return networking.DatagramProtocolDatagram1
+		return dataplane.DatagramProtocolDatagram1
 	}
 }
 

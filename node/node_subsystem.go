@@ -2,6 +2,7 @@
 package node
 
 import (
+	"gosuda.org/ivnp/controlplane"
 	noderuntime "gosuda.org/ivnp/node/internal/runtime"
 	"gosuda.org/ivnp/state"
 )
@@ -9,17 +10,17 @@ import (
 type (
 	Subsystem             = noderuntime.Daemon
 	Options               = noderuntime.Options
-	Status                = noderuntime.Status
-	TunnelRuntimeSnapshot = noderuntime.TunnelRuntimeSnapshot
-	DestinationPolicy     = noderuntime.DestinationPolicy
-	DestinationPolicyKind = noderuntime.DestinationPolicyKind
+	Status                = controlplane.Status
+	TunnelRuntimeSnapshot = controlplane.TunnelRuntimeSnapshot
+	DestinationPolicy     = controlplane.DestinationPolicy
+	DestinationPolicyKind = controlplane.DestinationPolicyKind
 )
 
 const (
-	DestinationPublicLeaseSet2            = noderuntime.DestinationPublicLS2
-	DestinationEncryptedWithoutAuth       = noderuntime.DestinationEncryptedNone
-	DestinationEncryptedWithDiffieHellman = noderuntime.DestinationEncryptedDH
-	DestinationEncryptedWithPreSharedKey  = noderuntime.DestinationEncryptedPSK
+	DestinationPublicLeaseSet2            = controlplane.DestinationPublicLS2
+	DestinationEncryptedWithoutAuth       = controlplane.DestinationEncryptedNone
+	DestinationEncryptedWithDiffieHellman = controlplane.DestinationEncryptedDH
+	DestinationEncryptedWithPreSharedKey  = controlplane.DestinationEncryptedPSK
 )
 
 func NewSubsystem(configuration state.ConfigurationOperating, options Options) (*Subsystem, error) {

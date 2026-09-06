@@ -5,7 +5,7 @@ import (
 	"context"
 	"testing"
 
-	"gosuda.org/ivnp/networking"
+	"gosuda.org/ivnp/dataplane"
 )
 
 func TestLocalZeroHopDialerListenerE2E(t *testing.T) {
@@ -22,7 +22,7 @@ func TestLocalZeroHopDialerListenerE2E(t *testing.T) {
 			serverDone <- err
 			return
 		}
-		server := networking.StreamingProtocolNewConn(raw, networking.StreamingProtocolNewState(2, 1))
+		server := dataplane.StreamingProtocolNewConn(raw, dataplane.StreamingProtocolNewState(2, 1))
 		defer server.Close()
 		buf := make([]byte, 4)
 		if _, err = server.Read(buf); err == nil && !bytes.Equal(buf, []byte("ping")) {
@@ -37,7 +37,7 @@ func TestLocalZeroHopDialerListenerE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := networking.StreamingProtocolNewConn(raw, networking.StreamingProtocolNewState(1, 2))
+	client := dataplane.StreamingProtocolNewConn(raw, dataplane.StreamingProtocolNewState(1, 2))
 	defer client.Close()
 	if _, err = client.Write([]byte("ping")); err != nil {
 		t.Fatal(err)

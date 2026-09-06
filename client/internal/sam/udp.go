@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"strings"
 
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/internal/pool"
-	"gosuda.org/ivnp/networking"
 )
 
 type udpPacket struct {
@@ -232,5 +232,5 @@ func (s *Server) sendUDPPacket(packet udpPacket) {
 		}
 		payload = framed
 	}
-	_ = session.endpoint.SendMessage(session.ctx, networking.StreamingTunnelDelivery{From: session.endpoint.Hash(), To: hash, FromPort: packet.fromPort, ToPort: packet.toPort, Protocol: protocol, Payload: payload})
+	_ = session.endpoint.SendMessage(session.ctx, dataplane.StreamingTunnelDelivery{From: session.endpoint.Hash(), To: hash, FromPort: packet.fromPort, ToPort: packet.toPort, Protocol: protocol, Payload: payload})
 }

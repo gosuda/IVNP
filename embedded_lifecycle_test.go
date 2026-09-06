@@ -15,11 +15,10 @@ import (
 	"time"
 
 	"gosuda.org/ivnp"
+	"gosuda.org/ivnp/controlplane"
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/networking"
 )
-
-var errMemoryTransportUnavailable = errors.New("memory transport: target unavailable")
 
 const embeddedTestTimeout = 20 * time.Second
 
@@ -27,24 +26,24 @@ type embeddedMemoryNetwork struct {
 	mu        sync.RWMutex
 	endpoints map[foundation.Hash]*embeddedMemoryTransport
 	flood     foundation.Hash
-	floodDB   *networking.NetworkDatabase
+	floodDB   *controlplane.NetworkDatabase
 	nextID    uint32
 }
 
 type embeddedMemoryTransport struct {
 	network  *embeddedMemoryNetwork
 	local    foundation.Hash
-	bindings networking.RouterTransportBindings
+	bindings dataplane.RouterTransportBindings
 	done     chan struct{}
 	once     sync.Once
 	running  bool
 }
 
-func newEmbeddedMemoryNetwork(flood networking.NetworkDatabaseRouterInfo) *embeddedMemoryNetwork {
+func newEmbeddedMemoryNetwork(flood foundation.NetworkDatabaseRouterInfo) *embeddedMemoryNetwork {
 	return &embeddedMemoryNetwork{
 		endpoints: make(map[foundation.Hash]*embeddedMemoryTransport),
 		flood:     flood.Hash(),
-		floodDB:   networking.NetworkDatabaseNewDatabase(flood.Hash(), 16),
+		floodDB:   controlplane.NetworkDatabaseNewDatabase(flood.Hash(), 16),
 	}
 }
 
@@ -62,9 +61,13 @@ func (n *embeddedMemoryNetwork) messageID() uint32 {
 	return n.nextID
 }
 
-func (t *embeddedMemoryTransport) Start(ctx context.Context, bindings networking.RouterTransportBindings) error {
-	bindings.LocalInfo.SetReachability(networking.RouterReachabilityReachable)
-	if err := bindings.LocalInfo.Publish(ctx); err != nil {
+func (t *embeddedMemoryTransport) Start(ctx context.Context, bindings dataplane.RouterTransportBindings) error {
+	localInfo, ok := bindings.LocalInfo.(controlplane.RouterLocalInfo)
+	if !ok {
+		return errors.New("memory network requires control-plane identity publication")
+	}
+	localInfo.SetReachability(controlplane.RouterReachabilityReachable)
+	if err := localInfo.Publish(ctx); err != nil {
 		return err
 	}
 	t.network.mu.Lock()
@@ -76,7 +79,7 @@ func (t *embeddedMemoryTransport) Start(ctx context.Context, bindings networking
 	return nil
 }
 
-func (t *embeddedMemoryTransport) Send(ctx context.Context, target foundation.Hash, message networking.I2NPMessage) error {
+func (t *embeddedMemoryTransport) Send(ctx context.Context, target foundation.Hash, message foundation.I2NPMessage) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -99,9 +102,9 @@ func (t *embeddedMemoryTransport) Wait() error {
 	return nil
 }
 
-func (t *embeddedMemoryTransport) Status() networking.RouterTransportStatus {
+func (t *embeddedMemoryTransport) Status() dataplane.RouterTransportStatus {
 	t.network.mu.RLock()
-	status := networking.RouterTransportStatus{Running: t.running}
+	status := dataplane.RouterTransportStatus{Running: t.running}
 	t.network.mu.RUnlock()
 	return status
 }
@@ -113,22 +116,22 @@ func (t *embeddedMemoryTransport) localHash() foundation.Hash {
 	return local
 }
 
-func (t *embeddedMemoryTransport) routerInfo() networking.NetworkDatabaseRouterInfo {
+func (t *embeddedMemoryTransport) routerInfo() foundation.NetworkDatabaseRouterInfo {
 	t.network.mu.RLock()
 	localInfo := t.bindings.LocalInfo
 	t.network.mu.RUnlock()
 	if localInfo == nil {
-		return networking.NetworkDatabaseRouterInfo{}
+		return foundation.NetworkDatabaseRouterInfo{}
 	}
 	return localInfo.Snapshot()
 }
 
-func (n *embeddedMemoryNetwork) route(from, target foundation.Hash, message networking.I2NPMessage) error {
+func (n *embeddedMemoryNetwork) route(from, target foundation.Hash, message foundation.I2NPMessage) error {
 	if target == n.flood {
 		return n.handleFlood(from, message)
 	}
-	if message.Header.Type == networking.I2NPShortTunnelBuild {
-		if _, err := networking.I2NPParseBuildRecords(networking.I2NPShortTunnelBuild, message.Payload); err != nil {
+	if message.Header.Type == foundation.I2NPShortTunnelBuild {
+		if _, err := foundation.I2NPParseBuildRecords(foundation.I2NPShortTunnelBuild, message.Payload); err != nil {
 			return err
 		}
 	}
@@ -136,16 +139,16 @@ func (n *embeddedMemoryNetwork) route(from, target foundation.Hash, message netw
 	endpoint := n.endpoints[target]
 	n.mu.RUnlock()
 	if endpoint == nil {
-		return errMemoryTransportUnavailable
+		return dataplane.RouterErrSessionUnavailable
 	}
 	return endpoint.bindings.HandleI2NPFrom(from, message, uint64(time.Now().UnixMilli()), false)
 }
 
-func (n *embeddedMemoryNetwork) handleFlood(from foundation.Hash, message networking.I2NPMessage) error {
+func (n *embeddedMemoryNetwork) handleFlood(from foundation.Hash, message foundation.I2NPMessage) error {
 	now := uint64(time.Now().UnixMilli())
 	switch message.Header.Type {
-	case networking.I2NPDatabaseStore:
-		store, err := networking.I2NPParseDatabaseStore(message.Payload)
+	case foundation.I2NPDatabaseStore:
+		store, err := foundation.I2NPParseDatabaseStore(message.Payload)
 		if err != nil {
 			return err
 		}
@@ -158,28 +161,28 @@ func (n *embeddedMemoryNetwork) handleFlood(from foundation.Hash, message networ
 		var payload [12]byte
 		binary.BigEndian.PutUint32(payload[:4], store.ReplyToken)
 		binary.BigEndian.PutUint64(payload[4:], now)
-		status := networking.I2NPMessage{
-			Header: networking.I2NPHeader{
-				Type:       networking.I2NPDeliveryStatus,
+		status := foundation.I2NPMessage{
+			Header: foundation.I2NPHeader{
+				Type:       foundation.I2NPDeliveryStatus,
 				ID:         n.messageID(),
 				Expiration: now + 60_000,
 			},
 			Payload: payload[:],
 		}
 		return n.reply(n.flood, store.ReplyGateway, store.ReplyTunnelID, status)
-	case networking.I2NPDatabaseLookup:
-		lookup, err := networking.I2NPParseDatabaseLookup(message.Payload)
+	case foundation.I2NPDatabaseLookup:
+		lookup, err := foundation.I2NPParseDatabaseLookup(message.Payload)
 		if err != nil {
 			return err
 		}
 		typeID, data, found := n.floodDB.StoredLeaseSet(lookup.Key)
 		if !found {
-			return networking.NetworkDatabaseErrNoFloodfill
+			return controlplane.NetworkDatabaseErrNoFloodfill
 		}
 		payload := marshalEmbeddedDatabaseStore(lookup.Key, typeID, data)
-		reply := networking.I2NPMessage{
-			Header: networking.I2NPHeader{
-				Type:       networking.I2NPDatabaseStore,
+		reply := foundation.I2NPMessage{
+			Header: foundation.I2NPHeader{
+				Type:       foundation.I2NPDatabaseStore,
 				ID:         n.messageID(),
 				Expiration: now + 60_000,
 			},
@@ -191,7 +194,7 @@ func (n *embeddedMemoryNetwork) handleFlood(from foundation.Hash, message networ
 	}
 }
 
-func marshalEmbeddedDatabaseStore(key foundation.Hash, typeID networking.I2NPStoreType, data []byte) []byte {
+func marshalEmbeddedDatabaseStore(key foundation.Hash, typeID foundation.I2NPStoreType, data []byte) []byte {
 	payload := make([]byte, 37+len(data))
 	copy(payload[:foundation.HashLength], key[:])
 	payload[foundation.HashLength] = byte(typeID)
@@ -199,7 +202,7 @@ func marshalEmbeddedDatabaseStore(key foundation.Hash, typeID networking.I2NPSto
 	return payload
 }
 
-func (n *embeddedMemoryNetwork) reply(from, gateway foundation.Hash, tunnelID uint32, message networking.I2NPMessage) error {
+func (n *embeddedMemoryNetwork) reply(from, gateway foundation.Hash, tunnelID uint32, message foundation.I2NPMessage) error {
 	if tunnelID == 0 {
 		return n.route(from, gateway, message)
 	}
@@ -207,13 +210,13 @@ func (n *embeddedMemoryNetwork) reply(from, gateway foundation.Hash, tunnelID ui
 	if _, err := message.MarshalTo(frame); err != nil {
 		return err
 	}
-	payload := make([]byte, networking.I2NPTunnelGatewayHeaderLen+len(frame))
+	payload := make([]byte, foundation.I2NPTunnelGatewayHeaderLen+len(frame))
 	binary.BigEndian.PutUint32(payload[:4], tunnelID)
 	binary.BigEndian.PutUint16(payload[4:6], uint16(len(frame)))
 	copy(payload[6:], frame)
-	gatewayMessage := networking.I2NPMessage{
-		Header: networking.I2NPHeader{
-			Type:       networking.I2NPTunnelGateway,
+	gatewayMessage := foundation.I2NPMessage{
+		Header: foundation.I2NPHeader{
+			Type:       foundation.I2NPTunnelGateway,
 			ID:         n.messageID(),
 			Expiration: message.Header.Expiration,
 		},
@@ -222,7 +225,7 @@ func (n *embeddedMemoryNetwork) reply(from, gateway foundation.Hash, tunnelID ui
 	return n.route(from, gateway, gatewayMessage)
 }
 
-func embeddedTestFloodfill(t *testing.T) networking.NetworkDatabaseRouterInfo {
+func embeddedTestFloodfill(t *testing.T) foundation.NetworkDatabaseRouterInfo {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(cryptorand.Reader)
 	if err != nil {
@@ -243,7 +246,7 @@ func embeddedTestFloodfill(t *testing.T) networking.NetworkDatabaseRouterInfo {
 	unsigned := append(identity, make([]byte, 10)...)
 	binary.BigEndian.PutUint64(unsigned[len(identity):len(identity)+8], now)
 	unsigned = append(unsigned, options[:optionLen]...)
-	info, err := networking.NetworkDatabaseParseRouterInfo(append(unsigned, ed25519.Sign(private, unsigned)...))
+	info, err := foundation.NetworkDatabaseParseRouterInfo(append(unsigned, ed25519.Sign(private, unsigned)...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +388,7 @@ func TestEmbeddedDestinationLifecycle(t *testing.T) {
 			t.Fatalf("endpoint %T does not implement ivnp.ReadyDestinationEndpoint", endpoint)
 		}
 		if err = ready.WaitReady(ctx); err != nil {
-			t.Fatal(err)
+			t.Fatalf("destination readiness: %v; source=%+v target=%+v", err, routers[0].RegistrySnapshot(), routers[1].RegistrySnapshot())
 		}
 	}
 

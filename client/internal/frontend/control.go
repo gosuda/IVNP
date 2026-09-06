@@ -10,55 +10,20 @@ import (
 	"strings"
 	"time"
 
+	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/internal/ingress"
 )
 
 const defaultControlAddress = "127.0.0.1:7657"
 
-// Status holds node readiness and diagnostic details.
-type Status struct {
-	Ready bool   `json:"ready"`
-	State string `json:"state,omitempty"`
-	// RouterHash is the Base64-encoded router identity hash.
-	RouterHash string           `json:"router_hash,omitempty"`
-	Readiness  ReadinessDetails `json:"readiness"`
-}
-
-// ReadinessDetails contains metrics and subsystem health indicators.
-type ReadinessDetails struct {
-	BootstrapStage             uint64 `json:"bootstrap_stage"`
-	NetDBRouters               uint64 `json:"netdb_routers"`
-	RouterInfoPublications     uint64 `json:"router_info_publications"`
-	LeaseSet2Publications      uint64 `json:"lease_set2_publications"`
-	ExploratoryInboundTunnels  uint64 `json:"exploratory_inbound_tunnels"`
-	ExploratoryOutboundTunnels uint64 `json:"exploratory_outbound_tunnels"`
-	ClientInboundTunnels       uint64 `json:"client_inbound_tunnels"`
-	ClientOutboundTunnels      uint64 `json:"client_outbound_tunnels"`
-	FloodfillConfigured        bool   `json:"floodfill_configured"`
-	FloodfillAdvertised        bool   `json:"floodfill_advertised"`
-	RouterReachable            bool   `json:"router_reachable"`
-	SSU2VectorIO               bool   `json:"ssu2_vector_io"`
-	SSU2KernelDropAccounting   bool   `json:"ssu2_kernel_drop_accounting"`
-	ProcessGoroutines          uint64 `json:"process_goroutines"`
-	ProcessHeapInuseBytes      uint64 `json:"process_heap_inuse_bytes"`
-	ProcessHeapObjects         uint64 `json:"process_heap_objects"`
-}
-
 // StatusProvider provides current status and readiness information.
 type StatusProvider interface {
-	ClientStatus(context.Context) (Status, error)
-}
-
-// Destination represents an active local I2P destination.
-type Destination struct {
-	Name    string `json:"name"`
-	Address string `json:"address"`
-	Default bool   `json:"default"`
+	ClientStatus(context.Context) (controlplane.ManagementStatus, error)
 }
 
 // DestinationCatalog lists local destinations.
 type DestinationCatalog interface {
-	ListDestinations(context.Context) ([]Destination, error)
+	ListDestinations(context.Context) ([]controlplane.DestinationSummary, error)
 }
 
 // ControlConfig configures the local HTTP control server.
@@ -205,24 +170,24 @@ func (c *Control) serveHTTP(w http.ResponseWriter, request *http.Request) {
 			return
 		}
 		if destinations == nil {
-			destinations = []Destination{}
+			destinations = []controlplane.DestinationSummary{}
 		}
 		writeJSON(w, http.StatusOK, struct {
-			Destinations []Destination `json:"destinations"`
+			Destinations []controlplane.DestinationSummary `json:"destinations"`
 		}{Destinations: destinations})
 	default:
 		rejectHTTP(w, request, "not found", http.StatusNotFound)
 	}
 }
 
-func (c *Control) status(ctx context.Context, w http.ResponseWriter, request *http.Request) (Status, bool) {
+func (c *Control) status(ctx context.Context, w http.ResponseWriter, request *http.Request) (controlplane.ManagementStatus, bool) {
 	if c.config.Status == nil {
-		return Status{Ready: false, State: "status-unavailable"}, true
+		return controlplane.ManagementStatus{Ready: false, State: "status-unavailable"}, true
 	}
 	status, err := c.config.Status.ClientStatus(ctx)
 	if err != nil {
 		rejectHTTP(w, request, "status unavailable", http.StatusServiceUnavailable)
-		return Status{}, false
+		return controlplane.ManagementStatus{}, false
 	}
 	return status, true
 }

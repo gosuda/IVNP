@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/networking"
 )
 
 func TestParseStyleDatagramModern(t *testing.T) {
@@ -36,9 +36,9 @@ func TestConfigurePacketTransportDatagramModern(t *testing.T) {
 		style    sessionStyle
 		protocol uint8
 	}{
-		{styleDatagram, networking.DatagramProtocolDatagram1},
-		{styleDatagram2, networking.DatagramProtocolDatagram2},
-		{styleDatagram3, networking.DatagramProtocolDatagram3},
+		{styleDatagram, dataplane.DatagramProtocolDatagram1},
+		{styleDatagram2, dataplane.DatagramProtocolDatagram2},
+		{styleDatagram3, dataplane.DatagramProtocolDatagram3},
 	}
 	for _, tc := range cases {
 		config := sessionTransportConfig{}
@@ -69,9 +69,9 @@ func TestDatagramOverheadPerProtocol(t *testing.T) {
 		subscriptions: make(map[destination.DestinationRoute]*loopSubscription),
 	}
 	defer endpoint.Close()
-	v1 := datagramOverhead(networking.DatagramProtocolDatagram1, endpoint, nil)
-	v2 := datagramOverhead(networking.DatagramProtocolDatagram2, endpoint, nil)
-	v3 := datagramOverhead(networking.DatagramProtocolDatagram3, endpoint, nil)
+	v1 := datagramOverhead(dataplane.DatagramProtocolDatagram1, endpoint, nil)
+	v2 := datagramOverhead(dataplane.DatagramProtocolDatagram2, endpoint, nil)
+	v3 := datagramOverhead(dataplane.DatagramProtocolDatagram3, endpoint, nil)
 	if v1 <= 0 || v2 != v1+2 {
 		t.Fatalf("v1 = %d, v2 = %d, want v1+2", v1, v2)
 	}
@@ -95,11 +95,11 @@ func TestDatagramOverheadPerProtocol(t *testing.T) {
 		t.Fatal("unknown transient key type")
 	}
 	want := identity.EncodedLen() + 2 + 6 + len(offline.PublicKey) + authorizationLen + transientLen
-	if got := datagramOverhead(networking.DatagramProtocolDatagram2, endpoint, offline); got != want {
+	if got := datagramOverhead(dataplane.DatagramProtocolDatagram2, endpoint, offline); got != want {
 		t.Fatalf("offline v2 overhead = %d, want %d", got, want)
 	}
 	// Offline signatures never enter Datagram3 or Datagram1 wire formats.
-	if got := datagramOverhead(networking.DatagramProtocolDatagram3, endpoint, offline); got != 34 {
+	if got := datagramOverhead(dataplane.DatagramProtocolDatagram3, endpoint, offline); got != 34 {
 		t.Fatalf("offline v3 overhead = %d, want 34", got)
 	}
 }
@@ -199,7 +199,7 @@ func TestDatagram2DropsForgedDatagrams(t *testing.T) {
 		}
 		overhead := identity.EncodedLen() + 2 + 64
 		frame := make([]byte, overhead+4)
-		n, marshalErr := networking.DatagramMarshalV2To(frame, target, identity, 2, foundation.Mapping{}, networking.DatagramOfflineSignature{}, []byte("DATA"), sender.Sign)
+		n, marshalErr := dataplane.DatagramMarshalV2To(frame, target, identity, 2, foundation.Mapping{}, dataplane.DatagramOfflineSignature{}, []byte("DATA"), sender.Sign)
 		if marshalErr != nil || n != len(frame) {
 			t.Fatalf("marshal = %d, %v", n, marshalErr)
 		}
@@ -209,7 +209,7 @@ func TestDatagram2DropsForgedDatagrams(t *testing.T) {
 		return frame
 	}
 	deliver := func(payload []byte) {
-		if err = senderEndpoint.SendMessage(t.Context(), networking.StreamingTunnelDelivery{From: sender.Hash(), To: receiverHash, Protocol: networking.DatagramProtocolDatagram2, Payload: payload}); err != nil {
+		if err = senderEndpoint.SendMessage(t.Context(), dataplane.StreamingTunnelDelivery{From: sender.Hash(), To: receiverHash, Protocol: dataplane.DatagramProtocolDatagram2, Payload: payload}); err != nil {
 			t.Fatal(err)
 		}
 	}

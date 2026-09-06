@@ -1,0 +1,102 @@
+package netdb
+
+import (
+	"bytes"
+	"compress/gzip"
+	"encoding/hex"
+	"errors"
+	"testing"
+
+	"gosuda.org/ivnp/foundation"
+)
+
+func gzipBytes(t *testing.T, input []byte) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(input); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return compressed.Bytes()
+}
+
+func TestRoutingKeyMatchesI2PDUTCDateTransform(t *testing.T) {
+	want, err := hex.DecodeString("8d5e0050a16b50f39a72cd045710ad628d343d596dd1068945d237d6413a987e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := RoutingKey(foundation.Hash{}, 1_787_529_600_000)
+	if !bytes.Equal(got[:], want) {
+		t.Fatalf("routing key = %x, want %x", got, want)
+	}
+}
+
+func TestLeaseSetRangeMatchesJavaFloodfillBounds(t *testing.T) {
+	now := uint64(1_700_000_000_000)
+	for _, test := range []struct {
+		name             string
+		earliest, latest uint64
+		want             error
+	}{
+		{"current", now + 1, now + 10*60_000, nil},
+		{"old earliest lease", now - LeaseSetMaxPastMillis, now + 1, ErrLeaseSetExpired},
+		{"expired latest lease", now + 1, now - LeaseSetClockFudgeMillis, ErrLeaseSetExpired},
+		{"future latest lease", now + LeaseSetClockFudgeMillis + LeaseSetMaxFutureMillis + 1, now + LeaseSetClockFudgeMillis + LeaseSetMaxFutureMillis + 1, ErrLeaseSetFuture},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateLeaseSetRange(test.earliest, test.latest, now, LeaseSetMaxFutureMillis); !errors.Is(err, test.want) {
+				t.Fatalf("validateLeaseSetRange() error = %v, want %v", err, test.want)
+			}
+		})
+	}
+}
+
+func TestInflateRouterInfoExactBoundary(t *testing.T) {
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+	exact := make([]byte, foundation.NetworkDatabaseMaxRouterInfoBytes)
+	inflated, lease, err := database.inflateRouterInfo(gzipBytes(t, exact))
+	if err != nil || len(inflated) != foundation.NetworkDatabaseMaxRouterInfoBytes {
+		t.Fatalf("exact boundary = %d bytes, %v", len(inflated), err)
+	}
+	defer lease.Release()
+	if _, _, err := database.inflateRouterInfo(gzipBytes(t, make([]byte, foundation.NetworkDatabaseMaxRouterInfoBytes+1))); !errors.Is(err, ErrRouterInfoTooLarge) {
+		t.Fatalf("oversize gzip error = %v, want ErrRouterInfoTooLarge", err)
+	}
+}
+
+func TestRouterInfoFreshUsesSharedTransportBounds(t *testing.T) {
+	now := uint64(1_000_000_000)
+	for _, test := range []struct {
+		name      string
+		published uint64
+		want      error
+	}{
+		{"fresh", now - RouterInfoMaxAgeMillis, nil},
+		{"stale", now - RouterInfoMaxAgeMillis - 1, ErrRouterInfoStale},
+		{"near future", now + RouterInfoMaxFutureMillis, nil},
+		{"future", now + RouterInfoMaxFutureMillis + 1, ErrRouterInfoFuture},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := RouterInfoFresh(foundation.NetworkDatabaseRouterInfo{Published: test.published}, now)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("RouterInfoFresh() = %v, want %v", err, test.want)
+			}
+		})
+	}
+}
+
+func TestReseedRouterInfoFreshUsesBoundedStandardWindow(t *testing.T) {
+	now := uint64(100_000_000)
+	if err := ReseedRouterInfoFresh(foundation.NetworkDatabaseRouterInfo{Published: now - ReseedRouterInfoMaxAgeMillis}, now); err != nil {
+		t.Fatalf("fresh reseed RouterInfo error = %v", err)
+	}
+	if err := ReseedRouterInfoFresh(foundation.NetworkDatabaseRouterInfo{Published: now - ReseedRouterInfoMaxAgeMillis - 1}, now); !errors.Is(err, ErrRouterInfoStale) {
+		t.Fatalf("stale reseed RouterInfo error = %v, want ErrRouterInfoStale", err)
+	}
+	if err := RouterInfoFresh(foundation.NetworkDatabaseRouterInfo{Published: now - RouterInfoMaxAgeMillis - 1}, now); !errors.Is(err, ErrRouterInfoStale) {
+		t.Fatalf("transport freshness was weakened: %v", err)
+	}
+}

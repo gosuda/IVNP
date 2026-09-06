@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/networking"
 )
 
 func (s *Server) dispatch(ctx context.Context, connection *serverConnection, cmd command) (bool, error) {
@@ -494,7 +494,7 @@ func (s *Server) configurePacketTransport(connection *serverConnection, config *
 			return ErrProtocol
 		}
 	} else {
-		protocolRaw, err := uintValue(values, "PROTOCOL", 8, uint64(networking.DatagramProtocolRaw))
+		protocolRaw, err := uintValue(values, "PROTOCOL", 8, uint64(dataplane.DatagramProtocolRaw))
 		if err != nil || reservedRawProtocol(uint8(protocolRaw)) {
 			return ErrProtocol
 		}
