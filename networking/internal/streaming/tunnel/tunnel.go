@@ -95,16 +95,17 @@ type TunnelNetworkConfig struct {
 
 // TunnelNetwork manages streaming connections routed over I2P tunnels.
 type TunnelNetwork struct {
-	localHash      foundation.Hash
-	localIdentity  foundation.Identity
-	localRaw       []byte
-	localB32       string
-	sign           func([]byte) ([]byte, error)
-	sender         TunnelSender
-	acceptCapacity int
-	readCapacity   int
-	retransmit     time.Duration
-	maxRetries     int
+	localHash            foundation.Hash
+	localIdentity        foundation.Identity
+	localRaw             []byte
+	localB32             string
+	sign                 func([]byte) ([]byte, error)
+	offlineAuthorization []byte
+	sender               TunnelSender
+	acceptCapacity       int
+	readCapacity         int
+	retransmit           time.Duration
+	maxRetries           int
 
 	mu             sync.RWMutex
 	listeners      map[uint16]*tunnelListener
@@ -152,6 +153,15 @@ func NewTunnelNetwork(config TunnelNetworkConfig) (*TunnelNetwork, error) {
 		return nil, ErrTunnelIdentity
 	}
 	raw, localHash, sign := identity.Bytes(), config.Destination.Hash(), config.Destination.Sign
+	var offlineAuthorization []byte
+	if offline, ok := config.Destination.OfflineSignature(); ok {
+		offlineAuthorization = make([]byte, offline.SignedContentLen()+len(offline.Signature))
+		written, err := offline.MarshalSignedContentTo(offlineAuthorization)
+		if err != nil {
+			return nil, ErrTunnelIdentity
+		}
+		copy(offlineAuthorization[written:], offline.Signature)
+	}
 	if config.AcceptQueue <= 0 {
 		config.AcceptQueue = DefaultTunnelAcceptQueue
 	}
@@ -168,25 +178,26 @@ func NewTunnelNetwork(config TunnelNetworkConfig) (*TunnelNetwork, error) {
 	deliveryWorkers := parallelism.Workers(DefaultTunnelSendQueue)
 	deliveryCapacity := max(1, (DefaultTunnelSendQueue+deliveryWorkers-1)/deliveryWorkers)
 	network := &TunnelNetwork{
-		localHash:      localHash,
-		localIdentity:  identity,
-		localRaw:       raw,
-		localB32:       hashB32(localHash),
-		sign:           sign,
-		sender:         config.Sender,
-		acceptCapacity: config.AcceptQueue,
-		readCapacity:   config.ReadQueue,
-		retransmit:     config.RetransmitAfter,
-		maxRetries:     config.MaxRetries,
-		listeners:      make(map[uint16]*tunnelListener),
-		byID:           make(map[uint32]*tunnelConn),
-		inbound:        make(map[inboundKey]*tunnelConn),
-		ctx:            lifetime,
-		cancel:         cancel,
-		done:           make(chan struct{}),
-		outbound:       make(chan sendRequest, DefaultTunnelSendQueue),
-		retryUpdates:   make(chan *tunnelConn, DefaultTunnelSendQueue),
-		deliveryQueues: make([]chan sendRequest, deliveryWorkers),
+		localHash:            localHash,
+		localIdentity:        identity,
+		localRaw:             raw,
+		localB32:             hashB32(localHash),
+		sign:                 sign,
+		offlineAuthorization: offlineAuthorization,
+		sender:               config.Sender,
+		acceptCapacity:       config.AcceptQueue,
+		readCapacity:         config.ReadQueue,
+		retransmit:           config.RetransmitAfter,
+		maxRetries:           config.MaxRetries,
+		listeners:            make(map[uint16]*tunnelListener),
+		byID:                 make(map[uint32]*tunnelConn),
+		inbound:              make(map[inboundKey]*tunnelConn),
+		ctx:                  lifetime,
+		cancel:               cancel,
+		done:                 make(chan struct{}),
+		outbound:             make(chan sendRequest, DefaultTunnelSendQueue),
+		retryUpdates:         make(chan *tunnelConn, DefaultTunnelSendQueue),
+		deliveryQueues:       make([]chan sendRequest, deliveryWorkers),
 	}
 	network.wg.Add(1 + deliveryWorkers)
 	for index := range network.deliveryQueues {
@@ -1054,6 +1065,8 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 		c.mu.Unlock()
 		return err
 	}
+	// A repeated SYN reply means the peer may have lost our initial ACK.
+	sendACK = c.remoteID != 0 && packet.Flags&FlagSynchronize != 0
 	if err := c.preparePeerLocked(delivery, packet); err != nil {
 		c.mu.Unlock()
 		return err
@@ -1903,6 +1916,10 @@ func (n *TunnelNetwork) signedControl(packet Packet, options controlOptions) ([]
 		packet.Flags |= FlagMaxPacketSize
 		packet.Options = append(packet.Options, byte(localMaxPayloadSize>>8), byte(localMaxPayloadSize&0xff))
 	}
+	if options.includeFrom && len(n.offlineAuthorization) != 0 {
+		packet.Flags |= FlagOfflineSignature
+		packet.Options = append(packet.Options, n.offlineAuthorization...)
+	}
 	packet.Flags |= FlagSignatureIncluded
 	packet.Options = append(packet.Options, make([]byte, streamingSignatureSize)...)
 	wire, err := marshalPacket(packet)
@@ -1993,7 +2010,7 @@ func verifyControl(packet Packet, wire []byte, claimed foundation.Hash, known *c
 		offset += transientKeyLen
 		offlineSignature := packet.Options[offset : offset+offlineSignatureLen]
 		offset += offlineSignatureLen
-		if uint64(expires) <= uint64(time.Now().Unix()) {
+		if uint64(expires)*1000 < uint64(time.Now().UnixMilli()) {
 			return controlPeer{}, 0, ErrTunnelSignature
 		}
 		valid, err := peer.identity.Verify(packet.Options[offlineStart:offlineStart+6+transientKeyLen], offlineSignature)

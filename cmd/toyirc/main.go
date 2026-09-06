@@ -93,7 +93,7 @@ func runIRC2PNetwork(ctx context.Context, config ircConfig, output io.Writer, ne
 	var lastErr error
 	for {
 		attemptContext, cancel := context.WithTimeout(ctx, 90*time.Second)
-		lastErr = runIRC2PAttempt(attemptContext, network, config, address)
+		lastErr = runIRC2PAttempt(attemptContext, network, config, address, output)
 		cancel()
 		if lastErr == nil {
 			_, err := fmt.Fprintf(output, "connected to %s as %s\n", address, config.nick)
@@ -112,17 +112,17 @@ func runIRC2PNetwork(ctx context.Context, config ircConfig, output io.Writer, ne
 	}
 }
 
-func runIRC2PAttempt(ctx context.Context, network ircNetwork, config ircConfig, address string) error {
+func runIRC2PAttempt(ctx context.Context, network ircNetwork, config ircConfig, address string, output io.Writer) error {
 	connection, err := network.DialI2P(ctx, address)
 	if err != nil {
 		return fmt.Errorf("toyirc: connect %s: %w", address, err)
 	}
 	defer connection.Close()
-	return exchangeIRC(ctx, connection, config.nick)
+	return exchangeIRC(ctx, connection, config.nick, output)
 }
 
-func exchangeIRC(ctx context.Context, connection net.Conn, nick string) error {
-	if ctx == nil || connection == nil || !validNick(nick) {
+func exchangeIRC(ctx context.Context, connection net.Conn, nick string, output io.Writer) error {
+	if ctx == nil || connection == nil || !validNick(nick) || output == nil {
 		return errors.New("toyirc: invalid IRC connection")
 	}
 	if deadline, ok := ctx.Deadline(); ok {
@@ -151,6 +151,9 @@ func exchangeIRC(ctx context.Context, connection net.Conn, nick string) error {
 			return errors.New("toyirc: oversized IRC line")
 		}
 		message := strings.TrimSuffix(strings.TrimSuffix(string(line), "\n"), "\r")
+		if _, err := fmt.Fprintln(output, message); err != nil {
+			return fmt.Errorf("toyirc: write received message: %w", err)
+		}
 		if strings.HasPrefix(message, "PING ") {
 			if err = writeIRC(connection, "PONG "+strings.TrimPrefix(message, "PING ")); err != nil {
 				return fmt.Errorf("toyirc: send PONG: %w", err)

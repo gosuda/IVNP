@@ -798,7 +798,7 @@ func parseTunnelPeerCapabilities(caps []byte, allowRestricted bool) (result tunn
 			return tunnelPeerCapabilities{}, false, false, false, false
 		}
 		switch capability {
-		case 'F':
+		case 'f':
 			floodfill = true
 		case 'R':
 			result.reachable = true
@@ -807,7 +807,7 @@ func parseTunnelPeerCapabilities(caps []byte, allowRestricted bool) (result tunn
 		case 'O', 'P', 'X':
 			result.highCapacity = true
 		}
-		if capability != 'F' && capability != 'R' && capability != 'U' {
+		if capability != 'f' && capability != 'R' && capability != 'U' {
 			hasCapacity = true
 		}
 	}

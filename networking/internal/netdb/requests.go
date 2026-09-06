@@ -93,6 +93,8 @@ type requestKey struct {
 }
 
 type pendingRequest struct {
+	ctx              context.Context
+	cancel           context.CancelFunc
 	key              foundation.Hash
 	typeID           LookupType
 	deadline         uint64
@@ -111,14 +113,11 @@ type pendingRequest struct {
 }
 
 type sendWork struct {
+	request    *pendingRequest
 	key        requestKey
 	typeID     LookupType
 	peer       RouterRef
 	exclusions []foundation.Hash
-}
-type sendJob struct {
-	work sendWork
-	done chan struct{}
 }
 
 // RequestManager drives bounded, iterative DatabaseLookup requests without a
@@ -146,7 +145,7 @@ type RequestManager struct {
 	closed  bool
 	active  sync.WaitGroup
 	workers sync.WaitGroup
-	jobs    chan sendJob
+	jobs    chan sendWork
 	ctx     context.Context
 	cancel  context.CancelFunc
 }
@@ -194,7 +193,7 @@ func NewRequestManager(database *Database, sender RequestSender, route ReplyRout
 		logger:        config.Logger,
 		rand:          config.Rand,
 		pending:       make(map[requestKey]*pendingRequest, config.Capacity),
-		jobs:          make(chan sendJob, config.Capacity),
+		jobs:          make(chan sendWork, config.Capacity),
 		ctx:           lifecycle,
 		cancel:        cancel,
 	}
@@ -216,19 +215,13 @@ func (m *RequestManager) LookupLeaseSet(ctx context.Context, key foundation.Hash
 	return m.Lookup(ctx, LeaseSetLookup, key)
 }
 
+// Lookup queues bounded send work and returns without waiting for transport I/O.
+// The result channel reports completion; Expire enforces the shared request deadline.
 func (m *RequestManager) Lookup(ctx context.Context, typeID LookupType, key foundation.Hash) (<-chan LookupResult, error) {
 	return m.lookup(ctx, typeID, key, false)
 }
 
 func (m *RequestManager) lookup(ctx context.Context, typeID LookupType, key foundation.Hash, forceRefresh bool) (<-chan LookupResult, error) {
-	return m.lookupWithDispatch(ctx, typeID, key, forceRefresh, true)
-}
-
-func (m *RequestManager) lookupAsync(ctx context.Context, typeID LookupType, key foundation.Hash, forceRefresh bool) (<-chan LookupResult, error) {
-	return m.lookupWithDispatch(ctx, typeID, key, forceRefresh, false)
-}
-
-func (m *RequestManager) lookupWithDispatch(ctx context.Context, typeID LookupType, key foundation.Hash, forceRefresh, waitForSend bool) (<-chan LookupResult, error) {
 	if typeID != RouterInfoLookup && typeID != LeaseSetLookup && typeID != ExplorationLookup {
 		return nil, errors.New("netdb: unknown lookup type")
 	}
@@ -288,7 +281,10 @@ func (m *RequestManager) lookupWithDispatch(ctx context.Context, typeID LookupTy
 	if deadline < now {
 		deadline = ^uint64(0)
 	}
+	requestContext, cancelRequest := context.WithCancel(m.ctx)
 	req := &pendingRequest{
+		ctx:        requestContext,
+		cancel:     cancelRequest,
 		key:        key,
 		typeID:     typeID,
 		routingKey: RoutingKey(key, now),
@@ -326,15 +322,8 @@ func (m *RequestManager) lookupWithDispatch(ctx context.Context, typeID LookupTy
 	}
 	m.mu.Unlock()
 	if work != nil {
-		if waitForSend {
-			m.dispatch(*work, true)
-		} else if !m.tryDispatch(*work) {
-			m.mu.Lock()
-			if current := m.pending[lookupKey]; current != nil {
-				m.completeLocked(lookupKey, current, ErrRequestManagerFull)
-			}
-			m.mu.Unlock()
-			return nil, ErrRequestManagerFull
+		if err := m.dispatch(*work); err != nil {
+			return nil, err
 		}
 	}
 	return result, nil
@@ -442,12 +431,12 @@ func (m *RequestManager) HandleDatabaseSearchReply(reply i2np.DatabaseSearchRepl
 	}
 	m.mu.Unlock()
 	if work != nil {
-		m.dispatch(*work, true)
+		_ = m.dispatch(*work)
 		work = nil
 	}
 	var refreshFailed []foundation.Hash
 	for _, peer := range refresh {
-		if _, err := m.lookupAsync(m.ctx, RouterInfoLookup, peer, true); err != nil {
+		if _, err := m.lookup(m.ctx, RouterInfoLookup, peer, true); err != nil {
 			refreshFailed = append(refreshFailed, peer)
 		}
 	}
@@ -469,7 +458,7 @@ func (m *RequestManager) HandleDatabaseSearchReply(reply i2np.DatabaseSearchRepl
 		m.mu.Unlock()
 	}
 	if work != nil {
-		m.dispatch(*work, true)
+		_ = m.dispatch(*work)
 	}
 }
 
@@ -520,7 +509,7 @@ func (m *RequestManager) HandleDatabaseStore(store i2np.DatabaseStoreMessage) {
 	}
 	m.mu.Unlock()
 	for i := range work {
-		m.dispatch(work[i], true)
+		_ = m.dispatch(work[i])
 	}
 }
 
@@ -541,7 +530,7 @@ func (m *RequestManager) Expire(nowMillis uint64) int {
 	}
 	m.mu.Unlock()
 	for i := range work {
-		m.dispatch(work[i], true)
+		_ = m.dispatch(work[i])
 	}
 	return removed
 }
@@ -703,7 +692,7 @@ func (m *RequestManager) prepareSendLocked(key requestKey, req *pendingRequest) 
 				exclusions = append(exclusions, exclusion)
 			}
 		}
-		return &sendWork{key: key, typeID: req.typeID, peer: peer, exclusions: exclusions}, nil
+		return &sendWork{request: req, key: key, typeID: req.typeID, peer: peer, exclusions: exclusions}, nil
 	}
 	if len(req.sent) == 0 {
 		return nil, ErrNoFloodfill
@@ -711,62 +700,43 @@ func (m *RequestManager) prepareSendLocked(key requestKey, req *pendingRequest) 
 	return nil, nil
 }
 
-func (m *RequestManager) dispatch(work sendWork, wait bool) {
+func (m *RequestManager) dispatch(work sendWork) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.closed {
-		if req := m.pending[work.key]; req != nil {
-			m.completeLocked(work.key, req, ErrRequestManagerClosed)
-		}
-		m.mu.Unlock()
-		return
+		return ErrRequestManagerClosed
 	}
 	m.active.Add(1)
-	m.mu.Unlock()
-	job := sendJob{work: work}
-	if wait {
-		job.done = make(chan struct{})
-	}
-	m.jobs <- job
-	if job.done != nil {
-		<-job.done
-	}
-}
-
-func (m *RequestManager) tryDispatch(work sendWork) bool {
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return false
-	}
-	m.active.Add(1)
-	m.mu.Unlock()
 	select {
-	case m.jobs <- sendJob{work: work}:
-		return true
+	case m.jobs <- work:
+		return nil
 	default:
 		m.active.Done()
-		return false
+		if req := m.pending[work.key]; req == work.request {
+			m.completeLocked(work.key, req, ErrRequestManagerFull)
+		}
+		return ErrRequestManagerFull
 	}
 }
 
 func (m *RequestManager) worker() {
 	defer m.workers.Done()
-	for job := range m.jobs {
-		m.send(job.work)
+	for work := range m.jobs {
+		m.send(work)
 		m.active.Done()
-		if job.done != nil {
-			close(job.done)
-		}
 	}
 }
 
 func (m *RequestManager) send(work sendWork) {
+	if work.request.ctx.Err() != nil {
+		return
+	}
 	payload, err := BuildDatabaseLookup(work.key.key, work.typeID, m.route, work.exclusions)
 	if err == nil {
 		var id uint32
 		if id, err = m.nextMessageID(); err == nil {
 			message := i2np.Message{Header: i2np.Header{Type: i2np.DatabaseLookup, ID: id, Expiration: databaseLookupExpiration(m.now())}, Payload: payload}
-			err = m.sender.Send(m.ctx, work.peer, message)
+			err = m.sender.Send(work.request.ctx, work.peer, message)
 			if m.logger != nil {
 				m.logger.Debug("netdb lookup send", "key", foundation.EncodeI2PBase64(work.key.key[:]), "lookup_type", uint8(work.typeID), "peer", foundation.EncodeI2PBase64(work.peer.Hash[:]), "exclusions", len(work.exclusions))
 			}
@@ -785,7 +755,7 @@ func (m *RequestManager) send(work sendWork) {
 	if err == nil {
 		var next *sendWork
 		m.mu.Lock()
-		if req := m.pending[work.key]; req != nil {
+		if req := m.pending[work.key]; req == work.request {
 			req.inFlight = false
 			req.responseDeadline = min(req.deadline, saturatingAddMillis(m.now(), databaseLookupAttemptTimeout))
 			if req.wakeups > 0 {
@@ -806,7 +776,7 @@ func (m *RequestManager) send(work sendWork) {
 
 	m.mu.Lock()
 	req := m.pending[work.key]
-	if req == nil {
+	if req != work.request {
 		m.mu.Unlock()
 		return
 	}
@@ -858,6 +828,7 @@ func databaseLookupExpiration(now uint64) uint64 {
 }
 
 func (m *RequestManager) completeLocked(key requestKey, req *pendingRequest, err error) {
+	req.cancel()
 	delete(m.pending, key)
 	result := LookupResult{Key: req.key, Type: req.typeID, Err: err}
 	for _, waiter := range req.waiters {

@@ -26,3 +26,41 @@ func TestAcknowledgementRetainsNACKedSequencesAndWraps(t *testing.T) {
 		t.Fatalf("wrap sequence = %d", state.lastReceived)
 	}
 }
+
+func TestNoACKPacketRequestsACKWithoutAcknowledgingOutboundData(t *testing.T) {
+	state := NewState(1, 2)
+	state.Status = Open
+	for range InitialWindow {
+		if _, ok := state.OnSend(false); !ok {
+			t.Fatal("send blocked before filling window")
+		}
+	}
+	action := state.OnPacket(Packet{ReceiveStreamID: 1, Sequence: 1, AckThrough: 2, Flags: FlagNoACK})
+	if !action.SendACK {
+		t.Fatal("NO_ACK data packet was not acknowledged")
+	}
+	if state.CanSend() {
+		t.Fatal("NO_ACK packet incorrectly released the outbound window")
+	}
+	action = state.OnPacket(Packet{ReceiveStreamID: 1, AckThrough: 2})
+	if action.SendACK {
+		t.Fatal("pure ACK requested another ACK")
+	}
+	if !state.CanSend() {
+		t.Fatal("pure ACK did not release the outbound window")
+	}
+}
+
+func TestInitialSynchronizeDoesNotAcknowledgeOutboundData(t *testing.T) {
+	state := NewState(1, 2)
+	state.Status = Open
+	for range InitialWindow {
+		if _, ok := state.OnSend(false); !ok {
+			t.Fatal("send blocked before filling window")
+		}
+	}
+	action := state.OnPacket(Packet{ReceiveStreamID: 1, Flags: FlagSynchronize})
+	if !action.SendACK || state.CanSend() {
+		t.Fatalf("initial SYN action=%#v canSend=%t", action, state.CanSend())
+	}
+}

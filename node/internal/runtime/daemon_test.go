@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"gosuda.org/ivnp/client"
@@ -734,60 +735,64 @@ func TestMuxRequestSenderUsesEstablishedOutboundTunnel(t *testing.T) {
 }
 
 func TestRequestManagerFiveAttemptChurnDoesNotRegisterZeroExclusionReplyKeys(t *testing.T) {
-	now := uint64(1_700_000_000_000)
-	database := networking.NetworkDatabaseNewDatabase(foundation.Hash{99}, networking.NetworkDatabaseDefaultBucketCapacity)
-	for range 8 {
-		if err := database.AdmitRouterInfo(daemonProductionFloodfill(t, now), true, now); err != nil {
+	synctest.Test(t, func(t *testing.T) {
+		now := uint64(1_700_000_000_000)
+		database := networking.NetworkDatabaseNewDatabase(foundation.Hash{99}, networking.NetworkDatabaseDefaultBucketCapacity)
+		for range 8 {
+			if err := database.AdmitRouterInfo(daemonProductionFloodfill(t, now), true, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		private, err := ecdh.X25519().GenerateKey(cryptorand.Reader)
+		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	private, err := ecdh.X25519().GenerateKey(cryptorand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var staticKey [32]byte
-	copy(staticKey[:], private.PublicKey().Bytes())
-	replyKeys := networking.GarlicNewReplyKeyRegistry(1)
-	throughTunnel := new(requestTunnelCapture)
-	sender := muxRequestSender{
-		sender: new(requestDirectCapture), tunnels: throughTunnel,
-		pairs: requestPairCapture{pair: networking.TunnelCircuitPair{OutboundID: 11}},
-		now:   func() uint64 { return now }, replyKeys: replyKeys,
-		staticKeyLookup: func(foundation.Hash) ([32]byte, bool) {
-			return staticKey, true
-		},
-	}
-	manager, err := networking.NetworkDatabaseNewRequestManager(
-		database,
-		sender,
-		requestReplyRouteCapture{gateway: foundation.Hash{2}, tunnel: 7},
-		networking.NetworkDatabaseRequestManagerConfig{
-			Capacity: 1, MaxCandidates: 8, TimeoutMillis: 50_000, Now: func() uint64 { return now },
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = manager.Close() })
-	result, err := manager.LookupLeaseSet(context.Background(), foundation.Hash{3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if throughTunnel.calls != 1 || replyKeys.Len() != 0 {
-		t.Fatalf("initial lookup sends=%d reply_keys=%d", throughTunnel.calls, replyKeys.Len())
-	}
-	const attemptTimeout = uint64(3_000)
-	for tick := 1; tick <= 5; tick++ {
-		now += attemptTimeout
-		manager.Expire(now)
-		wantSends := min(tick+1, 5)
-		if throughTunnel.calls != wantSends || replyKeys.Len() != 0 {
-			t.Fatalf("tick %d sends=%d want=%d reply_keys=%d", tick, throughTunnel.calls, wantSends, replyKeys.Len())
+		var staticKey [32]byte
+		copy(staticKey[:], private.PublicKey().Bytes())
+		replyKeys := networking.GarlicNewReplyKeyRegistry(1)
+		throughTunnel := new(requestTunnelCapture)
+		sender := muxRequestSender{
+			sender: new(requestDirectCapture), tunnels: throughTunnel,
+			pairs: requestPairCapture{pair: networking.TunnelCircuitPair{OutboundID: 11}},
+			now:   func() uint64 { return now }, replyKeys: replyKeys,
+			staticKeyLookup: func(foundation.Hash) ([32]byte, bool) {
+				return staticKey, true
+			},
 		}
-	}
-	if outcome := <-result; outcome.Err == nil {
-		t.Fatalf("five-attempt lookup outcome = %#v", outcome)
-	}
+		manager, err := networking.NetworkDatabaseNewRequestManager(
+			database,
+			sender,
+			requestReplyRouteCapture{gateway: foundation.Hash{2}, tunnel: 7},
+			networking.NetworkDatabaseRequestManagerConfig{
+				Capacity: 1, MaxCandidates: 8, TimeoutMillis: 50_000, Now: func() uint64 { return now },
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = manager.Close() })
+		result, err := manager.LookupLeaseSet(context.Background(), foundation.Hash{3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if throughTunnel.calls != 1 || replyKeys.Len() != 0 {
+			t.Fatalf("initial lookup sends=%d reply_keys=%d", throughTunnel.calls, replyKeys.Len())
+		}
+		const attemptTimeout = uint64(3_000)
+		for tick := 1; tick <= 5; tick++ {
+			now += attemptTimeout
+			manager.Expire(now)
+			synctest.Wait()
+			wantSends := min(tick+1, 5)
+			if throughTunnel.calls != wantSends || replyKeys.Len() != 0 {
+				t.Fatalf("tick %d sends=%d want=%d reply_keys=%d", tick, throughTunnel.calls, wantSends, replyKeys.Len())
+			}
+		}
+		if outcome := <-result; outcome.Err == nil {
+			t.Fatalf("five-attempt lookup outcome = %#v", outcome)
+		}
+	})
 }
 
 func TestMuxLeaseSetSenderUsesOutboundTunnelAndSeedsBothRoutes(t *testing.T) {

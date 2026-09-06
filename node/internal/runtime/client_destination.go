@@ -184,6 +184,9 @@ func (e *clientDestinationEndpoint) MarshalDatagramV1To(dst, payload []byte) (in
 	if e == nil || e.runtime == nil || e.runtime.local == nil || !e.runtime.active() {
 		return 0, net.ErrClosed
 	}
+	if _, offline := e.runtime.local.OfflineSignature(); offline {
+		return 0, foundation.ErrInvalidIdentity
+	}
 	identity, err := e.runtime.local.Identity()
 	if err != nil {
 		return 0, err

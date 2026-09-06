@@ -552,6 +552,44 @@ func TestTunnelNetworkRejectsTamperedSynchronize(t *testing.T) {
 	}
 }
 
+func TestTunnelNetworkAcknowledgesRetransmittedSynchronizeReply(t *testing.T) {
+	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
+	client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
+	listener, err := server.ListenI2P(context.Background(), ":80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	connection, err := client.DialI2PFromPort(ctx, server.B32()+":80", 1234)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientConn := connection.(*tunnelConn)
+	t.Cleanup(func() { clientConn.abort(false) })
+	accepted, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { accepted.(*tunnelConn).abort(false) })
+	packet := Packet{SendStreamID: clientConn.localID, ReceiveStreamID: clientConn.remoteID, Flags: FlagSynchronize}
+	wire, err := server.signedControl(packet, controlOptions{includeFrom: true, includeMax: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.HandleDelivery(ctx, Delivery{From: server.localHash, To: client.localHash, FromPort: 80, ToPort: 1234, Protocol: ProtocolStreaming, Payload: wire})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fabric.mu.Lock()
+	acknowledgments := fabric.initialACKs
+	fabric.mu.Unlock()
+	if acknowledgments != 2 {
+		t.Fatalf("SYN reply acknowledgments = %d, want initial and retransmitted reply ACKs", acknowledgments)
+	}
+}
+
 func TestTunnelNetworkAcceptsJavaSynchronizePayload(t *testing.T) {
 	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
 	client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
@@ -604,6 +642,68 @@ func TestTunnelNetworkAcceptsJavaSynchronizeReplyPayload(t *testing.T) {
 	if _, err = io.ReadFull(connection, got); err != nil || !bytes.Equal(got, payload) {
 		t.Fatalf("SYN-ACK payload = %q, %v", got, err)
 	}
+}
+
+func TestTunnelNetworkSendsOfflineSignedControl(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		longTerm, err := foundation.GenerateLegacyLocalDestination()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer longTerm.ReleaseSensitive()
+		state := make([]byte, longTerm.PrivateEncodedLen())
+		defer clear(state)
+		if _, err = longTerm.MarshalPrivateTo(state); err != nil {
+			t.Fatal(err)
+		}
+		publicLength := int(binary.BigEndian.Uint16(state[:2]))
+		clear(state[2+publicLength : 2+publicLength+ed25519.PrivateKeySize])
+		public, private, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer clear(private)
+		seed := private.Seed()
+		defer clear(seed)
+		offline := foundation.OfflineSignature{Expires: uint32(time.Now().Add(time.Second).Unix()), Type: foundation.SigningEdDSASHA512Ed25519, PublicKey: public}
+		content := make([]byte, offline.SignedContentLen())
+		if _, err = offline.MarshalSignedContentTo(content); err != nil {
+			t.Fatal(err)
+		}
+		offline.Signature, err = longTerm.Sign(content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		destination, err := foundation.ImportLocalDestinationOffline(state, offline, seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer destination.ReleaseSensitive()
+		network, err := NewTunnelNetwork(TunnelNetworkConfig{Destination: destination, Sender: discardTunnelSender{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer network.Close()
+		wire, err := network.signedControl(Packet{ReceiveStreamID: 1, Flags: FlagSynchronize | FlagNoACK}, controlOptions{includeFrom: true, includeMax: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		packet, err := streaming.Parse(wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err = verifyControl(packet, wire, destination.Hash(), nil, true); err != nil {
+			t.Fatalf("offline SYN signature: %v", err)
+		}
+		<-time.After(time.Until(time.Unix(int64(offline.Expires), 0)))
+		if _, _, err = verifyControl(packet, wire, destination.Hash(), nil, true); err != nil {
+			t.Fatalf("offline SYN at exact expiry: %v", err)
+		}
+		<-time.After(time.Millisecond)
+		if _, _, err = verifyControl(packet, wire, destination.Hash(), nil, true); !errors.Is(err, ErrTunnelSignature) {
+			t.Fatalf("expired offline SYN = %v, want signature rejection", err)
+		}
+	})
 }
 
 func TestTunnelNetworkAcceptsJavaOfflineSignedSynchronizeReply(t *testing.T) {

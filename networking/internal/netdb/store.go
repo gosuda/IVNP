@@ -124,6 +124,19 @@ func (d *Database) storedLeaseSet(key foundation.Hash, now uint64, publishedOnly
 }
 
 func leaseEntryExpired(entry leaseEntry, now uint64) bool {
+	var offline OfflineSignature
+	switch entry.typeID {
+	case i2np.StoreLeaseSet2:
+		offline = entry.v2.Header.Offline
+	case i2np.StoreMetaLeaseSet:
+		offline = entry.meta.Header.Offline
+	case i2np.StoreEncryptedLeaseSet:
+		offline = entry.encrypted.Offline
+	}
+	// Lease clock skew tolerance must not extend signing-key authorization.
+	if offline.Present() && uint64(offline.Expires)*1000 < now {
+		return true
+	}
 	cutoff := uint64(0)
 	if now > LeaseSetClockFudgeMillis {
 		cutoff = now - LeaseSetClockFudgeMillis

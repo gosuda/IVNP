@@ -78,13 +78,13 @@ func (s *State) OnPacket(packet Packet) Action {
 	if packet.Flags&FlagClose != 0 {
 		s.Status, action.SendClose = Closing, true
 	}
-	if packet.Flags&FlagNoACK == 0 {
-		action.SendACK = true
-	}
-	if !s.haveReceived || sequenceAfter(packet.Sequence, s.lastReceived) {
+	action.SendACK = packet.Sequence != 0 || packet.Flags&FlagSynchronize != 0
+	if action.SendACK && (!s.haveReceived || sequenceAfter(packet.Sequence, s.lastReceived)) {
 		s.lastReceived, s.haveReceived = packet.Sequence, true
 	}
-	s.acknowledge(packet.AckThrough, packet.NACKs)
+	if packet.Flags&FlagNoACK == 0 && !(packet.Flags&FlagSynchronize != 0 && packet.SendStreamID == 0) {
+		s.acknowledge(packet.AckThrough, packet.NACKs)
+	}
 	return action
 }
 

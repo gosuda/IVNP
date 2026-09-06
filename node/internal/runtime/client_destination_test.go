@@ -2,6 +2,9 @@ package noderuntime
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -73,5 +76,50 @@ func TestClientDestinationRejectsRemovedCryptoType5(t *testing.T) {
 	})
 	if !errors.Is(err, errDestinationCryptoTypes) || endpoint != nil {
 		t.Fatalf("CreateDestination(type 5) = %#v, %v", endpoint, err)
+	}
+}
+
+func TestClientDestinationRejectsOfflineDatagram1(t *testing.T) {
+	longTerm, err := foundation.GenerateLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer longTerm.ReleaseSensitive()
+	state := make([]byte, longTerm.PrivateEncodedLen())
+	defer clear(state)
+	if _, err := longTerm.MarshalPrivateTo(state); err != nil {
+		t.Fatal(err)
+	}
+	publicLength := int(binary.BigEndian.Uint16(state[:2]))
+	clear(state[2+publicLength : 2+publicLength+ed25519.PrivateKeySize])
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(private)
+	seed := private.Seed()
+	defer clear(seed)
+	offline := foundation.OfflineSignature{
+		Expires: uint32(time.Now().Add(time.Hour).Unix()),
+		Type:    foundation.SigningEdDSASHA512Ed25519, PublicKey: public,
+	}
+	var content [6 + ed25519.PublicKeySize]byte
+	n, err := offline.MarshalSignedContentTo(content[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	offline.Signature, err = longTerm.Sign(content[:n])
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, err := foundation.ImportLocalDestinationOffline(state, offline, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.ReleaseSensitive()
+	endpoint := &clientDestinationEndpoint{runtime: &destinationRuntime{local: local}}
+	var packet [1024]byte
+	if n, err := endpoint.MarshalDatagramV1To(packet[:], []byte("hello")); n != 0 || !errors.Is(err, foundation.ErrInvalidIdentity) {
+		t.Fatalf("offline Datagram1 = %d, %v; want invalid identity", n, err)
 	}
 }

@@ -47,14 +47,19 @@ func TestExchangeIRCCompletesWelcomeAndPong(t *testing.T) {
 		}
 		_, err = io.WriteString(serverConnection, ":irc.example 001 ivtest :welcome\r\n")
 		serverErr <- err
+		_, _ = reader.ReadString('\n')
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := exchangeIRC(ctx, clientConnection, "ivtest"); err != nil {
+	var output strings.Builder
+	if err := exchangeIRC(ctx, clientConnection, "ivtest", &output); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), ":irc.example 001 ivtest :welcome\n") {
+		t.Fatalf("received IRC output = %q", output.String())
 	}
 }
 
@@ -70,7 +75,7 @@ func TestExchangeIRCRejectsOversizedLine(t *testing.T) {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := exchangeIRC(ctx, clientConnection, "ivtest"); err == nil || !strings.Contains(err.Error(), "oversized IRC line") {
+	if err := exchangeIRC(ctx, clientConnection, "ivtest", io.Discard); err == nil || !strings.Contains(err.Error(), "oversized IRC line") {
 		t.Fatalf("oversized line error = %v", err)
 	}
 }

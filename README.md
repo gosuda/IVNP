@@ -10,6 +10,17 @@ facade.
 go get gosuda.org/ivnp
 ```
 
+Windows builds support amd64 and arm64 without CGO. Store configuration and router
+state on a local NTFS drive. Private files use owner-controlled ACLs, exclusive
+creation and byte-range locking; symlinks, reparse points, hard-linked private
+files, alternate data streams and UNC/device paths are rejected. Existing state
+must be owned by the current user and must not grant access beyond that user,
+SYSTEM or administrators. Unix retains ownership, mode and no-follow checks.
+
+The Windows workflow cross-builds both architectures and runs focused storage
+security regressions on amd64. Cross-compilation alone does not verify Windows
+ACL or filesystem behavior.
+
 ## Embed a router
 
 ```go
@@ -111,3 +122,23 @@ node-owned sensitive state.
 
 For complete, compile-checked programs, see `example_test.go`.
 
+## Receive IRC server messages
+
+Start the router and leave it running:
+
+```sh
+go run ./cmd/ivnpd -config ivnp.conf
+```
+
+After its tunnel pools are ready, run in another terminal:
+
+```sh
+go run ./cmd/toyirc -sam 127.0.0.1:7656 -server irc.postman.i2p -port 6667 -timeout 5m
+```
+
+`toyirc` prints received server messages, answers PING, and exits successfully
+after numeric `001` (welcome). It sends QUIT without joining a channel or posting
+channel messages. This checks an actual IRC registration, not just a SAM or
+transport connection. Cold-start reseeding and tunnel construction may take
+several minutes. Set `[paths] data_dir` explicitly when isolating router state;
+the default `./data` is relative to the daemon's working directory.

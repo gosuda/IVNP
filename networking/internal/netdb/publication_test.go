@@ -329,6 +329,7 @@ func TestLeaseSetPublisherDoesNotRepublishWhileDiscoveryPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer discovery.Close()
 	signingKey, _ := identity.SigningKeyParts()
 	publishSender := new(publisherSender)
 	publisher, err := NewLeaseSetPublisher(LeaseSetPublisherConfig{
@@ -343,6 +344,7 @@ func TestLeaseSetPublisherDoesNotRepublishWhileDiscoveryPending(t *testing.T) {
 	if sent, err := publisher.Publish(context.Background()); err != nil || sent != 1 {
 		t.Fatalf("initial Publish() = %d, %v", sent, err)
 	}
+	discovery.active.Wait()
 	if len(lookupSender.snapshot()) != 1 {
 		t.Fatal("publication did not start routing-key discovery")
 	}

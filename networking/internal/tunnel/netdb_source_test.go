@@ -359,9 +359,9 @@ func TestTunnelPeerCapabilitiesMatchJavaPolicy(t *testing.T) {
 		{name: "severe congestion", caps: "OE"},
 		{name: "occasional severe congestion", caps: "OE", allowRestricted: true, want: true},
 		{name: "no tunnels", caps: "OG"},
-		{name: "client floodfill", caps: "OF", want: true},
-		{name: "exploratory floodfill", caps: "OF", exploratory: true},
-		{name: "occasional exploratory floodfill", caps: "OF", exploratory: true, allowRestricted: true, want: true},
+		{name: "client floodfill", caps: "Of", want: true},
+		{name: "exploratory floodfill", caps: "Of", exploratory: true},
+		{name: "occasional exploratory floodfill", caps: "Of", exploratory: true, allowRestricted: true, want: true},
 	}
 	for marker, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -375,7 +375,7 @@ func TestTunnelPeerCapabilitiesMatchJavaPolicy(t *testing.T) {
 }
 
 func TestTunnelPeerCapabilityRelaxationsAreIndependent(t *testing.T) {
-	severeFloodfill := verifiedX25519RouterTransport(t, 35, "NTCP2", "192.0.2.1", "", "OEF")
+	severeFloodfill := verifiedX25519RouterTransport(t, 35, "NTCP2", "192.0.2.1", "", "OEf")
 	if _, allowed := tunnelPeerCapabilitiesAllowedWithDecisions(severeFloodfill, true, true, false, false); allowed {
 		t.Fatal("severe-congestion relaxation also relaxed exploratory floodfill")
 	}

@@ -59,7 +59,9 @@ func offlineTransientPrivateLen(keyType SigningKeyType) (int, bool) {
 func offlineTransientPublic(keyType SigningKeyType, private []byte) ([]byte, error) {
 	switch keyType {
 	case SigningEdDSASHA512Ed25519:
-		return ed25519.NewKeyFromSeed(private).Public().(ed25519.PublicKey), nil
+		key := ed25519.NewKeyFromSeed(private)
+		defer clear(key)
+		return key.Public().(ed25519.PublicKey), nil
 	case SigningRedDSASHA512Ed25519:
 		scalar, err := new(edwards25519.Scalar).SetCanonicalBytes(private)
 		if err != nil {

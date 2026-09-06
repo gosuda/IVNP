@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/networking/internal/i2np"
 )
 
 // offlineTestDestination builds a LocalDestination whose long-term signing
@@ -156,9 +157,9 @@ func TestLocalLeaseSet2OfflineCapsLeaseExpiry(t *testing.T) {
 	}
 }
 
-func TestOfflineLeaseSet2VerifyRejectsPastExpiry(t *testing.T) {
-	now := uint64(time.Now().UnixMilli())
-	expires := uint32(now/1000) + 60
+func TestOfflineLeaseSetExpiryHasNoClockFudge(t *testing.T) {
+	const expires = uint32(4_000_000_000)
+	const now = (uint64(expires) - 60) * 1000
 	destination := offlineTestDestination(t, expires)
 	defer destination.ReleaseSensitive()
 	local, err := NewLocalLeaseSet2(destination)
@@ -167,7 +168,7 @@ func TestOfflineLeaseSet2VerifyRejectsPastExpiry(t *testing.T) {
 	}
 	var gateway foundation.Hash
 	gateway[0] = 1
-	if err = local.ReplaceInboundLeases([]Lease{{Gateway: gateway, TunnelID: 7, EndDate: now + 30_000}}); err != nil {
+	if err = local.ReplaceInboundLeases([]Lease{{Gateway: gateway, TunnelID: 7, EndDate: uint64(expires) * 1000}}); err != nil {
 		t.Fatal(err)
 	}
 	payload := make([]byte, MaxLeaseSetBytes)
@@ -175,60 +176,22 @@ func TestOfflineLeaseSet2VerifyRejectsPastExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	set, err := ParseLeaseSet2(payload[:n])
-	if err != nil {
+	store := i2np.DatabaseStoreMessage{Key: destination.Hash(), Type: i2np.StoreLeaseSet2, Data: payload[:n]}
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+	if err = database.HandleDatabaseStore(store, false, now); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := set.Verify(); err != nil || !ok {
-		t.Fatalf("valid set verify = %t, %v", ok, err)
+	if _, _, ok := database.StoredPublishedLeaseSet(store.Key, uint64(expires)*1000-1); !ok {
+		t.Fatal("live offline LeaseSet unavailable")
 	}
-
-	t.Run("published past offline expires", func(t *testing.T) {
-		bad := set
-		bad.Header.Offline.Expires = bad.Header.Published - 1
-		if ok, err := bad.Verify(); err != nil || ok {
-			t.Fatalf("Verify() = %t, %v, want false", ok, err)
-		}
-	})
-
-	t.Run("header duration past offline expires", func(t *testing.T) {
-		bad := set
-		bad.Header.Offline.Expires = bad.Header.Published + uint32(bad.Header.Expires) - 1
-		if ok, err := bad.Verify(); err != nil || ok {
-			t.Fatalf("Verify() = %t, %v, want false", ok, err)
-		}
-	})
-
-	t.Run("lease end date past offline expires", func(t *testing.T) {
-		leases := set.Leases()
-		lease, ok, err := leases.Next()
-		if err != nil || !ok {
-			t.Fatal("no lease")
-		}
-		bad := set
-		bad.Header.Offline.Expires = lease.EndDate - 1
-		if ok, err := bad.Verify(); err != nil || ok {
-			t.Fatalf("Verify() = %t, %v, want false", ok, err)
-		}
-	})
-
-	t.Run("leaseSet2Range rejects lease past offline expires", func(t *testing.T) {
-		leases := set.Leases()
-		lease, ok, err := leases.Next()
-		if err != nil || !ok {
-			t.Fatal("no lease")
-		}
-		bad := set
-		bad.Header.Offline.Expires = lease.EndDate - 1
-		if _, _, err := leaseSet2Range(bad); !errors.Is(err, ErrMalformed) {
-			t.Fatalf("leaseSet2Range() = %v, want ErrMalformed", err)
-		}
-	})
-
-	t.Run("OfflineExpires returns configured expiry", func(t *testing.T) {
-		exp, ok := local.OfflineExpires()
-		if !ok || exp != expires {
-			t.Fatalf("OfflineExpires() = %d, %t, want %d, true", exp, ok, expires)
-		}
-	})
+	// Java rejects the authorization immediately after expiry, independently
+	// of the one-minute lease clock-skew allowance.
+	afterExpiry := uint64(expires)*1000 + 1
+	if _, _, ok := database.StoredPublishedLeaseSet(store.Key, afterExpiry); ok {
+		t.Fatal("expired offline authorization remained available for relay")
+	}
+	fresh := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+	if err = fresh.HandleDatabaseStore(store, false, afterExpiry); !errors.Is(err, ErrLeaseSetExpired) {
+		t.Fatalf("expired offline store = %v, want ErrLeaseSetExpired", err)
+	}
 }

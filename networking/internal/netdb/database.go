@@ -296,6 +296,9 @@ func (d *Database) storeLeaseSet2(store i2np.DatabaseStoreMessage, seenAt uint64
 	if parsed.Hash() != store.Key {
 		return ErrStoreKeyMismatch
 	}
+	if parsed.Header.Offline.Present() && uint64(parsed.Header.Offline.Expires)*1000 < seenAt {
+		return ErrLeaseSetExpired
+	}
 	valid, err := parsed.Verify()
 	if err != nil {
 		return err
@@ -344,6 +347,9 @@ func (d *Database) storeMetaLeaseSet(store i2np.DatabaseStoreMessage, seenAt uin
 	if parsed.Hash() != store.Key {
 		return ErrStoreKeyMismatch
 	}
+	if parsed.Header.Offline.Present() && uint64(parsed.Header.Offline.Expires)*1000 < seenAt {
+		return ErrLeaseSetExpired
+	}
 	valid, err := parsed.Verify()
 	if err != nil {
 		return err
@@ -391,6 +397,9 @@ func (d *Database) storeEncryptedLeaseSet(store i2np.DatabaseStoreMessage, seenA
 	parsed, err := ParseEncryptedLeaseSet(store.Data)
 	if err != nil {
 		return err
+	}
+	if parsed.Offline.Present() && uint64(parsed.Offline.Expires)*1000 < seenAt {
+		return ErrLeaseSetExpired
 	}
 	earliest := uint64(parsed.Published) * 1000
 	latest := (uint64(parsed.Published) + uint64(parsed.Expires)) * 1000

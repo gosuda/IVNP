@@ -48,6 +48,7 @@ func TestExplorerFillsConfiguredWindowInOneMaintenancePass(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer requests.Close()
 			explorer, err := NewExplorer(ExplorerConfig{
 				Table: database.Routers(), Requests: requests, Now: func() uint64 { return now },
 				Rand:       bytes.NewReader(bytes.Repeat([]byte{2}, explorerBootstrapMaxInflight*foundation.HashLength)),
@@ -62,6 +63,7 @@ func TestExplorerFillsConfiguredWindowInOneMaintenancePass(t *testing.T) {
 			if explorer.Inflight() != test.want {
 				t.Fatalf("inflight = %d, want %d", explorer.Inflight(), test.want)
 			}
+			requests.active.Wait()
 			if sent := len(sender.snapshot()); sent != test.want {
 				t.Fatalf("exploration lookups sent = %d, want %d", sent, test.want)
 			}

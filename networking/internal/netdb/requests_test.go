@@ -139,6 +139,23 @@ func (s *cancelingRequestTestSender) Send(ctx context.Context, _ RouterRef, _ i2
 	return ctx.Err()
 }
 
+type cancelingRetryRequestTestSender struct {
+	requestTestSender
+	entered  chan struct{}
+	canceled chan struct{}
+}
+
+func (s *cancelingRetryRequestTestSender) Send(ctx context.Context, peer RouterRef, message i2np.Message) error {
+	err := s.requestTestSender.Send(ctx, peer, message)
+	if len(s.snapshot()) == 1 {
+		return err
+	}
+	close(s.entered)
+	<-ctx.Done()
+	close(s.canceled)
+	return ctx.Err()
+}
+
 func requestTestHash(value byte) foundation.Hash {
 	var hash foundation.Hash
 	hash[0] = value
@@ -195,6 +212,7 @@ func TestRequestManagerCoalescesFollowsSearchReplyAndCompletesStore(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer manager.Close()
 
 	firstWaiter, err := manager.LookupRouterInfo(context.Background(), key)
 	if err != nil {
@@ -204,6 +222,7 @@ func TestRequestManagerCoalescesFollowsSearchReplyAndCompletesStore(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.active.Wait()
 	messages := sender.snapshot()
 	if len(messages) != 1 || messages[0].Header.ID != 1 || messages[0].Header.Expiration != 100+databaseLookupEnvelopeLifetime {
 		t.Fatalf("initial sends = %#v", messages)
@@ -216,6 +235,7 @@ func TestRequestManagerCoalescesFollowsSearchReplyAndCompletesStore(t *testing.T
 	peers := make([]byte, foundation.HashLength)
 	copy(peers, second[:])
 	manager.HandleDatabaseSearchReply(i2np.DatabaseSearchReplyMessage{Key: key, From: first, Peers: peers})
+	manager.active.Wait()
 	messages = sender.snapshot()
 	if len(messages) != 2 || messages[1].Header.ID != 2 {
 		t.Fatalf("follow-up sends = %#v", messages)
@@ -254,9 +274,11 @@ func TestRequestManagerQueriesKnownLeaseSetReferralWithoutRefresh(t *testing.T) 
 	if _, err = manager.LookupLeaseSet(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
+	manager.active.Wait()
 	peers := make([]byte, foundation.HashLength)
 	copy(peers, referred[:])
 	manager.HandleDatabaseSearchReply(i2np.DatabaseSearchReplyMessage{Key: key, From: first, Peers: peers})
+	manager.active.Wait()
 	messages := sender.snapshot()
 	if len(messages) != 2 {
 		t.Fatalf("known LeaseSet referral sends = %d, want 2", len(messages))
@@ -288,6 +310,7 @@ func TestRequestManagerDispatchesKnownParentBeforeBlockingUnknownReferralRefresh
 	if _, err = manager.LookupLeaseSet(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
+	manager.active.Wait()
 	manager.mu.Lock()
 	request := manager.pending[requestKey{key: key}]
 	var initial foundation.Hash
@@ -322,6 +345,57 @@ func TestRequestManagerDispatchesKnownParentBeforeBlockingUnknownReferralRefresh
 	}
 }
 
+func TestRequestManagerResponseHandlersDoNotWaitForSend(t *testing.T) {
+	for _, response := range []string{"search_reply", "router_info_store"} {
+		t.Run(response, func(t *testing.T) {
+			database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+			source, referred, key := requestTestHash(1), requestTestHash(2), requestTestHash(9)
+			addRequestTestFloodfill(database, source)
+			sender := &interleavingRequestTestSender{
+				blockPeer: referred, entered: make(chan struct{}), release: make(chan struct{}),
+			}
+			manager, err := NewRequestManager(database, sender, requestTestRoute{gateway: requestTestHash(8)}, RequestManagerConfig{
+				Capacity: 2, MaxCandidates: 4, TimeoutMillis: 10_000, Now: func() uint64 { return 100 },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer manager.Close()
+			defer close(sender.release)
+			if _, err = manager.LookupLeaseSet(t.Context(), key); err != nil {
+				t.Fatal(err)
+			}
+			manager.active.Wait()
+			reply := i2np.DatabaseSearchReplyMessage{Key: key, From: source, Peers: referred[:]}
+			if response == "router_info_store" {
+				manager.HandleDatabaseSearchReply(reply)
+				manager.active.Wait()
+			}
+			addRequestTestFloodfill(database, referred)
+			returned := make(chan struct{})
+			go func() {
+				if response == "search_reply" {
+					manager.HandleDatabaseSearchReply(reply)
+				} else {
+					manager.HandleDatabaseStore(i2np.DatabaseStoreMessage{Key: referred, Type: i2np.StoreRouterInfo})
+				}
+				close(returned)
+			}()
+			t.Cleanup(func() { <-returned })
+			select {
+			case <-sender.entered:
+			case <-time.After(time.Second):
+				t.Fatal("response did not schedule the referred peer lookup")
+			}
+			select {
+			case <-returned:
+			case <-time.After(time.Second):
+				t.Fatal("response handler blocked on the referred peer send")
+			}
+		})
+	}
+}
+
 func TestRequestManagerRejectsUnsolicitedSearchReplyAndExpires(t *testing.T) {
 	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	peer, key := requestTestHash(1), requestTestHash(9)
@@ -338,6 +412,7 @@ func TestRequestManagerRejectsUnsolicitedSearchReplyAndExpires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.active.Wait()
 	manager.HandleDatabaseSearchReply(i2np.DatabaseSearchReplyMessage{Key: key, From: requestTestHash(7)})
 	if len(sender.snapshot()) != 1 {
 		t.Fatal("unsolicited search reply triggered a send")
@@ -367,6 +442,7 @@ func TestRequestManagerRetriesAllInitialCandidatesAfterTransportFailures(t *test
 	if _, err = manager.LookupLeaseSet(context.Background(), requestTestHash(9)); err != nil {
 		t.Fatal(err)
 	}
+	manager.active.Wait()
 	if got := sender.count(); got != 4 {
 		t.Fatalf("send attempts = %d, want all 4 candidates", got)
 	}
@@ -478,6 +554,7 @@ func TestRequestManagerTransportFailuresDoNotConsumeJavaQueryBudget(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.active.Wait()
 	if got := sender.count(); got != 7 {
 		t.Fatalf("send attempts = %d, want six local failures followed by one query", got)
 	}
@@ -508,9 +585,11 @@ func TestRequestManagerUsesJavaFiveQueryBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.active.Wait()
 	for range javaIterativeSearchLimit {
 		now += databaseLookupAttemptTimeout
 		manager.Expire(now)
+		manager.active.Wait()
 	}
 	if outcome := <-result; !errors.Is(outcome.Err, ErrRequestExpired) {
 		t.Fatalf("lookup result = %#v, want Java query limit expiry", outcome)
@@ -541,6 +620,7 @@ func TestRequestManagerRetriesSilentFloodfill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.active.Wait()
 	if removed := manager.Expire(now + databaseLookupAttemptTimeout - 1); removed != 0 || len(sender.snapshot()) != 1 {
 		t.Fatalf("premature retry removed=%d sends=%d", removed, len(sender.snapshot()))
 	}
@@ -548,6 +628,7 @@ func TestRequestManagerRetriesSilentFloodfill(t *testing.T) {
 	if removed := manager.Expire(now); removed != 0 {
 		t.Fatalf("retry removed %d requests", removed)
 	}
+	manager.active.Wait()
 	messages := sender.snapshot()
 	if len(messages) != 2 {
 		t.Fatalf("silent floodfill sends = %d, want 2", len(messages))
@@ -559,6 +640,52 @@ func TestRequestManagerRetriesSilentFloodfill(t *testing.T) {
 	manager.HandleDatabaseStore(i2np.DatabaseStoreMessage{Key: key, Type: i2np.StoreLeaseSet2})
 	if result := <-waiter; result.Err != nil {
 		t.Fatalf("retry completion = %v", result.Err)
+	}
+}
+
+func TestRequestManagerExpireDoesNotWaitAndCancelsExpiredSend(t *testing.T) {
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+	addRequestTestFloodfill(database, requestTestHash(1))
+	addRequestTestFloodfill(database, requestTestHash(2))
+	sender := &cancelingRetryRequestTestSender{entered: make(chan struct{}), canceled: make(chan struct{})}
+	manager, err := NewRequestManager(database, sender, requestTestRoute{gateway: requestTestHash(8)}, RequestManagerConfig{
+		Capacity: 1, TimeoutMillis: 10_000, Now: func() uint64 { return 100 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	waiter, err := manager.LookupLeaseSet(t.Context(), requestTestHash(9))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.active.Wait()
+	returned := make(chan struct{})
+	go func() {
+		manager.Expire(100 + databaseLookupAttemptTimeout)
+		close(returned)
+	}()
+	t.Cleanup(func() { <-returned })
+	select {
+	case <-sender.entered:
+	case <-time.After(time.Second):
+		t.Fatal("expiry did not schedule the retry")
+	}
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("expiry scheduler blocked on the retry send")
+	}
+	if removed := manager.Expire(10_100); removed != 1 {
+		t.Fatalf("expired requests = %d, want 1", removed)
+	}
+	select {
+	case <-sender.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("request expiry did not cancel its blocked sender")
+	}
+	if result := <-waiter; !errors.Is(result.Err, ErrRequestExpired) {
+		t.Fatalf("lookup result = %v, want ErrRequestExpired", result.Err)
 	}
 }
 
@@ -584,11 +711,13 @@ func TestRequestManagerRetryOutlivesCanceledFirstWaiter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.active.Wait()
 	cancelFirst()
 	now += databaseLookupAttemptTimeout
 	if removed := manager.Expire(now); removed != 0 {
 		t.Fatalf("retry removed %d requests", removed)
 	}
+	manager.active.Wait()
 	contextErrors := sender.contextErrors()
 	if len(contextErrors) != 2 || contextErrors[1] != nil {
 		t.Fatalf("retry contexts = %#v", contextErrors)
@@ -681,6 +810,7 @@ func TestRequestManagerFetchesUnknownCandidatesAndWakesDuringSend(t *testing.T) 
 	if _, err := manager.LookupRouterInfo(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
+	manager.active.Wait()
 
 	discoveredPeers := make([]byte, 2*foundation.HashLength)
 	copy(discoveredPeers, firstDiscovered[:])
@@ -730,6 +860,7 @@ func TestRequestManagerFetchesUnknownCandidatesAndWakesDuringSend(t *testing.T) 
 		t.Fatal("candidate wakeups did not dispatch after Send returned")
 	}
 
+	manager.active.Wait()
 	messages = sender.snapshot()
 	if len(messages) != 6 {
 		t.Fatalf("sends after candidate admission = %#v", messages)
@@ -762,9 +893,11 @@ func TestRequestManagerBoundsWireExpirationSeparately(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer manager.Close()
 	if _, err := manager.LookupRouterInfo(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
+	manager.active.Wait()
 	messages := sender.snapshot()
 	if len(messages) != 1 || messages[0].Header.Expiration != 100+databaseLookupEnvelopeLifetime {
 		t.Fatalf("first wire expiration = %#v", messages)
@@ -775,13 +908,14 @@ func TestRequestManagerBoundsWireExpirationSeparately(t *testing.T) {
 	peers := make([]byte, foundation.HashLength)
 	copy(peers, second[:])
 	manager.HandleDatabaseSearchReply(i2np.DatabaseSearchReplyMessage{Key: key, From: first, Peers: peers})
+	manager.active.Wait()
 	messages = sender.snapshot()
 	if len(messages) != 2 || messages[1].Header.Expiration != 500+databaseLookupEnvelopeLifetime {
 		t.Fatalf("follow-up wire expiration = %#v", messages)
 	}
 }
 
-func TestRequestManagerCloseCancelsSendCompletesWaiterAndRejectsWork(t *testing.T) {
+func TestRequestManagerLookupReturnsBeforeSendAndCloseCancels(t *testing.T) {
 	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	peer, key := requestTestHash(1), requestTestHash(9)
 	addRequestTestFloodfill(database, peer)
@@ -793,6 +927,7 @@ func TestRequestManagerCloseCancelsSendCompletesWaiterAndRejectsWork(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer manager.Close()
 	type lookupReturn struct {
 		waiter <-chan LookupResult
 		err    error
@@ -807,10 +942,15 @@ func TestRequestManagerCloseCancelsSendCompletesWaiterAndRejectsWork(t *testing.
 	case <-time.After(time.Second):
 		t.Fatal("lookup sender did not enter")
 	}
+	var lookup lookupReturn
+	select {
+	case lookup = <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("initial lookup blocked on its sender")
+	}
 	if err = manager.Close(); err != nil {
 		t.Fatal(err)
 	}
-	lookup := <-returned
 	if lookup.err != nil {
 		t.Fatal(lookup.err)
 	}
@@ -855,6 +995,7 @@ func TestExplorationCompletesAfterClosestFloodfillConverges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.active.Wait()
 	manager.HandleDatabaseSearchReply(i2np.DatabaseSearchReplyMessage{Key: key, From: peer})
 	if outcome := <-result; outcome.Err != nil || outcome.Type != ExplorationLookup {
 		t.Fatalf("exploration outcome = %#v", outcome)
