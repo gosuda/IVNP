@@ -115,6 +115,7 @@ type OutboundBuild struct {
 	// out of the source-facing build contract: no caller may retire a tunnel
 	// unless the rotator selected it from the renewal window.
 	retireID uint32
+	attempt  *creatorAttempt
 }
 
 // InboundBuild describes a modern short-record inbound tunnel.
@@ -129,6 +130,7 @@ type InboundBuild struct {
 	// private so only a selection made from the renewal window can retire a
 	// live inbound path.
 	retireID uint32
+	attempt  *creatorAttempt
 }
 
 // BuildReplySender garlic-wraps the OBEP reply using the one-time key
@@ -201,6 +203,9 @@ type BuildManager struct {
 	metrics          *observability.Registry
 	onBuildEvent     func()
 	schedule         BuildScheduleFunc
+	creatorBudget    *CreatorBudget
+	creators         map[*creatorAttempt]struct{}
+	claims           map[*creatorClaim]struct{}
 
 	lifecycleMu     sync.RWMutex
 	mu              sync.Mutex
@@ -268,6 +273,7 @@ type VariableOutboundBuild struct {
 	ReplyTunnelID uint32
 	ExpiresAt     uint64
 	retireID      uint32
+	attempt       *creatorAttempt
 }
 
 // BuildManagerConfig provides the network handoff and local ECIES or legacy
@@ -289,12 +295,15 @@ type BuildManagerConfig struct {
 	Random          io.Reader
 	// Profiles receives terminal authenticated build observations. It is
 	// optional for compatibility-only runtimes without tunnel selection.
-	Profiles     *PeerProfiles
-	MaxPending   int
-	Logger       *slog.Logger
-	Metrics      *observability.Registry
+	Profiles   *PeerProfiles
+	MaxPending int
+	Logger     *slog.Logger
+	Metrics    *observability.Registry
+	// OnBuildEvent must enqueue maintenance without blocking or reentering build APIs.
 	OnBuildEvent func()
 	Schedule     BuildScheduleFunc
+	// CreatorBudget is shared by router owners; nil gives this manager a private budget.
+	CreatorBudget *CreatorBudget
 }
 
 func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
@@ -316,6 +325,9 @@ func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
 			timer := time.AfterFunc(delay, callback)
 			return func() { timer.Stop() }
 		}
+	}
+	if config.CreatorBudget == nil {
+		config.CreatorBudget = NewCreatorBudget(config.MaxPending, 1)
 	}
 	var staticPrivateKey *ecdh.PrivateKey
 	if len(config.StaticPrivate) != 0 {
@@ -341,6 +353,11 @@ func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
 		transit: make(map[uint32]uint64), transitRecords: make(map[[32]byte]uint64), staticPrivateKey: staticPrivateKey,
 		logger: config.Logger, metrics: config.Metrics, onBuildEvent: config.OnBuildEvent, schedule: config.Schedule,
 		ctx: lifecycle, cancel: cancel,
+		creatorBudget: config.CreatorBudget, creators: make(map[*creatorAttempt]struct{}), claims: make(map[*creatorClaim]struct{}),
+	}
+	if !manager.creatorBudget.register(manager) {
+		cancel()
+		return nil, ErrBuildConfig
 	}
 	if len(config.LegacyPrivate) != 0 {
 		copy(manager.legacyPrivate[:], config.LegacyPrivate)
@@ -368,6 +385,11 @@ func (m *BuildManager) ReleaseSensitive() {
 		return
 	}
 	m.released = true
+	for attempt := range m.creators {
+		attempt.finishLocked()
+	}
+	m.creatorBudget.unregister(m)
+	clear(m.claims)
 	for id, pending := range m.pending {
 		if pending.replyTag != ([8]byte{}) {
 			m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
@@ -379,6 +401,7 @@ func (m *BuildManager) ReleaseSensitive() {
 		delete(m.pending, id)
 	}
 	for id, recent := range m.recent {
+		recent.finishLocked()
 		m.clearRecentCreatorBuild(recent)
 		delete(m.recent, id)
 	}
@@ -479,6 +502,19 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		return 0, err
 	}
 	now := m.now()
+	if build.attempt == nil {
+		var err error
+		build.attempt, err = m.acquireCreator(Outbound, build.retireID)
+		if err != nil {
+			return 0, err
+		}
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			build.attempt.failPreparation()
+		}
+	}()
 	startOutboundRejected := build.CircuitID == 0 || len(build.Hops) < 1 || len(build.Hops) > foundation.I2NPMaxVariableBuildRecords || build.ReplyRouter == (foundation.Hash{}) || build.ReplyTunnelID == 0 || build.Hops[len(build.Hops)-1].Router == build.ReplyRouter
 	if !startOutboundRejected {
 		startOutboundRejected = build.ExpiresAt <= now
@@ -574,13 +610,14 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		recordCount: uint8(recordCount), startedAt: now, deadline: build.ExpiresAt,
 	}
 	m.mu.Lock()
-	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.replyIDInUseLocked(replyID) {
+	if m.replyIDInUseLocked(replyID) {
 		m.mu.Unlock()
 		cancelBuildDeadline(pending.cancelDeadline)
 		clearBuildKeys(keys)
 		return 0, ErrBuildPending
 	}
 	m.pending[replyID] = pending
+	transferred = true
 	m.mu.Unlock()
 	replyKeyExpiresAt := saturatingDeadline(now, 2*buildMessageLifetime)
 	if err = m.replyKeys.RegisterGarlicReplyKey(dataplane.GarlicReplyKey{
@@ -641,6 +678,19 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 		return 0, err
 	}
 	now := m.now()
+	if build.attempt == nil {
+		var err error
+		build.attempt, err = m.acquireCreator(Inbound, build.retireID)
+		if err != nil {
+			return 0, err
+		}
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			build.attempt.failPreparation()
+		}
+	}()
 	carrierEndpoint := build.CarrierEndpoint
 	if build.OutboundTunnelID != 0 && carrierEndpoint == (foundation.Hash{}) && m.pool != nil {
 		if carrier, ok := m.pool.Get(build.OutboundTunnelID, now); ok && carrier.Direction == Outbound && carrier.HopCount != 0 {
@@ -680,16 +730,8 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 		}
 	}
 	if build.OutboundTunnelID == 0 {
-		if err := m.ensureBuildSession(ctx, build.Hops[0].Router, build.Hops, "inbound", "first_hop"); err != nil {
+		if err := m.ensureBootstrapSessions(ctx, build.Hops); err != nil {
 			return 0, err
-		}
-		// A firewalled creator needs an established return session before the
-		// last hop can deliver the bootstrap build response.
-		replyPeer := build.Hops[len(build.Hops)-1].Router
-		if replyPeer != build.Hops[0].Router {
-			if err := m.ensureBuildSession(ctx, replyPeer, build.Hops, "inbound", "reply_hop"); err != nil {
-				return 0, err
-			}
 		}
 	}
 	var messageIDStorage [foundation.I2NPMaxVariableBuildRecords + 1]uint32
@@ -775,13 +817,14 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 		startedAt: now, deadline: build.ExpiresAt,
 	}
 	m.mu.Lock()
-	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.replyIDInUseLocked(replyID) {
+	if m.replyIDInUseLocked(replyID) {
 		m.mu.Unlock()
 		cancelBuildDeadline(pending.cancelDeadline)
 		clearBuildKeys(keys)
 		return 0, ErrBuildPending
 	}
 	m.pendingInbound[replyID] = pending
+	transferred = true
 	m.mu.Unlock()
 	if m.metrics != nil {
 		m.metrics.IncTunnelBuilds()
@@ -902,6 +945,7 @@ func (m *BuildManager) handleInboundReply(message foundation.I2NPMessage) error 
 		return ErrBuildPending
 	}
 	defer m.notifyBuildEvent()
+	defer pending.build.attempt.finish()
 	success := false
 	defer func() {
 		if !success && m.metrics != nil {
@@ -963,7 +1007,7 @@ func (m *BuildManager) handleInboundReply(message foundation.I2NPMessage) error 
 		return err
 	}
 	if m.pool != nil {
-		retired, replaced, poolErr := m.pool.Replace(entry, pending.build.retireID, now)
+		retired, replaced, poolErr := m.installCreatorEntry(entry, pending.build.attempt, pending.build.retireID, now)
 		if poolErr != nil {
 			m.runtime.RemoveCircuit(entry.Circuit)
 			return poolErr
@@ -1239,6 +1283,7 @@ func (m *BuildManager) HandleReply(message foundation.I2NPMessage) error {
 		m.logger.Info("tunnel build reply stage", "stage", "creator_received", "owner_kind", ownerKind, "owner", owner, "direction", "outbound", "reply_id", message.Header.ID, "late", pending.timedOut)
 	}
 	defer m.notifyBuildEvent()
+	defer pending.build.attempt.finish()
 	m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
 	defer clearBuildKeys(pending.keys)
 	success := false
@@ -1290,7 +1335,7 @@ func (m *BuildManager) HandleReply(message foundation.I2NPMessage) error {
 		return err
 	}
 	if m.pool != nil {
-		retired, replaced, poolErr := m.pool.Replace(entry, pending.build.retireID, now)
+		retired, replaced, poolErr := m.installCreatorEntry(entry, pending.build.attempt, pending.build.retireID, now)
 		if poolErr != nil {
 			m.runtime.RemoveCircuit(entry.Circuit)
 			return poolErr
@@ -1316,6 +1361,11 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 	m.lifecycleMu.RLock()
 	defer m.lifecycleMu.RUnlock()
 	m.mu.Lock()
+	for claim := range m.claims {
+		if claim.done && claim.retire.Expires <= nowMillis {
+			delete(m.claims, claim)
+		}
+	}
 	expiredOutbound := make([]*pendingOutboundBuild, 0)
 	expiredInbound := make([]*pendingInboundBuild, 0)
 	expiredVariable := make([]*pendingVariableBuild, 0)
@@ -1323,18 +1373,21 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 	for id, recent := range m.recent {
 		if recent.deadline <= nowMillis {
 			delete(m.recent, id)
+			recent.finishLocked()
 			expiredRecent = append(expiredRecent, recent)
 		}
 	}
 	for id, pending := range m.pending {
 		if pending.deadline <= nowMillis {
 			delete(m.pending, id)
+			pending.build.attempt.timeoutLocked()
 			pending.timedOut = true
 			graceDeadline := saturatingDeadline(pending.deadline, buildReplyGracePeriod)
 			pending.deadline = graceDeadline
 			cancelBuildDeadline(pending.cancelDeadline)
 			recent := recentCreatorBuild{replyID: id, deadline: graceDeadline, outbound: pending}
 			if graceDeadline <= nowMillis {
+				recent.finishLocked()
 				expiredRecent = append(expiredRecent, recent)
 			} else {
 				pending.cancelDeadline = m.scheduleBuildDeadline(nowMillis, graceDeadline)
@@ -1346,11 +1399,13 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 	for id, pending := range m.pendingInbound {
 		if pending.deadline <= nowMillis {
 			delete(m.pendingInbound, id)
+			pending.build.attempt.timeoutLocked()
 			graceDeadline := saturatingDeadline(pending.deadline, buildReplyGracePeriod)
 			pending.deadline = graceDeadline
 			cancelBuildDeadline(pending.cancelDeadline)
 			recent := recentCreatorBuild{replyID: id, deadline: graceDeadline, inbound: pending}
 			if graceDeadline <= nowMillis {
+				recent.finishLocked()
 				expiredRecent = append(expiredRecent, recent)
 			} else {
 				pending.cancelDeadline = m.scheduleBuildDeadline(nowMillis, graceDeadline)
@@ -1362,11 +1417,13 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 	for id, pending := range m.pendingVariable {
 		if pending.deadline <= nowMillis {
 			delete(m.pendingVariable, id)
+			pending.build.attempt.timeoutLocked()
 			graceDeadline := saturatingDeadline(pending.deadline, buildReplyGracePeriod)
 			pending.deadline = graceDeadline
 			cancelBuildDeadline(pending.cancelDeadline)
 			recent := recentCreatorBuild{replyID: id, deadline: graceDeadline, variable: pending}
 			if graceDeadline <= nowMillis {
+				recent.finishLocked()
 				expiredRecent = append(expiredRecent, recent)
 			} else {
 				pending.cancelDeadline = m.scheduleBuildDeadline(nowMillis, graceDeadline)
@@ -1432,46 +1489,48 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 	return expiredCount
 }
 
-// Pending returns the bounded number of creator builds awaiting replies.
+// Pending counts creators preparing requests or awaiting replies, excluding grace.
 func (m *BuildManager) Pending() int {
 	m.mu.Lock()
-	count := len(m.pending) + len(m.pendingInbound) + len(m.pendingVariable)
+	count := m.pendingDirectionLocked(Inbound) + m.pendingDirectionLocked(Outbound)
 	m.mu.Unlock()
 	return count
 }
 
-// PendingDirection reports creator builds awaiting replies in one direction.
+// PendingDirection includes preflight and cryptographic preparation.
 func (m *BuildManager) PendingDirection(direction Direction) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	switch direction {
-	case Inbound:
-		return len(m.pendingInbound)
-	case Outbound:
-		return len(m.pending) + len(m.pendingVariable)
-	default:
-		return 0
-	}
+	return m.pendingDirectionLocked(direction)
 }
 
-// pendingRetirements reports the renewal candidates reserved by builds that
-// still await a reply. Rotator uses it to avoid assigning one old tunnel to
-// multiple replacements.
-func (m *BuildManager) pendingRetirements() map[uint32]struct{} {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	reserved := make(map[uint32]struct{}, len(m.pending)+len(m.pendingVariable))
-	for _, pending := range m.pending {
-		if pending.build.retireID != 0 {
-			reserved[pending.build.retireID] = struct{}{}
+func (m *BuildManager) pendingDirectionLocked(direction Direction) int {
+	count := 0
+	for attempt := range m.creators {
+		if attempt.direction == direction {
+			count++
 		}
 	}
-	for _, pending := range m.pendingVariable {
-		if pending.build.retireID != 0 {
-			reserved[pending.build.retireID] = struct{}{}
+	if direction == Inbound {
+		for _, pending := range m.pendingInbound {
+			if pending.build.attempt == nil {
+				count++
+			}
 		}
 	}
-	return reserved
+	if direction == Outbound {
+		for _, pending := range m.pending {
+			if pending.build.attempt == nil {
+				count++
+			}
+		}
+		for _, pending := range m.pendingVariable {
+			if pending.build.attempt == nil {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 func (m *BuildManager) randomPositions(hops, slots int) ([]uint8, error) {
@@ -1648,11 +1707,9 @@ func (m *BuildManager) takePending(id uint32) *pendingOutboundBuild {
 	return pending
 }
 func (m *BuildManager) removePending(id uint32) {
-	m.mu.Lock()
-	pending := m.pending[id]
-	delete(m.pending, id)
-	m.mu.Unlock()
+	pending := m.takePending(id)
 	if pending != nil {
+		pending.build.attempt.failPreparation()
 		m.replyKeys.RemoveGarlicReplyKey(pending.replyTag)
 		clearBuildKeys(pending.keys)
 	}
@@ -1678,6 +1735,7 @@ func (m *BuildManager) takeInboundPending(id uint32) *pendingInboundBuild {
 func (m *BuildManager) removeInboundPending(id uint32) {
 	pending := m.takeInboundPending(id)
 	if pending != nil {
+		pending.build.attempt.failPreparation()
 		clearBuildKeys(pending.keys)
 	}
 }
@@ -1733,6 +1791,9 @@ func (m *BuildManager) ensureBuildSession(ctx context.Context, peer foundation.H
 		return nil
 	}
 	if err := ensurer.EnsureSession(ctx, peer); err != nil {
+		if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			return err
+		}
 		if m.profiles != nil {
 			m.profiles.RecordTransportFailure(peer, m.now())
 		}
@@ -1747,6 +1808,27 @@ func (m *BuildManager) ensureBuildSession(ctx context.Context, peer foundation.H
 		m.profiles.RecordTransportSuccess(peer, m.now())
 	}
 	return nil
+}
+
+func (m *BuildManager) ensureBootstrapSessions(ctx context.Context, hops []ShortBuildHop) error {
+	first, last := hops[0].Router, hops[len(hops)-1].Router
+	if first == last {
+		return m.ensureBuildSession(ctx, first, hops, "inbound", "first_hop")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan error, 2)
+	go func() { results <- m.ensureBuildSession(ctx, first, hops, "inbound", "first_hop") }()
+	go func() { results <- m.ensureBuildSession(ctx, last, hops, "inbound", "reply_hop") }()
+	firstErr := <-results
+	if firstErr != nil {
+		cancel()
+	}
+	secondErr := <-results
+	if firstErr != nil && errors.Is(secondErr, context.Canceled) {
+		return firstErr
+	}
+	return errors.Join(firstErr, secondErr)
 }
 
 func (m *BuildManager) recordBuildPeer(peer foundation.Hash, success bool, latency, now uint64) {

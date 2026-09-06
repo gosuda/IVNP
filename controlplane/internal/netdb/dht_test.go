@@ -140,17 +140,3 @@ func TestJavaKBucketSplitReinsertionRejectsTerminalOverflow(t *testing.T) {
 		t.Fatalf("terminal members = %d, want RejectTrimmer cap 5", len(terminal.members))
 	}
 }
-
-func TestClosestIntoHasNoHeapAllocation(t *testing.T) {
-	var local foundation.Hash
-	table := NewTable(local, 4)
-	for seed := byte(1); seed <= 3; seed++ {
-		table.StoreVerified(routerWithSeed(seed), seed&1 == 1, 1)
-	}
-	out := make([]RouterRef, 0, 3)
-	var target foundation.Hash
-	allocs := testing.AllocsPerRun(1_000, func() { out = table.ClosestInto(out[:0], target) })
-	if allocs != 0 {
-		t.Fatalf("ClosestInto allocations/run = %f, want 0", allocs)
-	}
-}

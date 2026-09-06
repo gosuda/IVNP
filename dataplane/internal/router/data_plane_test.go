@@ -283,15 +283,16 @@ func TestStreamingTunnelSenderReleasesScratchBeforeTunnelIO(t *testing.T) {
 		scratch: make(chan *streamingSenderScratch, 1),
 	}
 	scratch := new(streamingSenderScratch)
-	scratch.encrypted[0] = 0xaa
+	encrypted := scratch.encrypted.bytes(1)
+	encrypted[0] = 0xaa
 	done := make(chan error, 1)
 	go func() {
-		done <- sender.finishEncryptedSend(context.Background(), &PreparedRoute{Circuit: circuit, Gateway: foundation.Hash{1}, TunnelID: 3, Expires: now + 1_000}, scratch.encrypted[:1], now+1_000, scratch)
+		done <- sender.finishEncryptedSend(context.Background(), &PreparedRoute{Circuit: circuit, Gateway: foundation.Hash{1}, TunnelID: 3, Expires: now + 1_000}, encrypted, now+1_000, scratch)
 	}()
 	<-started
 	select {
 	case returned := <-sender.scratch:
-		if returned != scratch || returned.encrypted[0] != 0 {
+		if returned != scratch || encrypted[0] != 0 {
 			t.Fatal("scratch was not cleared before tunnel I/O")
 		}
 	default:

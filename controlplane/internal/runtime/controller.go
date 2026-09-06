@@ -728,6 +728,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		if replyErr != nil {
 			return nil, replyErr
 		}
+		creatorBudget := tunnel.NewCreatorBudget(cfg.Tunnel.BuildPendingCapacity, cfg.State.MaxDestinations+1)
 		buildManager, err = tunnel.NewBuildManager(tunnel.BuildManagerConfig{
 			Runtime: tunnels, Pool: pool, Sender: mux, ReplyKeys: replyKeys, ReplySender: replySender,
 			LocalRouter: bundle.Router.Hash, StaticPrivate: bundle.Router.X25519Private[:],
@@ -737,9 +738,10 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			},
 			LocalDelivery: func(message foundation.I2NPMessage) error { return service.HandleI2NP(message, now(), false) },
 			Now:           now, MaxPending: cfg.Tunnel.BuildPendingCapacity, Profiles: profiles, Logger: logger, Metrics: registry,
+			CreatorBudget: creatorBudget,
 			OnBuildEvent: func() {
 				if d != nil {
-					d.requestAllTunnelMaintenance()
+					d.requestExploratoryMaintenance()
 				}
 			},
 		})
@@ -813,7 +815,8 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		destinationFactory = &destinationRuntimeFactory{
 			cfg: cfg, database: database, service: service, tunnels: tunnels, destinations: destinations,
 			replyKeys: replyKeys, replySender: replySender, transport: mux,
-			localRouter: bundle.Router.Hash, staticPrivate: bundle.Router.X25519Private[:],
+			creatorBudget: creatorBudget,
+			localRouter:   bundle.Router.Hash, staticPrivate: bundle.Router.X25519Private[:],
 			profiles: profiles, eligible: eligible, connected: connected, allowUnknownTransports: allowUnknownTransports,
 			now: now, clockNow: clock.Now, garlicReceiver: garlicReceiver, status: statusMux,
 			buildReplies: buildReplies, requests: requestHandlers, publishers: destinationPublishers,
@@ -1058,9 +1061,7 @@ func (d *Controller) tunnelMaintenanceLoop() {
 			maintenanceContext, cancel := context.WithTimeout(d.ctx, 30*time.Second)
 			_, err := d.maintainer.Maintain(maintenanceContext)
 			cancel()
-			if err != nil && d.ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				d.recordMaintenanceError(err)
-			}
+			d.recordMaintenanceError(err)
 		}
 	}
 }
@@ -1085,13 +1086,6 @@ func (d *Controller) maintainPublication() {
 		_, err = d.publication.Maintain(publicationContext)
 	} else {
 		err = d.localInfo.Publish(publicationContext)
-	}
-	if err == nil || d.ctx.Err() != nil {
-		return
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		d.logger.Debug("bounded publication maintenance timed out", "error", err)
-		return
 	}
 	d.recordMaintenanceError(err)
 }
@@ -1139,23 +1133,18 @@ func (d *Controller) netdbSaveLoop() {
 
 func (d *Controller) maintainDestinationTunnels(runtime *destinationRuntime) {
 	var result error
-	for runtime.active() {
+	if runtime.active() {
 		runtime.tunnelMaintenanceDirty.Store(false)
 		maintenanceContext, cancel := context.WithTimeout(d.ctx, 30*time.Second)
 		_, err := runtime.maintainTunnels(maintenanceContext)
 		cancel()
 		result = errors.Join(result, err)
-		if !runtime.tunnelMaintenanceDirty.Load() {
-			break
-		}
 	}
 	runtime.tunnelMaintenanceQueued.Store(false)
 	if runtime.tunnelMaintenanceDirty.Load() {
 		d.requestDestinationTunnelMaintenance(runtime)
 	}
-	if result != nil && d.ctx.Err() == nil && !errors.Is(result, context.Canceled) && !errors.Is(result, context.DeadlineExceeded) {
-		d.recordMaintenanceError(result)
-	}
+	d.recordMaintenanceError(result)
 }
 
 func (d *Controller) explorationLoop() {
@@ -1165,9 +1154,7 @@ func (d *Controller) explorationLoop() {
 		if d.requests != nil {
 			d.requests.Expire(now)
 		}
-		if err := d.explorer.Maintain(d.ctx); err != nil && d.ctx.Err() == nil && !errors.Is(err, context.Canceled) {
-			d.recordMaintenanceError(err)
-		}
+		d.recordMaintenanceError(d.explorer.Maintain(d.ctx))
 		delay := daemonNetDBExplorationSteadyDelay
 		if d.registry.Snapshot().Bootstrap.Stage < 3 {
 			delay = daemonNetDBExplorationBootstrapDelay
@@ -1218,9 +1205,7 @@ func (d *Controller) maintainDestination(runtime *destinationRuntime) {
 	publicationTask.Wait()
 	err := errors.Join(maintenanceErr, publicationErr)
 	runtime.maintenanceQueued.Store(destinationMaintenanceIdle)
-	if err != nil && d.ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		d.recordMaintenanceError(err)
-	}
+	d.recordMaintenanceError(err)
 }
 
 func (d *Controller) periodicMaintenanceLoop(interval time.Duration) {
@@ -1429,20 +1414,44 @@ func (d *Controller) OutproxyReady() bool {
 }
 
 func (d *Controller) recordMaintenanceError(err error) {
-	if errors.Is(err, tunnel.ErrNoEligiblePeers) {
+	if err == nil || (d.ctx != nil && d.ctx.Err() != nil) {
+		return
+	}
+	if !d.expectedMaintenanceError(err) {
+		// Keep the complete diagnostic tree, including wrappers around joins.
+		d.recordLifecycleFailure(err)
+	}
+}
+
+func (d *Controller) expectedMaintenanceError(err error) bool {
+	// Classify independent causes before errors.Is/As can match a sibling.
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if joined, ok := cause.(interface{ Unwrap() []error }); ok {
+			expected := true
+			for _, child := range joined.Unwrap() {
+				if !d.expectedMaintenanceError(child) {
+					expected = false
+				}
+			}
+			return expected
+		}
+	}
+	switch {
+	case err == nil, errors.Is(err, tunnel.ErrBuildPending), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded), errors.Is(err, net.ErrClosed):
+		return true
+	case errors.Is(err, tunnel.ErrNoEligiblePeers):
 		d.logger.Debug("tunnel bootstrap waiting for eligible peers", "error", err)
-		return
-	}
-	if router.IsRetryableTransportError(err) {
+		return true
+	case router.IsRetryableTransportError(err):
 		d.logger.Debug("tunnel bootstrap transport attempt failed", "error", err)
-		return
-	}
-	if errors.Is(err, netdb.ErrNoFloodfill) {
+		return true
+	case errors.Is(err, netdb.ErrNoFloodfill):
 		d.registry.IncNetDBLookupFailures()
 		d.logger.Debug("netdb publication waiting for floodfill", "error", err)
-		return
+		return true
+	default:
+		return false
 	}
-	d.recordError(err)
 }
 
 func (d *Controller) recordReseedOutcome(err error) {
@@ -1561,6 +1570,10 @@ func (d *Controller) recordError(err error) {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
 		return
 	}
+	d.recordLifecycleFailure(err)
+}
+
+func (d *Controller) recordLifecycleFailure(err error) {
 	d.mu.Lock()
 	if d.err == nil {
 		d.err = err

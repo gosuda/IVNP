@@ -123,6 +123,18 @@ func (m *SessionManager) peerShard(peer foundation.Hash) *sessionManagerShard {
 	return &m.shards[binary.LittleEndian.Uint64(peer[:8])%uint64(len(m.shards))]
 }
 
+// EncryptBufferSize bounds both new and existing session output, including
+// partial-error writes. It does not reserve a tag or change session state.
+func (m *SessionManager) EncryptBufferSize(payloadLen int) (int, error) {
+	if m == nil {
+		return 0, ErrSessionManagerClosed
+	}
+	if payloadLen < 0 || payloadLen > foundation.I2NPI2PDMaxPayload {
+		return 0, ErrSession
+	}
+	return cryptography.ElGamalCiphertextSize + sessionBodyEncodedLen(payloadLen, m.tagsPerMessage*32), nil
+}
+
 // Encrypt writes a legacy ElGamal/AES Garlic packet for peer into dst. It uses
 // an available confirmed peer-scoped tag for an existing session, otherwise
 // starts a new ElGamal session. Tags delivered by this packet remain pending

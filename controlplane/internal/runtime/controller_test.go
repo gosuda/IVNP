@@ -589,6 +589,60 @@ func TestRequestAllTunnelMaintenanceQueuesEveryPool(t *testing.T) {
 	}
 }
 
+type requeueTunnelSource struct {
+	next func()
+}
+
+func (s requeueTunnelSource) NextInbound(context.Context, uint64, uint32) (tunnel.InboundBuild, error) {
+	s.next()
+	return tunnel.InboundBuild{}, context.Canceled
+}
+
+func (s requeueTunnelSource) NextOutboundForReply(context.Context, uint64, tunnel.ReplyRoute) (tunnel.OutboundBuild, error) {
+	return tunnel.OutboundBuild{}, context.Canceled
+}
+
+func TestDestinationTunnelMaintenanceRequeuesBehindOtherOwners(t *testing.T) {
+	const now = uint64(100)
+	d := &Controller{ctx: t.Context(), destinationTunnelWake: make(chan *destinationRuntime, 2)}
+	first, second := new(destinationRuntime), new(destinationRuntime)
+	calls := 0
+	source := requeueTunnelSource{next: func() {
+		calls++
+		if calls == 1 {
+			d.requestDestinationTunnelMaintenance(first)
+		}
+	}}
+	pool := tunnel.NewPool(2)
+	sender := new(requestDirectCapture)
+	runtime := dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: sender, Now: func() uint64 { return now }})
+	builder, err := tunnel.NewBuildManager(tunnel.BuildManagerConfig{Runtime: runtime, Pool: pool, Sender: sender, ReplyKeys: dataplane.GarlicNewReplyKeyRegistry(4), Now: func() uint64 { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(builder.ReleaseSensitive)
+	first.maintainer, err = tunnel.NewPairedPoolMaintainer(tunnel.PairedPoolMaintainerConfig{Pool: pool, Runtime: runtime, Builder: builder, InboundSource: source, OutboundSource: source, Now: func() uint64 { return now }, InboundTarget: 1, OutboundTarget: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.maintainer.Close() })
+	d.requestDestinationTunnelMaintenance(first)
+	d.requestDestinationTunnelMaintenance(second)
+	d.maintainDestinationTunnels(<-d.destinationTunnelWake)
+	if calls != 1 {
+		t.Fatalf("dirty owner consumed %d transitions in one worker turn", calls)
+	}
+	if len(d.destinationTunnelWake) != 2 {
+		t.Fatalf("queued owners = %d, want 2", len(d.destinationTunnelWake))
+	}
+	if got := <-d.destinationTunnelWake; got != second {
+		t.Fatal("dirty owner bypassed an already queued owner")
+	}
+	if got := <-d.destinationTunnelWake; got != first {
+		t.Fatal("dirty owner was not requeued")
+	}
+}
+
 func TestTunnelCompositionUsesLiveInboundGatewayRoute(t *testing.T) {
 	cfg := daemonTestConfig(t)
 	cfg.Tunnel.Enabled = true

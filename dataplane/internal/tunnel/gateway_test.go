@@ -2,6 +2,8 @@ package tunnel
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"testing"
 
 	"gosuda.org/ivnp/foundation"
@@ -147,5 +149,79 @@ func TestBlockIteratorRejectsUnsupportedInstructionFlags(t *testing.T) {
 		if _, _, err := it.Next(); err == nil {
 			t.Fatalf("accepted unsupported instruction %x", payload[0])
 		}
+	}
+}
+
+type gatewayEntropyReader struct {
+	chunk int
+	err   error
+}
+
+func (r *gatewayEntropyReader) Read(dst []byte) (int, error) {
+	if r.err != nil {
+		return 0, r.err
+	}
+	if r.chunk > 0 && len(dst) > r.chunk {
+		dst = dst[:r.chunk]
+	}
+	clear(dst)
+	return len(dst), nil
+}
+
+func TestGatewayPreservesIVAndNormalizesPadding(t *testing.T) {
+	reader := new(gatewayEntropyReader)
+	buffer := testPacketBuffer(t)
+	defer buffer.Release()
+	message := []byte("combined entropy")
+	if err := NewGateway(reader).Encode(7, []Block{{Delivery: DeliveryLocal, Last: true, Data: message}}, buffer); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := buffer.Payload()
+	if !bytes.Equal(payload[4:4+tunnelIVLen], make([]byte, tunnelIVLen)) {
+		t.Fatal("nonzero padding normalization changed the supplied IV")
+	}
+	out := make([]Block, 1)
+	if n, err := NewEndpoint(1, len(message)).Parse(payload, out, 0); err != nil || n != 1 || !bytes.Equal(out[0].Data, message) {
+		t.Fatalf("zero-filled entropy did not produce valid nonzero padding: %d, %v", n, err)
+	}
+}
+
+func TestGatewayCombinedEntropyHandlesShortReadsAndNoPadding(t *testing.T) {
+	reader := &gatewayEntropyReader{chunk: 3}
+	buffer := testPacketBuffer(t)
+	defer buffer.Release()
+	message := bytes.Repeat([]byte{0xa5}, maxBlockBytes-3)
+	if err := NewGateway(reader).Encode(7, []Block{{Delivery: DeliveryLocal, Last: true, Data: message}}, buffer); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := buffer.Payload()
+	if payload[4+tunnelIVLen+tunnelChecksumLen] != 0 {
+		t.Fatal("minimal frame padding did not leave the delimiter in place")
+	}
+	out := make([]Block, 1)
+	if n, err := NewEndpoint(1, len(message)).Parse(payload, out, 0); err != nil || n != 1 || !bytes.Equal(out[0].Data, message) {
+		t.Fatalf("short entropy reads corrupted a full frame: %d, %v", n, err)
+	}
+}
+
+func TestGatewayPropagatesCombinedEntropyFailures(t *testing.T) {
+	failure := errors.New("entropy unavailable")
+	for _, test := range []struct {
+		name   string
+		reader io.Reader
+		want   error
+	}{
+		{"empty", bytes.NewReader(nil), io.EOF},
+		{"partial", bytes.NewReader(make([]byte, 15)), io.ErrUnexpectedEOF},
+		{"failed", &gatewayEntropyReader{err: failure}, failure},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			buffer := testPacketBuffer(t)
+			defer buffer.Release()
+			err := NewGateway(test.reader).Encode(7, []Block{{Delivery: DeliveryLocal, Last: true, Data: []byte{1}}}, buffer)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("entropy failure = %v, want %v", err, test.want)
+			}
+		})
 	}
 }

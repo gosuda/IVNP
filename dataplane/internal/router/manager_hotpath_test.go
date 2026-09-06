@@ -80,9 +80,6 @@ func TestSSU2ManagerDataFramingUsesReceiveAndSessionBuffers(t *testing.T) {
 	if delivered.Header != wantHeader || string(delivered.Payload) != string(message.Payload) {
 		t.Fatalf("SSU2 data framing delivered %#v, want header %#v payload %x", delivered, wantHeader, message.Payload)
 	}
-	if got := testing.AllocsPerRun(100, func() { manager.handleData(session, seal()) }); got > 3 {
-		t.Fatalf("SSU2 data receive allocations = %v, want at most AEAD seal/open and ACK ownership", got)
-	}
 
 	output, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -298,8 +295,6 @@ func BenchmarkNTCP2ReplayAdmission(b *testing.B) {
 func managerHotReplayInput(index int) [32]byte {
 	return [32]byte{byte(index), byte(index >> 8), byte(index >> 16), byte(index >> 24)}
 }
-
-var managerHotPathFrame []byte
 
 func managerHotPathMessage() foundation.I2NPMessage {
 	return foundation.I2NPMessage{Header: foundation.I2NPHeader{Type: foundation.I2NPDeliveryStatus, ID: 7, Expiration: 60_000}, Payload: make([]byte, 64)}

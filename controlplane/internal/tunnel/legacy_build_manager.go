@@ -35,6 +35,19 @@ func (m *BuildManager) StartVariableOutbound(ctx context.Context, build Variable
 		return 0, err
 	}
 	now := m.now()
+	if build.attempt == nil {
+		var err error
+		build.attempt, err = m.acquireCreator(Outbound, build.retireID)
+		if err != nil {
+			return 0, err
+		}
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			build.attempt.failPreparation()
+		}
+	}()
 	startVariableOutboundRejected := build.CircuitID == 0 || len(build.Hops) == 0 || len(build.Hops) > legacyBuildMaxRecords || build.ReplyRouter == (foundation.Hash{}) || build.ReplyTunnelID == 0 || build.ExpiresAt <= now
 	if !startVariableOutboundRejected {
 		startVariableOutboundRejected = !validVariableHops(build.Hops)
@@ -87,13 +100,14 @@ func (m *BuildManager) StartVariableOutbound(ctx context.Context, build Variable
 	replyID := ids[len(ids)-1]
 	pending := &pendingVariableBuild{build: cloneVariableOutboundBuild(build), keys: keys, positions: positions, replyID: replyID, recordCount: uint8(recordCount), deadline: build.ExpiresAt}
 	m.mu.Lock()
-	if len(m.pending)+len(m.pendingInbound)+len(m.pendingVariable) >= m.maxPending || m.replyIDInUseLocked(replyID) {
+	if m.replyIDInUseLocked(replyID) {
 		m.mu.Unlock()
 		cancelBuildDeadline(pending.cancelDeadline)
 		clearVariableBuildKeys(keys)
 		return 0, ErrBuildPending
 	}
 	m.pendingVariable[replyID] = pending
+	transferred = true
 	m.mu.Unlock()
 	message := foundation.I2NPMessage{Header: foundation.I2NPHeader{Type: foundation.I2NPVariableTunnelBuild, ID: ids[0], Expiration: messageDeadline}, Payload: payload}
 	if err = m.sender.Send(ctx, build.Hops[0].Router, message); err != nil {
@@ -239,6 +253,7 @@ func (m *BuildManager) HandleVariableReply(message foundation.I2NPMessage) error
 		return ErrBuildPending
 	}
 	defer m.notifyBuildEvent()
+	defer pending.build.attempt.finish()
 	defer clearVariableBuildKeys(pending.keys)
 	records, err := foundation.I2NPParseBuildRecords(foundation.I2NPVariableTunnelBuildReply, message.Payload)
 	if err != nil {
@@ -287,7 +302,7 @@ func (m *BuildManager) HandleVariableReply(message foundation.I2NPMessage) error
 		return err
 	}
 	if m.pool != nil {
-		retired, replaced, poolErr := m.pool.Replace(entry, pending.build.retireID, now)
+		retired, replaced, poolErr := m.installCreatorEntry(entry, pending.build.attempt, pending.build.retireID, now)
 		if poolErr != nil {
 			m.runtime.RemoveCircuit(entry.Circuit)
 			return poolErr
@@ -366,11 +381,10 @@ func (m *BuildManager) takeVariablePending(id uint32) *pendingVariableBuild {
 	return pending
 }
 func (m *BuildManager) removeVariablePending(id uint32) {
-	m.mu.Lock()
-	pending := m.pendingVariable[id]
-	delete(m.pendingVariable, id)
-	m.mu.Unlock()
+	pending := m.takeVariablePending(id)
 	if pending != nil {
+		pending.build.attempt.failPreparation()
+		cancelBuildDeadline(pending.cancelDeadline)
 		clearVariableBuildKeys(pending.keys)
 	}
 }

@@ -363,6 +363,7 @@ var (
 	GarlicECIESSealRouterMessage                = garlicecies.SealRouterMessage
 	GarlicEncryptExisting                       = garlic.EncryptExisting
 	GarlicEncryptNew                            = garlic.EncryptNew
+	GarlicRatchetEncryptBufferSizes             = garlic.RatchetEncryptBufferSizes
 	GarlicErrClove                              = garlic.ErrClove
 	GarlicErrDelivery                           = garlic.ErrDelivery
 	GarlicErrLookupReply                        = garlic.ErrLookupReply

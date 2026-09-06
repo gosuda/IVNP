@@ -132,6 +132,7 @@ type (
 	TunnelBuildSource             = tunnel.BuildSource
 	TunnelBuildStaticKeyLookup    = tunnel.BuildStaticKeyLookup
 	TunnelCircuitPair             = tunnel.CircuitPair
+	TunnelCreatorBudget           = tunnel.CreatorBudget
 	TunnelDirection               = tunnel.Direction
 	// TunnelEntry.Circuit identifies the installation; ID alone is unsafe after replacement.
 	TunnelEntry                           = tunnel.Entry
@@ -365,6 +366,7 @@ var (
 	TunnelMarshalLongECIESBuildRequest                       = tunnel.MarshalLongECIESBuildRequest
 	TunnelMarshalShortBuildRequest                           = tunnel.MarshalShortBuildRequest
 	TunnelNewBuildManager                                    = tunnel.NewBuildManager
+	TunnelNewCreatorBudget                                   = tunnel.NewCreatorBudget
 	TunnelNewHealth                                          = tunnel.NewHealth
 	TunnelNewNetDBBuildStaticKeyLookup                       = tunnel.NewNetDBBuildStaticKeyLookup
 	TunnelNewNetDBInboundBuildSource                         = tunnel.NewNetDBInboundBuildSource

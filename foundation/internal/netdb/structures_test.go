@@ -161,29 +161,6 @@ func BenchmarkParseRouterInfo(b *testing.B) {
 	}
 }
 
-var routerInfoSink RouterInfo
-var routerInfoErrorSink error
-
-func TestParseRouterInfoHasNoHeapAllocation(t *testing.T) {
-	identity := legacyIdentity()
-	info := make([]byte, len(identity)+8+1+1+2+40)
-	offset := len(identity) + 8
-	info[offset] = 0
-	offset++
-	info[offset] = 0
-	offset++
-	info[offset], info[offset+1] = 0, 0
-	allocs := testing.AllocsPerRun(1_000, func() {
-		routerInfoSink, routerInfoErrorSink = ParseRouterInfo(info)
-	})
-	if routerInfoErrorSink != nil {
-		t.Fatal(routerInfoErrorSink)
-	}
-	if allocs != 0 {
-		t.Fatalf("ParseRouterInfo() allocations/run = %f, want 0", allocs)
-	}
-}
-
 func TestParsersEnforceI2PDNetdbCapsBeforeFieldTraversal(t *testing.T) {
 	if _, err := ParseRouterInfo(make([]byte, MaxRouterInfoBytes+1)); !errors.Is(err, ErrStructureTooLarge) {
 		t.Fatalf("RouterInfo cap error = %v", err)

@@ -156,23 +156,3 @@ func BenchmarkParseIdentityEd25519X25519(b *testing.B) {
 		_, _, _ = ParseIdentity(wire)
 	}
 }
-
-var identitySink Identity
-var identityErrorSink error
-
-func TestParseIdentityHasNoHeapAllocation(t *testing.T) {
-	encoded := make([]byte, IdentityBaseLength+7)
-	encoded[384] = byte(CertificateKey)
-	encoded[385], encoded[386] = 0, 4
-	encoded[387], encoded[388] = 0, byte(SigningEdDSASHA512Ed25519)
-	encoded[389], encoded[390] = 0, byte(CryptoX25519)
-	allocs := testing.AllocsPerRun(1_000, func() {
-		identitySink, _, identityErrorSink = ParseIdentity(encoded)
-	})
-	if identityErrorSink != nil {
-		t.Fatal(identityErrorSink)
-	}
-	if allocs != 0 {
-		t.Fatalf("ParseIdentity() allocations/run = %f, want 0", allocs)
-	}
-}

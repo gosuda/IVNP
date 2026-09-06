@@ -1733,7 +1733,7 @@ func (c *tunnelConn) Write(src []byte) (int, error) {
 		if err != nil {
 			return written, err
 		}
-		if err = c.sendWireOwned(context.Background(), wire, lease); err != nil {
+		if err = c.sendWireOwned(c.network.ctx, wire, lease); err != nil {
 			c.mu.Lock()
 			pending := c.pending[sequence]
 			delete(c.pending, sequence)

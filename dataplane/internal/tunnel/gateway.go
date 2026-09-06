@@ -83,12 +83,15 @@ func (g *Gateway) Encode(tunnelID uint32, blocks []Block, dst *packet.Buffer) er
 	if g != nil && g.padding != nil {
 		reader = g.padding
 	}
-	if _, err := io.ReadFull(reader, data[:tunnelIVLen]); err != nil {
+	padding := data[tunnelIVLen+tunnelChecksumLen : len(data)-n-1]
+	// Include the checksum gap in one entropy read, then overwrite it below.
+	if _, err := io.ReadFull(reader, data[:len(data)-n-1]); err != nil {
 		return err
 	}
-	padding := data[tunnelIVLen+tunnelChecksumLen : len(data)-n-1]
-	if err := readNonZero(reader, padding); err != nil {
-		return err
+	for index := range padding {
+		if padding[index] == 0 {
+			padding[index] = 1
+		}
 	}
 	blocksStart := tunnelIVLen + tunnelChecksumLen + len(padding) + 1
 	data[blocksStart-1] = 0

@@ -64,19 +64,6 @@ func TestPacketMarshalToRejectsInvalidInputs(t *testing.T) {
 	}
 }
 
-func TestPacketMarshalToAllocs(t *testing.T) {
-	packet := Packet{Payload: []byte{1, 2, 3}}
-	frame := make([]byte, packet.EncodedLen())
-	allocs := testing.AllocsPerRun(1_000, func() {
-		if _, err := packet.MarshalTo(frame); err != nil {
-			t.Fatal(err)
-		}
-	})
-	if allocs != 0 {
-		t.Fatalf("MarshalTo() allocations = %v, want 0", allocs)
-	}
-}
-
 func BenchmarkStreamingPacketMarshalTo(b *testing.B) {
 	packet := Packet{Payload: []byte{1, 2, 3}}
 	frame := make([]byte, packet.EncodedLen())

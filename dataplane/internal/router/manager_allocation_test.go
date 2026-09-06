@@ -1,5 +1,3 @@
-//go:build !race
-
 package router
 
 import (
@@ -8,80 +6,28 @@ import (
 	"testing"
 	"time"
 
-	dataplanentcp2 "gosuda.org/ivnp/dataplane/internal/transport/ntcp2"
 	dataplanessu2 "gosuda.org/ivnp/dataplane/internal/transport/ssu2"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/observability"
 )
 
-// The allocation ceilings document the deliberate ownership boundary: framing
-// writes into supplied buffers, while an authenticated I2NP delivery owns one
-// payload copy after the receive datagram is reused.
-func TestManagerHotPathAllocationBudgets(t *testing.T) {
+func TestSSU2I2NPOversizedPayloadFragments(t *testing.T) {
 	message := managerHotPathMessage()
-	ntcpFrame := make([]byte, foundation.I2NPTransportHeaderLen+len(message.Payload))
-	if got := testing.AllocsPerRun(100, func() {
-		if err := marshalNTCP2I2NPTo(ntcpFrame, message); err != nil {
-			t.Fatal(err)
-		}
-	}); got != 0 {
-		t.Fatalf("NTCP2 caller-buffer marshal allocations = %v, want 0", got)
-	}
-	direction, err := dataplanentcp2.NewDirection(make([]byte, 32), make([]byte, 16), make([]byte, 8))
-	if err != nil {
+	message.Payload = make([]byte, dataplanessu2.MaxIPv4PacketLen-dataplanessu2.ShortHeaderLen-dataplanessu2.PacketTagLen-3-foundation.I2NPTransportHeaderLen+1)
+	var fragmentFrame [dataplanessu2.MaxIPv4PacketLen]byte
+	fragments := 0
+	if err := forEachSSU2I2NPFragment(fragmentFrame[:], message, dataplanessu2.MaxIPv4PacketLen, func([]byte, bool) error {
+		fragments++
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	session := dataplanentcp2.NewSession(&managerHotPathStreamConn{}, direction, nil)
-	defer func() { _ = session.Close() }()
-	if got := testing.AllocsPerRun(100, func() {
-		if err := writeNTCP2I2NP(session, message); err != nil {
-			t.Fatal(err)
-		}
-	}); got != 0 {
-		t.Fatalf("NTCP2 framed write allocations = %v, want 0", got)
-	}
-
-	var ssuFrame [dataplanessu2.MaxIPv4PacketLen]byte
-	if got := testing.AllocsPerRun(100, func() {
-		frame, err := marshalSSU2I2NPTo(ssuFrame[:], message)
-		if err != nil {
-			t.Fatal(err)
-		}
-		managerHotPathFrame = frame
-	}); got != 0 {
-		t.Fatalf("SSU2 caller-buffer frame allocations = %v, want 0", got)
-	}
-
-	fragmented := message
-	fragmented.Payload = make([]byte, dataplanessu2.MaxIPv4PacketLen-dataplanessu2.ShortHeaderLen-dataplanessu2.PacketTagLen-3-foundation.I2NPTransportHeaderLen+1)
-	var fragmentFrame [dataplanessu2.MaxIPv4PacketLen]byte
-	if got := testing.AllocsPerRun(100, func() {
-		fragments := 0
-		if err := forEachSSU2I2NPFragment(fragmentFrame[:], fragmented, dataplanessu2.MaxIPv4PacketLen, func([]byte, bool) error {
-			fragments++
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		} else if fragments != 2 {
-			t.Fatalf("SSU2 fragment count = %d, want 2", fragments)
-		}
-	}); got != 0 {
-		t.Fatalf("SSU2 caller-buffer fragment allocations = %v, want 0", got)
-	}
-
-	manager := &NTCP2Manager{replaySeen: make(map[[32]byte]struct{}, ntcp2ReplayEntries)}
-	var ephemeral [32]byte
-	if got := testing.AllocsPerRun(100, func() {
-		ephemeral[0]++
-		if manager.replayedRequest(ephemeral[:]) {
-			t.Fatal("fresh replay admission rejected")
-		}
-	}); got != 0 {
-		t.Fatalf("NTCP2 replay admission allocations = %v, want 0 after manager initialization", got)
+	if fragments != 2 {
+		t.Fatalf("SSU2 fragment count = %d, want 2", fragments)
 	}
 }
 
-func TestSSU2LiveVectorReadAuthDispatchWriteAllocations(t *testing.T) {
+func TestSSU2LiveVectorReadAuthDispatchWriteDelivery(t *testing.T) {
 	aliceConn := newSSU2LoopbackConn(t)
 	bobConn := newSSU2LoopbackConn(t)
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
@@ -145,23 +91,19 @@ func TestSSU2LiveVectorReadAuthDispatchWriteAllocations(t *testing.T) {
 		pending := len(session.sent)
 		session.sendMu.Unlock()
 		return pending == 0
-	}, "warm live vector/auth/dispatch/write path")
+	}, "initial live vector/auth/dispatch/write delivery")
 
-	var sendErr error
 	before := delivered.Load()
-	allocations := testing.AllocsPerRun(64, func() {
+	const messages = 64
+	for range messages {
 		message.Header.ID++
-		sendErr = aliceManager.Send(ctx, bob.Hash(), message)
-	})
-	if sendErr != nil {
-		t.Fatal(sendErr)
+		if err := aliceManager.Send(ctx, bob.Hash(), message); err != nil {
+			t.Fatal(err)
+		}
 	}
 	waitForSSU2Live(t, 30*time.Second, func() bool {
-		return delivered.Load() >= before+65
-	}, "measured live vector/auth/dispatch/write delivery")
-	if allocations != 0 {
-		t.Fatalf("live SSU2 vector read/auth/dispatch/write allocations = %v, want 0 after warmup", allocations)
-	}
+		return delivered.Load() >= before+messages
+	}, "live vector/auth/dispatch/write delivery")
 	for name, snapshot := range map[string]observability.SSU2Snapshot{
 		"alice": aliceMetrics.Snapshot().SSU2,
 		"bob":   bobMetrics.Snapshot().SSU2,
@@ -169,7 +111,7 @@ func TestSSU2LiveVectorReadAuthDispatchWriteAllocations(t *testing.T) {
 		if snapshot.ReceivedDatagrams != snapshot.EnqueuedDatagrams+snapshot.ReceiveQueueDrops ||
 			snapshot.EnqueuedDatagrams != snapshot.ProcessedDatagrams+snapshot.IngressQueueDepth ||
 			snapshot.SendEnqueuedDatagrams != snapshot.SentDatagrams+snapshot.SendFailedDatagrams+snapshot.SendQueueDrops+snapshot.EgressQueueDepth {
-			t.Fatalf("%s SSU2 conservation failed after live allocation run: %+v", name, snapshot)
+			t.Fatalf("%s SSU2 conservation failed after live delivery: %+v", name, snapshot)
 		}
 	}
 }

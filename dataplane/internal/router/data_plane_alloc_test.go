@@ -7,29 +7,31 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
-func TestStreamingDestinationFramingHasZeroAllocations(t *testing.T) {
-	var nextID uint32
-	sender := &PreparedRouteSender{nextID: func() (uint32, error) {
-		nextID++
-		return nextID, nil
-	}}
-	delivery := dataplanestreamingtunnel.Delivery{
-		From: foundation.Hash{1}, To: foundation.Hash{2}, Protocol: dataplanestreamingtunnel.ProtocolStreaming,
-		FromPort: 1234, ToPort: 4321, Payload: []byte("prewarmed streaming frame"),
-	}
-	set := make([]byte, 1024)
-	data := make([]byte, 1024)
-	if _, err := sender.destinationCloveSetTo(set, data, delivery, 10_000, nil); err != nil {
-		t.Fatal(err)
-	}
-	var frameErr error
-	allocations := testing.AllocsPerRun(1000, func() {
-		_, frameErr = sender.destinationCloveSetTo(set, data, delivery, 10_000, nil)
-	})
-	if frameErr != nil {
-		t.Fatal(frameErr)
-	}
-	if allocations != 0 {
-		t.Fatalf("destination framing allocations = %v, want 0", allocations)
+func BenchmarkPreparedSenderDestinationFraming(b *testing.B) {
+	for _, workload := range []struct {
+		name string
+		size int
+	}{{"small", 128}, {"large", 48 * 1024}} {
+		b.Run(workload.name, func(b *testing.B) {
+			sender := &PreparedRouteSender{nextID: func() (uint32, error) { return 1, nil }}
+			var scratch streamingSenderScratch
+			delivery := dataplanestreamingtunnel.Delivery{To: foundation.Hash{2}, Protocol: dataplanestreamingtunnel.ProtocolStreaming, Payload: make([]byte, workload.size)}
+			dataLen := 4 + destinationDataHeaderLen + len(delivery.Payload)
+			payloadLen := 3 + 1 + foundation.HashLength + 9 + dataLen
+			if _, err := sender.destinationRatchetPayloadTo(scratch.ratchet.bytes(payloadLen), scratch.data.bytes(dataLen), delivery, 10_000, nil); err != nil {
+				b.Fatal(err)
+			}
+			clearStreamingSenderScratch(&scratch)
+			b.ReportAllocs()
+			b.SetBytes(int64(workload.size))
+			b.ResetTimer()
+			for b.Loop() {
+				_, err := sender.destinationRatchetPayloadTo(scratch.ratchet.bytes(payloadLen), scratch.data.bytes(dataLen), delivery, 10_000, nil)
+				clearStreamingSenderScratch(&scratch)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

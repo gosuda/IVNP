@@ -422,6 +422,28 @@ func (m *RatchetManager) EncryptWithScratch(dst, plain []byte, peer foundation.H
 	return m.encryptLocked(dst, plain, peer, remotePublic, cryptoType, payload, now)
 }
 
+// RatchetEncryptBufferSizes bounds EncryptWithScratch output and plaintext
+// workspace across new sessions and automatic DH rotation. Unbound encryption
+// needs only the output buffer. Bounds include partial-error writes.
+func RatchetEncryptBufferSizes(payloadLen int, cryptoType uint16) (packet, plain int, err error) {
+	if payloadLen < 0 || payloadLen > foundation.I2NPI2PDMaxPayload {
+		return 0, 0, ErrRatchet
+	}
+	hybridLen := 0
+	if cryptoType != 4 {
+		params, known := cryptography.Parameters(cryptoType)
+		if !known || (cryptoType != 6 && cryptoType != 7) {
+			return 0, 0, ErrRatchet
+		}
+		hybridLen = params.PublicKeySize + cryptography.ChaChaTagSize
+	}
+	plain = payloadLen + ratchetNextKeyBlockLen
+	newSessionLen := newSessionEphemeralLen + hybridLen + staticSectionLen + minNewSessionPayload + payloadLen + cryptography.ChaChaTagSize
+	return max(newSessionLen, ratchetTagLen+plain+cryptography.ChaChaTagSize), plain, nil
+}
+
+const ratchetNextKeyBlockLen = 3 + 35
+
 func (m *RatchetManager) encryptLocked(dst, scratch []byte, peer foundation.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
 	if established := m.sessions[peer]; established != nil && !established.terminated && established.expires >= now {
 		options := RatchetOptions{}
@@ -585,7 +607,7 @@ func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, 
 		blocksLen += 4
 	}
 	if s.pendingDH {
-		blocksLen += 38
+		blocksLen += ratchetNextKeyBlockLen
 	}
 	if blocksLen > 65519 {
 		return nil, ErrRatchet

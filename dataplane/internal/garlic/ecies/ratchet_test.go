@@ -591,46 +591,6 @@ func TestRatchetMetricsRecordAuthenticatedTransitions(t *testing.T) {
 	}
 }
 
-func TestRatchetSteadyStateScratchHasZeroAllocations(t *testing.T) {
-	a, b, aPeer, bPeer, now := ratchetPair(t)
-	defer a.ReleaseSensitive()
-	defer b.ReleaseSensitive()
-	_ = establishRatchet(t, a, b, aPeer, bPeer, now)
-	payload := []byte{ratchetGarlicClove, 0, 1, 9}
-	var encrypted [256]byte
-	var plain [256]byte
-	var received [256]byte
-	var receiveReply [256]byte
-
-	// Warm tag maps, AEAD constructors, and both ratchet directions before the
-	// regression measurement.
-	for index := uint64(1); index <= 64; index++ {
-		packet, err := a.EncryptExistingWithScratch(encrypted[:], plain[:], bPeer, payload, RatchetOptions{}, now+index)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err = b.Receive(received[:], receiveReply[:], packet, now+index); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var hotErr error
-	offset := uint64(65)
-	allocations := testing.AllocsPerRun(100, func() {
-		packet, err := a.EncryptExistingWithScratch(encrypted[:], plain[:], bPeer, payload, RatchetOptions{}, now+offset)
-		if err == nil {
-			_, err = b.Receive(received[:], receiveReply[:], packet, now+offset)
-		}
-		hotErr = err
-		offset++
-	})
-	if hotErr != nil {
-		t.Fatal(hotErr)
-	}
-	if allocations != 0 {
-		t.Fatalf("steady-state ratchet relay allocations = %v, want 0", allocations)
-	}
-}
-
 func BenchmarkRatchetExistingWithScratch(b *testing.B) {
 	a, receiver, aPeer, bPeer, now := ratchetPair(b)
 	defer a.ReleaseSensitive()

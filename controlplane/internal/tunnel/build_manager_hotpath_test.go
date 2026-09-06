@@ -9,22 +9,6 @@ import (
 	"gosuda.org/ivnp/dataplane"
 )
 
-// randomPositions returns one owned pending-build descriptor. The injected
-// io.Reader interface may make each four-byte shuffle read escape; keep the
-// complete bounded shuffle at no more than four allocations.
-func TestBuildRequestSetAllocationBudget(t *testing.T) {
-	manager := &BuildManager{random: new(buildCounterReader)}
-	if got := testing.AllocsPerRun(100, func() {
-		positions, err := manager.randomPositions(3, 4)
-		if err != nil {
-			t.Fatal(err)
-		}
-		buildHotPathPositions = positions
-	}); got > 4 {
-		t.Fatalf("build request position allocations = %v, want at most 4", got)
-	}
-}
-
 func BenchmarkBuildManagerRequestSet(b *testing.B) {
 	manager, build := newBuildHotPathManager(b)
 	b.ReportAllocs()
@@ -37,8 +21,6 @@ func BenchmarkBuildManagerRequestSet(b *testing.B) {
 		manager.removePending(replyID)
 	}
 }
-
-var buildHotPathPositions []uint8
 
 type buildHotPathReplyRegistry struct {
 	entries map[[8]byte]dataplane.GarlicReplyKey

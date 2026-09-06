@@ -118,11 +118,37 @@ func (s *PreparedRouteSender) RetireRatchetPeer(peer foundation.Hash) {
 }
 
 type streamingSenderScratch struct {
-	data      [foundation.I2NPI2PDMaxPayload]byte
-	clove     [foundation.I2NPI2PDMaxPayload]byte
-	ratchet   [foundation.I2NPI2PDMaxPayload]byte
-	plain     [foundation.I2NPI2PDMaxPayload]byte
-	encrypted [foundation.I2NPI2PDMaxPayload]byte
+	data      senderScratchBuffer
+	clove     senderScratchBuffer
+	ratchet   senderScratchBuffer
+	plain     senderScratchBuffer
+	encrypted senderScratchBuffer
+}
+
+type senderScratchBuffer struct {
+	exposed []byte
+}
+
+// bytes records the entire writable span before handing it to serializers or
+// crypto: an error may leave output beyond the successfully returned length.
+func (b *senderScratchBuffer) bytes(size int) []byte {
+	size = min(size, foundation.I2NPI2PDMaxPayload)
+	if cap(b.exposed) < size {
+		clear(b.exposed)
+		capacity := 4096
+		if size > capacity {
+			capacity = foundation.I2NPI2PDMaxPayload
+		}
+		b.exposed = make([]byte, size, capacity)
+	} else {
+		b.exposed = b.exposed[:max(size, len(b.exposed))]
+	}
+	return b.exposed[:size:size]
+}
+
+func (b *senderScratchBuffer) clear() {
+	clear(b.exposed)
+	b.exposed = b.exposed[:0]
 }
 
 func (s *PreparedRouteSender) BandwidthSnapshot() DestinationBandwidthSnapshot {
@@ -188,16 +214,23 @@ func (s *PreparedRouteSender) sendTunnel(ctx context.Context, delivery dataplane
 		if s.ratchet == nil {
 			return ErrUnsupportedEncryption
 		}
-		ratchetPayload, payloadErr := s.destinationRatchetPayloadTo(scratch.ratchet[:], scratch.data[:], delivery, expires, route)
+		payloadLen := 3 + 1 + foundation.HashLength + 9 + 4 + destinationDataHeaderLen + len(delivery.Payload)
+		if shouldBundleLeaseSet(delivery) && route.LocalLeaseSet2 && len(route.LocalLeaseSet) != 0 {
+			payloadLen += 3 + 1 + 9 + len(route.LocalLeaseSet)
+		}
+		ratchetPayload, payloadErr := s.destinationRatchetPayloadTo(scratch.ratchet.bytes(payloadLen), scratch.data.bytes(4+destinationDataHeaderLen+len(delivery.Payload)), delivery, expires, route)
 		if payloadErr != nil {
 			return payloadErr
 		}
-		if destinationProtocolRepliable(delivery.Protocol) {
-			encrypted, err = s.ratchet.EncryptWithScratch(scratch.encrypted[:], scratch.plain[:], delivery.To, route.KeyData, uint16(route.KeyType), ratchetPayload, now)
-		} else {
-			encrypted, err = s.ratchet.EncryptUnbound(scratch.encrypted[:], route.KeyData, uint16(route.KeyType), ratchetPayload, now)
+		packetLen, plainLen, sizeErr := dataplanegarlic.RatchetEncryptBufferSizes(len(ratchetPayload), uint16(route.KeyType))
+		if sizeErr != nil {
+			return sizeErr
 		}
-		clear(ratchetPayload)
+		if destinationProtocolRepliable(delivery.Protocol) {
+			encrypted, err = s.ratchet.EncryptWithScratch(scratch.encrypted.bytes(packetLen), scratch.plain.bytes(plainLen), delivery.To, route.KeyData, uint16(route.KeyType), ratchetPayload, now)
+		} else {
+			encrypted, err = s.ratchet.EncryptUnbound(scratch.encrypted.bytes(packetLen), route.KeyData, uint16(route.KeyType), ratchetPayload, now)
+		}
 		if err != nil {
 			return err
 		}
@@ -205,11 +238,25 @@ func (s *PreparedRouteSender) sendTunnel(ctx context.Context, delivery dataplane
 		if s.garlic == nil {
 			return ErrUnsupportedEncryption
 		}
-		cloveSet, cloveErr := s.destinationCloveSetTo(scratch.clove[:], scratch.data[:], delivery, expires, route)
+		cloves := [2]dataplanegarlic.Clove{{Delivery: dataplanegarlic.Delivery{Type: dataplanegarlic.DeliveryDestination}, Message: foundation.I2NPMessage{Payload: delivery.Payload}}}
+		cloveCount := 1
+		if shouldBundleLeaseSet(delivery) && len(route.LocalLeaseSet) != 0 {
+			cloves[1] = dataplanegarlic.Clove{Delivery: dataplanegarlic.Delivery{Type: dataplanegarlic.DeliveryLocal}, Message: foundation.I2NPMessage{Payload: route.LocalLeaseSet}}
+			cloveCount++
+		}
+		cloveLen, sizeErr := dataplanegarlic.CloveSetEncodedLen(cloves[:cloveCount])
+		if sizeErr != nil {
+			return sizeErr
+		}
+		cloveSet, cloveErr := s.destinationCloveSetTo(scratch.clove.bytes(cloveLen+4+destinationDataHeaderLen), scratch.data.bytes(4+destinationDataHeaderLen+len(delivery.Payload)), delivery, expires, route)
 		if cloveErr != nil {
 			return cloveErr
 		}
-		encrypted, err = s.garlic.Encrypt(scratch.encrypted[:], delivery.To, route.LegacyKey, cloveSet, now)
+		packetLen, sizeErr := s.garlic.EncryptBufferSize(len(cloveSet))
+		if sizeErr != nil {
+			return sizeErr
+		}
+		encrypted, err = s.garlic.Encrypt(scratch.encrypted.bytes(packetLen), delivery.To, route.LegacyKey, cloveSet, now)
 		if err != nil {
 			return err
 		}
@@ -254,8 +301,15 @@ func (s *PreparedRouteSender) SendRatchetReply(ctx context.Context, target found
 	return s.finishEncryptedSend(ctx, route, packet, min(saturatingAdd(s.now(), dataPlaneEnvelopeLifetime), route.Expires), scratch)
 }
 func (s *PreparedRouteSender) acquireScratch(ctx context.Context) (*streamingSenderScratch, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	select {
 	case scratch := <-s.scratch:
+		if err := ctx.Err(); err != nil {
+			s.scratch <- scratch
+			return nil, err
+		}
 		return scratch, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -271,11 +325,11 @@ func clearStreamingSenderScratch(scratch *streamingSenderScratch) {
 	if scratch == nil {
 		return
 	}
-	clear(scratch.data[:])
-	clear(scratch.clove[:])
-	clear(scratch.ratchet[:])
-	clear(scratch.plain[:])
-	clear(scratch.encrypted[:])
+	scratch.data.clear()
+	scratch.clove.clear()
+	scratch.ratchet.clear()
+	scratch.plain.clear()
+	scratch.encrypted.clear()
 }
 
 func (s *PreparedRouteSender) finishEncryptedSend(ctx context.Context, route *PreparedRoute, encrypted []byte, expires uint64, scratch *streamingSenderScratch) error {

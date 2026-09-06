@@ -51,20 +51,23 @@ type PairedPoolMaintainerConfig struct {
 // strict dependency order: bootstrap inbound, outbound through that inbound
 // reply route, then later inbound builds through a live outbound path.
 type PairedPoolMaintainer struct {
-	pool           *Pool
-	runtime        dataplane.TunnelCircuitRuntime
-	builder        *BuildManager
-	inboundSource  InboundBuildSource
-	outboundSource PairedOutboundBuildSource
-	now            func() uint64
-	inboundTarget  int
-	outboundTarget int
-	renewBefore    uint64
-	hooks          []MaintenanceHook
-	lifecycleMu    sync.RWMutex
-	ctx            context.Context
-	cancel         context.CancelFunc
-	closed         bool
+	pool             *Pool
+	runtime          dataplane.TunnelCircuitRuntime
+	builder          *BuildManager
+	inboundSource    InboundBuildSource
+	outboundSource   PairedOutboundBuildSource
+	now              func() uint64
+	inboundTarget    int
+	outboundTarget   int
+	renewBefore      uint64
+	hooks            []MaintenanceHook
+	maintenanceMu    sync.Mutex
+	inboundSourceMu  sync.Mutex
+	outboundSourceMu sync.Mutex
+	lifecycleMu      sync.RWMutex
+	ctx              context.Context
+	cancel           context.CancelFunc
+	closed           bool
 }
 
 func NewPairedPoolMaintainer(config PairedPoolMaintainerConfig) (*PairedPoolMaintainer, error) {
@@ -93,17 +96,18 @@ func (m *PairedPoolMaintainer) Maintain(ctx context.Context) (int, error) {
 	if m.closed {
 		return 0, ErrPairedMaintenanceClosed
 	}
+	if !m.maintenanceMu.TryLock() {
+		return 0, nil
+	}
+	defer m.maintenanceMu.Unlock()
 	if ctx == nil {
 		ctx = context.Background()
 	}
-
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(m.ctx, cancel)
-	defer func() {
-		stop()
-		cancel()
-	}()
+	defer func() { stop(); cancel() }()
 	if err := ctx.Err(); err != nil {
+		m.builder.creatorBudget.cancelWait(m.builder)
 		return 0, err
 	}
 	now := m.now()
@@ -113,103 +117,96 @@ func (m *PairedPoolMaintainer) Maintain(ctx context.Context) (int, error) {
 	for _, hook := range m.hooks {
 		hook(now)
 	}
-	pendingInbound := m.builder.PendingDirection(Inbound)
-	pendingOutbound := m.builder.PendingDirection(Outbound)
-	cutoff := now + m.renewBefore
-	if cutoff < now {
-		cutoff = ^uint64(0)
-	}
-
+	cutoff := saturatingDeadline(now, m.renewBefore)
 	outbound, haveOutbound := m.pool.Select(Outbound, now)
 	inbound, haveInbound := m.pool.Select(Inbound, now)
-
-	// A zero-hop carrier is bootstrap-only. Once an inbound reply route exists,
-	// establish its outbound peer before expanding either direction.
-	if !haveInbound {
-		if pendingInbound != 0 {
-			return 0, nil
+	var attempts []*creatorAttempt
+	var resultErr error
+	waiting := false
+	reserve := func(direction Direction, target, limit int, deadline uint64) {
+		for range limit {
+			attempt, err := m.builder.reserveCreator(direction, target, limit, now, deadline)
+			if err != nil {
+				waiting = waiting || errors.Is(err, ErrBuildPending)
+				resultErr = errors.Join(resultErr, err)
+				break
+			}
+			if attempt == nil {
+				break
+			}
+			attempts = append(attempts, attempt)
 		}
-		build, err := m.inboundSource.NextInbound(ctx, now, 0)
-		if err != nil {
-			return 0, err
-		}
-		if _, err = m.builder.StartInbound(ctx, build); err != nil {
-			return 0, err
-		}
-		return 1, nil
 	}
-
-	// An outbound tunnel needs the IBGW's receive-tunnel ID, not the creator's
-	// local inbound circuit ID.
-	if !haveOutbound {
-		if pendingOutbound != 0 {
-			return 0, nil
+	switch {
+	case !haveInbound:
+		reserve(Inbound, 1, 1, now)
+	case !haveOutbound:
+		if inbound.Gateway != (foundation.Hash{}) && inbound.GatewayTunnelID != 0 {
+			reserve(Outbound, 1, 1, now)
 		}
-		if inbound.Gateway == (foundation.Hash{}) || inbound.GatewayTunnelID == 0 {
-			return 0, nil
-		}
-		build, err := m.outboundSource.NextOutboundForReply(ctx, now, ReplyRoute{Gateway: inbound.Gateway, TunnelID: inbound.GatewayTunnelID})
-		if err != nil {
-			return 0, err
-		}
-		if _, err = m.builder.StartOutbound(ctx, build); err != nil {
-			return 0, err
-		}
-		return 1, nil
+	default:
+		reserve(Inbound, m.inboundTarget, 2, cutoff)
+		reserve(Outbound, m.outboundTarget, 2, cutoff)
 	}
-
+	if !waiting {
+		m.builder.creatorBudget.cancelWait(m.builder)
+	}
 	type buildResult struct {
 		started bool
 		err     error
 	}
-	actions := make([]func() buildResult, 0, 2)
-	if pendingInbound == 0 && m.pool.Count(Inbound, cutoff) < m.inboundTarget {
-		actions = append(actions, func() buildResult {
-			build, err := m.inboundSource.NextInbound(ctx, now, outbound.ID)
-			if err != nil {
-				return buildResult{err: err}
+	run := func(attempt *creatorAttempt) buildResult {
+		var err error
+		if attempt.direction == Inbound {
+			carrierID := uint32(0)
+			if haveInbound && haveOutbound {
+				carrierID = outbound.ID
 			}
-			if outbound.HopCount == 0 {
-				return buildResult{err: ErrPairedMaintenanceConfig}
+			m.inboundSourceMu.Lock()
+			build, sourceErr := m.inboundSource.NextInbound(ctx, now, carrierID)
+			m.inboundSourceMu.Unlock()
+			err = sourceErr
+			if err == nil && carrierID != 0 && outbound.HopCount == 0 {
+				err = ErrPairedMaintenanceConfig
 			}
-			build.CarrierEndpoint = outbound.Hops[outbound.HopCount-1]
-			if renewal := m.pool.renewalIDs(Inbound, now, cutoff); len(renewal) != 0 {
-				build.retireID = renewal[0]
+			if err == nil {
+				build.attempt, build.retireID = attempt, attempt.retire.ID
+				if carrierID != 0 {
+					build.CarrierEndpoint = outbound.Hops[outbound.HopCount-1]
+				}
+				_, err = m.builder.StartInbound(ctx, build)
 			}
-			_, err = m.builder.StartInbound(ctx, build)
-			return buildResult{started: err == nil, err: err}
-		})
-	}
-	if pendingOutbound == 0 && m.pool.Count(Outbound, cutoff) < m.outboundTarget {
-		actions = append(actions, func() buildResult {
-			build, err := m.outboundSource.NextOutboundForReply(ctx, now, ReplyRoute{Gateway: inbound.Gateway, TunnelID: inbound.GatewayTunnelID})
-			if err != nil {
-				return buildResult{err: err}
+		} else {
+			m.outboundSourceMu.Lock()
+			build, sourceErr := m.outboundSource.NextOutboundForReply(ctx, now, ReplyRoute{Gateway: inbound.Gateway, TunnelID: inbound.GatewayTunnelID})
+			m.outboundSourceMu.Unlock()
+			err = sourceErr
+			if err == nil {
+				build.attempt, build.retireID = attempt, attempt.retire.ID
+				_, err = m.builder.StartOutbound(ctx, build)
 			}
-			if renewal := m.pool.renewalIDs(Outbound, now, cutoff); len(renewal) != 0 {
-				build.retireID = renewal[0]
-			}
-			_, err = m.builder.StartOutbound(ctx, build)
-			return buildResult{started: err == nil, err: err}
-		})
-	}
-	if len(actions) == 0 {
-		return 0, nil
-	}
-	if len(actions) == 1 {
-		result := actions[0]()
-		if result.started {
-			return 1, result.err
 		}
-		return 0, result.err
+		if err != nil {
+			attempt.failPreparation()
+		}
+		return buildResult{started: err == nil, err: err}
 	}
-	results := make(chan buildResult, len(actions))
-	for _, action := range actions {
-		go func() { results <- action() }()
+	if len(attempts) == 1 {
+		result := run(attempts[0])
+		if result.started {
+			return 1, resultErr
+		}
+		if resultErr == nil {
+			return 0, result.err
+		}
+		return 0, errors.Join(resultErr, result.err)
+	}
+	results := make(chan buildResult, len(attempts))
+	for _, attempt := range attempts {
+		go func() { results <- run(attempt) }()
 	}
 	started := 0
-	var resultErr error
-	for range actions {
+	for range attempts {
 		result := <-results
 		if result.started {
 			started++
@@ -230,6 +227,7 @@ func (m *PairedPoolMaintainer) Close() error {
 	m.closed = true
 	clear(m.hooks)
 	m.hooks = nil
+	m.builder.creatorBudget.cancelWait(m.builder)
 	m.lifecycleMu.Unlock()
 	return nil
 }

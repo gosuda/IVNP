@@ -335,6 +335,7 @@ type destinationRuntimeFactory struct {
 	tunnels                  *dataplane.TunnelRuntime
 	destinations             *dataplane.RouterDestinationManager
 	replyKeys                *dataplane.GarlicReplyKeyRegistry
+	creatorBudget            *tunnel.CreatorBudget
 	replySender              *router.BuildReplySender
 	transport                dataplane.TunnelSender
 	localRouter              foundation.Hash
@@ -441,6 +442,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 		},
 		LocalDelivery: func(message foundation.I2NPMessage) error { return f.service.HandleI2NP(message, f.now(), false) },
 		Now:           f.now, MaxPending: f.cfg.Tunnel.BuildPendingCapacity, Profiles: profiles, Logger: f.logger, Metrics: f.metrics,
+		CreatorBudget: f.creatorBudget,
 		OnBuildEvent: func() {
 			if runtime != nil {
 				runtime.notifyChanged()

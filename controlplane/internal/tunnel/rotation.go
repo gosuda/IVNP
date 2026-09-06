@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"gosuda.org/ivnp/dataplane"
 )
@@ -18,13 +19,14 @@ type OutboundBuildSource interface {
 // Rotator maintains a target number of outbound tunnels. Maintain is intended
 // for one router maintenance worker; it performs no background work itself.
 type Rotator struct {
-	pool        *Pool
-	runtime     dataplane.TunnelCircuitRuntime
-	builder     *BuildManager
-	source      OutboundBuildSource
-	now         func() uint64
-	target      int
-	renewBefore uint64
+	pool          *Pool
+	runtime       dataplane.TunnelCircuitRuntime
+	builder       *BuildManager
+	source        OutboundBuildSource
+	now           func() uint64
+	target        int
+	renewBefore   uint64
+	maintenanceMu sync.Mutex
 }
 
 type RotatorConfig struct {
@@ -52,12 +54,17 @@ func NewRotator(config RotatorConfig) (*Rotator, error) {
 // tunnels already inside the renewal window. Pending builds count toward the
 // target so a slow or hostile network cannot create an unbounded build storm.
 func (r *Rotator) Maintain(ctx context.Context) (started int, err error) {
+	if !r.maintenanceMu.TryLock() {
+		return 0, nil
+	}
+	defer r.maintenanceMu.Unlock()
 	if ctx == nil {
 		ctx = context.
 			Background()
 	}
 
 	if err = ctx.Err(); err != nil {
+		r.builder.creatorBudget.cancelWait(r.builder)
 		return 0, err
 	}
 	now := r.now()
@@ -68,29 +75,26 @@ func (r *Rotator) Maintain(ctx context.Context) (started int, err error) {
 	if cutoff < now {
 		cutoff = ^uint64(0)
 	}
-	usable := r.pool.Count(Outbound, cutoff)
-	reserved := r.builder.pendingRetirements()
-	renewals := r.pool.renewalIDs(Outbound, now, cutoff)
-	candidates := renewals[:0]
-	for _, id := range renewals {
-		if _, pending := reserved[id]; !pending {
-			candidates = append(candidates, id)
+	for range 2 {
+		attempt, reserveErr := r.builder.reserveCreator(Outbound, r.target, 2, now, cutoff)
+		if reserveErr != nil {
+			return started, reserveErr
 		}
-	}
-	needed := r.target - usable - r.builder.Pending()
-	for needed > 0 {
+		if attempt == nil {
+			r.builder.creatorBudget.cancelWait(r.builder)
+			break
+		}
 		build, nextErr := r.source.NextOutbound(ctx, now)
 		if nextErr != nil {
+			attempt.failPreparation()
 			return started, nextErr
 		}
-		if started < len(candidates) {
-			build.retireID = candidates[started]
-		}
+		build.attempt, build.retireID = attempt, attempt.retire.ID
 		if _, nextErr = r.builder.StartOutbound(ctx, build); nextErr != nil {
+			attempt.failPreparation()
 			return started, nextErr
 		}
 		started++
-		needed--
 	}
 	return started, nil
 }

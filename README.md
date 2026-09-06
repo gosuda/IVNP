@@ -196,12 +196,39 @@ fresh verified floodfill RouterInfos; configured static seeds are not persisted
 as observed successes. Selection rotates eligible hints rather than pinning every
 lookup to one peer. Neither cache replaces signature checks or tunnel readiness.
 
-Initial inbound builds establish the return-hop transport before sending the
-bootstrap request, without reducing the configured hop count. Later builds using
-an established carrier do not add this direct preflight.
+Initial inbound builds prepare distinct first-hop and return-hop transports
+concurrently, then send only after both succeed. Cancellation joins both
+preparations without treating sibling cancellation as peer failure. The
+configured hop count is unchanged; later carrier-based builds do not add this
+direct preflight.
+
+After the first inbound/outbound pair exists, maintenance can prepare up to two
+builds per direction. `[tunnel] build_pending_capacity` bounds preparing and
+reply-pending creators across the router, as well as each manager. Maintenance
+owners wait in a fair queue; direct `Start*` calls return backpressure without
+registering persistent waits. Failed preparation cancels obsolete waits before
+releasing admission, avoiding self-triggered retry loops. Expected backpressure
+does not poison lifecycle status, while independent real failures remain visible.
+
+Logical target and renewal claims survive the late-reply grace period while
+timeouts release active admission for retries. Retries retain retirement
+identity but refresh the scheduling window; only one competing reply can satisfy
+a claim. Circuit installation tokens protect renewed paths from stale replies.
 
 RouterInfo seeding shares bounded encoding and per-transport-session caches
 across destinations in one router. Snapshot changes, session replacement, and
 expiry trigger reseeding; failed sends are not cached as successes. Router
 shutdown releases cached session references. Compression reuses bounded scratch
 state while returning independently owned deterministic gzip bytes.
+
+Prepared senders allocate payload scratch backing on demand within fixed
+admission slots. Writable spans are recorded before serialization or encryption
+and wiped on release, including partial failures. First use and larger messages
+may allocate; warmed storage is reused. Framed ciphertext remains independently
+owned so network backpressure does not pin scratch storage. Tunnel encoding
+combines IV and padding entropy into one cryptographic read.
+
+Allocation counts, memory use, and throughput are benchmark measurements, not
+unit-test pass/fail thresholds. Protocol bounds, cancellation, configured
+deadlines, admission capacity, and sensitive-memory cleanup remain behavioral
+test contracts.

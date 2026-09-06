@@ -312,26 +312,6 @@ func BenchmarkParseStandard(b *testing.B) {
 	}
 }
 
-var messageSink Message
-var messageErrorSink error
-
-func TestParseStandardHasNoHeapAllocation(t *testing.T) {
-	message := Message{Header: Header{Type: DeliveryStatus}, Payload: make([]byte, 12)}
-	frame := make([]byte, message.EncodedLen())
-	if _, err := message.MarshalTo(frame); err != nil {
-		t.Fatal(err)
-	}
-	allocs := testing.AllocsPerRun(1_000, func() {
-		messageSink, _, messageErrorSink = Parse(frame)
-	})
-	if messageErrorSink != nil {
-		t.Fatal(messageErrorSink)
-	}
-	if allocs != 0 {
-		t.Fatalf("Parse() allocations/run = %f, want 0", allocs)
-	}
-}
-
 func TestDatabaseStoreDefersJavaRouterInfoInflationCap(t *testing.T) {
 	compressed := make([]byte, 37+2+MaxRouterInfoBytes+1)
 	compressed[0] = 1

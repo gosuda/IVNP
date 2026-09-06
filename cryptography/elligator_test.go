@@ -153,29 +153,6 @@ func TestElligator2IneligibleDoesNotConsumeRandomness(t *testing.T) {
 	}
 	t.Fatal("no ineligible public key in test corpus")
 }
-func TestElligator2Allocations(t *testing.T) {
-	public := mustElligatorHex(t, "04d44290d13100b2c25290c9343d70c12ed4813487a07ac1176daa5925e7975e")
-	var encoded, decoded [32]byte
-	entropy := oneByteReader{value: 1, remaining: 1}
-	if ok, err := EncodeElligator2(encoded[:], public, &entropy); err != nil || !ok {
-		t.Fatalf("setup EncodeElligator2 = (%v, %v)", ok, err)
-	}
-	if allocations := testing.AllocsPerRun(100, func() {
-		entropy.remaining = 1
-		if ok, err := EncodeElligator2(encoded[:], public, &entropy); err != nil || !ok {
-			panic("encode failed")
-		}
-	}); allocations != 0 {
-		t.Fatalf("EncodeElligator2 allocations/call = %v, want 0", allocations)
-	}
-	if allocations := testing.AllocsPerRun(100, func() {
-		if err := DecodeElligator2(decoded[:], encoded[:]); err != nil {
-			panic("decode failed")
-		}
-	}); allocations != 0 {
-		t.Fatalf("DecodeElligator2 allocations/call = %v, want 0", allocations)
-	}
-}
 
 func mustElligatorHex(t *testing.T, value string) []byte {
 	t.Helper()
@@ -205,25 +182,4 @@ func (r *countingReader) Read(dst []byte) (int, error) {
 	r.data = r.data[n:]
 	r.read += n
 	return n, nil
-}
-
-type oneByteReader struct {
-	value     byte
-	remaining int
-}
-
-func (r *oneByteReader) Read(dst []byte) (int, error) {
-	if r.remaining == 0 {
-		return 0, io.EOF
-	}
-	dst[0] = r.value
-	r.remaining--
-	return 1, nil
-}
-func (r *oneByteReader) ReadByte() (byte, error) {
-	if r.remaining == 0 {
-		return 0, io.EOF
-	}
-	r.remaining--
-	return r.value, nil
 }

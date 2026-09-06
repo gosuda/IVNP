@@ -40,6 +40,7 @@ func (r *buildXorShiftReader) Read(dst []byte) (int, error) {
 }
 
 type buildReplyRegistry struct {
+	mu      sync.Mutex
 	entries map[[8]byte]dataplane.GarlicReplyKey
 	removed [][8]byte
 }
@@ -49,16 +50,22 @@ func newBuildReplyRegistry() *buildReplyRegistry {
 }
 
 func (r *buildReplyRegistry) RegisterGarlicReplyKey(key dataplane.GarlicReplyKey) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.entries[key.Tag] = key
 	return nil
 }
 
 func (r *buildReplyRegistry) RemoveGarlicReplyKey(tag [8]byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	delete(r.entries, tag)
 	r.removed = append(r.removed, tag)
 }
 
 func (r *buildReplyRegistry) consume(tag [8]byte) (dataplane.GarlicReplyKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	key, ok := r.entries[tag]
 	if !ok {
 		return dataplane.GarlicReplyKey{}, ErrBuildPending
@@ -107,6 +114,8 @@ type sessionCaptureTunnelSender struct {
 }
 
 func (s *sessionCaptureTunnelSender) EnsureSession(_ context.Context, peer foundation.Hash) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.sessions = append(s.sessions, peer)
 	return nil
 }

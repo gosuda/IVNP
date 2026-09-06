@@ -9,6 +9,12 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+const sessionBodyFixedLen = 2 + 4 + 32 + 1
+
+func sessionBodyEncodedLen(payloadLen, tagsLen int) int {
+	return (sessionBodyFixedLen + tagsLen + payloadLen + aes.BlockSize - 1) &^ (aes.BlockSize - 1)
+}
+
 // EncryptExisting writes tag || AES-CBC(session block) into dst. deliveredTags
 // is a flat sequence of 32-byte tags. Padding is drawn from crypto/rand before
 // encryption so equal payloads cannot be correlated by deterministic tails.
@@ -30,12 +36,11 @@ func encryptSessionBody(dst, ivMaterial, key, payload, deliveredTags []byte) ([]
 	if len(ivMaterial) != 32 || len(key) != 32 || len(payload) > foundation.I2NPI2PDMaxPayload || len(deliveredTags)%32 != 0 || len(deliveredTags)/32 > MaxSessionTags {
 		return nil, ErrSession
 	}
-	const fixed = 2 + 4 + 32 + 1
-	if len(deliveredTags) > foundation.I2NPI2PDMaxPayload-fixed || len(payload) > foundation.I2NPI2PDMaxPayload-fixed-len(deliveredTags) {
+	if len(deliveredTags) > foundation.I2NPI2PDMaxPayload-sessionBodyFixedLen || len(payload) > foundation.I2NPI2PDMaxPayload-sessionBodyFixedLen-len(deliveredTags) {
 		return nil, ErrSession
 	}
-	plainLen := fixed + len(deliveredTags) + len(payload)
-	cipherLen := (plainLen + aes.BlockSize - 1) &^ (aes.BlockSize - 1)
+	plainLen := sessionBodyFixedLen + len(deliveredTags) + len(payload)
+	cipherLen := sessionBodyEncodedLen(len(payload), len(deliveredTags))
 	if len(dst) < cipherLen {
 		return nil, ErrSession
 	}

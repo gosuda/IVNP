@@ -24,11 +24,12 @@ const (
 )
 
 var (
-	ErrRatchet          = dataplanegarlicecies.ErrRatchet
-	ErrRatchetClosed    = dataplanegarlicecies.ErrRatchetClosed
-	ErrRatchetReplay    = dataplanegarlicecies.ErrRatchetReplay
-	ErrRatchetExpired   = dataplanegarlicecies.ErrRatchetExpired
-	ErrRatchetNoSession = dataplanegarlicecies.ErrRatchetNoSession
+	ErrRatchet                = dataplanegarlicecies.ErrRatchet
+	ErrRatchetClosed          = dataplanegarlicecies.ErrRatchetClosed
+	ErrRatchetReplay          = dataplanegarlicecies.ErrRatchetReplay
+	ErrRatchetExpired         = dataplanegarlicecies.ErrRatchetExpired
+	ErrRatchetNoSession       = dataplanegarlicecies.ErrRatchetNoSession
+	RatchetEncryptBufferSizes = dataplanegarlicecies.RatchetEncryptBufferSizes
 )
 
 // RatchetManager coordinates sharded ECIES ratchet sessions across worker routines.
