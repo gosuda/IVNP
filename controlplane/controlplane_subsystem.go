@@ -1,3 +1,5 @@
+// Package controlplane owns discovery, routing policy, and data-plane programming.
+// Use node or the top-level ivnp package to include SAM and proxy listeners.
 package controlplane
 
 import (
@@ -11,11 +13,13 @@ import (
 )
 
 type (
-	Controller                                          = noderuntime.Controller
-	ControllerOptions                                   = noderuntime.ControllerOptions
-	DestinationPolicy                                   = noderuntime.DestinationPolicy
-	DestinationPolicyKind                               = noderuntime.DestinationPolicyKind
-	DestinationSummary                                  = noderuntime.DestinationSummary
+	// Controller owns durable router state and maintenance, not client-service listeners.
+	Controller            = noderuntime.Controller
+	ControllerOptions     = noderuntime.ControllerOptions
+	DestinationPolicy     = noderuntime.DestinationPolicy
+	DestinationPolicyKind = noderuntime.DestinationPolicyKind
+	DestinationSummary    = noderuntime.DestinationSummary
+	// ManagementStatus separates process lifecycle from full router readiness.
 	ManagementStatus                                    = noderuntime.ManagementStatus
 	NATRuntime                                          = noderuntime.NATRuntime
 	NetworkAddressTranslationPortMappingClient          = natpmp.Client
@@ -53,112 +57,122 @@ type (
 	NetworkDatabaseReplyPathSource                      = netdb.ReplyPathSource
 	NetworkDatabaseReplyRoute                           = netdb.ReplyRoute
 	NetworkDatabaseReplySender                          = netdb.ReplySender
-	NetworkDatabaseRequestManager                       = netdb.RequestManager
-	NetworkDatabaseRequestManagerConfig                 = netdb.RequestManagerConfig
-	NetworkDatabaseRequestSender                        = netdb.RequestSender
-	NetworkDatabaseResponderProfiles                    = netdb.ResponderProfiles
-	NetworkDatabaseRouterInfoContacts                   = netdb.RouterInfoContacts
-	NetworkDatabaseRouterInfoLoadResult                 = netdb.RouterInfoLoadResult
-	NetworkDatabaseRouterInfoPublisher                  = netdb.RouterInfoPublisher
-	NetworkDatabaseRouterInfoPublisherConfig            = netdb.RouterInfoPublisherConfig
-	NetworkDatabaseRouterInfoSource                     = netdb.RouterInfoSource
-	NetworkDatabaseRouterInfoStore                      = netdb.RouterInfoStore
-	NetworkDatabaseRouterInfoStoreConfig                = netdb.RouterInfoStoreConfig
-	NetworkDatabaseRouterRef                            = netdb.RouterRef
-	NetworkDatabaseStoreFloodSender                     = netdb.StoreFloodSender
-	NetworkDatabaseStoreFlooder                         = netdb.StoreFlooder
-	NetworkDatabaseStoreFlooderConfig                   = netdb.StoreFlooderConfig
-	NetworkDatabaseTable                                = netdb.Table
-	ReadinessDetails                                    = noderuntime.ReadinessDetails
-	ReseedClient                                        = reseed.Client
-	ReseedSU3Signer                                     = reseed.SU3Signer
-	Router                                              = router.Router
-	RouterAddressPublisher                              = router.AddressPublisher
-	RouterAddressPublisherCloser                        = router.AddressPublisherCloser
-	RouterBuildReplySender                              = router.BuildReplySender
-	RouterBuildReplySenderConfig                        = router.BuildReplySenderConfig
-	RouterConfig                                        = router.Config
-	RouterControlDispatcher                             = router.ControlDispatcher
-	RouterControlDispatcherConfig                       = router.ControlDispatcherConfig
-	RouterControlSinks                                  = router.ControlSinks
-	RouterDeliveryStatusHandler                         = router.DeliveryStatusHandler
-	RouterDeliveryStatusMux                             = router.DeliveryStatusMux
-	RouterDependencies                                  = router.Dependencies
-	RouterLeaseSetRefresher                             = router.LeaseSetRefresher
-	RouterLocalInfo                                     = router.LocalInfo
-	RouterLocalRouterInfo                               = router.LocalRouterInfo
-	RouterLocalRouterInfoConfig                         = router.LocalRouterInfoConfig
-	RouterMappingOption                                 = router.MappingOption
-	RouterNetDBRequestHandler                           = router.NetDBRequestHandler
-	RouterPeerSelector                                  = router.PeerSelector
-	RouterPublicationMaintenance                        = router.PublicationMaintenance
-	RouterPublicationMaintenanceConfig                  = router.PublicationMaintenanceConfig
-	RouterPublicationMaintenanceResult                  = router.PublicationMaintenanceResult
-	RouterPublishedAddress                              = router.PublishedAddress
-	RouterReachability                                  = router.Reachability
-	RouterRemoteELSContext                              = router.RemoteELSContext
-	RouterReseedRunner                                  = router.ReseedRunner
-	RouterRouterInfoRefresher                           = router.RouterInfoRefresher
-	RouterSocketAddressPublisher                        = router.SocketAddressPublisher
-	RouterState                                         = router.State
-	RouterStatus                                        = router.Status
-	RouterStreamBackend                                 = router.StreamBackend
-	RouterStreamingTunnelSender                         = router.StreamingTunnelSender
-	RouterStreamingTunnelSenderConfig                   = router.StreamingTunnelSenderConfig
-	RouterTransportMux                                  = router.TransportMux
-	RouterTransportMuxConfig                            = router.TransportMuxConfig
-	RouterTunnelBuildReplyHandler                       = router.TunnelBuildReplyHandler
-	Status                                              = noderuntime.Status
-	TunnelBuildAdmission                                = tunnel.BuildAdmission
-	TunnelBuildBandwidth                                = tunnel.BuildBandwidth
-	TunnelBuildManager                                  = tunnel.BuildManager
-	TunnelBuildManagerConfig                            = tunnel.BuildManagerConfig
-	TunnelBuildReplySender                              = tunnel.BuildReplySender
-	TunnelBuildScheduleFunc                             = tunnel.BuildScheduleFunc
-	TunnelBuildSource                                   = tunnel.BuildSource
-	TunnelBuildStaticKeyLookup                          = tunnel.BuildStaticKeyLookup
-	TunnelCircuitPair                                   = tunnel.CircuitPair
-	TunnelDirection                                     = tunnel.Direction
-	TunnelEntry                                         = tunnel.Entry
-	TunnelHealth                                        = tunnel.Health
-	TunnelHealthConfig                                  = tunnel.HealthConfig
-	TunnelInboundBuild                                  = tunnel.InboundBuild
-	TunnelInboundBuildSource                            = tunnel.InboundBuildSource
-	TunnelMaintenanceHook                               = tunnel.MaintenanceHook
-	TunnelNetDBInboundBuildSource                       = tunnel.NetDBInboundBuildSource
-	TunnelNetDBInboundBuildSourceConfig                 = tunnel.NetDBInboundBuildSourceConfig
-	TunnelNetDBOutboundBuildSource                      = tunnel.NetDBOutboundBuildSource
-	TunnelNetDBOutboundBuildSourceConfig                = tunnel.NetDBOutboundBuildSourceConfig
-	TunnelObservation                                   = tunnel.Observation
-	TunnelObservationKind                               = tunnel.ObservationKind
-	TunnelOutboundBuild                                 = tunnel.OutboundBuild
-	TunnelOutboundBuildSource                           = tunnel.OutboundBuildSource
-	TunnelPairedOutboundBuildSource                     = tunnel.PairedOutboundBuildSource
-	TunnelPairedPoolMaintainer                          = tunnel.PairedPoolMaintainer
-	TunnelPairedPoolMaintainerConfig                    = tunnel.PairedPoolMaintainerConfig
-	TunnelPeerProfile                                   = tunnel.PeerProfile
-	TunnelPeerProfiles                                  = tunnel.PeerProfiles
-	TunnelPeerProfilesConfig                            = tunnel.PeerProfilesConfig
-	TunnelPool                                          = tunnel.Pool
-	TunnelReplyRoute                                    = tunnel.ReplyRoute
-	TunnelRotator                                       = tunnel.Rotator
-	TunnelRotatorConfig                                 = tunnel.RotatorConfig
-	TunnelRouterInfoSeeder                              = tunnel.RouterInfoSeeder
-	TunnelRuntimeSnapshot                               = noderuntime.TunnelRuntimeSnapshot
-	TunnelSessionEnsurer                                = tunnel.SessionEnsurer
-	TunnelShortBuildHop                                 = tunnel.ShortBuildHop
-	TunnelShortBuildKeys                                = tunnel.ShortBuildKeys
-	TunnelShortBuildOptions                             = tunnel.ShortBuildOptions
-	TunnelShortBuildRequest                             = tunnel.ShortBuildRequest
-	TunnelVariableBuildHop                              = tunnel.VariableBuildHop
-	TunnelVariableBuildKeys                             = tunnel.VariableBuildKeys
-	TunnelVariableBuildKind                             = tunnel.VariableBuildKind
-	TunnelVariableBuildRequest                          = tunnel.VariableBuildRequest
-	TunnelVariableOutboundBuild                         = tunnel.VariableOutboundBuild
-	UniversalPlugAndPlayClient                          = upnp.Client
-	UniversalPlugAndPlayDiscoveryResponse               = upnp.DiscoveryResponse
-	UniversalPlugAndPlayGateway                         = upnp.Gateway
-	UniversalPlugAndPlayPortMapping                     = upnp.PortMapping
+	// NetworkDatabaseRequestManager coalesces lookups; Close cancels and joins send work.
+	NetworkDatabaseRequestManager            = netdb.RequestManager
+	NetworkDatabaseRequestManagerConfig      = netdb.RequestManagerConfig
+	NetworkDatabaseRequestSender             = netdb.RequestSender
+	NetworkDatabaseResponderProfiles         = netdb.ResponderProfiles
+	NetworkDatabaseRouterInfoContacts        = netdb.RouterInfoContacts
+	NetworkDatabaseRouterInfoLoadResult      = netdb.RouterInfoLoadResult
+	NetworkDatabaseRouterInfoPublisher       = netdb.RouterInfoPublisher
+	NetworkDatabaseRouterInfoPublisherConfig = netdb.RouterInfoPublisherConfig
+	NetworkDatabaseRouterInfoSource          = netdb.RouterInfoSource
+	NetworkDatabaseRouterInfoStore           = netdb.RouterInfoStore
+	NetworkDatabaseRouterInfoStoreConfig     = netdb.RouterInfoStoreConfig
+	NetworkDatabaseRouterRef                 = netdb.RouterRef
+	NetworkDatabaseStoreFloodSender          = netdb.StoreFloodSender
+	NetworkDatabaseStoreFlooder              = netdb.StoreFlooder
+	NetworkDatabaseStoreFlooderConfig        = netdb.StoreFlooderConfig
+	NetworkDatabaseTable                     = netdb.Table
+	ReadinessDetails                         = noderuntime.ReadinessDetails
+	ReseedClient                             = reseed.Client
+	ReseedSU3Signer                          = reseed.SU3Signer
+	Router                                   = router.Router
+	RouterAddressPublisher                   = router.AddressPublisher
+	RouterAddressPublisherCloser             = router.AddressPublisherCloser
+	RouterBuildReplySender                   = router.BuildReplySender
+	RouterBuildReplySenderConfig             = router.BuildReplySenderConfig
+	RouterConfig                             = router.Config
+	// RouterControlDispatcher preserves lookup privacy before queueing and applies
+	// bounded execution deadlines to admitted control messages.
+	RouterControlDispatcher            = router.ControlDispatcher
+	RouterControlDispatcherConfig      = router.ControlDispatcherConfig
+	RouterControlSinks                 = router.ControlSinks
+	RouterDeliveryStatusHandler        = router.DeliveryStatusHandler
+	RouterDeliveryStatusMux            = router.DeliveryStatusMux
+	RouterDependencies                 = router.Dependencies
+	RouterLeaseSetRefresher            = router.LeaseSetRefresher
+	RouterLocalInfo                    = router.LocalInfo
+	RouterLocalRouterInfo              = router.LocalRouterInfo
+	RouterLocalRouterInfoConfig        = router.LocalRouterInfoConfig
+	RouterMappingOption                = router.MappingOption
+	RouterNetDBRequestHandler          = router.NetDBRequestHandler
+	RouterPeerSelector                 = router.PeerSelector
+	RouterPublicationMaintenance       = router.PublicationMaintenance
+	RouterPublicationMaintenanceConfig = router.PublicationMaintenanceConfig
+	RouterPublicationMaintenanceResult = router.PublicationMaintenanceResult
+	RouterPublishedAddress             = router.PublishedAddress
+	RouterReachability                 = router.Reachability
+	// RouterRemoteELSContext makes its target encrypted-only; plaintext LeaseSet
+	// fallback is forbidden even when no client authorization key is supplied.
+	RouterRemoteELSContext       = router.RemoteELSContext
+	RouterReseedRunner           = router.ReseedRunner
+	RouterRouterInfoRefresher    = router.RouterInfoRefresher
+	RouterSocketAddressPublisher = router.SocketAddressPublisher
+	RouterState                  = router.State
+	RouterStatus                 = router.Status
+	RouterStreamBackend          = router.StreamBackend
+	// RouterStreamingTunnelSender may wait for route preparation or a ratchet reply.
+	// Receive workers must not call this application-side adapter synchronously.
+	RouterStreamingTunnelSender       = router.StreamingTunnelSender
+	RouterStreamingTunnelSenderConfig = router.StreamingTunnelSenderConfig
+	// RouterTransportMux may establish sessions for control sends. Use DataSender
+	// for forwarding that must never dial or resolve a peer.
+	RouterTransportMux            = router.TransportMux
+	RouterTransportMuxConfig      = router.TransportMuxConfig
+	RouterTunnelBuildReplyHandler = router.TunnelBuildReplyHandler
+	Status                        = noderuntime.Status
+	TunnelBuildAdmission          = tunnel.BuildAdmission
+	TunnelBuildBandwidth          = tunnel.BuildBandwidth
+	TunnelBuildManager            = tunnel.BuildManager
+	TunnelBuildManagerConfig      = tunnel.BuildManagerConfig
+	TunnelBuildReplySender        = tunnel.BuildReplySender
+	TunnelBuildScheduleFunc       = tunnel.BuildScheduleFunc
+	TunnelBuildSource             = tunnel.BuildSource
+	TunnelBuildStaticKeyLookup    = tunnel.BuildStaticKeyLookup
+	TunnelCircuitPair             = tunnel.CircuitPair
+	TunnelDirection               = tunnel.Direction
+	// TunnelEntry.Circuit identifies the installation; ID alone is unsafe after replacement.
+	TunnelEntry                           = tunnel.Entry
+	TunnelHealth                          = tunnel.Health
+	TunnelHealthConfig                    = tunnel.HealthConfig
+	TunnelInboundBuild                    = tunnel.InboundBuild
+	TunnelInboundBuildSource              = tunnel.InboundBuildSource
+	TunnelMaintenanceHook                 = tunnel.MaintenanceHook
+	TunnelNetDBInboundBuildSource         = tunnel.NetDBInboundBuildSource
+	TunnelNetDBInboundBuildSourceConfig   = tunnel.NetDBInboundBuildSourceConfig
+	TunnelNetDBOutboundBuildSource        = tunnel.NetDBOutboundBuildSource
+	TunnelNetDBOutboundBuildSourceConfig  = tunnel.NetDBOutboundBuildSourceConfig
+	TunnelObservation                     = tunnel.Observation
+	TunnelObservationKind                 = tunnel.ObservationKind
+	TunnelOutboundBuild                   = tunnel.OutboundBuild
+	TunnelOutboundBuildSource             = tunnel.OutboundBuildSource
+	TunnelPairedOutboundBuildSource       = tunnel.PairedOutboundBuildSource
+	TunnelPairedPoolMaintainer            = tunnel.PairedPoolMaintainer
+	TunnelPairedPoolMaintainerConfig      = tunnel.PairedPoolMaintainerConfig
+	TunnelPeerProfile                     = tunnel.PeerProfile
+	TunnelPeerProfiles                    = tunnel.PeerProfiles
+	TunnelPeerProfilesConfig              = tunnel.PeerProfilesConfig
+	TunnelPool                            = tunnel.Pool
+	TunnelReplyRoute                      = tunnel.ReplyRoute
+	TunnelRotator                         = tunnel.Rotator
+	TunnelRotatorConfig                   = tunnel.RotatorConfig
+	TunnelRouterInfoSeeder                = tunnel.RouterInfoSeeder
+	TunnelRuntimeSnapshot                 = noderuntime.TunnelRuntimeSnapshot
+	TunnelSessionEnsurer                  = tunnel.SessionEnsurer
+	TunnelShortBuildHop                   = tunnel.ShortBuildHop
+	TunnelShortBuildKeys                  = tunnel.ShortBuildKeys
+	TunnelShortBuildOptions               = tunnel.ShortBuildOptions
+	TunnelShortBuildRequest               = tunnel.ShortBuildRequest
+	TunnelVariableBuildHop                = tunnel.VariableBuildHop
+	TunnelVariableBuildKeys               = tunnel.VariableBuildKeys
+	TunnelVariableBuildKind               = tunnel.VariableBuildKind
+	TunnelVariableBuildRequest            = tunnel.VariableBuildRequest
+	TunnelVariableOutboundBuild           = tunnel.VariableOutboundBuild
+	UniversalPlugAndPlayClient            = upnp.Client
+	UniversalPlugAndPlayDiscoveryResponse = upnp.DiscoveryResponse
+	UniversalPlugAndPlayGateway           = upnp.Gateway
+	UniversalPlugAndPlayPortMapping       = upnp.PortMapping
 )
 
 const (

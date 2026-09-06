@@ -1,3 +1,6 @@
+// Package dataplane executes traffic over installed circuits and authenticated
+// sessions. Discovery and route policy belong to controlplane; nonce, replay,
+// ratchet, and retransmission state remain with their execution owners here.
 package dataplane
 
 import (
@@ -14,61 +17,64 @@ import (
 )
 
 type (
-	DatagramOfflineSignature           = datagram.OfflineSignature
-	DatagramPacket                     = datagram.Packet
-	DatagramSigner                     = datagram.Signer
-	DatagramV1                         = datagram.V1
-	DatagramV2                         = datagram.V2
-	DatagramV3                         = datagram.V3
-	GarlicClove                        = garlic.Clove
-	GarlicCloveSet                     = garlic.CloveSet
-	GarlicDatabaseLookupReplyWrapper   = garlic.DatabaseLookupReplyWrapper
-	GarlicDelivery                     = garlic.Delivery
-	GarlicDeliveryType                 = garlic.DeliveryType
-	GarlicECIESACK                     = garlicecies.ACK
-	GarlicECIESHybridInitiator         = garlicecies.HybridInitiator
-	GarlicECIESHybridResponder         = garlicecies.HybridResponder
-	GarlicECIESInitiator               = garlicecies.Initiator
-	GarlicECIESNewSessionCandidate     = garlicecies.NewSessionCandidate
-	GarlicECIESNewSessionCommit        = garlicecies.NewSessionCommit
-	GarlicECIESRatchetConfig           = garlicecies.RatchetConfig
-	GarlicECIESRatchetManager          = garlicecies.RatchetManager
-	GarlicECIESRatchetOptions          = garlicecies.RatchetOptions
-	GarlicECIESRatchetResult           = garlicecies.RatchetResult
-	GarlicECIESRatchetStats            = garlicecies.RatchetStats
-	GarlicECIESResponder               = garlicecies.Responder
-	GarlicECIESSessionTag              = garlicecies.SessionTag
-	GarlicECIESTagObserver             = garlicecies.TagObserver
-	GarlicIterator                     = garlic.Iterator
-	GarlicNewSessionCandidate          = garlic.NewSessionCandidate
-	GarlicNewSessionCommit             = garlic.NewSessionCommit
-	GarlicRatchetACK                   = garlic.RatchetACK
-	GarlicRatchetConfig                = garlic.RatchetConfig
-	GarlicRatchetManager               = garlic.RatchetManager
-	GarlicRatchetOptions               = garlic.RatchetOptions
-	GarlicRatchetResult                = garlic.RatchetResult
-	GarlicRatchetStats                 = garlic.RatchetStats
-	GarlicReplyKey                     = garlic.GarlicReplyKey
-	GarlicReplyKeyConsumer             = garlic.ReplyKeyConsumer
-	GarlicReplyKeyRegistry             = garlic.ReplyKeyRegistry
-	GarlicReplyKeyRegistryContract     = garlic.GarlicReplyKeyRegistry
-	GarlicSessionManager               = garlic.SessionManager
-	GarlicSessionManagerConfig         = garlic.SessionManagerConfig
-	GarlicTagStore                     = garlic.TagStore
-	NTCP2Block                         = ntcp2.Block
-	NTCP2BlockIterator                 = ntcp2.BlockIterator
-	NTCP2Direction                     = ntcp2.Direction
-	NTCP2Initiator                     = ntcp2.Initiator
-	NTCP2Responder                     = ntcp2.Responder
-	NTCP2Session                       = ntcp2.Session
-	NTCP2SessionCreatedOptions         = ntcp2.SessionCreatedOptions
-	NTCP2SessionRequestOptions         = ntcp2.SessionRequestOptions
-	NTCP2SipState                      = ntcp2.SipState
-	NoiseSymmetricState                = noise.SymmetricState
-	RouterClock                        = router.Clock
-	RouterControlHandler               = router.ControlHandler
-	RouterControlIngress               = router.ControlIngress
-	RouterControlMessage               = router.ControlMessage
+	DatagramOfflineSignature         = datagram.OfflineSignature
+	DatagramPacket                   = datagram.Packet
+	DatagramSigner                   = datagram.Signer
+	DatagramV1                       = datagram.V1
+	DatagramV2                       = datagram.V2
+	DatagramV3                       = datagram.V3
+	GarlicClove                      = garlic.Clove
+	GarlicCloveSet                   = garlic.CloveSet
+	GarlicDatabaseLookupReplyWrapper = garlic.DatabaseLookupReplyWrapper
+	GarlicDelivery                   = garlic.Delivery
+	GarlicDeliveryType               = garlic.DeliveryType
+	GarlicECIESACK                   = garlicecies.ACK
+	GarlicECIESHybridInitiator       = garlicecies.HybridInitiator
+	GarlicECIESHybridResponder       = garlicecies.HybridResponder
+	GarlicECIESInitiator             = garlicecies.Initiator
+	GarlicECIESNewSessionCandidate   = garlicecies.NewSessionCandidate
+	GarlicECIESNewSessionCommit      = garlicecies.NewSessionCommit
+	GarlicECIESRatchetConfig         = garlicecies.RatchetConfig
+	GarlicECIESRatchetManager        = garlicecies.RatchetManager
+	GarlicECIESRatchetOptions        = garlicecies.RatchetOptions
+	GarlicECIESRatchetResult         = garlicecies.RatchetResult
+	GarlicECIESRatchetStats          = garlicecies.RatchetStats
+	GarlicECIESResponder             = garlicecies.Responder
+	GarlicECIESSessionTag            = garlicecies.SessionTag
+	GarlicECIESTagObserver           = garlicecies.TagObserver
+	GarlicIterator                   = garlic.Iterator
+	GarlicNewSessionCandidate        = garlic.NewSessionCandidate
+	GarlicNewSessionCommit           = garlic.NewSessionCommit
+	GarlicRatchetACK                 = garlic.RatchetACK
+	GarlicRatchetConfig              = garlic.RatchetConfig
+	GarlicRatchetManager             = garlic.RatchetManager
+	GarlicRatchetOptions             = garlic.RatchetOptions
+	GarlicRatchetResult              = garlic.RatchetResult
+	GarlicRatchetStats               = garlic.RatchetStats
+	GarlicReplyKey                   = garlic.GarlicReplyKey
+	GarlicReplyKeyConsumer           = garlic.ReplyKeyConsumer
+	GarlicReplyKeyRegistry           = garlic.ReplyKeyRegistry
+	GarlicReplyKeyRegistryContract   = garlic.GarlicReplyKeyRegistry
+	GarlicSessionManager             = garlic.SessionManager
+	GarlicSessionManagerConfig       = garlic.SessionManagerConfig
+	GarlicTagStore                   = garlic.TagStore
+	NTCP2Block                       = ntcp2.Block
+	NTCP2BlockIterator               = ntcp2.BlockIterator
+	NTCP2Direction                   = ntcp2.Direction
+	NTCP2Initiator                   = ntcp2.Initiator
+	NTCP2Responder                   = ntcp2.Responder
+	NTCP2Session                     = ntcp2.Session
+	NTCP2SessionCreatedOptions       = ntcp2.SessionCreatedOptions
+	NTCP2SessionRequestOptions       = ntcp2.SessionRequestOptions
+	NTCP2SipState                    = ntcp2.SipState
+	NoiseSymmetricState              = noise.SymmetricState
+	RouterClock                      = router.Clock
+	RouterControlHandler             = router.ControlHandler
+	RouterControlIngress             = router.ControlIngress
+	// RouterControlMessage retains authenticated source and private-lookup provenance.
+	RouterControlMessage = router.ControlMessage
+	// RouterControlQueue copies admitted payloads; item and byte limits include
+	// both queued messages and the active handler.
 	RouterControlQueue                 = router.ControlQueue
 	RouterControlQueueLimits           = router.ControlQueueLimits
 	RouterDeliveryForwarder            = router.DeliveryForwarder
@@ -80,31 +86,41 @@ type (
 	RouterDestinationSession           = router.DestinationSession
 	RouterDestinationSessionConfig     = router.DestinationSessionConfig
 	RouterEndpoint                     = router.Endpoint
-	RouterEstablishedSender            = router.EstablishedSender
-	RouterEstablishedSessionRegistry   = router.EstablishedSessionRegistry
-	RouterGarlicDestination            = router.GarlicDestination
-	RouterGarlicReceiver               = router.GarlicReceiver
-	RouterGarlicReceiverConfig         = router.GarlicReceiverConfig
-	RouterI2NPSource                   = router.I2NPSource
-	RouterIOStats                      = router.IOStats
-	RouterLifecycle                    = router.Lifecycle
-	RouterMessageIDSource              = router.MessageIDSource
-	RouterNTCP2Manager                 = router.NTCP2Manager
-	RouterNTCP2ManagerConfig           = router.NTCP2ManagerConfig
-	RouterNativeSocketRuntime          = router.NativeSocketRuntime
-	RouterPeerTestOutcome              = router.PeerTestOutcome
-	RouterPeerTestResult               = router.PeerTestResult
-	RouterPreparedRoute                = router.PreparedRoute
-	RouterPreparedRouteSender          = router.PreparedRouteSender
-	RouterPreparedRouteSenderConfig    = router.PreparedRouteSenderConfig
-	RouterRatchetReplyReservation      = router.RatchetReplyReservation
-	RouterPreparedTunnelWriter         = router.PreparedTunnelWriter
-	RouterSSU2Introducer               = router.SSU2Introducer
-	RouterSSU2Manager                  = router.SSU2Manager
-	RouterSSU2ManagerConfig            = router.SSU2ManagerConfig
-	RouterSSU2PeerCapabilities         = router.SSU2PeerCapabilities
-	RouterService                      = router.Service
-	RouterSessionProvider              = router.SessionProvider
+	// RouterEstablishedSender never establishes connections; missing sessions
+	// must be handled by the control plane rather than implicit dialing.
+	RouterEstablishedSender          = router.EstablishedSender
+	RouterEstablishedSessionRegistry = router.EstablishedSessionRegistry
+	RouterGarlicDestination          = router.GarlicDestination
+	RouterGarlicReceiver             = router.GarlicReceiver
+	RouterGarlicReceiverConfig       = router.GarlicReceiverConfig
+	RouterI2NPSource                 = router.I2NPSource
+	RouterIOStats                    = router.IOStats
+	RouterLifecycle                  = router.Lifecycle
+	RouterMessageIDSource            = router.MessageIDSource
+	RouterNTCP2Manager               = router.NTCP2Manager
+	RouterNTCP2ManagerConfig         = router.NTCP2ManagerConfig
+	RouterNativeSocketRuntime        = router.NativeSocketRuntime
+	RouterPeerTestOutcome            = router.PeerTestOutcome
+	RouterPeerTestResult             = router.PeerTestResult
+	// RouterPreparedRoute is owner- and generation-scoped. InstallRoute copies
+	// its key and LeaseSet slices; callers retain their original buffers.
+	RouterPreparedRoute = router.PreparedRoute
+	// RouterPreparedRouteSender never resolves or dials on a miss. Invalidation
+	// drains admitted uses before wiping retired route snapshots.
+	RouterPreparedRouteSender       = router.PreparedRouteSender
+	RouterPreparedRouteSenderConfig = router.PreparedRouteSenderConfig
+	// RouterRatchetReplyReservation must be activated before committing a new
+	// session, then sent or released so application data cannot overtake the reply.
+	RouterRatchetReplyReservation = router.RatchetReplyReservation
+	RouterPreparedTunnelWriter    = router.PreparedTunnelWriter
+	RouterSSU2Introducer          = router.SSU2Introducer
+	RouterSSU2Manager             = router.SSU2Manager
+	RouterSSU2ManagerConfig       = router.SSU2ManagerConfig
+	RouterSSU2PeerCapabilities    = router.SSU2PeerCapabilities
+	RouterService                 = router.Service
+	RouterSessionProvider         = router.SessionProvider
+	// RouterSessionSender borrows one session and consumes Payload before returning.
+	// A write error may follow partial delivery; do not blindly replay the message.
 	RouterSessionSender                = router.SessionSender
 	RouterSinks                        = router.Sinks
 	RouterSocketRuntime                = router.SocketRuntime
@@ -158,19 +174,21 @@ type (
 	TunnelBlockIterator                = tunnel.BlockIterator
 	TunnelCircuitInfo                  = tunnel.CircuitInfo
 	TunnelCircuitRuntime               = tunnel.CircuitRuntime
-	TunnelCircuitToken                 = tunnel.CircuitToken
-	TunnelDeliveryType                 = tunnel.DeliveryType
-	TunnelEndpoint                     = tunnel.Endpoint
-	TunnelForward                      = tunnel.Forward
-	TunnelFragment                     = tunnel.Fragment
-	TunnelGateway                      = tunnel.Gateway
-	TunnelInboundCircuit               = tunnel.InboundCircuit
-	TunnelLayerCipher                  = tunnel.LayerCipher
-	TunnelOutboundCircuit              = tunnel.OutboundCircuit
-	TunnelReassembler                  = tunnel.Reassembler
-	TunnelRuntime                      = tunnel.Runtime
-	TunnelRuntimeConfig                = tunnel.RuntimeConfig
-	TunnelSender                       = tunnel.Sender
+	// TunnelCircuitToken identifies one installation in one runtime, not merely
+	// a tunnel ID. Keep the returned token for replacement, removal, and prepared sends.
+	TunnelCircuitToken    = tunnel.CircuitToken
+	TunnelDeliveryType    = tunnel.DeliveryType
+	TunnelEndpoint        = tunnel.Endpoint
+	TunnelForward         = tunnel.Forward
+	TunnelFragment        = tunnel.Fragment
+	TunnelGateway         = tunnel.Gateway
+	TunnelInboundCircuit  = tunnel.InboundCircuit
+	TunnelLayerCipher     = tunnel.LayerCipher
+	TunnelOutboundCircuit = tunnel.OutboundCircuit
+	TunnelReassembler     = tunnel.Reassembler
+	TunnelRuntime         = tunnel.Runtime
+	TunnelRuntimeConfig   = tunnel.RuntimeConfig
+	TunnelSender          = tunnel.Sender
 )
 
 const (

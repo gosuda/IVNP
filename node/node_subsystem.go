@@ -1,4 +1,5 @@
-// Package node orchestrates the router runtime, tunnel pools, NetDB, and client services into a runnable node.
+// Package node composes the control plane with local client services and owns
+// their coordinated startup and shutdown; routing policy stays in controlplane.
 package node
 
 import (
@@ -8,6 +9,7 @@ import (
 )
 
 type (
+	// Subsystem.Close releases managed resources; Wait joins all node-owned workers.
 	Subsystem             = noderuntime.Daemon
 	Options               = noderuntime.Options
 	Status                = controlplane.Status
@@ -23,6 +25,8 @@ const (
 	DestinationEncryptedWithPreSharedKey  = controlplane.DestinationEncryptedPSK
 )
 
+// NewSubsystem opens encrypted state without starting listeners. Start activates
+// transports and enabled client services; it does not wait for tunnel readiness.
 func NewSubsystem(configuration state.ConfigurationOperating, options Options) (*Subsystem, error) {
 	return noderuntime.New(configuration, options)
 }

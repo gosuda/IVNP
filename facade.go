@@ -1,5 +1,6 @@
-// Package ivnp provides the top-level public API for embedding an IVNP router
-// and managing application destinations.
+// Package ivnp is the embedding entry point for a router and its client services.
+// New opens local state; Start begins network work. Close and Wait release the
+// node's resources and join its workers. Start alone does not imply I2P readiness.
 package ivnp
 
 import (
@@ -18,8 +19,8 @@ type LogConfig = state.ConfigurationLog
 // LoadConfig reads and validates an operating configuration from path.
 func LoadConfig(path string) (Config, error) { return state.ConfigurationLoadOperating(path) }
 
-// LoadOrCreateConfig reads the configuration file if it exists, or writes
-// and returns a production default configuration if it does not.
+// LoadOrCreateConfig writes production defaults when absent. Review enabled
+// listeners before starting a node with the returned configuration.
 func LoadOrCreateConfig(path string) (Config, error) {
 	return state.ConfigurationLoadOrCreateOperating(path)
 }
@@ -29,29 +30,32 @@ func ParseConfig(text, path string) (Config, error) {
 	return state.ConfigurationParseOperating(text, path)
 }
 
-// Node represents an embedded IVNP router node and its associated services.
+// Node owns the router and client services; Close also retires its destinations.
 type Node = node.Subsystem
 
-// Options supplies host-owned collaborators (custom logger, clock, sockets, listener).
+// Options injects host collaborators; zero-valued fields select native defaults.
 type Options = node.Options
 
-// Status describes node runtime health and lifecycle state.
+// Status reports lifecycle state, not whether tunnels or remote services are ready.
 type Status = node.Status
 
-// New initializes an embedded IVNP node with the given configuration and options.
+// New opens and locks encrypted state without opening listeners. Always Close
+// the returned node, even if Start is never called or fails.
 func New(cfg Config, options Options) (*Node, error) { return node.NewSubsystem(cfg, options) }
 
 type (
-	// DestinationController creates, queries, and releases application-scoped destinations.
+	// DestinationController creates isolated endpoints without waiting for tunnel readiness.
 	DestinationController = destination.DestinationController
 
-	// DestinationEndpoint represents an isolated I2P identity for dialing and listening.
+	// DestinationEndpoint owns streams, tunnels, and key material until Close.
 	DestinationEndpoint = destination.DestinationEndpoint
 
-	// ReadyDestinationEndpoint synchronizes until inbound and outbound tunnels are ready.
+	// ReadyDestinationEndpoint waits for live inbound/outbound tunnels and confirmed
+	// LeaseSet publication. Give WaitReady a bounded context during bootstrap.
 	ReadyDestinationEndpoint = destination.ReadyDestinationEndpoint
 
-	// DestinationSpec configures the creation of a new or imported destination.
+	// DestinationSpec with Local nil creates a transient identity; supplied keys
+	// are cloned, so the caller retains ownership of the original.
 	DestinationSpec = destination.DestinationSpec
 
 	// DestinationPolicy defines LeaseSet publication and encryption options.

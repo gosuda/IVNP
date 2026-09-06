@@ -38,7 +38,8 @@ func (n *localStreamNetwork) DialI2P(ctx context.Context, address string) (net.C
 	}
 }
 
-// NewLocalStreamNetwork returns an in-memory StreamNetwork implementation using net.Pipe.
+// NewLocalStreamNetwork connects only listeners on the returned in-memory
+// network. It does not join I2P or encrypt traffic.
 func NewLocalStreamNetwork() StreamNetwork {
 	return &localStreamNetwork{listeners: make(map[string]*localListener)}
 }
