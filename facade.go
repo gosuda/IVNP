@@ -1,9 +1,10 @@
+// Package ivnp provides the top-level public API for embedding an IVNP router
+// and managing application destinations.
 package ivnp
 
 import (
-	"gosuda.org/ivnp/client"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/networking"
 	"gosuda.org/ivnp/node"
 	"gosuda.org/ivnp/state"
 )
@@ -11,14 +12,19 @@ import (
 // Config represents the operating configuration for an IVNP node.
 type Config = state.ConfigurationOperating
 
+// LogConfig represents the logging backend configuration.
 type LogConfig = state.ConfigurationLog
 
+// LoadConfig reads and validates an operating configuration from path.
 func LoadConfig(path string) (Config, error) { return state.ConfigurationLoadOperating(path) }
 
+// LoadOrCreateConfig reads the configuration file if it exists, or writes
+// and returns a production default configuration if it does not.
 func LoadOrCreateConfig(path string) (Config, error) {
 	return state.ConfigurationLoadOrCreateOperating(path)
 }
 
+// ParseConfig parses raw configuration text as an operating configuration.
 func ParseConfig(text, path string) (Config, error) {
 	return state.ConfigurationParseOperating(text, path)
 }
@@ -26,13 +32,33 @@ func ParseConfig(text, path string) (Config, error) {
 // Node represents an embedded IVNP router node and its associated services.
 type Node = node.Subsystem
 
+// Options supplies host-owned collaborators (custom logger, clock, sockets, listener).
+type Options = node.Options
+
+// Status describes node runtime health and lifecycle state.
+type Status = node.Status
+
+// New initializes an embedded IVNP node with the given configuration and options.
+func New(cfg Config, options Options) (*Node, error) { return node.NewSubsystem(cfg, options) }
+
 type (
-	Options           = node.Options
-	Status            = node.Status
-	Destination       = client.ClientDestination
-	DestinationStatus = client.ClientStatus
+	// DestinationController creates, queries, and releases application-scoped destinations.
+	DestinationController = destination.DestinationController
+
+	// DestinationEndpoint represents an isolated I2P identity for dialing and listening.
+	DestinationEndpoint = destination.DestinationEndpoint
+
+	// ReadyDestinationEndpoint synchronizes until inbound and outbound tunnels are ready.
+	ReadyDestinationEndpoint = destination.ReadyDestinationEndpoint
+
+	// DestinationSpec configures the creation of a new or imported destination.
+	DestinationSpec = destination.DestinationSpec
+
+	// DestinationPolicy defines LeaseSet publication and encryption options.
 	DestinationPolicy = node.DestinationPolicy
-	DestinationKind   = node.DestinationPolicyKind
+
+	// DestinationKind designates the publication visibility of a destination.
+	DestinationKind = node.DestinationPolicyKind
 )
 
 const (
@@ -42,182 +68,14 @@ const (
 	DestinationEncryptedPSK  = node.DestinationEncryptedWithPreSharedKey
 )
 
-// New initializes an embedded IVNP node with the given configuration and options.
-func New(cfg Config, options Options) (*Node, error) { return node.NewSubsystem(cfg, options) }
+// Hash is a 32-byte cryptographic identifier used for routers and destinations.
+type Hash = foundation.Hash
 
-type (
-	DestinationResolver           = destination.DestinationResolver
-	LeaseSetPolicy                = destination.LeaseSetPolicy
-	DestinationSpec               = destination.DestinationSpec
-	DestinationRoute              = destination.DestinationRoute
-	ReceivedMessage               = destination.ReceivedMessage
-	MessageSubscription           = destination.MessageSubscription
-	DestinationEndpoint           = destination.DestinationEndpoint
-	DestinationController         = destination.DestinationController
-	ReadyDestinationEndpoint      = destination.ReadyDestinationEndpoint
-	BoundedDestinationEndpoint    = destination.BoundedDestinationEndpoint
-	SourcePortDestinationEndpoint = destination.SourcePortDestinationEndpoint
-	ByteBudget                    = destination.ByteBudget
-)
+// B32 returns the canonical .b32.i2p base32 representation of a destination hash.
+func B32(hash Hash) string { return foundation.B32(hash) }
 
-type (
-	Router             = networking.Router
-	RouterConfig       = networking.RouterConfig
-	RouterDependencies = networking.RouterDependencies
-	RouterStatus       = networking.RouterStatus
-	RouterEndpoint     = networking.RouterEndpoint
-	RouterState        = networking.RouterState
-	Reachability       = networking.RouterReachability
-)
+// EncodeI2PBase64 returns the canonical I2P base64 string for the given bytes.
+func EncodeI2PBase64(raw []byte) string { return foundation.EncodeI2PBase64(raw) }
 
-func NewRouter(cfg RouterConfig, dependencies RouterDependencies) (*Router, error) {
-	return networking.RouterNew(cfg, dependencies)
-}
-
-type (
-	Database          = networking.NetworkDatabase
-	RouterInfo        = networking.NetworkDatabaseRouterInfo
-	RouterAddress     = networking.NetworkDatabaseRouterAddress
-	Lease             = networking.NetworkDatabaseLease
-	LeaseSet          = networking.NetworkDatabaseLeaseSet
-	LeaseSet2         = networking.NetworkDatabaseLeaseSet2
-	EncryptedLeaseSet = networking.NetworkDatabaseEncryptedLeaseSet
-	MetaLeaseSet      = networking.NetworkDatabaseMetaLeaseSet
-	RouterRef         = networking.NetworkDatabaseRouterRef
-)
-
-func NewDatabase(local Hash, bucketCapacity int) *Database {
-	return networking.NetworkDatabaseNewDatabase(local, bucketCapacity)
-}
-
-func ParseRouterInfo(src []byte) (RouterInfo, error) {
-	return networking.NetworkDatabaseParseRouterInfo(src)
-}
-
-func ParseRouterAddress(src []byte) (RouterAddress, int, error) {
-	return networking.NetworkDatabaseParseRouterAddress(src)
-}
-
-func ParseLeaseSet(src []byte) (LeaseSet, error) { return networking.NetworkDatabaseParseLeaseSet(src) }
-
-func ParseLeaseSet2(src []byte) (LeaseSet2, error) {
-	return networking.NetworkDatabaseParseLeaseSet2(src)
-}
-
-func ParseEncryptedLeaseSet(src []byte) (EncryptedLeaseSet, error) {
-	return networking.NetworkDatabaseParseEncryptedLeaseSet(src)
-}
-
-func ParseMetaLeaseSet(src []byte) (MetaLeaseSet, error) {
-	return networking.NetworkDatabaseParseMetaLeaseSet(src)
-}
-
-type (
-	I2NPMessage              = networking.I2NPMessage
-	I2NPHeader               = networking.I2NPHeader
-	I2NPShortHeader          = networking.I2NPShortHeader
-	I2NPTransportHeader      = networking.I2NPTransportHeader
-	I2NPMessageType          = networking.I2NPMessageType
-	I2NPStoreType            = networking.I2NPStoreType
-	I2NPDataMessage          = networking.I2NPDataMessage
-	I2NPGarlicMessage        = networking.I2NPGarlicMessage
-	I2NPDatabaseStoreMessage = networking.I2NPDatabaseStoreMessage
-	I2NPDatabaseLookup       = networking.I2NPDatabaseLookupMessage
-	I2NPTunnelDataMessage    = networking.I2NPTunnelDataMessage
-	I2NPTunnelGatewayMessage = networking.I2NPTunnelGatewayMessage
-)
-
-func ParseI2NP(src []byte) (I2NPMessage, int, error) { return networking.I2NPParse(src) }
-
-func ParseI2NPWire(src []byte) (I2NPMessage, int, error) { return networking.I2NPParseWire(src) }
-
-func ParseI2NPData(payload []byte) (I2NPDataMessage, error) { return networking.I2NPParseData(payload) }
-
-func ParseI2NPGarlic(payload []byte) (I2NPGarlicMessage, error) {
-	return networking.I2NPParseGarlic(payload)
-}
-
-func ParseI2NPDatabaseStore(payload []byte) (I2NPDatabaseStoreMessage, error) {
-	return networking.I2NPParseDatabaseStore(payload)
-}
-
-func ParseI2NPDatabaseLookup(payload []byte) (I2NPDatabaseLookup, error) {
-	return networking.I2NPParseDatabaseLookup(payload)
-}
-
-func ParseI2NPTunnelData(payload []byte) (I2NPTunnelDataMessage, error) {
-	return networking.I2NPParseTunnelData(payload)
-}
-
-func ParseI2NPTunnelGateway(payload []byte) (I2NPTunnelGatewayMessage, error) {
-	return networking.I2NPParseTunnelGateway(payload)
-}
-
-type (
-	TunnelRuntime       = networking.TunnelRuntime
-	TunnelRuntimeConfig = networking.TunnelRuntimeConfig
-	TunnelPool          = networking.TunnelPool
-	TunnelEntry         = networking.TunnelEntry
-	TunnelDirection     = networking.TunnelDirection
-	TunnelSender        = networking.TunnelSender
-	GarlicReplyKey      = networking.GarlicReplyKey
-	GarlicReplyKeys     = networking.GarlicReplyKeyRegistryContract
-	StreamingDelivery   = destination.Delivery
-)
-
-const (
-	TunnelInbound  = networking.TunnelInbound
-	TunnelOutbound = networking.TunnelOutbound
-)
-
-func NewTunnelRuntime(cfg TunnelRuntimeConfig) *TunnelRuntime {
-	return networking.TunnelNewRuntime(cfg)
-}
-
-func NewTunnelPool(maximum int) *TunnelPool { return networking.TunnelNewPool(maximum) }
-
-func NewOwnedTunnelPool(owner Hash, maximum int) *TunnelPool {
-	return networking.TunnelNewOwnedPool(owner, maximum)
-}
-
-func NewGarlicReplyKeyRegistry(maximum int) *networking.GarlicReplyKeyRegistry {
-	return networking.GarlicNewReplyKeyRegistry(maximum)
-}
-
-type (
-	SAMNetwork         = client.SimpleAnonymousMessagingNetwork
-	SAMConfig          = client.SimpleAnonymousMessagingConfig
-	SAMServer          = client.SimpleAnonymousMessagingServer
-	SAMServerConfig    = client.SimpleAnonymousMessagingServerConfig
-	HTTPProxy          = client.ClientHTTPProxy
-	HTTPProxyConfig    = client.ClientHTTPProxyConfig
-	SOCKS5Proxy        = client.ClientSOCKS5Proxy
-	SOCKS5Config       = client.ClientSOCKS5Config
-	ControlServer      = client.ClientControl
-	ControlConfig      = client.ClientControlConfig
-	RegistrationSigner = client.RegistrationSigner
-)
-
-var (
-	ErrRegistrationDomain      = client.RegistrationErrDomain
-	RegistrationAuthentication = client.RegistrationAuthentication
-	RegistrationEd25519Signer  = client.RegistrationEd25519Signer
-)
-
-func NewSAMNetwork(cfg SAMConfig) (*SAMNetwork, error) {
-	return client.SimpleAnonymousMessagingNew(cfg)
-}
-
-func NewSAMServer(cfg SAMServerConfig) (*SAMServer, error) {
-	return client.SimpleAnonymousMessagingNewServer(cfg)
-}
-
-func NewHTTPProxy(cfg HTTPProxyConfig) (*HTTPProxy, error) { return client.ClientNewHTTPProxy(cfg) }
-
-func NewSOCKS5Proxy(cfg SOCKS5Config) (*SOCKS5Proxy, error) {
-	return client.ClientNewSOCKS5Proxy(cfg)
-}
-
-func NewControlServer(cfg ControlConfig) (*ControlServer, error) {
-	return client.ClientNewControl(cfg)
-}
+// DecodeI2PBase64 decodes standard I2P base64-encoded binary data.
+func DecodeI2PBase64(encoded []byte) ([]byte, error) { return foundation.DecodeI2PBase64(encoded) }
