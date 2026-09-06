@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 
 	filesystemstore "gosuda.org/ivnp/state/internal/filesystem_store"
 )
@@ -32,41 +31,27 @@ func (s *Store) AcquireLock() (*Lock, error) {
 		return nil, err
 	}
 	path := filepath.Join(dir, lockFileName)
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	file, err := filesystemstore.CreatePrivate(path)
 	created := err == nil
 	if errors.Is(err, os.ErrExist) {
-		file, err = os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
+		file, _, err = filesystemstore.OpenRegularFile(path, os.O_RDWR)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if created {
-		err = file.Chmod(0o600)
-	}
-	info, statErr := file.Stat()
-	if statErr ==
-
-		nil {
-		statErr = err
-	}
-	if statErr ==
-		nil {
-		statErr = validatePrivateFile(info)
-	}
-
-	if statErr != nil {
+	if err := validatePrivateFile(file); err != nil {
 		file.Close()
-		return nil, statErr
+		return nil, err
 	}
 	if created {
-		if err := filesystemstore.SyncDir(dir); err != nil {
+		if err := filesystemstore.SyncCreated(file); err != nil {
 			file.Close()
 			return nil, err
 		}
 	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := filesystemstore.LockExclusive(file); err != nil {
 		file.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		if errors.Is(err, filesystemstore.ErrLocked) {
 			return nil, ErrStateLocked
 		}
 		return nil, err
@@ -83,7 +68,7 @@ func (l *Lock) Close() error {
 		if l.file == nil {
 			return
 		}
-		unlockErr := syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+		unlockErr := filesystemstore.Unlock(l.file)
 		closeErr := l.file.Close()
 		l.err = errors.Join(unlockErr, closeErr)
 	})

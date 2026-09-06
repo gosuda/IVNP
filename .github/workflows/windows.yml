@@ -1,0 +1,33 @@
+name: Windows state storage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    env:
+      GOARCH: ${{ matrix.arch }}
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build Windows packages
+        run: go build ./...
+      - name: Run state security regressions
+        if: matrix.arch == 'amd64'
+        run: go test -count=1 ./state/internal/filesystem_store ./state/internal/secure_store ./state/internal/configuration -run 'Test(Windows|CreatePrivate|AtomicRoundTrip|ReadBoundedRejectsSymlink|StateLock|StateRejectsUnsafe|StateCiphertext|LoadOrCreatePersists|LoadOrCreateOperating|LoadOperatingRejects|LoadRejectsSwapped)'

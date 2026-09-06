@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -203,21 +202,18 @@ func LoadOrCreateOperating(path string) (Operating, error) {
 	if _, statErr := os.Lstat(absolute); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
 		return Operating{}, err
 	}
-	file, createErr := os.OpenFile(absolute, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, createErr := filesystemstore.CreatePrivate(absolute)
 	if createErr != nil {
 		if errors.Is(createErr, os.ErrExist) {
 			return LoadOperating(absolute)
 		}
 		return Operating{}, errors.New("config: cannot create operating configuration")
 	}
-	if syncErr := file.Sync(); syncErr != nil {
+	if syncErr := filesystemstore.SyncCreated(file); syncErr != nil {
 		_ = file.Close()
 		return Operating{}, errors.New("config: cannot persist operating configuration")
 	}
 	if closeErr := file.Close(); closeErr != nil {
-		return Operating{}, errors.New("config: cannot persist operating configuration")
-	}
-	if syncErr := filesystemstore.SyncDir(filepath.Dir(absolute)); syncErr != nil {
 		return Operating{}, errors.New("config: cannot persist operating configuration")
 	}
 	return LoadOperating(absolute)
@@ -229,12 +225,12 @@ func LoadOperating(path string) (Operating, error) {
 	if err != nil {
 		return Operating{}, errors.New("config: cannot resolve operating configuration")
 	}
-	file, info, err := filesystemstore.OpenRegular(absolute)
+	file, _, err := filesystemstore.OpenRegular(absolute)
 	if err != nil {
 		return Operating{}, errors.New("config: cannot open operating configuration")
 	}
 	defer file.Close()
-	if !ownedUnlinkedRegularFile(info) {
+	if err := filesystemstore.ValidateOwnedFile(file); err != nil {
 		return Operating{}, errors.New("config: unsafe operating configuration")
 	}
 	contents, err := filesystemstore.ReadBoundedFile(file, maxConfigBytes)
@@ -248,15 +244,10 @@ func LoadOperating(path string) (Operating, error) {
 	if err != nil {
 		return Operating{}, err
 	}
-	if operatingHasBearerCredentials(operating) && info.Mode().Perm()&0o077 != 0 {
+	if operatingHasBearerCredentials(operating) && filesystemstore.ValidatePrivateAccess(file) != nil {
 		return Operating{}, errors.New("config: bearer credentials require a private configuration file")
 	}
 	return operating, nil
-}
-
-func ownedUnlinkedRegularFile(info os.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && info.Mode().IsRegular() && stat.Uid == uint32(os.Getuid()) && stat.Nlink == 1
 }
 
 func operatingHasBearerCredentials(operating Operating) bool {

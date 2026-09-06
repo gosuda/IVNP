@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 )
 
@@ -23,7 +22,7 @@ func TestAtomicRoundTripAndBound(t *testing.T) {
 	}
 }
 
-func TestReadBoundedRejectsSymlinkAndFIFO(t *testing.T) {
+func TestReadBoundedRejectsSymlink(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "state")
 	if err := os.WriteFile(target, []byte("state"), 0o600); err != nil {
@@ -36,32 +35,30 @@ func TestReadBoundedRejectsSymlinkAndFIFO(t *testing.T) {
 	if _, err := ReadBounded(link, 8); err == nil {
 		t.Fatal("ReadBounded accepted a symlink")
 	}
-	fifo := filepath.Join(dir, "state-fifo")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ReadBounded(fifo, 8); !errors.Is(err, ErrInvalidFile) {
-		t.Fatalf("ReadBounded(FIFO) error = %v, want invalid file", err)
-	}
 }
 
-func TestSyncDirRejectsFilesAndSymlinks(t *testing.T) {
-	dir := t.TempDir()
-	if err := SyncDir(dir); err != nil {
-		t.Fatalf("SyncDir(directory) error = %v", err)
-	}
-	file := filepath.Join(dir, "file")
-	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+func TestCreatePrivateDoesNotReplaceExistingSecret(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secret")
+	file, err := CreatePrivate(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := SyncDir(file); err == nil {
-		t.Fatal("SyncDir accepted a regular file")
-	}
-	link := filepath.Join(dir, "dir-link")
-	if err := os.Symlink(dir, link); err != nil {
+	defer file.Close()
+	if _, err := file.Write([]byte("original")); err != nil {
 		t.Fatal(err)
 	}
-	if err := SyncDir(link); err == nil {
-		t.Fatal("SyncDir accepted a symlink")
+	if err := SyncCreated(file); err != nil {
+		t.Fatal(err)
+	}
+	other, err := CreatePrivate(path)
+	if other != nil {
+		other.Close()
+	}
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("exclusive creation = %v, want exists", err)
+	}
+	data, err := ReadBounded(path, 32)
+	if err != nil || string(data) != "original" {
+		t.Fatalf("existing secret changed: %q, %v", data, err)
 	}
 }

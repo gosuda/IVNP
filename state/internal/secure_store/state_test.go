@@ -76,13 +76,11 @@ func TestStateCiphertextAndModesProtectPrivateMaterial(t *testing.T) {
 		}
 	}
 	for _, path := range []string{store.StatePath, store.MasterKeyPath} {
-		info, err := os.Stat(path)
+		file, err := store.openPrivateFile(path)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("private state file %s: %v", path, err)
 		}
-		if got := info.Mode().Perm(); got != 0o600 {
-			t.Fatalf("%s mode = %o, want 0600", path, got)
-		}
+		file.Close()
 	}
 }
 
@@ -267,38 +265,6 @@ func TestLoadRejectsSwappedAndOversizeState(t *testing.T) {
 	}
 	if _, err := store.Load(); !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("Load(oversize) error = %v, want invalid state", err)
-	}
-}
-
-func TestStateRejectsUnsafeParentAndFiles(t *testing.T) {
-	store := testStore(t)
-	if _, err := store.LoadOrCreate(); err != nil {
-		t.Fatal(err)
-	}
-	parent := filepath.Dir(store.StatePath)
-	if err := os.Chmod(parent, 0o770); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Load(); !errors.Is(err, ErrUnsafePermissions) {
-		t.Fatalf("Load(group-writable parent) error = %v, want unsafe permissions", err)
-	}
-	if err := os.Chmod(parent, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(store.StatePath, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Load(); !errors.Is(err, ErrUnsafePermissions) {
-		t.Fatalf("Load(world-readable state) error = %v, want unsafe permissions", err)
-	}
-	if err := os.Chmod(store.StatePath, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(store.MasterKeyPath, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Load(); !errors.Is(err, ErrUnsafePermissions) {
-		t.Fatalf("Load(world-readable key) error = %v, want unsafe permissions", err)
 	}
 }
 

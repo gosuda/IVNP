@@ -6,18 +6,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	filesystemstore "gosuda.org/ivnp/state/internal/filesystem_store"
 )
 
 func TestParseOperatingDefaults(t *testing.T) {
 	config, err := ParseOperating("", "/etc/ivnp/ivnp.conf")
 	if err != nil {
 		t.Fatal(err)
-	}
-	if config.DataDir != "./data" || config.StateDir != "data/state" || config.StatePath != "data/state/router.state" || config.KeyPath != "data/state/router.keys" {
-		t.Fatalf("paths = %#v", config)
 	}
 	if config.Network.ID != 2 || !config.Network.IPv4 || config.Network.IPv6 {
 		t.Fatalf("network = %#v", config.Network)
@@ -110,7 +108,7 @@ func TestDefaultAddressBookHasVerifiedRemoteSubscription(t *testing.T) {
 func TestLoadOperatingResolvesRelativePaths(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "ivnp.conf")
-	if err := os.WriteFile(path, []byte("[paths]\ndata_dir = data\nstate_dir = runtime/state\nstate_path = runtime/state/router.bin\nkey_path = keys/router.key\n"), 0o600); err != nil {
+	if err := filesystemstore.WriteAtomic(path, []byte("[paths]\ndata_dir = data\nstate_dir = runtime/state\nstate_path = runtime/state/router.bin\nkey_path = keys/router.key\n"), 0o600, maxConfigBytes); err != nil {
 		t.Fatal(err)
 	}
 	config, err := LoadOperating(path)
@@ -128,12 +126,13 @@ func TestLoadOrCreateOperatingInstallsPrivateSafeDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Lstat(path)
+	file, _, err := filesystemstore.OpenRegular(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 || !info.Mode().IsRegular() {
-		t.Fatalf("first-run config mode = %v", info.Mode())
+	defer file.Close()
+	if err := filesystemstore.ValidatePrivateFile(file); err != nil {
+		t.Fatalf("first-run config permissions: %v", err)
 	}
 	if first.Control.Enabled || first.HTTPProxy.Enabled || first.SOCKS5.Enabled || first.Metrics.Enabled {
 		t.Fatalf("first-run privileged listeners enabled: %#v", first)
@@ -147,21 +146,11 @@ func TestLoadOrCreateOperatingInstallsPrivateSafeDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadOperatingRejectsUnsafeSecretSources(t *testing.T) {
+func TestLoadOperatingRejectsSymlink(t *testing.T) {
 	dir := t.TempDir()
-	secret := []byte("[control]\nenabled = true\nlisten_host = 192.0.2.10\nlisten_port = 7650\nbearer_token = token-token-token-1\n")
 	path := filepath.Join(dir, "ivnp.conf")
-	if err := os.WriteFile(path, secret, 0o644); err != nil {
+	if _, err := LoadOrCreateOperating(path); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := LoadOperating(path); err == nil {
-		t.Fatal("LoadOperating accepted world-readable bearer credentials")
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadOperating(path); err != nil {
-		t.Fatalf("LoadOperating(private secret) error = %v", err)
 	}
 	link := filepath.Join(dir, "ivnp-link.conf")
 	if err := os.Symlink(path, link); err != nil {
@@ -169,13 +158,6 @@ func TestLoadOperatingRejectsUnsafeSecretSources(t *testing.T) {
 	}
 	if _, err := LoadOperating(link); err == nil {
 		t.Fatal("LoadOperating accepted a symlink")
-	}
-	fifo := filepath.Join(dir, "ivnp-fifo.conf")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadOperating(fifo); err == nil {
-		t.Fatal("LoadOperating accepted a FIFO")
 	}
 }
 

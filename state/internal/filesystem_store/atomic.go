@@ -2,16 +2,19 @@
 package filesystemstore
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 var (
-	ErrTooLarge    = errors.New("fsstore: content exceeds configured maximum")
-	ErrInvalidFile = errors.New("fsstore: not a regular file")
+	ErrTooLarge          = errors.New("fsstore: content exceeds configured maximum")
+	ErrInvalidFile       = errors.New("fsstore: not a regular file")
+	ErrUnsafePermissions = errors.New("fsstore: unsafe ownership or permissions")
+	ErrLocked            = errors.New("fsstore: file is locked")
 )
 
 // WriteAtomic writes data to a temporary file and atomically renames it to path.
@@ -20,7 +23,7 @@ func WriteAtomic(path string, data []byte, mode os.FileMode, max int) error {
 		return ErrTooLarge
 	}
 	dir := filepath.Dir(path)
-	file, err := os.CreateTemp(dir, ".ivnp-*")
+	file, err := createTemporary(dir)
 	if err != nil {
 		return err
 	}
@@ -40,15 +43,21 @@ func WriteAtomic(path string, data []byte, mode os.FileMode, max int) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Rename(temporary, path); err != nil {
-		return err
-	}
-	return SyncDir(dir)
+	return replaceAtomic(temporary, path)
 }
 
 // OpenRegular opens a file without following symlinks and checks that it is a regular file.
 func OpenRegular(path string) (*os.File, os.FileInfo, error) {
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	return OpenRegularFile(path, os.O_RDONLY)
+}
+
+// OpenRegularFile opens an existing regular file without following symlinks.
+// flag must be os.O_RDONLY or os.O_RDWR.
+func OpenRegularFile(path string, flag int) (*os.File, os.FileInfo, error) {
+	if flag != os.O_RDONLY && flag != os.O_RDWR {
+		return nil, nil, os.ErrInvalid
+	}
+	file, err := openRegular(path, flag)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -62,16 +71,6 @@ func OpenRegular(path string) (*os.File, os.FileInfo, error) {
 		return nil, nil, ErrInvalidFile
 	}
 	return file, info, nil
-}
-
-// SyncDir flushes directory changes to disk.
-func SyncDir(dir string) error {
-	file, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	return file.Sync()
 }
 
 func ReadBounded(path string, max int64) ([]byte, error) {
@@ -106,4 +105,19 @@ func ReadBoundedFile(file *os.File, max int64) ([]byte, error) {
 		return nil, ErrTooLarge
 	}
 	return data, nil
+}
+
+func createTemporary(dir string) (*os.File, error) {
+	for range 100 {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return nil, err
+		}
+		file, err := CreatePrivate(filepath.Join(dir, ".ivnp-"+hex.EncodeToString(random[:])))
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return file, err
+	}
+	return nil, os.ErrExist
 }

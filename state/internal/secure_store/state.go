@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-	"syscall"
 	"unicode/utf8"
 
 	"gosuda.org/ivnp/cryptography"
@@ -362,7 +361,7 @@ func (s *Store) loadOrCreateMasterKey() ([]byte, error) {
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	dir, err := ensureParent(s.MasterKeyPath)
+	_, err = ensureParent(s.MasterKeyPath)
 	if err != nil {
 		return nil, err
 	}
@@ -371,20 +370,9 @@ func (s *Store) loadOrCreateMasterKey() ([]byte, error) {
 		clear(key)
 		return nil, err
 	}
-	file, err := os.OpenFile(s.MasterKeyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	file, err := filesystemstore.CreatePrivate(s.MasterKeyPath)
 	if err == nil {
-		statErr := file.Chmod(0o600)
-		info, infoErr := file.Stat()
-		if statErr ==
-
-			nil {
-			statErr = infoErr
-		}
-		if statErr ==
-			nil {
-			statErr = validatePrivateFile(info)
-
-		}
+		statErr := validatePrivateFile(file)
 		written, writeErr := 0, statErr
 		if writeErr == nil {
 			written, writeErr = file.Write(key)
@@ -394,17 +382,12 @@ func (s *Store) loadOrCreateMasterKey() ([]byte, error) {
 		}
 
 		if writeErr == nil {
-			writeErr = file.
-				Sync()
+			writeErr = filesystemstore.SyncCreated(file)
 		}
 		if closeErr := file.Close(); writeErr == nil {
 			writeErr = closeErr
 		}
 
-		if writeErr == nil {
-			writeErr = filesystemstore.
-				SyncDir(dir)
-		}
 		if writeErr != nil {
 			_ = os.Remove(s.MasterKeyPath)
 			clear(key)
@@ -1080,49 +1063,31 @@ func (s *Store) openPrivateFile(path string) (*os.File, error) {
 	if _, err := ensureParent(path); err != nil {
 		return nil, err
 	}
-	file, info, err := filesystemstore.OpenRegular(path)
+	file, _, err := filesystemstore.OpenRegular(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := validatePrivateFile(info); err != nil {
+	if err := validatePrivateFile(file); err != nil {
 		file.Close()
 		return nil, err
 	}
 	return file, nil
 }
 
-func validatePrivateFile(info os.FileInfo) error {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
-		return ErrUnsafePermissions
+func validatePrivateFile(file *os.File) error {
+	if err := filesystemstore.ValidatePrivateFile(file); err != nil {
+		return errors.Join(ErrUnsafePermissions, err)
 	}
 	return nil
 }
 
 func ensureParent(path string) (string, error) {
 	dir := filepath.Dir(path)
-	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return "", err
+	if err := filesystemstore.EnsurePrivateDir(dir); err != nil {
+		if errors.Is(err, filesystemstore.ErrUnsafePermissions) {
+			return "", errors.Join(ErrUnsafePermissions, err)
 		}
-		if err := os.Chmod(dir, 0o700); err != nil {
-			return "", err
-		}
-	} else if err != nil {
 		return "", err
-	}
-	file, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return "", err
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.IsDir() || stat.Uid != uint32(os.Getuid()) || info.Mode().Perm()&0o022 != 0 {
-		return "", ErrUnsafePermissions
 	}
 	return dir, nil
 }
