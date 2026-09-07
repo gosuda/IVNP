@@ -2048,6 +2048,13 @@ func (s muxRequestSender) Send(ctx context.Context, peer netdb.RouterRef, messag
 	return err
 }
 
+func (s muxRequestSender) Eligible(peer netdb.RouterRef) bool {
+	if s.seedReplyRouterInfo != nil && !canSeedNetDBTarget(peer, s.pairs, s.now) {
+		return false
+	}
+	return transportPeerEligibility(s.sender)(peer.Hash)
+}
+
 type directStoreFloodSender struct{ sender dataplane.TunnelSender }
 
 func (s directStoreFloodSender) Send(ctx context.Context, peer netdb.RouterRef, message foundation.I2NPMessage) error {
@@ -2080,8 +2087,24 @@ func (s muxLeaseSetSender) Send(ctx context.Context, peer netdb.RouterRef, messa
 	return sendNetDBThroughPair(ctx, peer, message, s.sender, s.tunnels, s.pairs, s.now, s.staticKeyLookup, s.seedReplyRouterInfo)
 }
 func (s muxLeaseSetSender) Eligible(peer netdb.RouterRef) bool {
+	if s.seedReplyRouterInfo != nil && !canSeedNetDBTarget(peer, s.pairs, s.now) {
+		return false
+	}
 	eligible := transportPeerEligibility(s.sender)
 	return eligible == nil || eligible(peer.Hash)
+}
+
+func canSeedNetDBTarget(peer netdb.RouterRef, pairs requestPairSource, now func() uint64) bool {
+	if pairs == nil || now == nil {
+		return true
+	}
+	current := now()
+	pair, ready := pairs.Pair(current)
+	if !ready || pair.OutboundEndpoint == (foundation.Hash{}) {
+		return true
+	}
+	// A seed rejected as stale must not consume a lookup's transport budget.
+	return netdb.RouterInfoFresh(peer.Info, current) == nil
 }
 
 func sendNetDBThroughPair(ctx context.Context, peer netdb.RouterRef, message foundation.I2NPMessage, sender dataplane.TunnelSender, tunnels requestTunnelSender, pairs requestPairSource, now func() uint64, staticKeyLookup tunnel.BuildStaticKeyLookup, seedReplyRouterInfo tunnel.RouterInfoSeeder) error {

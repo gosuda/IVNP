@@ -537,3 +537,104 @@ func TestEncryptedLeaseSetPublisherRejectsReplacedGenerationAcknowledgements(t *
 		})
 	}
 }
+
+func TestLeaseSetPublisherRecoversAfterEmptyFloodfillSnapshot(t *testing.T) {
+	localDestination, err := foundation.GenerateLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer localDestination.ReleaseSensitive()
+	local, err := NewLocalLeaseSet2(localDestination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+	sender := new(publisherSender)
+	now := uint64(1_000)
+	publisher, err := NewLeaseSetPublisher(LeaseSetPublisherConfig{
+		Local2: local, Database: database, Sender: sender,
+		InboundLeases: &publisherLeaseSource{leases: []foundation.NetworkDatabaseLease{{TunnelID: 7, EndDate: 600_000}}},
+		Sign:          localDestination.Sign, Now: func() uint64 { return now }, Random: func() uint32 { return 19 },
+		FloodfillLimit: 1, ReplyPath: publicationTestRoute{gateway: requestTestHash(8)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer publisher.Close()
+	if sent, err := publisher.Maintain(t.Context()); err != nil || sent != 0 {
+		t.Fatalf("publication without floodfills = %d, %v", sent, err)
+	}
+	addRequestTestFloodfill(database, requestTestHash(3))
+	now += PublicationConfirmTimeout - 1
+	if sent, err := publisher.Maintain(t.Context()); err != nil || sent != 0 {
+		t.Fatalf("publication before retry deadline = %d, %v", sent, err)
+	}
+	now++
+	if sent, err := publisher.Maintain(t.Context()); err != nil || sent != 1 {
+		t.Fatalf("publication after floodfill discovery = %d, %v; want one send", sent, err)
+	}
+	store, err := foundation.I2NPParseDatabaseStore(sender.published[0].message.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !publisher.HandleDeliveryStatus(foundation.I2NPDeliveryStatusMessage{MessageID: store.ReplyToken, Timestamp: now}) || !publisher.Confirmed() {
+		t.Fatal("discovered floodfill could not confirm the unchanged LeaseSet")
+	}
+}
+
+func TestLeaseSetPublisherUsesLocalAcknowledgementDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		arrival      uint64
+		receiveDelay uint64
+		confirmed    bool
+	}{
+		{name: "Java randomized timestamp", arrival: 8_000, receiveDelay: 10, confirmed: true},
+		{name: "floodfill clock ahead", arrival: 41_000, receiveDelay: 10, confirmed: true},
+		{name: "local deadline expired", arrival: 10_010, receiveDelay: PublicationConfirmTimeout, confirmed: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			localDestination, err := foundation.GenerateLocalDestination()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer localDestination.ReleaseSensitive()
+			local, err := NewLocalLeaseSet2(localDestination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+			addRequestTestFloodfill(database, requestTestHash(3))
+			sender := new(publisherSender)
+			now := uint64(10_000)
+			publisher, err := NewLeaseSetPublisher(LeaseSetPublisherConfig{
+				Local2: local, Database: database, Sender: sender,
+				InboundLeases: &publisherLeaseSource{leases: []foundation.NetworkDatabaseLease{{TunnelID: 7, EndDate: 600_000}}},
+				Sign:          localDestination.Sign, Now: func() uint64 { return now }, Random: func() uint32 { return 19 },
+				FloodfillLimit: 1, ReplyPath: publicationTestRoute{gateway: requestTestHash(8)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer publisher.Close()
+			if sent, err := publisher.Maintain(t.Context()); err != nil || sent != 1 {
+				t.Fatalf("publication = %d, %v; want one send", sent, err)
+			}
+			store, err := foundation.I2NPParseDatabaseStore(sender.published[0].message.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now += tc.receiveDelay
+			ack := foundation.I2NPDeliveryStatusMessage{MessageID: store.ReplyToken, Timestamp: tc.arrival}
+			if got := publisher.HandleDeliveryStatus(ack); got != tc.confirmed {
+				t.Fatalf("ACK accepted = %t, want %t", got, tc.confirmed)
+			}
+			if got := publisher.Confirmed(); got != tc.confirmed {
+				t.Fatalf("publication ready = %t, want %t", got, tc.confirmed)
+			}
+			if tc.confirmed && publisher.HandleDeliveryStatus(ack) {
+				t.Fatal("duplicate ACK accepted")
+			}
+		})
+	}
+}

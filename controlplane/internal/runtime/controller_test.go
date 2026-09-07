@@ -896,6 +896,35 @@ func TestMuxLeaseSetSenderUsesOutboundTunnelAndSeedsBothRoutes(t *testing.T) {
 	}
 }
 
+func TestTunneledNetDBTargetsRequireSeedableRouterInfo(t *testing.T) {
+	const now = uint64(1_700_000_000_000)
+	direct := new(requestDirectCapture)
+	pairs := requestPairCapture{pair: tunnel.CircuitPair{OutboundID: 11, OutboundEndpoint: foundation.Hash{3}}}
+	clock := func() uint64 { return now }
+	seed := func(context.Context, foundation.Hash, foundation.Hash) error { return nil }
+	lookup := muxRequestSender{sender: direct, pairs: pairs, now: clock, seedReplyRouterInfo: seed}
+	publication := muxLeaseSetSender{sender: direct, pairs: pairs, now: clock, seedReplyRouterInfo: seed}
+	fresh := netdb.RouterRef{Hash: foundation.Hash{1}, Info: foundation.NetworkDatabaseRouterInfo{Published: now - netdb.RouterInfoMaxAgeMillis}}
+	stale := netdb.RouterRef{Hash: foundation.Hash{2}, Info: foundation.NetworkDatabaseRouterInfo{Published: now - netdb.RouterInfoMaxAgeMillis - 1}}
+	for _, sender := range []struct {
+		name     string
+		eligible func(netdb.RouterRef) bool
+	}{{"lookup", lookup.Eligible}, {"publication", publication.Eligible}} {
+		t.Run(sender.name, func(t *testing.T) {
+			if !sender.eligible(fresh) {
+				t.Fatal("rejected RouterInfo at the seed freshness boundary")
+			}
+			if sender.eligible(stale) {
+				t.Fatal("selected a RouterInfo which the required seed would reject")
+			}
+		})
+	}
+	lookup.pairs, publication.pairs = nil, nil
+	if !lookup.Eligible(stale) || !publication.Eligible(stale) {
+		t.Fatal("direct bootstrap requires a seed even before tunnels exist")
+	}
+}
+
 func TestProxyRequiresTunnelAndPersistsDefaultDestination(t *testing.T) {
 	cfg := daemonTestConfig(t)
 	cfg.HTTPProxy.Enabled = true

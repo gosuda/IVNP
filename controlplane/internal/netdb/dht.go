@@ -276,7 +276,7 @@ func (t *Table) Expire(cutoff uint64) int {
 // ClosestInto writes up to len(dst) closest peers by XOR metric and returns
 // the populated prefix. A zero-length dst is valid and never allocates.
 func (t *Table) ClosestInto(dst []RouterRef, target foundation.Hash) []RouterRef {
-	return t.closestInto(dst, target, false, nil)
+	return t.closestInto(dst, target, false, nil, nil)
 }
 
 // ClosestRoutingInto searches only hashes admitted by the Java-compatible
@@ -328,15 +328,15 @@ func (t *Table) closestRoutingInto(dst []RouterRef, target foundation.Hash, excl
 
 // ClosestFloodfillsInto is ClosestInto restricted to floodfill routers.
 func (t *Table) ClosestFloodfillsInto(dst []RouterRef, target foundation.Hash) []RouterRef {
-	return t.closestInto(dst, target, true, nil)
+	return t.closestInto(dst, target, true, nil, nil)
 }
 
 // ClosestFloodfillsExcludingInto applies exclusions before limiting results.
 func (t *Table) ClosestFloodfillsExcludingInto(dst []RouterRef, target foundation.Hash, excluded map[foundation.Hash]struct{}) []RouterRef {
-	return t.closestInto(dst, target, true, excluded)
+	return t.closestInto(dst, target, true, excluded, nil)
 }
 
-func (t *Table) closestInto(dst []RouterRef, target foundation.Hash, floodfillOnly bool, excluded map[foundation.Hash]struct{}) []RouterRef {
+func (t *Table) closestInto(dst []RouterRef, target foundation.Hash, floodfillOnly bool, excluded map[foundation.Hash]struct{}, eligible func(RouterRef) bool) []RouterRef {
 	dst = dst[:0]
 	if cap(dst) == 0 {
 		return dst
@@ -347,6 +347,9 @@ func (t *Table) closestInto(dst []RouterRef, target foundation.Hash, floodfillOn
 	for _, candidate := range buffer.peers {
 		_, skip := excluded[candidate.Hash]
 		if skip || floodfillOnly && !candidate.Floodfill {
+			continue
+		}
+		if eligible != nil && !eligible(candidate) {
 			continue
 		}
 		index := len(dst)

@@ -278,7 +278,7 @@ func (m *RequestManager) lookup(ctx context.Context, typeID LookupType, key foun
 		return nil, ErrRequestManagerFull
 	}
 	now := m.now()
-	allTargets := m.database.FloodTargetsAt(make([]RouterRef, m.maxCandidates), key, now)
+	allTargets := m.database.eligibleFloodTargets(make([]RouterRef, m.maxCandidates), key, now, m.sender)
 	deadline := now + m.timeoutMillis
 	if deadline < now {
 		deadline = ^uint64(0)
@@ -418,7 +418,7 @@ func (m *RequestManager) HandleDatabaseSearchReply(ctx context.Context, reply fo
 		if !m.addCandidateLocked(req, peer) {
 			continue
 		}
-		if _, known := m.database.Routers().Get(peer); !known {
+		if current, known := m.database.Routers().Get(peer); !known || !targetEligible(m.sender, current) {
 			req.refreshing[peer] = struct{}{}
 			refresh = append(refresh, peer)
 		}
@@ -669,7 +669,7 @@ func (m *RequestManager) prepareSendLocked(key requestKey, req *pendingRequest) 
 	var peer RouterRef
 	found := false
 	if req.seed != (foundation.Hash{}) && len(req.attempted) == 0 {
-		if current, known := m.database.Routers().Get(req.seed); known && responderRefEligible(current, m.now()) {
+		if current, known := m.database.Routers().Get(req.seed); known && responderRefEligible(current, m.now()) && targetEligible(m.sender, current) {
 			selected, peer, found = req.seed, current, true
 		}
 	}
@@ -682,7 +682,10 @@ func (m *RequestManager) prepareSendLocked(key requestKey, req *pendingRequest) 
 				continue
 			}
 			current, known := m.database.Routers().Get(candidate)
-			if !known || (candidate == req.seed && !responderRefEligible(current, m.now())) {
+			if !known || !targetEligible(m.sender, current) {
+				continue
+			}
+			if candidate == req.seed && !responderRefEligible(current, m.now()) {
 				continue
 			}
 			if !found || distanceLess(req.routingKey, candidate, selected) {

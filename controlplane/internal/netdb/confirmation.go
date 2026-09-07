@@ -215,7 +215,7 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 			}
 		}
 	}
-	if len(p.attempts) == 0 && p.confirmed < PublicationFloodfillK && len(p.targets) != 0 && p.nextTarget >= len(p.targets) && p.nextRetry <= now {
+	if len(p.attempts) == 0 && p.confirmed < PublicationFloodfillK && p.nextTarget >= len(p.targets) && p.nextRetry <= now {
 		p.targets = nil
 		p.nextTarget = 0
 	}
@@ -257,8 +257,8 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 			p.mu.Unlock()
 
 			token, err := p.registry.allocate(func(token uint32) publicationTokenOwner {
-				return func(status foundation.I2NPDeliveryStatusMessage) bool {
-					return p.confirm(token, status, generation)
+				return func(foundation.I2NPDeliveryStatusMessage) bool {
+					return p.confirm(token, generation)
 				}
 			})
 			if err != nil {
@@ -346,12 +346,12 @@ func (p *confirmedPublication) snapshotTargets() []RouterRef {
 	targets := make([]RouterRef, 0, publicationTargetSnapshot+len(p.preferred))
 	for _, hash := range p.preferred {
 		ref, ok := p.database.Routers().Get(hash)
-		if !ok || !ref.Floodfill || !publicationTargetEligible(p.sender, ref) {
+		if !ok || !ref.Floodfill || !targetEligible(p.sender, ref) {
 			continue
 		}
 		targets = append(targets, ref)
 	}
-	for _, candidate := range p.database.FloodTargetsAt(make([]RouterRef, publicationTargetSnapshot), p.key, p.now()) {
+	for _, candidate := range p.database.eligibleFloodTargets(make([]RouterRef, publicationTargetSnapshot), p.key, p.now(), p.sender) {
 		duplicate := false
 		for _, existing := range targets {
 			if existing.Hash == candidate.Hash {
@@ -359,23 +359,26 @@ func (p *confirmedPublication) snapshotTargets() []RouterRef {
 				break
 			}
 		}
-		if !duplicate && publicationTargetEligible(p.sender, candidate) {
+		if !duplicate {
 			targets = append(targets, candidate)
 		}
 	}
 	return targets
 }
 
-func publicationTargetEligible(sender LeaseSetPublishSender, target RouterRef) bool {
-	eligibility, ok := sender.(leaseSetTargetEligibility)
+func targetEligible(sender LeaseSetPublishSender, target RouterRef) bool {
+	eligibility, ok := sender.(targetEligibility)
 	return !ok || eligibility.Eligible(target)
 }
 
-func (p *confirmedPublication) confirm(token uint32, status foundation.I2NPDeliveryStatusMessage, generation uint64) bool {
+func (p *confirmedPublication) confirm(token uint32, generation uint64) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	attempt, ok := p.attempts[uint32(token)]
-	if !ok || p.generation != generation || status.Timestamp < attempt.sentAt || status.Timestamp > attempt.deadline {
+	// Floodfills set the DSM timestamp from their own clock; Java I2P also
+	// randomizes it backwards by up to three seconds. Expire on local receipt.
+	now := p.now()
+	if !ok || p.generation != generation || now >= attempt.deadline {
 		return false
 	}
 	delete(p.attempts, uint32(token))
@@ -389,7 +392,11 @@ func (p *confirmedPublication) confirm(token uint32, status foundation.I2NPDeliv
 		}
 	}
 	if p.logger != nil {
-		p.logger.Info("netdb publication confirmed", "store_type", uint8(p.typeID), "target", foundation.EncodeI2PBase64(attempt.target.Hash[:]), "generation", generation, "latency_ms", status.Timestamp-attempt.sentAt)
+		latency := uint64(0)
+		if now > attempt.sentAt {
+			latency = now - attempt.sentAt
+		}
+		p.logger.Info("netdb publication confirmed", "store_type", uint8(p.typeID), "target", foundation.EncodeI2PBase64(attempt.target.Hash[:]), "generation", generation, "latency_ms", latency)
 	}
 	return true
 }

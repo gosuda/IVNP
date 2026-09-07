@@ -97,6 +97,14 @@ func (d *Database) FloodTargetsAt(dst []RouterRef, key foundation.Hash, nowMilli
 	return d.routers.ClosestFloodfillsInto(dst, RoutingKey(key, nowMillis))
 }
 
+func (d *Database) eligibleFloodTargets(dst []RouterRef, key foundation.Hash, nowMillis uint64, sender LeaseSetPublishSender) []RouterRef {
+	eligibility, ok := sender.(targetEligibility)
+	if !ok {
+		return d.FloodTargetsAt(dst, key, nowMillis)
+	}
+	return d.routers.closestInto(dst, RoutingKey(key, nowMillis), true, nil, eligibility.Eligible)
+}
+
 // FloodTargets finds the current UTC day's closest floodfill routers.
 func (d *Database) FloodTargets(dst []RouterRef, key foundation.Hash) []RouterRef {
 	return d.FloodTargetsAt(dst, key, uint64(time.Now().UnixMilli()))

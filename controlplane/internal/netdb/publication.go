@@ -47,7 +47,7 @@ func (f LeaseSetPublishSenderFunc) Send(ctx context.Context, peer RouterRef, mes
 	return f(ctx, peer, message)
 }
 
-type leaseSetTargetEligibility interface {
+type targetEligibility interface {
 	Eligible(RouterRef) bool
 }
 
