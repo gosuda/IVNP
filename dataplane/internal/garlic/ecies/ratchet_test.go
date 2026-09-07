@@ -296,6 +296,55 @@ func TestRatchetNewExistingReplayAndAck(t *testing.T) {
 	}
 }
 
+func TestRatchetActivityExtendsIdleLifetime(t *testing.T) {
+	a, b, aPeer, bPeer, now := ratchetPair(t)
+	defer a.ReleaseSensitive()
+	defer b.ReleaseSensitive()
+	bInboundPeer := establishRatchet(t, a, b, aPeer, bPeer, now)
+	for range 4 {
+		now += defaultSessionLife / 2
+		forward, err := a.EncryptExisting(make([]byte, 256), bPeer, clove("PING"), RatchetOptions{}, now)
+		if err != nil {
+			t.Fatalf("active session send at %d: %v", now, err)
+		}
+		if got, err := b.Receive(make([]byte, 256), nil, forward, now); err != nil || string(got.Payload) != string(clove("PING")) {
+			t.Fatalf("active session receive at %d: payload=%x error=%v", now, got.Payload, err)
+		}
+		reverse, err := b.EncryptExisting(make([]byte, 256), bInboundPeer, clove("PONG"), RatchetOptions{}, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := a.Receive(make([]byte, 256), nil, reverse, now); err != nil || string(got.Payload) != string(clove("PONG")) {
+			t.Fatalf("active reply at %d: payload=%x error=%v", now, got.Payload, err)
+		}
+	}
+	if _, err := a.EncryptExisting(make([]byte, 256), bPeer, nil, RatchetOptions{}, now+defaultSessionLife+1); !errors.Is(err, ErrRatchetNoSession) {
+		t.Fatalf("idle session error = %v, want ErrRatchetNoSession", err)
+	}
+}
+
+func TestRatchetUnauthenticatedTrafficDoesNotExtendIdleLifetime(t *testing.T) {
+	a, b, aPeer, bPeer, now := ratchetPair(t)
+	defer a.ReleaseSensitive()
+	defer b.ReleaseSensitive()
+	establishRatchet(t, a, b, aPeer, bPeer, now)
+	invalid, err := a.EncryptExisting(make([]byte, 256), bPeer, clove("invalid"), RatchetOptions{}, now+defaultSessionLife-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid[len(invalid)-1] ^= 1
+	if _, err := b.Receive(make([]byte, 256), nil, invalid, now+defaultSessionLife-1); !errors.Is(err, ErrRatchet) {
+		t.Fatalf("tampered packet error = %v, want ErrRatchet", err)
+	}
+	valid, err := a.EncryptExisting(make([]byte, 256), bPeer, clove("late"), RatchetOptions{}, now+defaultSessionLife-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Receive(make([]byte, 256), nil, valid, now+defaultSessionLife+1); err == nil {
+		t.Fatal("tampered traffic kept idle receive keys alive")
+	}
+}
+
 func TestRatchetDHTransitionAndExpiry(t *testing.T) {
 	a, b, aPeer, bPeer, now := ratchetPair(t)
 	defer a.ReleaseSensitive()
@@ -322,7 +371,7 @@ func TestRatchetDHTransitionAndExpiry(t *testing.T) {
 	if got, err := b.Receive(make([]byte, 256), make([]byte, 1), after, now+3); err != nil || string(got.Payload) != string(clove("after")) {
 		t.Fatalf("post-DH = %#v, %v", got, err)
 	}
-	if _, err = a.EncryptExisting(make([]byte, 256), bPeer, nil, RatchetOptions{}, now+defaultSessionLife+1); !errors.Is(err, ErrRatchetNoSession) {
+	if _, err = a.EncryptExisting(make([]byte, 256), bPeer, nil, RatchetOptions{}, now+3+defaultSessionLife+1); !errors.Is(err, ErrRatchetNoSession) {
 		t.Fatalf("expired session = %v", err)
 	}
 }

@@ -172,6 +172,8 @@ func (a *creatorAttempt) failPreparation() {
 	a.finishLocked()
 }
 
+// Replacement retires pool selection, not the runtime circuit: peers may still
+// send to its advertised lease until ExpiresAt. Runtime.Expire owns that deadline.
 func (m *BuildManager) installCreatorEntry(entry Entry, attempt *creatorAttempt, retireID uint32, now uint64) (Entry, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

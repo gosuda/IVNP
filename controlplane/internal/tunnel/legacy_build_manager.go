@@ -302,13 +302,10 @@ func (m *BuildManager) HandleVariableReply(message foundation.I2NPMessage) error
 		return err
 	}
 	if m.pool != nil {
-		retired, replaced, poolErr := m.installCreatorEntry(entry, pending.build.attempt, pending.build.retireID, now)
+		_, _, poolErr := m.installCreatorEntry(entry, pending.build.attempt, pending.build.retireID, now)
 		if poolErr != nil {
 			m.runtime.RemoveCircuit(entry.Circuit)
 			return poolErr
-		}
-		if replaced {
-			m.runtime.RemoveCircuit(retired.Circuit)
 		}
 	}
 	return nil

@@ -45,7 +45,7 @@ func (dataPlaneRequestSender) Send(context.Context, controlplanenetdb.RouterRef,
 type dataPlaneReplyRoute struct{}
 
 func (dataPlaneReplyRoute) DatabaseLookupReplyRoute() (foundation.Hash, uint32, bool) {
-	return foundation.Hash{}, 1, true
+	return foundation.Hash{1}, 1, true
 }
 
 type controlPlaneDirectSender func(context.Context, dataplane.StreamingTunnelDelivery) error
@@ -236,7 +236,7 @@ func TestStreamingTunnelSenderLeaseSetGarlicTunnelDestination(t *testing.T) {
 		t.Fatal("outbound tunnel did not carry the encrypted Garlic frame")
 	}
 }
-func storeControlLegacyLeaseSet(t *testing.T, database *controlplanenetdb.Database, address foundation.LocalAddress, lease foundation.NetworkDatabaseLease) {
+func storeControlLegacyLeaseSet(t *testing.T, database *controlplanenetdb.Database, address foundation.LocalAddress, leases ...foundation.NetworkDatabaseLease) {
 	t.Helper()
 	raw, err := foundation.DecodeI2PBase64(address.Destination)
 	if err != nil {
@@ -250,7 +250,7 @@ func storeControlLegacyLeaseSet(t *testing.T, database *controlplanenetdb.Databa
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = local.ReplaceInboundLeases([]foundation.NetworkDatabaseLease{lease}); err != nil {
+	if err = local.ReplaceInboundLeases(leases); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, ok := local.Snapshot(0)

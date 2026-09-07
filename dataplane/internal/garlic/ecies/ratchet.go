@@ -42,10 +42,10 @@ var (
 	ErrRatchetTagExhausted = errors.New("garlic/ecies: ratchet tag set exhausted")
 )
 
-// RatchetConfig limits all destination-local ratchet state. Times are Unix
-// milliseconds. CryptoTypes is the ordered set of New Session formats accepted
-// by this destination. An empty set enables every production format in
-// preference order: ML-KEM-1024/X25519, ML-KEM-768/X25519, then X25519.
+// RatchetConfig limits destination-local ratchet state. SessionLifetime is an
+// idle timeout. Times are Unix milliseconds; durations are milliseconds.
+// CryptoTypes orders the accepted New Session formats. An empty set enables
+// ML-KEM-1024/X25519, ML-KEM-768/X25519, then X25519.
 type RatchetConfig struct {
 	CryptoTypes     []uint16
 	MaxSessions     int
@@ -451,12 +451,11 @@ func (m *RatchetManager) encryptLocked(dst, scratch []byte, peer foundation.Hash
 			options.RequestDH = true
 		}
 		packet, err := m.encryptExistingLocked(dst, scratch, established, payload, options, now)
-		if !errors.Is(err, ErrRatchetTagExhausted) {
+		if !errors.Is(err, ErrRatchetTagExhausted) && !errors.Is(err, ErrRatchetExpired) {
 			return packet, err
 		}
-		// A peer which never returns the reverse DH key must not strand the
-		// data plane on an exhausted tag set. Retire that session atomically
-		// and start a fresh bound session with the current LeaseSet key.
+		// Expired directions and an exhausted unacknowledged DH step require a
+		// fresh handshake with the current LeaseSet key.
 		m.discardSessionLocked(peer, established)
 	}
 	return m.encryptNewLocked(dst, peer, remotePublic, cryptoType, payload, now)
@@ -578,7 +577,7 @@ func (m *RatchetManager) EncryptExistingWithScratch(dst, plain []byte, peer foun
 }
 
 func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, payload []byte, options RatchetOptions, now uint64) ([]byte, error) {
-	if s.expires < now {
+	if s.expires < now || s.outbound.expires < now || s.inbound.expires < now {
 		return nil, ErrRatchetExpired
 	}
 	if options.RequestDH && !s.pendingDH {
@@ -691,6 +690,8 @@ func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, 
 	if options.Terminate {
 		s.terminated = true
 	}
+	s.outbound.expires = max(s.outbound.expires, now+m.config.SessionLifetime)
+	s.expires = max(s.expires, s.outbound.expires)
 	if m.metrics != nil {
 		m.metrics.IncGarlicECIESExistingSessionSent()
 		if sentDH {
@@ -869,6 +870,9 @@ func (m *RatchetManager) receiveExistingLocked(dst, packet []byte, tag [ratchetT
 		clear(plain)
 		return RatchetResult{}, err
 	}
+	// Only authenticated traffic renews receive keys; old DH sets still obey oldUntil.
+	entry.set.expires = max(entry.set.expires, now+m.config.SessionLifetime)
+	entry.set.owner.expires = max(entry.set.owner.expires, entry.set.expires)
 	result.Payload, result.Peer = plain, sessionPeer(entry.set, m.sessions)
 	return result, nil
 }

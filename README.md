@@ -200,6 +200,20 @@ lease. Caller cancellation does not penalize routes; later successful handshakes
 and newer installations protect against stale failure feedback. Established
 streams do not inherit the handshake timeout.
 
+Authenticated peer RESETs reject a dial immediately without classifying the
+route as silent. Streaming loss recovery uses explicit NACKs; repeated
+piggyback ACKs alone do not trigger fast retransmission.
+
+Tunnel renewal removes old circuits from selection but keeps them installed
+until their advertised expiration. A local LeaseSet remains usable while any
+return lease is live; expired remote LeaseSets trigger lookup before route
+preparation. ECIES ratchet lifetimes measure inactivity, not connection age;
+authenticated traffic renews them without extending retired DH tag-set grace.
+
+IRC `KILL` or `ERROR` responses such as `spambot kill` are server-side refusals,
+not I2P timeouts. Obtain the server operator's permission for bots or relaying;
+changing transport timeouts or identities does not resolve that policy.
+
 On bridges advertising `IVNP_PREPARE=1`, `toyirc` supplies its IRC target during
 session creation. Remote preparation overlaps local LeaseSet confirmation using
 destination-owned tunnels. Slow or failed preparation does not add a readiness

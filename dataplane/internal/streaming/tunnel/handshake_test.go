@@ -9,6 +9,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	dataplanestreaming "gosuda.org/ivnp/dataplane/internal/streaming"
 	"gosuda.org/ivnp/foundation"
 )
 
@@ -131,6 +132,63 @@ func TestCanceledHandshakeDoesNotReportRouteFailure(t *testing.T) {
 		}
 		if network.Stats().Connections != 0 {
 			t.Fatal("canceled handshake remained registered")
+		}
+	})
+}
+
+func TestSignedResetRejectsHandshakeWithoutReplyStreamID(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
+		client, server := newTunnelNetworkPair(t, fabric, time.Second)
+		feedback := &handshakeFeedbackRecorder{TunnelSender: fabric}
+		client.handshakeObserver = feedback
+		client.sender = handshakeSendFunc(func(ctx context.Context, delivery Delivery) error {
+			packet, err := dataplanestreaming.Parse(delivery.Payload)
+			if err != nil {
+				return err
+			}
+			wire, err := server.signedControl(Packet{SendStreamID: packet.ReceiveStreamID, Flags: FlagReset | FlagSignatureIncluded | FlagFromIncluded}, controlOptions{includeFrom: true})
+			if err != nil {
+				return err
+			}
+			_ = client.HandleDelivery(ctx, Delivery{From: server.localHash, To: client.localHash, FromPort: delivery.ToPort, ToPort: delivery.FromPort, Protocol: ProtocolStreaming, Payload: wire})
+			return nil
+		})
+		feedback.TunnelSender = client.sender
+		started := time.Now()
+		_, err := client.DialI2P(t.Context(), net.JoinHostPort(server.B32(), "80"))
+		if !errors.Is(err, ErrTunnelReset) {
+			t.Fatalf("signed rejection = %v, want ErrTunnelReset", err)
+		}
+		if time.Since(started) >= time.Second || feedback.timedOut != 0 {
+			t.Fatalf("rejected handshake waited %s and reported %d silent route failures", time.Since(started), feedback.timedOut)
+		}
+	})
+}
+
+func TestSignedResetDoesNotRequireMatchingReplyStreamID(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
+		client, server := newTunnelNetworkPair(t, fabric, time.Second)
+		connection := client.newConn(1, 2, server.localHash, server.localIdentity, 1234, 80, true)
+		if err := client.register(connection); err != nil {
+			t.Fatal(err)
+		}
+		wire, err := server.signedControl(Packet{SendStreamID: 1, ReceiveStreamID: 99, Flags: FlagReset | FlagSignatureIncluded}, controlOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		delivery := Delivery{From: server.localHash, To: client.localHash, FromPort: 80, ToPort: 1234, Protocol: ProtocolStreaming, Payload: wire}
+		wire[len(wire)-1] ^= 1
+		if err := client.HandleDelivery(t.Context(), delivery); !errors.Is(err, ErrTunnelSignature) {
+			t.Fatalf("forged reset = %v, want ErrTunnelSignature", err)
+		}
+		wire[len(wire)-1] ^= 1
+		if err := client.HandleDelivery(t.Context(), delivery); !errors.Is(err, ErrTunnelReset) {
+			t.Fatalf("signed reset = %v, want ErrTunnelReset", err)
+		}
+		if _, err := connection.Read(make([]byte, 1)); !errors.Is(err, ErrTunnelReset) {
+			t.Fatalf("reset stream read = %v, want ErrTunnelReset", err)
 		}
 	})
 }

@@ -871,17 +871,31 @@ func TestBuildManagerBuildsInboundAcrossTransitAndRejectsStaleRequests(t *testin
 	carrier := new(buildCaptureSender)
 	var inboundDelivered foundation.I2NPMessage
 	creatorRuntime := dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: carrier, Now: func() uint64 { return now }})
+	pool := NewPool(1)
+	oldInbound := Entry{ID: 699, Direction: Inbound, Expires: now + 120_000}
+	var err error
+	oldInbound.Circuit, err = creatorRuntime.RegisterInbound(dataplane.TunnelInboundCircuit{
+		ID: oldInbound.ID, ExpiresAt: oldInbound.Expires, Endpoint: dataplane.TunnelNewEndpoint(1, 1024),
+		Local: func(message foundation.I2NPMessage) error { inboundDelivered = message; return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { creatorRuntime.RemoveCircuit(oldInbound.Circuit) })
+	if err := pool.Add(oldInbound, now); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := creatorRuntime.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 500, FirstHop: outerPeer, NextTunnelID: 501}); err != nil {
 		t.Fatal(err)
 	}
 	creatorManager, err := NewBuildManager(BuildManagerConfig{
-		Runtime: creatorRuntime, Sender: carrier, ReplyKeys: newBuildReplyRegistry(), LocalRouter: creator,
+		Runtime: creatorRuntime, Pool: pool, Sender: carrier, ReplyKeys: newBuildReplyRegistry(), LocalRouter: creator,
 		LocalDelivery: func(message foundation.I2NPMessage) error { inboundDelivered = message; return nil }, Now: func() uint64 { return now }, Random: new(buildCounterReader),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	build := InboundBuild{CircuitID: 700, OutboundTunnelID: 500, ExpiresAt: now + 600_000, Hops: make([]ShortBuildHop, 3)}
+	build := InboundBuild{CircuitID: 700, OutboundTunnelID: 500, ExpiresAt: now + 600_000, Hops: make([]ShortBuildHop, 3), retireID: oldInbound.ID}
 	privateKeys := make([][]byte, len(build.Hops))
 	for index := range build.Hops {
 		privateKeys[index] = make([]byte, 32)
@@ -963,6 +977,24 @@ func TestBuildManagerBuildsInboundAcrossTransitAndRejectsStaleRequests(t *testin
 	}
 	producerSender := new(buildCaptureSender)
 	producer := dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: producerSender, Now: func() uint64 { return now }})
+	if _, err := producer.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 2, FirstHop: foundation.Hash{1}, NextTunnelID: oldInbound.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := producer.SendBlock(t.Context(), 2, dataplane.TunnelBlock{Delivery: dataplane.TunnelDeliveryLocal, Last: true, Data: buildStatusFrame(t, 54)}); err != nil {
+		t.Fatal(err)
+	}
+	for _, sent := range producerSender.take() {
+		if err := creatorRuntime.Handle(sent.message); err != nil {
+			t.Fatalf("renewal dropped traffic for an advertised inbound lease: %v", err)
+		}
+	}
+	if inboundDelivered.Header.ID != 54 {
+		t.Fatalf("old inbound delivery ID = %d, want 54", inboundDelivered.Header.ID)
+	}
+	creatorRuntime.Expire(oldInbound.Expires)
+	if _, ok := creatorRuntime.InspectCircuit(oldInbound.ID); ok {
+		t.Fatal("old inbound circuit survived its original expiry")
+	}
 	if _, err = producer.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 1, FirstHop: foundation.Hash{1}, NextTunnelID: build.CircuitID}); err != nil {
 		t.Fatal(err)
 	}

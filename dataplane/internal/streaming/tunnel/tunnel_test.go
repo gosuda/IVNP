@@ -804,13 +804,18 @@ func TestTunnelReliabilityKarnFastRetransmitAndNACKs(t *testing.T) {
 	connection.pending[3] = pendingPacket{wire: []byte{3}, sent: now}
 	nack := []byte{0, 0, 0, 3}
 	for range 2 {
-		if retransmit := connection.acknowledgeLocked(2, nack, now); len(retransmit) != 0 {
-			t.Fatal("fast retransmit fired before three duplicate ACK/NACKs")
+		if retransmit := connection.acknowledgeLocked(4, nack, now); len(retransmit) != 0 {
+			t.Fatal("fast retransmit fired before three explicit NACKs")
 		}
 	}
-	retransmit := connection.acknowledgeLocked(2, nack, now)
+	retransmit := connection.acknowledgeLocked(4, nack, now)
 	if len(retransmit) != 1 || retransmit[0].wire[0] != 3 {
 		t.Fatalf("fast retransmit = %v, want packet 3", retransmit)
+	}
+	for range 12 {
+		if retransmit := connection.acknowledgeLocked(4, nack, now); len(retransmit) != 0 {
+			t.Fatal("repeated loss reports retransmitted an already retried packet")
+		}
 	}
 	if got := connection.congestion.Window(); got != dataplanestreaming.MinWindow {
 		t.Fatalf("fast retransmit window = %d, want %d", got, dataplanestreaming.MinWindow)
@@ -818,7 +823,11 @@ func TestTunnelReliabilityKarnFastRetransmitAndNACKs(t *testing.T) {
 
 	connection.expect = 1
 	connection.reordered[3] = receivedPacket{payload: []byte("late")}
-	if got, want := connection.nacksLocked(), []byte{0, 0, 0, 1, 0, 0, 0, 2}; !bytes.Equal(got, want) {
+	through, nacks := connection.acknowledgmentsLocked()
+	if through != 3 {
+		t.Fatalf("ACK through = %d, want highest received packet 3", through)
+	}
+	if got, want := nacks, []byte{0, 0, 0, 1, 0, 0, 0, 2}; !bytes.Equal(got, want) {
 		t.Fatalf("NACK holes = %v, want %v", got, want)
 	}
 }

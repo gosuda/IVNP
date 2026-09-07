@@ -326,6 +326,7 @@ func (n *TunnelNetwork) DialI2PFromPort(ctx context.Context, address string, loc
 	select {
 	case <-connection.established:
 	case <-connection.done:
+	case <-connection.peerClosed:
 	case <-handshake.Done():
 	}
 	if err = ctx.Err(); err != nil {
@@ -334,11 +335,15 @@ func (n *TunnelNetwork) DialI2PFromPort(ctx context.Context, address string, loc
 	connection.mu.Lock()
 	unanswered := connection.remoteID == 0
 	retriesExhausted := connection.handshakeFailed
-	peerTimedOut := unanswered && (errors.Is(handshake.Err(), context.DeadlineExceeded) || retriesExhausted)
+	reset := connection.reset
+	peerTimedOut := !reset && unanswered && (errors.Is(handshake.Err(), context.DeadlineExceeded) || retriesExhausted)
 	if peerTimedOut {
 		connection.handshakeFailed = true
 	}
 	connection.mu.Unlock()
+	if reset {
+		return nil, ErrTunnelReset
+	}
 	if !unanswered && !connection.isDone() {
 		if feedback != nil {
 			feedback.Established()
@@ -409,7 +414,7 @@ func (n *TunnelNetwork) HandleDelivery(ctx context.Context, delivery Delivery) e
 	if packet.SendStreamID == 0 && packet.Flags&FlagSynchronize != 0 {
 		return n.handleSynchronize(ctx, delivery, packet)
 	}
-	if packet.SendStreamID == 0 || packet.ReceiveStreamID == 0 {
+	if packet.SendStreamID == 0 || (packet.ReceiveStreamID == 0 && packet.Flags&FlagReset == 0) {
 		return invalidTunnelPacket("missing stream ID", packet)
 	}
 	n.mu.RLock()
@@ -1065,9 +1070,6 @@ type tunnelConn struct {
 	syncRetries        int
 	rto                dataplanestreaming.RTOEstimator
 	congestion         dataplanestreaming.CongestionWindow
-	lastAck            uint32
-	haveAck            bool
-	duplicateACK       uint8
 	peerMaxPayloadSize int
 	retryUpdateQueued  atomic.Bool
 	nextPaced          time.Time
@@ -1099,6 +1101,7 @@ type pendingPacket struct {
 	lease         *wireLease
 	sent          time.Time
 	retries       int
+	nacks         uint8
 	retransmitted bool
 }
 
@@ -1150,7 +1153,7 @@ func (c *tunnelConn) retryDue() time.Time {
 	}
 	var due time.Time
 	rto := c.rto.RTO()
-	if c.remoteID == 0 && len(c.synchronize) != 0 {
+	if len(c.synchronize) != 0 {
 		due = c.syncSent.Add(rto)
 	}
 	for _, pending := range c.pending {
@@ -1182,7 +1185,7 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 		c.mu.Unlock()
 		return net.ErrClosed
 	}
-	if c.remoteID == 0 && packet.Flags&FlagSynchronize == 0 {
+	if c.remoteID == 0 && packet.Flags&(FlagSynchronize|FlagReset) == 0 {
 		err := c.queuePreSynchronizeLocked(delivery, packet)
 		c.mu.Unlock()
 		return err
@@ -1193,19 +1196,22 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 		c.mu.Unlock()
 		return err
 	}
-	if c.remoteID != 0 && len(c.preSynchronize) != 0 {
-		deferred, c.preSynchronize = c.preSynchronize, nil
-	}
-	retryChanged := packet.Flags&FlagNoACK == 0
-	if retryChanged {
-		fastRetransmit = c.acknowledgeLocked(packet.AckThrough, packet.NACKs, time.Now())
-	}
 	if packet.Flags&FlagReset != 0 {
 		c.reset = true
 		c.peerClosedOK = true
 		c.signalPeerClosedLocked()
 		c.mu.Unlock()
 		return ErrTunnelReset
+	}
+	if c.remoteID != 0 && len(c.preSynchronize) != 0 {
+		deferred, c.preSynchronize = c.preSynchronize, nil
+	}
+	retryChanged := packet.Flags&FlagNoACK == 0
+	if retryChanged {
+		if !containsNACK(packet.NACKs, 0) {
+			c.releaseSynchronizeLocked()
+		}
+		fastRetransmit = c.acknowledgeLocked(packet.AckThrough, packet.NACKs, time.Now())
 	}
 	if packet.Sequence != 0 {
 		sendACK, sendReset = c.handleSequenceLocked(packet)
@@ -1255,12 +1261,10 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 }
 
 func (c *tunnelConn) preparePeerLocked(delivery Delivery, packet Packet) error {
-	if c.remoteID != 0 {
-		if packet.SendStreamID != c.localID || packet.ReceiveStreamID != c.remoteID {
+	if c.remoteID != 0 || packet.Flags&FlagReset != 0 {
+		// Java authenticates RESET by recipient ID and signature, not reply ID.
+		if packet.SendStreamID != c.localID || (packet.Flags&FlagReset == 0 && packet.ReceiveStreamID != c.remoteID) {
 			return invalidTunnelPacket("stream ID mismatch", packet)
-		}
-		if packet.Flags&FlagNoACK == 0 {
-			c.releaseSynchronizeLocked()
 		}
 		if packet.Flags&(FlagSynchronize|FlagClose|FlagReset) == 0 {
 			return nil
@@ -1269,7 +1273,7 @@ func (c *tunnelConn) preparePeerLocked(delivery Delivery, packet Packet) error {
 			identity: c.peerIdentity, signingType: c.peerSigningType,
 			signingPublic: c.peerSigningPublic,
 		}
-		_, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, &known, packet.Flags&FlagSynchronize != 0)
+		_, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, &known, c.remoteID == 0 || packet.Flags&FlagSynchronize != 0)
 		if err != nil {
 			return err
 		}
@@ -1368,62 +1372,44 @@ func (c *tunnelConn) acknowledgeLocked(through uint32, nacks []byte, now time.Ti
 		return nil
 	}
 	var acknowledged uint16
+	var resend []leasedSend
 	for sequence, pending := range c.pending {
-		if sequenceBeforeOrEqual(sequence, through) && !containsNACK(nacks, sequence) {
+		if !sequenceBeforeOrEqual(sequence, through) {
+			continue
+		}
+		if !containsNACK(nacks, sequence) {
 			if !pending.retransmitted && !pending.sent.IsZero() {
 				c.rto.Observe(now.Sub(pending.sent))
 			}
 			pending.release()
 			delete(c.pending, sequence)
 			acknowledged++
+			continue
 		}
+		// Every data packet carries an ACK; only explicit NACKs signal loss.
+		// Fast retransmit once per packet so an in-flight retry cannot exhaust
+		// the retry budget on more copies of the same loss report.
+		if pending.nacks >= 3 || pending.sent.IsZero() {
+			continue
+		}
+		pending.nacks++
+		if pending.nacks == 3 && pending.retries < c.network.maxRetries {
+			pending.retries++
+			pending.retransmitted = true
+			pending.sent = now
+			pending.lease.retain()
+			resend = append(resend, leasedSend{wire: pending.wire, lease: pending.lease})
+		}
+		c.pending[sequence] = pending
 	}
 	if acknowledged != 0 {
 		c.congestion.Acknowledge(acknowledged)
-		c.duplicateACK = 0
-		c.lastAck, c.haveAck = through, true
 		c.signalWakeLocked()
-		return nil
 	}
-	if (c.haveAck && c.lastAck == through) || len(nacks) != 0 {
-		c.duplicateACK++
-	} else {
-		c.lastAck, c.haveAck, c.duplicateACK = through, true, 0
+	if len(resend) != 0 {
+		c.congestion.Loss()
 	}
-	if c.duplicateACK < 3 {
-		return nil
-	}
-	c.duplicateACK = 0
-	c.congestion.Loss()
-	var selected uint32
-	var pending pendingPacket
-	found := false
-	for sequence, candidate := range c.pending {
-		if containsNACK(nacks, sequence) && candidate.retries < c.network.maxRetries {
-			selected, pending, found = sequence, candidate, true
-			break
-		}
-	}
-	if !found {
-		for sequence, candidate := range c.pending {
-			acknowledgeLockedSelected := sequenceAfter(sequence, through) && candidate.retries < c.network.maxRetries
-			if acknowledgeLockedSelected {
-				acknowledgeLockedSelected = (!found || sequenceBeforeOrEqual(sequence, selected))
-			}
-			if acknowledgeLockedSelected {
-				selected, pending, found = sequence, candidate, true
-			}
-		}
-	}
-	if !found {
-		return nil
-	}
-	pending.retries++
-	pending.retransmitted = true
-	pending.sent = now
-	c.pending[selected] = pending
-	pending.lease.retain()
-	return []leasedSend{{wire: pending.wire, lease: pending.lease}}
+	return resend
 }
 
 func (c *tunnelConn) enqueueReceivedLocked(packet receivedPacket) bool {
@@ -1500,7 +1486,8 @@ func (c *tunnelConn) sendACK() error {
 		c.mu.Unlock()
 		return net.ErrClosed
 	}
-	packet := Packet{SendStreamID: c.remoteID, ReceiveStreamID: c.localID, AckThrough: c.expect - 1, NACKs: c.nacksLocked()}
+	through, nacks := c.acknowledgmentsLocked()
+	packet := Packet{SendStreamID: c.remoteID, ReceiveStreamID: c.localID, AckThrough: through, NACKs: nacks}
 
 	wire, lease, err := marshalPacketLeased(packet)
 	c.mu.Unlock()
@@ -1509,24 +1496,30 @@ func (c *tunnelConn) sendACK() error {
 	}
 	return c.queueProtocolOwned(wire, lease)
 }
-func (c *tunnelConn) nacksLocked() []byte {
-	var highest uint32
-	haveHighest := false
+func (c *tunnelConn) acknowledgmentsLocked() (uint32, []byte) {
+	highest := c.expect - 1
 	for sequence := range c.reordered {
-		if !haveHighest || sequenceAfter(sequence, highest) {
-			highest, haveHighest = sequence, true
+		if sequenceAfter(sequence, highest) {
+			highest = sequence
 		}
 	}
-	if !haveHighest {
-		return nil
+	if highest == c.expect-1 {
+		return highest, nil
 	}
 	nacks := make([]byte, 0, min(int(MaxWindow), int(highest-c.expect))*4)
-	for sequence := c.expect; sequenceBeforeOrEqual(sequence, highest) && len(nacks) < 4*MaxWindow; sequence++ {
-		if _, received := c.reordered[sequence]; !received {
-			nacks = append(nacks, byte(sequence>>24), byte(sequence>>16), byte(sequence>>8), byte(sequence))
+	through, nackBytes := c.expect-1, 0
+	for sequence := c.expect; sequenceBeforeOrEqual(sequence, highest); sequence++ {
+		if _, received := c.reordered[sequence]; received {
+			through, nackBytes = sequence, len(nacks)
+			continue
 		}
+		if len(nacks) == 4*MaxWindow {
+			// Stop at the last received packet whose holes fit in the NACK list.
+			break
+		}
+		nacks = append(nacks, byte(sequence>>24), byte(sequence>>16), byte(sequence>>8), byte(sequence))
 	}
-	return nacks
+	return through, nacks[:nackBytes]
 }
 
 func (c *tunnelConn) sendWire(ctx context.Context, wire []byte) error {
@@ -1610,9 +1603,9 @@ func (c *tunnelConn) retry(now time.Time) []leasedSend {
 		return nil
 	}
 	rto := c.rto.RTO()
-	if c.remoteID == 0 && len(c.synchronize) != 0 && now.Sub(c.syncSent) >= rto {
+	if len(c.synchronize) != 0 && now.Sub(c.syncSent) >= rto {
 		if c.syncRetries >= c.network.maxRetries {
-			c.handshakeFailed = true
+			c.handshakeFailed = c.remoteID == 0
 			closeConnection = true
 		} else {
 			c.syncRetries++

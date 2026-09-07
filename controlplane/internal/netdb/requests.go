@@ -616,17 +616,10 @@ func (m *RequestManager) lookupPresent(typeID LookupType, key foundation.Hash) b
 		_, ok := m.database.Routers().Get(key)
 		return ok
 	case LeaseSetLookup:
-		if _, ok := m.database.LeaseSet(key); ok {
-			return true
-		}
-		if _, ok := m.database.LeaseSet2(key); ok {
-			return true
-		}
-		if _, ok := m.database.MetaLeaseSet(key); ok {
-			return true
-		}
-		_, ok := m.database.EncryptedLeaseSet(key)
-		return ok
+		m.database.leasesMu.RLock()
+		entry, ok := m.database.leases[key]
+		m.database.leasesMu.RUnlock()
+		return ok && entry.expires > m.now()
 	default:
 		return false
 	}

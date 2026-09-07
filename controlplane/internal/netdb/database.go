@@ -318,7 +318,7 @@ func (d *Database) storeLeaseSet2(store foundation.I2NPDatabaseStoreMessage, see
 		return err
 	}
 	version := uint64(parsed.Header.Published)
-	expires := (uint64(parsed.Header.Published) + uint64(parsed.Header.Expires)) * 1000
+	expires := min((uint64(parsed.Header.Published)+uint64(parsed.Header.Expires))*1000, latest)
 	if parsed.Header.Offline.Present() {
 		offlineExpiry := uint64(parsed.Header.Offline.Expires) * 1000
 		if expires > offlineExpiry {

@@ -1,6 +1,7 @@
 package netdb
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"gosuda.org/ivnp/foundation"
@@ -69,5 +70,66 @@ func TestLeaseExpiryIndexTracksUpdatesAndEarliestEviction(t *testing.T) {
 	}
 	if _, ok := database.leases[third]; !ok {
 		t.Fatal("indexed expiry removed unexpired key")
+	}
+}
+
+func TestExpiredLeaseSet2TriggersLookupBeforeMaintenance(t *testing.T) {
+	now := uint64(1_750_000_000_000)
+	leaseExpiry := now + 60000
+	destination, err := foundation.GenerateLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(destination.ReleaseSensitive)
+	local, err := NewLocalLeaseSet2(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.ReplaceInboundLeases([]foundation.NetworkDatabaseLease{{Gateway: foundation.Hash{1}, TunnelID: 7, EndDate: leaseExpiry}}); err != nil {
+		t.Fatal(err)
+	}
+	raw := make([]byte, foundation.NetworkDatabaseMaxLeaseSetBytes)
+	n, err := local.MarshalTo(raw, now, destination.Sign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A signed LS2 header may outlive every advertised tunnel.
+	binary.BigEndian.PutUint16(raw[len(local.identity.Bytes())+4:], 120)
+	signatureLen, _ := local.identity.SigningKeyType().SignatureLen()
+	unsigned := append([]byte{byte(foundation.I2NPStoreLeaseSet2)}, raw[:n-signatureLen]...)
+	signature, err := destination.Sign(unsigned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(raw[n-signatureLen:n], signature)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+	store := foundation.I2NPDatabaseStoreMessage{Key: destination.Hash(), Type: foundation.I2NPStoreLeaseSet2, Data: raw[:n]}
+	if err := database.HandleDatabaseStore(store, false, now); err != nil {
+		t.Fatal(err)
+	}
+	addRequestTestFloodfill(database, foundation.Hash{2})
+	sender := new(requestTestSender)
+	manager, err := NewRequestManager(database, sender, requestTestRoute{gateway: foundation.Hash{3}, tunnel: 4, viaTunnel: true}, RequestManagerConfig{Capacity: 1, TimeoutMillis: 60000, Now: func() uint64 { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := manager.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	now = leaseExpiry
+	result, err := manager.LookupLeaseSet(t.Context(), destination.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.active.Wait()
+	if len(sender.snapshot()) != 1 {
+		t.Fatal("expired tunnels were accepted from cache instead of issuing a lookup")
+	}
+	select {
+	case outcome := <-result:
+		t.Fatalf("lookup completed from expired cache before receiving a reply: %+v", outcome)
+	default:
 	}
 }

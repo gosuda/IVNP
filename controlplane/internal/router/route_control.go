@@ -587,7 +587,7 @@ func localLeaseSetDeadline(kind foundation.I2NPStoreType, raw []byte, now uint64
 		if err != nil {
 			return 0, err
 		}
-		expires := leaseSet2Deadline(set)
+		var latest uint64
 		leases := set.Leases()
 		for {
 			lease, ok, err := leases.Next()
@@ -597,7 +597,11 @@ func localLeaseSetDeadline(kind foundation.I2NPStoreType, raw []byte, now uint64
 			if !ok {
 				break
 			}
-			expires = min(expires, uint64(lease.EndDate)*1000)
+			latest = max(latest, uint64(lease.EndDate)*1000)
+		}
+		expires := min(leaseSet2Deadline(set), latest)
+		if expires <= now {
+			return 0, dataplane.RouterErrLeaseSetExpired
 		}
 		return expires, nil
 	}
@@ -605,7 +609,7 @@ func localLeaseSetDeadline(kind foundation.I2NPStoreType, raw []byte, now uint64
 	if err != nil {
 		return 0, err
 	}
-	expires := ^uint64(0)
+	var expires uint64
 	leases := set.Leases()
 	for {
 		lease, ok, err := leases.Next()
@@ -615,9 +619,9 @@ func localLeaseSetDeadline(kind foundation.I2NPStoreType, raw []byte, now uint64
 		if !ok {
 			break
 		}
-		expires = min(expires, lease.EndDate)
+		expires = max(expires, lease.EndDate)
 	}
-	if expires == ^uint64(0) || expires <= now {
+	if expires <= now {
 		return 0, dataplane.RouterErrLeaseSetExpired
 	}
 	return expires, nil
@@ -713,12 +717,6 @@ func (s *StreamingTunnelSender) seedLeaseGateway(ctx context.Context, outbound c
 	s.seedMu.Unlock()
 }
 func (s *StreamingTunnelSender) resolveLeaseSet(ctx context.Context, target foundation.Hash) (*foundation.NetworkDatabaseLeaseSet2, *foundation.NetworkDatabaseLeaseSet, error) {
-	if set, ok := s.database.LeaseSet2(target); ok {
-		return &set, nil, nil
-	}
-	if set, ok := s.database.LeaseSet(target); ok {
-		return nil, &set, nil
-	}
 	if err := s.lookupLeaseSet(ctx, target); err != nil {
 		return nil, nil, err
 	}
@@ -736,15 +734,12 @@ func (s *StreamingTunnelSender) resolveEncryptedLeaseSet(ctx context.Context, po
 	if err != nil {
 		return nil, 0, err
 	}
+	if err := s.lookupLeaseSet(ctx, key); err != nil {
+		return nil, 0, err
+	}
 	set, found := s.database.EncryptedLeaseSet(key)
 	if !found {
-		if err = s.lookupLeaseSet(ctx, key); err != nil {
-			return nil, 0, err
-		}
-		set, found = s.database.EncryptedLeaseSet(key)
-		if !found {
-			return nil, 0, dataplane.RouterErrLeaseSetUnavailable
-		}
+		return nil, 0, dataplane.RouterErrLeaseSetUnavailable
 	}
 	inner, err := controlplanenetdb.DecryptEncryptedLeaseSet(set, policy.Identity, policy.Secret, policy.Authorization, s.now())
 	if err != nil {

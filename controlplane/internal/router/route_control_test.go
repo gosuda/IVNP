@@ -14,7 +14,7 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
-func routeControlFixture(t *testing.T, prepare func(context.Context, foundation.Hash) error) (*StreamingTunnelSender, []dataplane.StreamingTunnelDelivery, *controlPlaneTunnelSender) {
+func routeControlFixture(t *testing.T, prepare func(context.Context, foundation.Hash) error, localLeases ...foundation.NetworkDatabaseLease) (*StreamingTunnelSender, []dataplane.StreamingTunnelDelivery, *controlPlaneTunnelSender) {
 	t.Helper()
 	const now = uint64(1000)
 	local, err := foundation.GenerateLocalAddress()
@@ -23,7 +23,10 @@ func routeControlFixture(t *testing.T, prepare func(context.Context, foundation.
 	}
 	owner := local.Hash
 	database := controlplanenetdb.NewDatabase(owner, controlplanenetdb.DefaultBucketCapacity)
-	storeControlLegacyLeaseSet(t, database, local, foundation.NetworkDatabaseLease{Gateway: foundation.Hash{6}, TunnelID: 7, EndDate: 90000})
+	if len(localLeases) == 0 {
+		localLeases = []foundation.NetworkDatabaseLease{{Gateway: foundation.Hash{6}, TunnelID: 7, EndDate: 90000}}
+	}
+	storeControlLegacyLeaseSet(t, database, local, localLeases...)
 	deliveries := make([]dataplane.StreamingTunnelDelivery, 3)
 	for i := range deliveries {
 		remote, err := foundation.GenerateLocalAddress()
@@ -476,5 +479,100 @@ func TestSilentRoutesExhaustRemoteLeasesBeforeReusingFailure(t *testing.T) {
 	second.NoResponse()
 	if err := sender.PrepareDestination(t.Context(), remote.Hash()); !errors.Is(err, dataplane.TunnelErrCircuitNotFound) {
 		t.Fatalf("exhausted silent leases were reused: %v", err)
+	}
+}
+
+func TestPreparedRouteSurvivesFirstLocalLeaseExpiry(t *testing.T) {
+	sender, deliveries, _ := routeControlFixture(t, nil,
+		foundation.NetworkDatabaseLease{Gateway: foundation.Hash{6}, TunnelID: 7, EndDate: 500},
+		foundation.NetworkDatabaseLease{Gateway: foundation.Hash{8}, TunnelID: 9, EndDate: 90000},
+	)
+	if err := sender.SendTunnel(t.Context(), deliveries[0]); err != nil {
+		t.Fatalf("live return lease was rejected after another lease expired: %v", err)
+	}
+	receipt, ok := sender.execution.RouteReceipt(deliveries[0].To)
+	if !ok || receipt.Expires != 90000 {
+		t.Fatalf("route deadline = %d, present=%t; want last return lease deadline 90000", receipt.Expires, ok)
+	}
+}
+
+func TestLocalLeaseSet2RemainsUsableUntilLastLeaseExpiry(t *testing.T) {
+	const now = uint64(1_750_000_000_000)
+	destination, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(destination.ReleaseSensitive)
+	local, err := controlplanenetdb.NewLocalLeaseSet2(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.ReplaceInboundLeases([]foundation.NetworkDatabaseLease{
+		{Gateway: foundation.Hash{1}, TunnelID: 11, EndDate: now - 1000},
+		{Gateway: foundation.Hash{2}, TunnelID: 22, EndDate: now + 60000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw := make([]byte, foundation.NetworkDatabaseMaxLeaseSetBytes)
+	n, err := local.MarshalTo(raw, now-60000, destination.Sign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline, err := localLeaseSetDeadline(foundation.I2NPStoreLeaseSet2, raw[:n], now)
+	if err != nil || deadline != now+60000 {
+		t.Fatalf("local LS2 deadline = %d, %v; want %d", deadline, err, now+60000)
+	}
+	if _, err := localLeaseSetDeadline(foundation.I2NPStoreLeaseSet2, raw[:n], now+60000); !errors.Is(err, dataplane.RouterErrLeaseSetExpired) {
+		t.Fatalf("LS2 with no live return lease = %v, want expired", err)
+	}
+}
+
+type routeLookupSender func(context.Context, controlplanenetdb.RouterRef, foundation.I2NPMessage) error
+
+func (f routeLookupSender) Send(ctx context.Context, peer controlplanenetdb.RouterRef, message foundation.I2NPMessage) error {
+	return f(ctx, peer, message)
+}
+
+func TestRoutePreparationRefreshesExpiredCachedLeaseSet(t *testing.T) {
+	sender, _, _ := routeControlFixture(t, nil)
+	remote, err := foundation.GenerateLocalAddress()
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeControlLegacyLeaseSet(t, sender.database, remote, foundation.NetworkDatabaseLease{Gateway: foundation.Hash{4}, TunnelID: 5, EndDate: 500})
+	refreshed := controlplanenetdb.NewDatabase(sender.owner, controlplanenetdb.DefaultBucketCapacity)
+	storeControlLegacyLeaseSet(t, refreshed, remote, foundation.NetworkDatabaseLease{Gateway: foundation.Hash{6}, TunnelID: 7, EndDate: 50000})
+	kind, raw, ok := refreshed.StoredLeaseSet(remote.Hash)
+	if !ok {
+		t.Fatal("missing refreshed LeaseSet")
+	}
+	store := foundation.I2NPDatabaseStoreMessage{Key: remote.Hash, Type: kind, Data: raw}
+	if err := sender.database.AdmitRouterInfo(dataPlaneFloodfill(t), true, 1000); err != nil {
+		t.Fatal(err)
+	}
+	var requests *controlplanenetdb.RequestManager
+	lookupSender := routeLookupSender(func(ctx context.Context, _ controlplanenetdb.RouterRef, message foundation.I2NPMessage) error {
+		if err := sender.database.HandleDatabaseStore(store, false, 1000); err != nil {
+			return err
+		}
+		requests.HandleDatabaseStore(ctx, store)
+		return nil
+	})
+	requests, err = controlplanenetdb.NewRequestManager(sender.database, lookupSender, dataPlaneReplyRoute{}, controlplanenetdb.RequestManagerConfig{Capacity: 4, TimeoutMillis: 60000, Now: func() uint64 { return 1000 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := requests.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	sender.requests = requests
+	if err := sender.SendTunnel(t.Context(), dataplane.StreamingTunnelDelivery{From: sender.owner, To: remote.Hash, Protocol: 6, Payload: []byte("after renewal")}); err != nil {
+		t.Fatalf("expired cache entry prevented route refresh: %v", err)
+	}
+	receipt, ok := sender.execution.RouteReceipt(remote.Hash)
+	if !ok || receipt.TunnelID != 7 || receipt.Expires != 50000 {
+		t.Fatalf("refreshed route = %+v, present=%t", receipt, ok)
 	}
 }

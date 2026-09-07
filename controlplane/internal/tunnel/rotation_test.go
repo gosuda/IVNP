@@ -138,7 +138,7 @@ func TestRotatorReplacesTunnelInsideRenewalWindow(t *testing.T) {
 	}
 }
 
-func TestRotatorRenewsAtPoolCapacityWithoutEvictingHealthyTunnel(t *testing.T) {
+func TestRotatorRenewalPreservesOldCircuitUntilExpiry(t *testing.T) {
 	const now = uint64(1_700_000_000_000)
 	sender := new(buildCaptureSender)
 	runtime := dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: sender, Now: func() uint64 { return now }})
@@ -157,6 +157,8 @@ func TestRotatorRenewsAtPoolCapacityWithoutEvictingHealthyTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(manager.ReleaseSensitive)
+	t.Cleanup(func() { runtime.Expire(^uint64(0)) })
 	build := rotationBuild(t, 1, now+10_000)
 	source := &rotationSource{builds: []OutboundBuild{build}}
 	rotator, err := NewRotator(RotatorConfig{Pool: pool, Runtime: runtime, Builder: manager, Source: source, Now: func() uint64 { return now }, Target: 1, RenewBefore: 100})
@@ -194,8 +196,15 @@ func TestRotatorRenewsAtPoolCapacityWithoutEvictingHealthyTunnel(t *testing.T) {
 	if entry, ok := pool.Get(build.CircuitID, now); !ok || entry.ID != build.CircuitID {
 		t.Fatalf("replacement entry = %#v, %t", entry, ok)
 	}
-	if err = runtime.SendBlock(context.Background(), old.ID, dataplane.TunnelBlock{Delivery: dataplane.TunnelDeliveryLocal, Last: true, Data: []byte{1}}); err != dataplane.TunnelErrCircuitNotFound {
-		t.Fatalf("retired runtime circuit error = %v, want %v", err, dataplane.TunnelErrCircuitNotFound)
+	if err = runtime.SendBlock(context.Background(), old.ID, dataplane.TunnelBlock{Delivery: dataplane.TunnelDeliveryLocal, Last: true, Data: []byte{1}}); err != nil {
+		t.Fatalf("renewal interrupted an unexpired circuit: %v", err)
+	}
+	runtime.Expire(old.Expires)
+	if _, ok := runtime.InspectCircuit(old.ID); ok {
+		t.Fatal("renewed circuit retained past its original expiry")
+	}
+	if _, ok := runtime.InspectCircuit(build.CircuitID); !ok {
+		t.Fatal("expiring the old circuit removed its replacement")
 	}
 }
 
