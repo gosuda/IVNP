@@ -79,7 +79,9 @@ type RatchetResult struct {
 	Terminated  bool
 	ACKs        []ACK
 	ACKRequests []ACK
-	DHStep      bool
+	// ReplyRequested covers NSR confirmation, ACKRequest, and forward NextKey.
+	ReplyRequested bool
+	DHStep         bool
 }
 
 // SessionTag is the non-secret routing prefix of an ECIES ratchet packet.
@@ -163,23 +165,50 @@ type tagSet struct {
 }
 
 type session struct {
-	peer               foundation.Hash
-	outbound           *tagSet
-	inbound            *tagSet
-	localKey           *ecdh.PrivateKey
-	localKeyID         uint16
-	pendingKeyID       uint16
-	remoteForwardKeyID uint16
-	remoteReverseKeyID uint16
-	haveRemoteForward  bool
-	haveRemoteReverse  bool
-	pendingDH          bool
-	replyDH            bool
-	terminateAfterDH   bool
-	dhSecret           [32]byte
-	created            uint64
-	expires            uint64
-	terminated         bool
+	peer       foundation.Hash
+	outbound   *tagSet
+	inbound    *tagSet
+	forwardDH  dhRatchet
+	reverseDH  dhRatchet
+	created    uint64
+	expires    uint64
+	terminated bool
+}
+
+// Each traffic direction has its own key pair and NextKey exchange.
+type dhRatchet struct {
+	localKey    *cryptography.X25519PrivateKey
+	remoteKey   *ecdh.PublicKey
+	localKeyID  int
+	remoteKeyID int
+	received    nextKey
+	pending     nextKey
+	send        bool
+}
+
+type nextKey struct {
+	flags byte
+	id    uint16
+	key   [32]byte
+}
+
+func (k nextKey) size() int {
+	if k.flags&1 != 0 {
+		return ratchetNextKeyBlockLen
+	}
+	return 6
+}
+
+func (k nextKey) appendTo(dst []byte) int {
+	size := k.size()
+	dst[0] = ratchetNextKey
+	binary.BigEndian.PutUint16(dst[1:3], uint16(size-3))
+	dst[3] = k.flags
+	binary.BigEndian.PutUint16(dst[4:6], k.id)
+	if k.flags&1 != 0 {
+		copy(dst[6:38], k.key[:])
+	}
+	return size
 }
 
 type pendingInitiator struct {
@@ -437,7 +466,7 @@ func RatchetEncryptBufferSizes(payloadLen int, cryptoType uint16) (packet, plain
 		}
 		hybridLen = params.PublicKeySize + cryptography.ChaChaTagSize
 	}
-	plain = payloadLen + ratchetNextKeyBlockLen
+	plain = payloadLen + 2*ratchetNextKeyBlockLen
 	newSessionLen := newSessionEphemeralLen + hybridLen + staticSectionLen + minNewSessionPayload + payloadLen + cryptography.ChaChaTagSize
 	return max(newSessionLen, ratchetTagLen+plain+cryptography.ChaChaTagSize), plain, nil
 }
@@ -447,7 +476,7 @@ const ratchetNextKeyBlockLen = 3 + 35
 func (m *RatchetManager) encryptLocked(dst, scratch []byte, peer foundation.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
 	if established := m.sessions[peer]; established != nil && !established.terminated && established.expires >= now {
 		options := RatchetOptions{}
-		if established.outbound != nil && established.outbound.next >= automaticDHRatchetMessages && !established.pendingDH {
+		if established.outbound != nil && established.outbound.next >= automaticDHRatchetMessages && !established.forwardDH.send {
 			options.RequestDH = true
 		}
 		packet, err := m.encryptExistingLocked(dst, scratch, established, payload, options, now)
@@ -580,21 +609,12 @@ func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, 
 	if s.expires < now || s.outbound.expires < now || s.inbound.expires < now {
 		return nil, ErrRatchetExpired
 	}
-	if options.RequestDH && !s.pendingDH {
-		if s.localKeyID == 32767 {
-			s.terminated = true
-			return nil, ErrRatchetTagExhausted
-		}
-		private, err := ecdh.X25519().GenerateKey(nil)
-		if err != nil {
+	if options.RequestDH && !s.forwardDH.send {
+		if err := s.beginForwardDH(); err != nil {
 			return nil, err
 		}
-		s.localKeyID++
-		s.pendingKeyID = s.localKeyID
-		s.localKey, s.pendingDH = private, true
-		s.terminateAfterDH = s.pendingKeyID == 32767
 	}
-	sentDH := s.pendingDH
+	sentDH := s.forwardDH.send || s.reverseDH.send
 	blocksLen := len(payload)
 	if len(options.ACKs) != 0 {
 		blocksLen += 3 + 4*len(options.ACKs)
@@ -605,8 +625,11 @@ func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, 
 	if options.Terminate {
 		blocksLen += 4
 	}
-	if s.pendingDH {
-		blocksLen += ratchetNextKeyBlockLen
+	if s.forwardDH.send {
+		blocksLen += s.forwardDH.pending.size()
+	}
+	if s.reverseDH.send {
+		blocksLen += s.reverseDH.pending.size()
 	}
 	if blocksLen > 65519 {
 		return nil, ErrRatchet
@@ -638,17 +661,11 @@ func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, 
 		plain[off] = 0
 		off++
 	}
-	if s.pendingDH {
-		plain[off] = ratchetNextKey
-		binary.BigEndian.PutUint16(plain[off+1:off+3], 35)
-		if s.replyDH {
-			plain[off+3] = 0x03 // key present, reverse
-		} else {
-			plain[off+3] = 0x05 // key present, forward + request reverse
-		}
-		binary.BigEndian.PutUint16(plain[off+4:off+6], s.pendingKeyID)
-		copy(plain[off+6:off+38], s.localKey.PublicKey().Bytes())
-		off += 38
+	if s.forwardDH.send {
+		off += s.forwardDH.pending.appendTo(plain[off:])
+	}
+	if s.reverseDH.send {
+		off += s.reverseDH.pending.appendTo(plain[off:])
 	}
 	if options.Terminate {
 		plain[off] = ratchetTermination
@@ -672,19 +689,6 @@ func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, 
 	clear(plain)
 	if err != nil {
 		return nil, err
-	}
-	if s.replyDH {
-		nextOutbound, _, ratchetErr := m.prepareRatchetDirectionLocked(s, true, s.dhSecret[:], now)
-		if ratchetErr != nil {
-			s.terminated = true
-			return nil, ratchetErr
-		}
-		m.commitRatchetDirectionLocked(s, true, nextOutbound, nil, now)
-		clear(s.dhSecret[:])
-		s.localKey, s.pendingKeyID, s.pendingDH, s.replyDH = nil, 0, false, false
-		if s.terminateAfterDH {
-			s.terminated = true
-		}
 	}
 
 	if options.Terminate {
@@ -769,7 +773,7 @@ func (m *RatchetManager) receiveReplyLocked(dst, packet []byte, tag [ratchetTagL
 		releaseSession(s)
 		return RatchetResult{}, err
 	}
-	return RatchetResult{Payload: payload, Peer: pending.peer, NewSession: true}, nil
+	return RatchetResult{Payload: payload, Peer: pending.peer, NewSession: true, ReplyRequested: true}, nil
 }
 
 func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint64) (RatchetResult, error) {
@@ -873,6 +877,9 @@ func (m *RatchetManager) receiveExistingLocked(dst, packet []byte, tag [ratchetT
 	// Only authenticated traffic renews receive keys; old DH sets still obey oldUntil.
 	entry.set.expires = max(entry.set.expires, now+m.config.SessionLifetime)
 	entry.set.owner.expires = max(entry.set.owner.expires, entry.set.expires)
+	if entry.set == entry.set.owner.inbound {
+		entry.set.owner.reverseDH.send = false
+	}
 	result.Payload, result.Peer = plain, sessionPeer(entry.set, m.sessions)
 	return result, nil
 }
@@ -904,7 +911,10 @@ func (m *RatchetManager) parseExistingLocked(entry tagEntry, plain []byte, now u
 			if size != 1 {
 				return RatchetResult{}, ErrRatchet
 			}
-			out.ACKRequests = append(out.ACKRequests, ACK{entry.set.id, entry.n})
+			if len(out.ACKRequests) == 0 {
+				out.ACKRequests = []ACK{{entry.set.id, entry.n}}
+			}
+			out.ReplyRequested = true
 		case ratchetTermination:
 			if size < 1 || off != len(plain) && plain[off] != ratchetPadding {
 				return RatchetResult{}, ErrRatchet
@@ -915,6 +925,9 @@ func (m *RatchetManager) parseExistingLocked(entry tagEntry, plain []byte, now u
 				return RatchetResult{}, err
 			}
 			out.DHStep = true
+			if data[0]&2 == 0 && entry.set.owner.reverseDH.send {
+				out.ReplyRequested = true
+			}
 		case ratchetDateTime, ratchetPrevious, ratchetGarlicClove, ratchetPadding:
 			// The payload is delivered intact to the garlic router. DateTime and
 			// PN are retained for callers that need their protocol semantics.
@@ -934,102 +947,150 @@ func (m *RatchetManager) consumeNextKeyLocked(current *tagSet, data []byte, now 
 	if len(data) != 3 && len(data) != 35 {
 		return ErrRatchet
 	}
-	flags, keyID := data[0], binary.BigEndian.Uint16(data[1:3])
-	consumeNextKeyLockedRejected := flags&^byte(7) != 0 || keyID > 32767 || (flags&1 == 0 && len(data) != 3)
-	if !consumeNextKeyLockedRejected {
-		consumeNextKeyLockedRejected = (flags&1 != 0 && len(data) != 35)
-	}
-	if consumeNextKeyLockedRejected {
+	key := nextKey{flags: data[0], id: binary.BigEndian.Uint16(data[1:3])}
+	if key.flags&^byte(7) != 0 || key.flags&6 == 6 || key.id > 32767 || (key.flags&1 != 0) != (len(data) == 35) {
 		return ErrRatchet
 	}
-	s := sessionForSet(current, m.sessions)
+	copy(key.key[:], data[3:])
+	s := current.owner
 	if s == nil {
 		return ErrRatchet
 	}
-	if flags&1 == 0 {
-		return nil
-	} // acknowledgement of a retained key
-	remote, err := ecdh.X25519().NewPublicKey(data[3:])
-	if err != nil {
-		return ErrRatchet
+	if key.flags&2 != 0 {
+		return m.receiveReverseKeyLocked(s, key, now)
 	}
-	if flags&2 != 0 { // reverse key completes a locally initiated exchange
-		if s.haveRemoteReverse && keyID <= s.remoteReverseKeyID {
-			return ErrRatchet
-		}
-		if s.localKey == nil || !s.pendingDH || s.replyDH || keyID != s.pendingKeyID {
-			return ErrRatchet
-		}
-		shared, err := s.localKey.ECDH(remote)
-		if err != nil {
-			return ErrRatchet
-		}
-		defer clear(shared)
-		nextOutbound, _, err := m.prepareRatchetDirectionLocked(s, true, shared, now)
-		if err != nil {
+	return m.receiveForwardKeyLocked(s, current, key, now)
+}
+
+func (s *session) beginForwardDH() error {
+	if s.outbound.id == 65535 {
+		s.terminated = true
+		return ErrRatchetTagExhausted
+	}
+	dh := &s.forwardDH
+	key := nextKey{flags: 4}
+	if s.outbound.id == 0 || s.outbound.id&1 != 0 {
+		if dh.localKeyID == 32767 {
 			s.terminated = true
+			return ErrRatchetTagExhausted
+		}
+		private, err := cryptography.GenerateX25519PrivateKey(nil)
+		if err != nil {
 			return err
 		}
-		nextInbound, entries, err := m.prepareRatchetDirectionLocked(s, false, shared, now)
-		if err != nil {
-			releaseTagSet(nextOutbound)
-			s.terminated = true
+		if err := private.PublicKey(&key.key); err != nil {
+			private.ReleaseSensitive()
 			return err
 		}
-		m.commitRatchetDirectionLocked(s, true, nextOutbound, nil, now)
-		m.commitRatchetDirectionLocked(s, false, nextInbound, entries, now)
-		clearTagEntries(entries)
-		s.remoteReverseKeyID, s.haveRemoteReverse = keyID, true
-		s.pendingDH, s.localKey, s.pendingKeyID = false, nil, 0
-		if s.terminateAfterDH || keyID == 32767 {
-			s.terminated = true
+		dh.localKey.ReleaseSensitive()
+		dh.localKey, dh.localKeyID = private, dh.localKeyID+1
+		key.flags = 1
+		if s.outbound.id == 0 {
+			key.flags |= 4
 		}
+	}
+	key.id = uint16(dh.localKeyID)
+	dh.pending, dh.send = key, true
+	return nil
+}
+
+func (dh *dhRatchet) resolveRemote(key nextKey) (*ecdh.PublicKey, error) {
+	if key.flags&1 != 0 && int(key.id) == dh.remoteKeyID+1 {
+		return ecdh.X25519().NewPublicKey(key.key[:])
+	}
+	if key.flags&1 == 0 && int(key.id) == dh.remoteKeyID && dh.remoteKey != nil {
+		return dh.remoteKey, nil
+	}
+	return nil, ErrRatchet
+}
+
+func (m *RatchetManager) receiveReverseKeyLocked(s *session, key nextKey, now uint64) error {
+	dh := &s.forwardDH
+	// Reverse keys may be repeated until the peer sees the new tagset.
+	if key == dh.received || !dh.send {
 		return nil
 	}
-	// A forward key begins an exchange. Its ID is monotonic independently of
-	// our locally initiated direction. Previous inbound tagsets remain usable
-	// briefly, so this check is required even though each individual tag is
-	// one-time.
-	if s.haveRemoteForward && keyID <= s.remoteForwardKeyID {
-		// Until our reverse key is sent, the initiator may repeat its forward
-		// key on another authenticated old-tag-set packet. Treat the exact key
-		// generation as an idempotent retransmission; once the reply commits,
-		// old-tag-set repeats remain invalid.
-		if keyID == s.remoteForwardKeyID && s.pendingDH && s.replyDH {
-			return nil
-		}
+	if int(key.id) < dh.remoteKeyID || int(key.id) == dh.remoteKeyID && key.flags&1 != 0 {
+		return nil
+	}
+	remote, err := dh.resolveRemote(key)
+	if err != nil || dh.localKey == nil || 1+dh.localKeyID+int(key.id) != int(s.outbound.id)+1 {
 		return ErrRatchet
 	}
-	if s.pendingDH {
-		return ErrRatchet
-	}
-	local, err := ecdh.X25519().GenerateKey(nil)
-	if err != nil {
-		return err
-	}
-	shared, err := local.ECDH(remote)
+	var shared [32]byte
+	err = dh.localKey.ECDH(&shared, remote.Bytes())
 	if err != nil {
 		return ErrRatchet
 	}
-	defer clear(shared)
-	nextInbound, entries, err := m.prepareRatchetDirectionLocked(s, false, shared, now)
+	defer clear(shared[:])
+	next, _, err := m.prepareRatchetDirectionLocked(s, true, shared[:], now)
 	if err != nil {
 		s.terminated = true
 		return err
 	}
-	m.commitRatchetDirectionLocked(s, false, nextInbound, entries, now)
-	clearTagEntries(entries)
-	copy(s.dhSecret[:], shared)
-	s.remoteForwardKeyID, s.haveRemoteForward = keyID, true
-	s.localKey, s.pendingKeyID, s.pendingDH, s.replyDH = local, keyID, true, true
-	s.terminateAfterDH = keyID == 32767
+	m.commitRatchetDirectionLocked(s, true, next, nil, now)
+	dh.remoteKey, dh.remoteKeyID, dh.received, dh.send = remote, int(key.id), key, false
 	return nil
 }
 
-// prepareRatchetDirectionLocked derives a replacement tagset without changing
-// the live session. Inbound lookahead and collision checks are completed before
-// either half of a DH exchange is committed, so bounded-capacity failure cannot
-// leave only one direction advanced.
+func (m *RatchetManager) receiveForwardKeyLocked(s *session, current *tagSet, key nextKey, now uint64) error {
+	dh := &s.reverseDH
+	// Old-tagset packets may arrive after the exchange has completed.
+	if key == dh.received || current != s.inbound {
+		return nil
+	}
+	remote, err := dh.resolveRemote(key)
+	if err != nil {
+		return err
+	}
+	local, localID := dh.localKey, dh.localKeyID
+	reply := nextKey{flags: 2}
+	if current.id&1 == 0 {
+		if localID == 32767 {
+			return ErrRatchetTagExhausted
+		}
+		local, err = cryptography.GenerateX25519PrivateKey(nil)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if local != dh.localKey {
+				local.ReleaseSensitive()
+			}
+		}()
+		localID++
+		reply.flags |= 1
+		if err := local.PublicKey(&reply.key); err != nil {
+			return err
+		}
+	}
+	if local == nil || 1+localID+int(key.id) != int(current.id)+1 {
+		return ErrRatchet
+	}
+	var shared [32]byte
+	err = local.ECDH(&shared, remote.Bytes())
+	if err != nil {
+		return ErrRatchet
+	}
+	defer clear(shared[:])
+	next, entries, err := m.prepareRatchetDirectionLocked(s, false, shared[:], now)
+	if err != nil {
+		s.terminated = true
+		return err
+	}
+	m.commitRatchetDirectionLocked(s, false, next, entries, now)
+	clearTagEntries(entries)
+	reply.id = uint16(localID)
+	if local != dh.localKey {
+		dh.localKey.ReleaseSensitive()
+	}
+	dh.localKey, dh.localKeyID = local, localID
+	dh.remoteKey, dh.remoteKeyID, dh.received = remote, int(key.id), key
+	dh.pending, dh.send = reply, true
+	return nil
+}
+
+// Inbound lookahead and collision checks finish before the direction advances.
 func (m *RatchetManager) prepareRatchetDirectionLocked(s *session, outbound bool, shared []byte, now uint64) (*tagSet, []tagEntry, error) {
 	old := s.inbound
 	if outbound {
@@ -1038,9 +1099,11 @@ func (m *RatchetManager) prepareRatchetDirectionLocked(s *session, outbound bool
 	if old == nil || old.id == 65535 {
 		return nil, nil, ErrRatchetTagExhausted
 	}
-	material := hkdf64(old.nextRoot[:], shared, "XDHRatchetTagSet")
+	prk := hmacSHA256(shared, nil, nil, 0, false)
+	material := hmacSHA256(prk[:], nil, nil, 1, true, "XDHRatchetTagSet")
+	clear(prk[:])
 	defer clear(material[:])
-	next, err := newTagSet(old.id+1, old.nextRoot, material[:32], now+m.config.SessionLifetime)
+	next, err := newTagSet(old.id+1, old.nextRoot, material[:], now+m.config.SessionLifetime)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1122,7 +1185,11 @@ func (m *RatchetManager) sessionFromCiphers(peer foundation.Hash, root [32]byte,
 	if err != nil {
 		return nil, err
 	}
-	s := &session{peer: peer, outbound: out, inbound: in, created: now, expires: now + m.config.SessionLifetime}
+	s := &session{
+		peer: peer, outbound: out, inbound: in, created: now, expires: now + m.config.SessionLifetime,
+		forwardDH: dhRatchet{localKeyID: -1, remoteKeyID: -1},
+		reverseDH: dhRatchet{localKeyID: -1, remoteKeyID: -1},
+	}
 	out.owner, in.owner = s, s
 	return s, nil
 }
@@ -1253,6 +1320,7 @@ func (m *RatchetManager) removeSessionTagsLocked(s *session) {
 	for tag, entry := range m.inbound {
 		if entry.set.owner == s {
 			clear(entry.key[:])
+			releaseTagSet(entry.set)
 			m.removeInboundTagLocked(tag)
 		}
 	}
@@ -1323,17 +1391,10 @@ func releaseSession(s *session) {
 	}
 	releaseTagSet(s.outbound)
 	releaseTagSet(s.inbound)
-	clear(s.dhSecret[:])
-	s.localKey = nil
-	s.localKeyID = 0
-	s.pendingKeyID = 0
-	s.remoteForwardKeyID = 0
-	s.remoteReverseKeyID = 0
-	s.haveRemoteForward = false
-	s.haveRemoteReverse = false
-	s.pendingDH = false
-	s.replyDH = false
-	s.terminateAfterDH = false
+	s.forwardDH.localKey.ReleaseSensitive()
+	s.reverseDH.localKey.ReleaseSensitive()
+	s.forwardDH = dhRatchet{}
+	s.reverseDH = dhRatchet{}
 	s.terminated = true
 }
 

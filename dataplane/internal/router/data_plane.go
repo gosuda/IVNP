@@ -51,6 +51,9 @@ type GarlicDestination struct {
 type RatchetReplyReservation interface {
 	Activate() error
 	Send(context.Context, []byte) error
+	// SendEstablished transfers an unactivated ACK/rekey response without
+	// making application sends depend on its delivery.
+	SendEstablished(context.Context, []byte) error
 	Release()
 }
 
@@ -369,7 +372,7 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 			destination.scratch <- scratch
 			return ErrDestinationBandwidth
 		}
-		receiveErr = r.handleRatchetResult(destination, result, now)
+		receiveErr = r.handleRatchetResult(destination, result, scratch.reply[:], now)
 		clear(scratch.plaintext[:])
 		clear(scratch.reply[:])
 		destination.scratch <- scratch
@@ -403,8 +406,8 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 	return ErrGarlicDestination
 }
 
-func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState, result dataplanegarlic.RatchetResult, now uint64) error {
-	if len(result.Payload) == 0 && len(result.Reply) == 0 {
+func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState, result dataplanegarlic.RatchetResult, replyDst []byte, now uint64) error {
+	if len(result.Payload) == 0 && len(result.Reply) == 0 && !result.ReplyRequested {
 		return nil
 	}
 	cloves, err := parseRatchetGarlicCloves(result.Payload)
@@ -415,6 +418,9 @@ func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState
 		var dispatchErr error
 		for _, clove := range cloves {
 			dispatchErr = appendError(dispatchErr, r.service.dispatchClove(result.Peer, clove.Delivery, clove.Message, now, false))
+		}
+		if result.ReplyRequested && !result.Terminated {
+			dispatchErr = appendError(dispatchErr, sendRatchetResponse(destination, result, replyDst, now))
 		}
 		return dispatchErr
 	}
@@ -463,8 +469,26 @@ func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState
 	return dispatchErr
 }
 
+func sendRatchetResponse(destination *garlicDestinationState, result dataplanegarlic.RatchetResult, replyDst []byte, now uint64) error {
+	if destination.ReserveRatchetReply == nil || result.Peer == (foundation.Hash{}) {
+		return ErrGarlicDestination
+	}
+	reservation, err := destination.ReserveRatchetReply(result.Peer)
+	if err != nil {
+		return err
+	}
+	defer reservation.Release()
+	// At most one ACK per packet and one NextKey per direction.
+	var plain [7 + 2*38]byte
+	packet, err := destination.Ratchet.EncryptExistingWithScratch(replyDst, plain[:], result.Peer, nil, dataplanegarlic.RatchetOptions{ACKs: result.ACKRequests}, now)
+	if err != nil {
+		return err
+	}
+	return reservation.SendEstablished(context.Background(), packet)
+}
+
 func parseRatchetGarlicCloves(payload []byte) ([]dataplanegarlic.Clove, error) {
-	cloves := make([]dataplanegarlic.Clove, 0, 4)
+	var cloves []dataplanegarlic.Clove
 	for len(payload) != 0 {
 		if len(payload) < 3 {
 			return nil, ErrGarlicPacket
@@ -479,12 +503,12 @@ func parseRatchetGarlicCloves(payload []byte) ([]dataplanegarlic.Clove, error) {
 			if err != nil {
 				return nil, err
 			}
+			if cloves == nil {
+				cloves = make([]dataplanegarlic.Clove, 0, 4)
+			}
 			cloves = append(cloves, clove)
 		}
 		payload = payload[size:]
-	}
-	if len(cloves) == 0 {
-		return nil, ErrGarlicPacket
 	}
 	return cloves, nil
 }

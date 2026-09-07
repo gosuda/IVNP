@@ -78,8 +78,10 @@ type StreamingTunnelSender struct {
 	lifecycleMu          sync.RWMutex
 	released             bool
 	remoteMu             sync.RWMutex
+	replyPolicyMu        sync.RWMutex
 	remoteELS            map[foundation.Hash]RemoteELSContext
 	generation           uint64
+	policyGeneration     uint64
 	localPublication     foundation.Hash
 	localPublicationType foundation.I2NPStoreType
 	pending              map[routePreparationKey]*routePreparation
@@ -218,7 +220,7 @@ func NewStreamingTunnelSender(config StreamingTunnelSenderConfig) (*StreamingTun
 		awaitControl: config.AwaitControl,
 		replyGates:   make(map[foundation.Hash]*ratchetReplyGate), replyGateCapacity: config.RouteCapacity,
 		failedRoutes: make(map[failedRoutePath]uint64), failedRouteCapacity: config.RouteCapacity,
-		seedRouterInfo: config.SeedRouterInfo, now: config.Now, remoteELS: policies, generation: 1,
+		seedRouterInfo: config.SeedRouterInfo, now: config.Now, remoteELS: policies, generation: 1, policyGeneration: 1,
 		localPublication: publication, localPublicationType: publicationType,
 		pending: make(map[routePreparationKey]*routePreparation), pendingCapacity: config.PreparationCapacity,
 		waiterCapacity: config.WaiterCapacity, preparationTimeout: config.PreparationTimeout, preparationCtx: ctx, cancelPreparation: cancel,
@@ -246,9 +248,12 @@ func (s *StreamingTunnelSender) UpdateRemoteELS(policies map[foundation.Hash]Rem
 		releaseRemoteELSPolicies(updated)
 		return dataplane.RouterErrDataPlaneConfig
 	}
+	s.replyPolicyMu.Lock()
+	defer s.replyPolicyMu.Unlock()
 	s.remoteMu.Lock()
 	previous := s.remoteELS
 	s.remoteELS = updated
+	s.policyGeneration++
 	s.generation++
 	generation := s.generation
 	releaseRemoteELSPolicies(previous)
@@ -327,20 +332,23 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery datapla
 	if delivery.From != s.owner {
 		return dataplane.RouterErrGarlicDestination
 	}
-	if err := s.waitForRatchetReply(ctx, delivery.To); err != nil {
-		return err
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := s.waitForRatchetReply(ctx, delivery.To); err != nil {
+			return err
+		}
+		err := s.execution.SendTunnel(ctx, delivery)
+		if !errors.Is(err, dataplane.RouterErrPreparedRouteMissing) {
+			return s.retireFailedRoute(delivery.To, err)
+		}
+		// A missing or superseded route has not transmitted this payload.
+		// Publication renewal may replace it while preparation is in flight.
+		if err = s.prepare(ctx, delivery.To); err != nil && !errors.Is(err, dataplane.RouterErrRouteGeneration) {
+			return err
+		}
 	}
-	err := s.execution.SendTunnel(ctx, delivery)
-	if !errors.Is(err, dataplane.RouterErrPreparedRouteMissing) {
-		return s.retireFailedRoute(delivery.To, err)
-	}
-	if err = s.prepare(ctx, delivery.To); err != nil {
-		return err
-	}
-	if err := s.waitForRatchetReply(ctx, delivery.To); err != nil {
-		return err
-	}
-	return s.retireFailedRoute(delivery.To, s.execution.SendTunnel(ctx, delivery))
 }
 
 func (s *StreamingTunnelSender) retireFailedRoute(remote foundation.Hash, err error) error {

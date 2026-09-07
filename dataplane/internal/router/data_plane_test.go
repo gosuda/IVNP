@@ -54,7 +54,224 @@ func (dataPlaneReplyReservation) Activate() error { return nil }
 func (f dataPlaneReplyReservation) Send(ctx context.Context, packet []byte) error {
 	return f(ctx, packet)
 }
+func (f dataPlaneReplyReservation) SendEstablished(ctx context.Context, packet []byte) error {
+	return f(ctx, packet)
+}
 func (dataPlaneReplyReservation) Release() {}
+
+type ratchetReceiverFixture struct {
+	receiver              *GarlicReceiver
+	local, remote         *dataplanegarlic.RatchetManager
+	localHash, remoteHash foundation.Hash
+	now                   uint64
+	newSessionReply       []byte
+	replies               [][]byte
+	reserveErr            error
+}
+
+func newRatchetReceiverFixture(t *testing.T) *ratchetReceiverFixture {
+	t.Helper()
+	local, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(local.ReleaseSensitive)
+	remote, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(remote.ReleaseSensitive)
+	f := &ratchetReceiverFixture{localHash: local.Hash(), remoteHash: remote.Hash(), now: 1_000_000}
+	f.local, err = dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(f.local.ReleaseSensitive)
+	f.remote, err = dataplanegarlic.NewRatchetManager(remote, dataplanegarlic.RatchetConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(f.remote.ReleaseSensitive)
+	public := remote.X25519Public()
+	packet, err := f.local.Encrypt(make([]byte, 2048), f.remoteHash, public[:], uint16(foundation.CryptoX25519), nil, f.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := f.remote.Receive(make([]byte, 2048), make([]byte, 2048), packet, f.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Candidate.Discard()
+	if _, err := f.remote.CommitNew(result.Candidate, f.localHash, f.now); err != nil {
+		t.Fatal(err)
+	}
+	f.newSessionReply = result.Reply
+	f.receiver, err = NewGarlicReceiver(GarlicReceiverConfig{
+		Service: NewService(Sinks{}), ReplyKeys: dataplanegarlic.NewReplyKeyRegistry(1), Now: func() uint64 { return f.now },
+		Destinations: map[foundation.Hash]GarlicDestination{f.localHash: {
+			Ratchet: f.local,
+			ReserveRatchetReply: func(target foundation.Hash) (RatchetReplyReservation, error) {
+				if target != f.remoteHash {
+					t.Fatalf("reply target = %x, want %x", target, f.remoteHash)
+				}
+				if f.reserveErr != nil {
+					return nil, f.reserveErr
+				}
+				return dataPlaneReplyReservation(func(_ context.Context, packet []byte) error {
+					f.replies = append(f.replies, append([]byte(nil), packet...))
+					return nil
+				}), nil
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(f.receiver.ReleaseSensitive)
+	return f
+}
+
+func (f *ratchetReceiverFixture) receive(packet []byte) error {
+	payload := make([]byte, 4+len(packet))
+	binary.BigEndian.PutUint32(payload, uint32(len(packet)))
+	copy(payload[4:], packet)
+	return f.receiver.HandleGarlic(foundation.I2NPMessage{Header: foundation.I2NPHeader{Type: foundation.I2NPGarlic}, Payload: payload})
+}
+
+func (f *ratchetReceiverFixture) establish(t *testing.T) {
+	t.Helper()
+	if err := f.receive(f.newSessionReply); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.replies) != 1 {
+		t.Fatalf("NSR confirmations = %d, want 1", len(f.replies))
+	}
+	got, err := f.remote.Receive(make([]byte, 2048), nil, f.replies[0], f.now)
+	if err != nil || got.NewSession || len(got.Payload) != 0 || got.Peer != f.localHash {
+		t.Fatalf("NSR confirmation = %#v, %v", got, err)
+	}
+	f.replies = nil
+}
+
+func TestGarlicReceiverConfirmsNewSessionReplyWithoutApplicationTraffic(t *testing.T) {
+	f := newRatchetReceiverFixture(t)
+	f.establish(t)
+}
+
+func TestGarlicReceiverAcknowledgesRequestedMessages(t *testing.T) {
+	for _, withClove := range []bool{false, true} {
+		name := "ack-only"
+		if withClove {
+			name = "application-clove"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newRatchetReceiverFixture(t)
+			f.establish(t)
+			var payload []byte
+			delivered := false
+			f.receiver.service.SetDestinationSink(func(from, to foundation.Hash, message foundation.I2NPMessage) error {
+				data, err := foundation.I2NPParseData(message.Payload)
+				if err != nil {
+					return err
+				}
+				if from != f.remoteHash || to != f.localHash || !bytes.Equal(data.Data, []byte("message")) {
+					t.Fatalf("delivered message = %x to %x: %x", from, to, message.Payload)
+				}
+				delivered = true
+				return nil
+			})
+			if withClove {
+				content := []byte("message")
+				data := make([]byte, 4+len(content))
+				binary.BigEndian.PutUint32(data, uint32(len(content)))
+				copy(data[4:], content)
+				var err error
+				payload, err = appendRatchetGarlicClove(make([]byte, 256), dataplanegarlic.Delivery{Type: dataplanegarlic.DeliveryDestination, To: f.localHash}, foundation.I2NPMessage{
+					Header: foundation.I2NPHeader{Type: foundation.I2NPData, ID: 1, Expiration: f.now + 1000}, Payload: data,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			packet, err := f.remote.EncryptExisting(make([]byte, 512), f.localHash, payload, dataplanegarlic.RatchetOptions{ACKRequest: true}, f.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.receive(packet); err != nil {
+				t.Fatal(err)
+			}
+			if delivered != withClove || len(f.replies) != 1 {
+				t.Fatalf("delivered=%t replies=%d, want delivered=%t replies=1", delivered, len(f.replies), withClove)
+			}
+			got, err := f.remote.Receive(make([]byte, 512), nil, f.replies[0], f.now)
+			if err != nil || len(got.ACKs) != 1 || got.ACKs[0] != (dataplanegarlic.RatchetACK{TagSet: 0, Message: 0}) || got.ReplyRequested {
+				t.Fatalf("ratchet ACK = %#v, %v", got, err)
+			}
+			ackOnly, err := f.remote.EncryptExisting(make([]byte, 512), f.localHash, nil, dataplanegarlic.RatchetOptions{ACKs: got.ACKs}, f.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.receive(ackOnly); err != nil || len(f.replies) != 1 {
+				t.Fatalf("ACK-only packet triggered a response: replies=%d error=%v", len(f.replies), err)
+			}
+		})
+	}
+}
+
+func TestGarlicReceiverCompletesRekeyWithoutApplicationReply(t *testing.T) {
+	f := newRatchetReceiverFixture(t)
+	f.establish(t)
+	packet, err := f.remote.EncryptExisting(make([]byte, 512), f.localHash, nil, dataplanegarlic.RatchetOptions{RequestDH: true}, f.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receive(packet); err != nil || len(f.replies) != 1 {
+		t.Fatalf("rekey-only packet: replies=%d error=%v", len(f.replies), err)
+	}
+	if _, err := f.remote.Receive(make([]byte, 512), nil, f.replies[0], f.now); err != nil {
+		t.Fatal(err)
+	}
+	packet, err = f.remote.EncryptExisting(make([]byte, 512), f.localHash, nil, dataplanegarlic.RatchetOptions{ACKRequest: true}, f.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receive(packet); err != nil || len(f.replies) != 2 {
+		t.Fatalf("new tagset packet: replies=%d error=%v", len(f.replies), err)
+	}
+	got, err := f.remote.Receive(make([]byte, 512), nil, f.replies[1], f.now)
+	if err != nil || len(got.ACKs) != 1 || got.ACKs[0] != (dataplanegarlic.RatchetACK{TagSet: 1, Message: 0}) {
+		t.Fatalf("new tagset ACK = %#v, %v", got, err)
+	}
+}
+
+func TestGarlicReceiverDeliversPayloadWhenACKAdmissionFails(t *testing.T) {
+	f := newRatchetReceiverFixture(t)
+	f.establish(t)
+	delivered := false
+	f.receiver.service.SetDestinationSink(func(_, _ foundation.Hash, message foundation.I2NPMessage) error {
+		data, err := foundation.I2NPParseData(message.Payload)
+		delivered = err == nil && bytes.Equal(data.Data, []byte("deliver despite overload"))
+		return err
+	})
+	content := []byte("deliver despite overload")
+	data := make([]byte, 4+len(content))
+	binary.BigEndian.PutUint32(data, uint32(len(content)))
+	copy(data[4:], content)
+	payload, err := appendRatchetGarlicClove(make([]byte, 256), dataplanegarlic.Delivery{Type: dataplanegarlic.DeliveryDestination, To: f.localHash}, foundation.I2NPMessage{
+		Header: foundation.I2NPHeader{Type: foundation.I2NPData, ID: 1, Expiration: f.now + 1000}, Payload: data,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := f.remote.EncryptExisting(make([]byte, 512), f.localHash, payload, dataplanegarlic.RatchetOptions{ACKRequest: true}, f.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.reserveErr = ErrRoutePreparationBusy
+	if err := f.receive(packet); !errors.Is(err, ErrRoutePreparationBusy) || !delivered || len(f.replies) != 0 {
+		t.Fatalf("overloaded ACK admission: delivered=%t replies=%d error=%v", delivered, len(f.replies), err)
+	}
+}
 
 type dataPlaneDirectSender func(context.Context, dataplanestreamingtunnel.Delivery) error
 

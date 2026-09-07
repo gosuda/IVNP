@@ -20,7 +20,7 @@ func (f replyTestWriter) SendBlockPrepared(ctx context.Context, token dataplane.
 	return f(ctx, token, block)
 }
 
-func replyExchange(t *testing.T, writer replyTestWriter) (*StreamingTunnelSender, dataplane.StreamingTunnelDelivery, *dataplane.GarlicRatchetManager, dataplane.RouterRatchetReplyReservation, []byte) {
+func replyExchange(t *testing.T, writer replyTestWriter) (*StreamingTunnelSender, dataplane.StreamingTunnelDelivery, *dataplane.GarlicRatchetManager, dataplane.RouterRatchetReplyReservation, []byte, *foundation.LocalDestination) {
 	t.Helper()
 	const now = uint64(1000)
 	local, err := foundation.GenerateLegacyLocalDestination()
@@ -117,7 +117,7 @@ func replyExchange(t *testing.T, writer replyTestWriter) (*StreamingTunnelSender
 	if _, err := localRatchet.CommitNew(result.Candidate, remote.Hash(), now); err != nil {
 		t.Fatal(err)
 	}
-	return sender, dataplane.StreamingTunnelDelivery{From: local.Hash(), To: remote.Hash(), Protocol: 6, Payload: []byte("application reply")}, remoteRatchet, reservation, append([]byte(nil), result.Reply...)
+	return sender, dataplane.StreamingTunnelDelivery{From: local.Hash(), To: remote.Hash(), Protocol: 6, Payload: []byte("application reply")}, remoteRatchet, reservation, append([]byte(nil), result.Reply...), local
 }
 
 func TestWarmApplicationReplyWaitsForNSRHandoff(t *testing.T) {
@@ -142,7 +142,7 @@ func TestWarmApplicationReplyWaitsForNSRHandoff(t *testing.T) {
 			handed <- kind
 			return nil
 		})
-		sender, delivery, peer, reservation, packet := replyExchange(t, writer)
+		sender, delivery, peer, reservation, packet, _ := replyExchange(t, writer)
 		remote, reply = peer, packet
 		if err := reservation.Send(t.Context(), reply); err != nil {
 			t.Fatal(err)
@@ -172,6 +172,167 @@ func TestWarmApplicationReplyWaitsForNSRHandoff(t *testing.T) {
 	})
 }
 
+func TestEstablishedControlReplyFailureDoesNotBlockApplication(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		defer once.Do(func() { close(release) })
+		control := []byte("lost control response")
+		delivered := make(chan struct{}, 2)
+		var remote *dataplane.GarlicRatchetManager
+		writer := replyTestWriter(func(_ context.Context, _ dataplane.TunnelCircuitToken, block dataplane.TunnelBlock) error {
+			packet := block.Data[foundation.I2NPStandardHeaderLen+4:]
+			if bytes.Equal(packet, control) {
+				close(entered)
+				<-release
+				return context.DeadlineExceeded
+			}
+			result, err := remote.Receive(make([]byte, 4096), make([]byte, 4096), packet, 1000)
+			if err == nil && !result.NewSession {
+				delivered <- struct{}{}
+			}
+			return err
+		})
+		sender, delivery, peer, initial, reply, _ := replyExchange(t, writer)
+		remote = peer
+		if err := initial.Send(t.Context(), reply); err != nil {
+			t.Fatal(err)
+		}
+		sender.replies.Wait()
+		reservation, err := sender.ReserveRatchetReply(delivery.To)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reservation.Release()
+		if err := reservation.SendEstablished(t.Context(), control); err != nil {
+			t.Fatal(err)
+		}
+		<-entered
+		application := make(chan error, 1)
+		go func() { application <- sender.SendTunnel(t.Context(), delivery) }()
+		synctest.Wait()
+		select {
+		case err := <-application:
+			if err != nil {
+				t.Fatalf("application while ACK handoff is pending: %v", err)
+			}
+		default:
+			t.Fatal("established control response blocked application data")
+		}
+		once.Do(func() { close(release) })
+		sender.replies.Wait()
+		if err := sender.SendTunnel(t.Context(), delivery); err != nil {
+			t.Fatalf("failed ACK handoff poisoned later application data: %v", err)
+		}
+		if len(delivered) != 2 {
+			t.Fatalf("recipient decrypted %d application packets, want 2", len(delivered))
+		}
+	})
+}
+
+func TestLocalPublicationRefreshPreservesPendingNSR(t *testing.T) {
+	for _, phase := range []string{"before handoff", "during preparation"} {
+		t.Run(phase, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				handed := make(chan string, 2)
+				var remote *dataplane.GarlicRatchetManager
+				var reply []byte
+				sender, delivery, peer, reservation, packet, local := replyExchange(t, func(_ context.Context, _ dataplane.TunnelCircuitToken, block dataplane.TunnelBlock) error {
+					encrypted := block.Data[foundation.I2NPStandardHeaderLen+4:]
+					if _, err := remote.Receive(make([]byte, 4096), make([]byte, 4096), encrypted, 1000); err != nil {
+						return err
+					}
+					kind := "ES"
+					if bytes.Equal(encrypted, reply) {
+						kind = "NSR"
+					}
+					handed <- kind
+					return nil
+				})
+				remote, reply = peer, packet
+				entered, release := make(chan struct{}), make(chan struct{})
+				var unblock, first sync.Once
+				defer unblock.Do(func() { close(release) })
+				if phase == "during preparation" {
+					sender.execution.RetireRoute(delivery.To)
+					sender.prepareTunnel = func(ctx context.Context, _ foundation.Hash) error {
+						var err error
+						first.Do(func() {
+							close(entered)
+							select {
+							case <-release:
+							case <-ctx.Done():
+								err = ctx.Err()
+							}
+						})
+						return err
+					}
+					if err := reservation.Send(t.Context(), reply); err != nil {
+						t.Fatal(err)
+					}
+					<-entered
+				}
+				localSet, err := controlplanenetdb.NewLocalLeaseSet2(local)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := localSet.ReplaceInboundLeases([]foundation.NetworkDatabaseLease{{Gateway: foundation.Hash{8}, TunnelID: 9, EndDate: 90000}}); err != nil {
+					t.Fatal(err)
+				}
+				raw := make([]byte, foundation.NetworkDatabaseMaxLeaseSetBytes)
+				n, err := localSet.MarshalTo(raw, 1000, local.Sign)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := sender.database.HandleDatabaseStore(foundation.I2NPDatabaseStoreMessage{Key: local.Hash(), Type: foundation.I2NPStoreLeaseSet2, Data: raw[:n]}, false, 1000); err != nil {
+					t.Fatal(err)
+				}
+				if err := sender.RefreshLocalLeaseSet(); err != nil {
+					t.Fatal(err)
+				}
+				unblock.Do(func() { close(release) })
+				if phase == "before handoff" {
+					if err := reservation.Send(t.Context(), reply); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := sender.SendTunnel(t.Context(), delivery); err != nil {
+					t.Fatalf("publication refresh poisoned reply handoff: %v", err)
+				}
+				if first, second := <-handed, <-handed; first != "NSR" || second != "ES" {
+					t.Fatalf("handoff across refresh = %s, %s; want NSR then ES", first, second)
+				}
+			})
+		})
+	}
+}
+
+func TestRemoteELSReplacementRejectsPendingNSR(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		writes := 0
+		sender, delivery, _, reservation, reply, _ := replyExchange(t, func(context.Context, dataplane.TunnelCircuitToken, dataplane.TunnelBlock) error {
+			writes++
+			return nil
+		})
+		remote, ok := sender.database.LeaseSet2(delivery.To)
+		if !ok {
+			t.Fatal("missing remote LeaseSet2")
+		}
+		if err := sender.UpdateRemoteELS(map[foundation.Hash]RemoteELSContext{delivery.To: {Identity: remote.Header.Destination}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := reservation.Send(t.Context(), reply); err != nil {
+			t.Fatal(err)
+		}
+		if err := sender.SendTunnel(t.Context(), delivery); !errors.Is(err, dataplane.RouterErrRouteGeneration) {
+			t.Fatalf("reply under replaced authorization = %v", err)
+		}
+		if writes != 0 {
+			t.Fatalf("replaced authorization transmitted %d frames", writes)
+		}
+	})
+}
+
 func TestFailedNSRHandoffBlocksESUntilPeerRetirement(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		failure := errors.New("reply handoff failed")
@@ -181,7 +342,7 @@ func TestFailedNSRHandoffBlocksESUntilPeerRetirement(t *testing.T) {
 		writes := 0
 		var remote *dataplane.GarlicRatchetManager
 		recovered := false
-		sender, delivery, peer, reservation, reply := replyExchange(t, func(_ context.Context, _ dataplane.TunnelCircuitToken, block dataplane.TunnelBlock) error {
+		sender, delivery, peer, reservation, reply, _ := replyExchange(t, func(_ context.Context, _ dataplane.TunnelCircuitToken, block dataplane.TunnelBlock) error {
 			writes++
 			if writes == 1 {
 				close(entered)

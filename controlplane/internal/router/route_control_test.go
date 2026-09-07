@@ -16,11 +16,16 @@ import (
 
 func routeControlFixture(t *testing.T, prepare func(context.Context, foundation.Hash) error, localLeases ...foundation.NetworkDatabaseLease) (*StreamingTunnelSender, []dataplane.StreamingTunnelDelivery, *controlPlaneTunnelSender) {
 	t.Helper()
-	const now = uint64(1000)
 	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
+	return routeControlFixtureForOwner(t, local, prepare, localLeases...)
+}
+
+func routeControlFixtureForOwner(t *testing.T, local foundation.LocalAddress, prepare func(context.Context, foundation.Hash) error, localLeases ...foundation.NetworkDatabaseLease) (*StreamingTunnelSender, []dataplane.StreamingTunnelDelivery, *controlPlaneTunnelSender) {
+	t.Helper()
+	const now = uint64(1000)
 	owner := local.Hash
 	database := controlplanenetdb.NewDatabase(owner, controlplanenetdb.DefaultBucketCapacity)
 	if len(localLeases) == 0 {
@@ -138,10 +143,7 @@ func TestELSPolicyReplacementRejectsInflightPlaintextPreparation(t *testing.T) {
 			t.Fatal(err)
 		}
 		once.Do(func() { close(release) })
-		if err := <-pending; !errors.Is(err, dataplane.RouterErrRouteGeneration) {
-			t.Fatalf("old plaintext preparation = %v", err)
-		}
-		if err := sender.SendTunnel(t.Context(), deliveries[0]); err == nil {
+		if err := <-pending; err == nil {
 			t.Fatal("encrypted policy downgraded to plaintext")
 		}
 		wire.mu.Lock()
@@ -173,6 +175,101 @@ func TestLocalPublicationRefreshReplacesWarmBundle(t *testing.T) {
 	}
 	if err := sender.SendTunnel(t.Context(), deliveries[0]); !errors.Is(err, dataplane.TunnelErrCircuitNotFound) {
 		t.Fatalf("publication refresh kept old circuit/bundle: %v", err)
+	}
+}
+
+func TestLocalPublicationRenewalDoesNotRejectUnsentPayload(t *testing.T) {
+	for _, phase := range []string{"during preparation", "after installation"} {
+		t.Run(phase, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				local, err := foundation.GenerateLocalAddress()
+				if err != nil {
+					t.Fatal(err)
+				}
+				entered, release := make(chan struct{}), make(chan struct{})
+				var unblock, first sync.Once
+				defer unblock.Do(func() { close(release) })
+				sender, deliveries, _ := routeControlFixtureForOwner(t, local, func(ctx context.Context, _ foundation.Hash) error {
+					var err error
+					first.Do(func() {
+						close(entered)
+						select {
+						case <-release:
+						case <-ctx.Done():
+							err = ctx.Err()
+						}
+					})
+					return err
+				}, foundation.NetworkDatabaseLease{Gateway: foundation.Hash{6}, TunnelID: 7, EndDate: 30000})
+				result := make(chan error, 1)
+				go func() { result <- sender.SendTunnel(t.Context(), deliveries[0]) }()
+				<-entered
+				var reply dataplane.RouterRatchetReplyReservation
+				if phase == "after installation" {
+					reply, err = sender.ReserveRatchetReply(deliveries[0].To)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer reply.Release()
+					unblock.Do(func() { close(release) })
+					synctest.Wait()
+					if _, ok := sender.execution.RouteReceipt(deliveries[0].To); !ok {
+						t.Fatal("route was not installed before publication renewal")
+					}
+				}
+				storeControlLegacyLeaseSet(t, sender.database, local, foundation.NetworkDatabaseLease{Gateway: foundation.Hash{8}, TunnelID: 9, EndDate: 90000})
+				if err := sender.RefreshLocalLeaseSet(); err != nil {
+					t.Fatal(err)
+				}
+				unblock.Do(func() { close(release) })
+				if reply != nil {
+					reply.Release()
+				}
+				if err := <-result; err != nil {
+					t.Fatalf("renewal rejected unsent payload: %v", err)
+				}
+				receipt, ok := sender.execution.RouteReceipt(deliveries[0].To)
+				if !ok || receipt.Expires != 90000 {
+					t.Fatalf("replacement route = %+v, present=%t; want renewed return lease deadline 90000", receipt, ok)
+				}
+			})
+		})
+	}
+}
+
+func TestRouteReacquisitionStopsWhenCallerCancels(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var sender *StreamingTunnelSender
+	prepare := func(context.Context, foundation.Hash) error {
+		if err := sender.UpdateRemoteELS(nil); err != nil {
+			return err
+		}
+		cancel()
+		return nil
+	}
+	sender, deliveries, wire := routeControlFixture(t, prepare)
+	if err := sender.SendTunnel(ctx, deliveries[0]); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled route re-acquisition = %v", err)
+	}
+	wire.mu.Lock()
+	defer wire.mu.Unlock()
+	if len(wire.messages) != 0 {
+		t.Fatal("canceled route re-acquisition transmitted payload")
+	}
+}
+
+func TestRouteReacquisitionDoesNotReplayTransportFailure(t *testing.T) {
+	sender, deliveries, wire := routeControlFixture(t, nil)
+	failure := errors.New("tunnel write failed after admission")
+	wire.handle = func(context.Context, foundation.I2NPMessage) error { return failure }
+	if err := sender.SendTunnel(t.Context(), deliveries[0]); !errors.Is(err, failure) {
+		t.Fatalf("admitted tunnel write = %v", err)
+	}
+	wire.mu.Lock()
+	defer wire.mu.Unlock()
+	if len(wire.messages) != 1 {
+		t.Fatalf("failed tunnel write was replayed: %d frames", len(wire.messages))
 	}
 }
 

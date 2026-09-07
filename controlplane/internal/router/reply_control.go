@@ -10,11 +10,11 @@ import (
 )
 
 type ratchetReplyGate struct {
-	done        chan struct{}
-	err         error
-	completed   bool
-	generation  uint64
-	reservation *ratchetReplyReservation
+	done             chan struct{}
+	err              error
+	completed        bool
+	policyGeneration uint64
+	reservation      *ratchetReplyReservation
 }
 
 // A reservation pins reply admission before the receiver commits a session.
@@ -27,6 +27,7 @@ type ratchetReplyReservation struct {
 	previous    *ratchetReplyGate
 	transferred bool
 	activated   bool
+	established bool
 	released    bool
 }
 
@@ -63,7 +64,7 @@ func (s *StreamingTunnelSender) ReserveRatchetReply(target foundation.Hash) (dat
 	default:
 		return nil, dataplane.RouterErrRoutePreparationBusy
 	}
-	gate := &ratchetReplyGate{done: make(chan struct{}), generation: s.generation}
+	gate := &ratchetReplyGate{done: make(chan struct{}), policyGeneration: s.policyGeneration}
 	s.replyGates[target] = gate
 	s.replies.Add(1)
 	reservation := &ratchetReplyReservation{sender: s, target: target, gate: gate, previous: previous}
@@ -103,6 +104,12 @@ func (r *ratchetReplyReservation) releaseLocked() {
 		return
 	}
 	r.released = true
+	r.restorePreviousGate()
+	<-r.sender.replySlots
+	r.sender.replies.Done()
+}
+
+func (r *ratchetReplyReservation) restorePreviousGate() {
 	s := r.sender
 	s.remoteMu.Lock()
 	if r.previous != nil {
@@ -115,8 +122,6 @@ func (r *ratchetReplyReservation) releaseLocked() {
 	r.gate.reservation = nil
 	close(r.gate.done)
 	s.remoteMu.Unlock()
-	<-s.replySlots
-	s.replies.Done()
 }
 
 func (r *ratchetReplyReservation) Send(ctx context.Context, packet []byte) error {
@@ -125,6 +130,21 @@ func (r *ratchetReplyReservation) Send(ctx context.Context, packet []byte) error
 	if r.released || r.transferred || !r.activated {
 		return dataplane.RouterErrDataPlaneConfig
 	}
+	return r.sendLocked(ctx, packet)
+}
+
+func (r *ratchetReplyReservation) SendEstablished(ctx context.Context, packet []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.released || r.transferred || r.activated {
+		return dataplane.RouterErrDataPlaneConfig
+	}
+	r.established = true
+	r.restorePreviousGate()
+	return r.sendLocked(ctx, packet)
+}
+
+func (r *ratchetReplyReservation) sendLocked(ctx context.Context, packet []byte) error {
 	r.transferred = true
 	var err error
 	switch {
@@ -149,33 +169,22 @@ func (r *ratchetReplyReservation) Send(ctx context.Context, packet []byte) error
 func (r *ratchetReplyReservation) sendOwned(packet []byte) {
 	s := r.sender
 	ctx, cancel := context.WithTimeout(s.preparationCtx, s.preparationTimeout)
-	s.remoteMu.RLock()
-	generation := s.generation
-	s.remoteMu.RUnlock()
 	var err error
-	if generation != r.gate.generation {
-		err = dataplane.RouterErrRouteGeneration
-	} else {
-		err = s.execution.SendRatchetReply(ctx, r.target, packet)
-	}
-	if errors.Is(err, dataplane.RouterErrPreparedRouteMissing) {
-		err = nil
+	for {
+		if err = ctx.Err(); err != nil {
+			break
+		}
+		err = r.sendPrepared(ctx, packet)
+		if !errors.Is(err, dataplane.RouterErrPreparedRouteMissing) {
+			break
+		}
 		if s.awaitControl != nil {
-			err = s.awaitControl(ctx)
-		}
-		if err == nil {
-			err = s.prepare(ctx, r.target)
-		}
-		if err == nil {
-			s.remoteMu.RLock()
-			generation = s.generation
-			s.remoteMu.RUnlock()
-			if generation != r.gate.generation {
-				err = dataplane.RouterErrRouteGeneration
+			if err = s.awaitControl(ctx); err != nil {
+				break
 			}
 		}
-		if err == nil {
-			err = s.execution.SendRatchetReply(ctx, r.target, packet)
+		if err = s.prepare(ctx, r.target); err != nil && !errors.Is(err, dataplane.RouterErrRouteGeneration) {
+			break
 		}
 	}
 	err = s.retireFailedRoute(r.target, err)
@@ -187,17 +196,34 @@ func (r *ratchetReplyReservation) sendOwned(packet []byte) {
 	r.complete(err)
 }
 
+func (r *ratchetReplyReservation) sendPrepared(ctx context.Context, packet []byte) error {
+	s := r.sender
+	// Authorization changes wait for admitted replies, but publication renewal
+	// remains independent of the handoff and may replace an unsent route.
+	s.replyPolicyMu.RLock()
+	defer s.replyPolicyMu.RUnlock()
+	s.remoteMu.RLock()
+	current := s.policyGeneration
+	s.remoteMu.RUnlock()
+	if current != r.gate.policyGeneration {
+		return dataplane.RouterErrRouteGeneration
+	}
+	return s.execution.SendRatchetReply(ctx, r.target, packet)
+}
+
 func (r *ratchetReplyReservation) complete(err error) {
 	s := r.sender
-	s.remoteMu.Lock()
-	r.gate.err = err
-	r.gate.completed = true
-	r.gate.reservation = nil
-	if err == nil {
-		delete(s.replyGates, r.target)
+	if !r.established {
+		s.remoteMu.Lock()
+		r.gate.err = err
+		r.gate.completed = true
+		r.gate.reservation = nil
+		if err == nil {
+			delete(s.replyGates, r.target)
+		}
+		close(r.gate.done)
+		s.remoteMu.Unlock()
 	}
-	close(r.gate.done)
-	s.remoteMu.Unlock()
 	<-s.replySlots
 	s.replies.Done()
 }
