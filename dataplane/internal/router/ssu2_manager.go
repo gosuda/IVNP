@@ -31,16 +31,23 @@ import (
 )
 
 const (
-	defaultSSU2NetworkID         = 2
-	defaultSSU2HandshakeTimeout  = 30 * time.Second
-	defaultSSU2MaxSessions       = 256
-	defaultSSU2MaxPending        = 64
-	defaultSSU2MaxClockSkew      = 2 * time.Minute
-	defaultSSU2TokenLifetime     = 10 * time.Minute
-	ssu2RetransmitInterval       = time.Second
-	ssu2MaximumRTO               = time.Minute
-	ssu2MaxRetransmits           = 5
-	ssu2MaxTrackedPackets        = 256
+	defaultSSU2NetworkID        = 2
+	defaultSSU2HandshakeTimeout = 30 * time.Second
+	defaultSSU2MaxSessions      = 256
+	defaultSSU2MaxPending       = 64
+	defaultSSU2MaxClockSkew     = 2 * time.Minute
+	defaultSSU2TokenLifetime    = 10 * time.Minute
+	ssu2RetransmitInterval      = time.Second
+	ssu2MaximumRTO              = time.Minute
+	ssu2MaxRetransmits          = 5
+	ssu2MaxTrackedPackets       = 256
+	ssu2InitialTrackedPackets   = 16
+	// ssu2SentSlotIdleShrinkTicks bounds how many consecutive
+	// ssu2RetransmitInterval ticks a session's sentSlots must stay under-half
+	// utilized before its most recently grown chunk is released. This is a
+	// plain idle watermark, not a forecast: it only ever undoes the most
+	// recent doubling step, and only once every slot in that chunk is free.
+	ssu2SentSlotIdleShrinkTicks  = 30
 	ssu2MaximumSendWindow        = 1024 * 1024
 	ssu2InitialSlowStart         = ssu2MaximumSendWindow / 2
 	ssu2MinimumNetworkMTU        = 1280
@@ -359,8 +366,9 @@ type ssu2TransportSession struct {
 	frame                 [dataplanessu2.MaxIPv4PacketLen]byte
 	received              dataplanessu2.ACKTracker
 	sent                  map[uint32]*ssu2SentPacket
-	sentSlots             []ssu2SentPacket
-	sentStore             []byte
+	sentSlots             []*ssu2SentPacket
+	sentChunks            [][]byte
+	sentIdleTicks         int
 	sendWindowBytes       int
 	sendWindowRemaining   int
 	slowStartThreshold    int
@@ -429,16 +437,18 @@ func (s *ssu2TransportSession) ReleaseSensitive() {
 		}
 		clear(s.sendPacket[:])
 		clear(s.frame[:])
-		for index := range s.sentSlots {
-			s.sentSlots[index].release()
+		for _, slot := range s.sentSlots {
+			slot.release()
 		}
 		for _, packet := range s.sent {
 			packet.release()
 		}
 		clear(s.sent)
-		clear(s.sentStore)
+		for _, chunk := range s.sentChunks {
+			clear(chunk)
+		}
 		s.sentSlots = nil
-		s.sentStore = nil
+		s.sentChunks = nil
 		s.sendMu.Unlock()
 		s.packetMu.Unlock()
 		clear(s.ackPayload[:])
@@ -482,6 +492,13 @@ func (s *ssu2TransportSession) setRemote(remote net.Addr) {
 }
 
 type ssu2SentPacket struct {
+	// storage is this slot's fixed backing buffer, sized once at
+	// growSentSlotsLocked time and never reallocated for the slot's
+	// lifetime; payload is always a reslice of storage. Keeping storage
+	// pinned per *ssu2SentPacket (rather than in one contiguous session-wide
+	// buffer indexed by position) lets sentSlots grow via append without
+	// invalidating slots already referenced from the session's sent map.
+	storage      []byte
 	payload      []byte
 	sentAt       time.Time
 	firstSentAt  time.Time
@@ -506,12 +523,34 @@ func (s *ssu2TransportSession) initReliability(largeMTU int) {
 	s.slowStartThreshold = ssu2InitialSlowStart
 	s.rto = ssu2RetransmitInterval
 	s.sendCapacityAvailable = make(chan struct{})
-	s.sent = make(map[uint32]*ssu2SentPacket, ssu2MaxTrackedPackets)
-	s.sentSlots = make([]ssu2SentPacket, ssu2MaxTrackedPackets)
-	s.sentStore = make([]byte, ssu2MaxTrackedPackets*dataplanessu2.MaxIPv4PacketLen)
-	for index := range s.sentSlots {
+	s.sent = make(map[uint32]*ssu2SentPacket, ssu2InitialTrackedPackets)
+	// Retransmission tracking starts small (the initial congestion window is
+	// a handful of packets) and grows on demand in retainPayload, up to the
+	// same ssu2MaxTrackedPackets ceiling this replaced eager allocation
+	// preallocated unconditionally. See growSentSlotsLocked.
+	s.growSentSlotsLocked(ssu2InitialTrackedPackets)
+}
+
+// growSentSlotsLocked appends fresh, never-in-use slots until sentSlots
+// holds at least to (capped at ssu2MaxTrackedPackets). It only ever appends:
+// existing slots keep their identity and backing storage, so *ssu2SentPacket
+// values already held in s.sent stay valid across a grow. Callers hold
+// sendMu.
+func (s *ssu2TransportSession) growSentSlotsLocked(to int) {
+	to = min(to, ssu2MaxTrackedPackets)
+	add := to - len(s.sentSlots)
+	if add <= 0 {
+		return
+	}
+	chunk := make([]byte, add*dataplanessu2.MaxIPv4PacketLen)
+	s.sentChunks = append(s.sentChunks, chunk)
+	if s.sentSlots == nil {
+		s.sentSlots = make([]*ssu2SentPacket, 0, to)
+	}
+	for index := range add {
 		start := index * dataplanessu2.MaxIPv4PacketLen
-		s.sentSlots[index].payload = s.sentStore[start:start]
+		storage := chunk[start : start+dataplanessu2.MaxIPv4PacketLen : start+dataplanessu2.MaxIPv4PacketLen]
+		s.sentSlots = append(s.sentSlots, &ssu2SentPacket{storage: storage, payload: storage[:0]})
 	}
 }
 
@@ -519,29 +558,31 @@ func (s *ssu2TransportSession) retainPayload(payload []byte, now time.Time) *ssu
 	if len(payload) > dataplanessu2.MaxIPv4PacketLen {
 		return nil
 	}
-	for index := range s.sentSlots {
-		slot := &s.sentSlots[index]
-		if slot.inUse {
-			continue
+	for {
+		for _, slot := range s.sentSlots {
+			if slot.inUse {
+				continue
+			}
+			slot.payload = slot.storage[:copy(slot.storage, payload)]
+			slot.sentAt = now
+			slot.firstSentAt = now
+			slot.windowBytes = 0
+			slot.packetSize = 0
+			slot.latestPacket = 0
+			slot.nackThrough = 0
+			slot.attempts = 0
+			slot.nacks = 0
+			slot.fast = false
+			slot.acknowledged = false
+			slot.ackNext = nil
+			slot.inUse = true
+			return slot
 		}
-		storage := s.sentStore[index*dataplanessu2.MaxIPv4PacketLen : (index+1)*dataplanessu2.MaxIPv4PacketLen]
-		copy(storage, payload)
-		slot.payload = storage[:len(payload)]
-		slot.sentAt = now
-		slot.firstSentAt = now
-		slot.windowBytes = 0
-		slot.packetSize = 0
-		slot.latestPacket = 0
-		slot.nackThrough = 0
-		slot.attempts = 0
-		slot.nacks = 0
-		slot.fast = false
-		slot.acknowledged = false
-		slot.ackNext = nil
-		slot.inUse = true
-		return slot
+		if len(s.sentSlots) >= ssu2MaxTrackedPackets {
+			return nil
+		}
+		s.growSentSlotsLocked(max(ssu2InitialTrackedPackets, len(s.sentSlots)*2))
 	}
-	return nil
 }
 
 func (p *ssu2SentPacket) release() {
@@ -562,6 +603,54 @@ func (p *ssu2SentPacket) release() {
 	p.acknowledged = false
 	p.ackNext = nil
 	p.inUse = false
+}
+
+// maintainSentCapacity is retransmitLoop's per-tick hook for releasing
+// retransmission capacity a session grew into but no longer needs.
+func (s *ssu2TransportSession) maintainSentCapacity() {
+	s.sendMu.Lock()
+	s.shrinkSentSlotsLocked()
+	s.sendMu.Unlock()
+}
+
+// shrinkSentSlotsLocked releases the most recently grown chunk once
+// utilization has stayed under half of capacity for
+// ssu2SentSlotIdleShrinkTicks consecutive ticks, mirroring growSentSlotsLocked's
+// doubling by undoing exactly one doubling step at a time. It never shrinks
+// below ssu2InitialTrackedPackets, and only removes a chunk once every slot
+// in it is free — a still-tracked packet in that chunk defers the shrink to
+// a later tick rather than blocking or relocating it. Callers hold sendMu.
+func (s *ssu2TransportSession) shrinkSentSlotsLocked() {
+	if len(s.sentSlots) <= ssu2InitialTrackedPackets || len(s.sentChunks) == 0 {
+		s.sentIdleTicks = 0
+		return
+	}
+	inUse := 0
+	for _, slot := range s.sentSlots {
+		if slot.inUse {
+			inUse++
+		}
+	}
+	if inUse*2 >= len(s.sentSlots) {
+		s.sentIdleTicks = 0
+		return
+	}
+	s.sentIdleTicks++
+	if s.sentIdleTicks < ssu2SentSlotIdleShrinkTicks {
+		return
+	}
+	s.sentIdleTicks = 0
+	lastChunk := s.sentChunks[len(s.sentChunks)-1]
+	lastChunkSlots := len(lastChunk) / dataplanessu2.MaxIPv4PacketLen
+	tailStart := len(s.sentSlots) - lastChunkSlots
+	for _, slot := range s.sentSlots[tailStart:] {
+		if slot.inUse {
+			return
+		}
+	}
+	clear(lastChunk)
+	s.sentChunks = s.sentChunks[:len(s.sentChunks)-1]
+	s.sentSlots = s.sentSlots[:tailStart]
 }
 
 type ssu2FragmentAssembly struct {
@@ -1980,6 +2069,7 @@ func (m *SSU2Manager) retransmitLoop() {
 				}
 				session.expireFragments(now)
 				session.expirePath(now)
+				session.maintainSentCapacity()
 			}
 			m.expireIntroductions(now)
 			m.expireExtensions(now)

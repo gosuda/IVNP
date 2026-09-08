@@ -1471,6 +1471,115 @@ func TestSSU2PacketNumberAliasesDoNotExhaustRetainedPayloadSlots(t *testing.T) {
 	})
 }
 
+// TestSSU2SentSlotsStartSmallAndGrowLazily checks that a fresh session starts
+// with ssu2InitialTrackedPackets slots rather than the full
+// ssu2MaxTrackedPackets ceiling, that retainPayload grows sentSlots on
+// demand by doubling, and that growth never invalidates a *ssu2SentPacket a
+// caller is already holding (its storage keeps the exact payload bytes it
+// was given, and its pointer identity is unchanged by a later grow).
+func TestSSU2SentSlotsStartSmallAndGrowLazily(t *testing.T) {
+	_, session := newSSU2SendTestHarness(t)
+	if got := len(session.sentSlots); got != ssu2InitialTrackedPackets {
+		t.Fatalf("initial sentSlots = %d, want %d", got, ssu2InitialTrackedPackets)
+	}
+	if got := len(session.sentChunks); got != 1 {
+		t.Fatalf("initial sentChunks = %d, want 1", got)
+	}
+
+	held := make([]*ssu2SentPacket, 0, ssu2InitialTrackedPackets+1)
+	for index := range ssu2InitialTrackedPackets {
+		payload := bytes.Repeat([]byte{byte(index)}, 4)
+		slot := session.retainPayload(payload, time.Unix(1, 0))
+		if slot == nil {
+			t.Fatalf("retainPayload %d = nil before exhausting initial slots", index)
+		}
+		held = append(held, slot)
+	}
+	if got := len(session.sentSlots); got != ssu2InitialTrackedPackets {
+		t.Fatalf("sentSlots after filling initial capacity = %d, want %d (should not grow early)", got, ssu2InitialTrackedPackets)
+	}
+
+	// The initial capacity is now fully in-use; the next retain must grow.
+	overflow := session.retainPayload([]byte("grown"), time.Unix(2, 0))
+	if overflow == nil {
+		t.Fatal("retainPayload returned nil instead of growing sentSlots")
+	}
+	held = append(held, overflow)
+	if got, want := len(session.sentSlots), 2*ssu2InitialTrackedPackets; got != want {
+		t.Fatalf("sentSlots after growth = %d, want %d (doubling)", got, want)
+	}
+	if got := len(session.sentChunks); got != 2 {
+		t.Fatalf("sentChunks after growth = %d, want 2", got)
+	}
+
+	// Growth must not disturb slots retained before it: same pointer
+	// identity, same payload bytes.
+	for index, slot := range held[:ssu2InitialTrackedPackets] {
+		if slot != held[index] {
+			t.Fatalf("slot %d identity changed", index)
+		}
+		want := byte(index)
+		if len(slot.payload) != 4 || slot.payload[0] != want {
+			t.Fatalf("slot %d payload = %v, want first byte %d", index, slot.payload, want)
+		}
+	}
+	if string(overflow.payload) != "grown" {
+		t.Fatalf("grown slot payload = %q, want %q", overflow.payload, "grown")
+	}
+}
+
+// TestSSU2SentSlotsShrinkAfterSustainedIdleAndFloorAtInitial checks that
+// shrinkSentSlotsLocked releases a grown chunk once utilization has stayed
+// low for ssu2SentSlotIdleShrinkTicks consecutive ticks, but never below
+// ssu2InitialTrackedPackets, and that a still-in-use slot in the tail chunk
+// defers the shrink instead of relocating or dropping it.
+func TestSSU2SentSlotsShrinkAfterSustainedIdleAndFloorAtInitial(t *testing.T) {
+	_, session := newSSU2SendTestHarness(t)
+	session.growSentSlotsLocked(2 * ssu2InitialTrackedPackets)
+	if got, want := len(session.sentSlots), 2*ssu2InitialTrackedPackets; got != want {
+		t.Fatalf("sentSlots after manual growth = %d, want %d", got, want)
+	}
+
+	// A packet still tracked in the grown tail chunk must block the shrink.
+	// retainPayload always fills the lowest-index free slot, so mark the
+	// tail slot in-use directly rather than relying on scan order.
+	tail := session.sentSlots[len(session.sentSlots)-1]
+	tail.inUse = true
+	for i := 0; i < ssu2SentSlotIdleShrinkTicks+5; i++ {
+		session.shrinkSentSlotsLocked()
+	}
+	if got, want := len(session.sentSlots), 2*ssu2InitialTrackedPackets; got != want {
+		t.Fatalf("sentSlots shrank to %d despite an in-use slot, want unchanged %d", got, want)
+	}
+	tail.inUse = false
+	// The loop above left sentIdleTicks at some partial count depending on
+	// how the blocked attempts landed relative to the threshold; pin it back
+	// to zero so the boundary check below is exact rather than incidental.
+	session.sentIdleTicks = 0
+
+	for i := 0; i < ssu2SentSlotIdleShrinkTicks-1; i++ {
+		session.shrinkSentSlotsLocked()
+	}
+	if got, want := len(session.sentSlots), 2*ssu2InitialTrackedPackets; got != want {
+		t.Fatalf("sentSlots shrank before ssu2SentSlotIdleShrinkTicks elapsed: %d, want unchanged %d", got, want)
+	}
+	session.shrinkSentSlotsLocked()
+	if got, want := len(session.sentSlots), ssu2InitialTrackedPackets; got != want {
+		t.Fatalf("sentSlots after idle shrink = %d, want %d", got, want)
+	}
+	if got := len(session.sentChunks); got != 1 {
+		t.Fatalf("sentChunks after idle shrink = %d, want 1", got)
+	}
+
+	// Floor: shrinking further must never drop below the initial chunk.
+	for i := 0; i < 4*ssu2SentSlotIdleShrinkTicks; i++ {
+		session.shrinkSentSlotsLocked()
+	}
+	if got, want := len(session.sentSlots), ssu2InitialTrackedPackets; got != want {
+		t.Fatalf("sentSlots below floor = %d, want %d", got, want)
+	}
+}
+
 func TestSSU2EgressCollectsOnlyReadyDatagrams(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
