@@ -164,19 +164,29 @@ type SSU2Manager struct {
 	setupSlots            chan struct{}
 	egressMu              sync.RWMutex
 
-	receiveFree    chan *ssu2ReceiveBatch
-	authQueue      chan ssu2ReceiveJob
-	setupFree      chan *ssu2SetupPacket
-	setupQueue     chan *ssu2SetupPacket
-	dispatchQueues []chan *ssu2DispatchBatch
-	dispatchFree   chan *ssu2DispatchBatch
-	ackQueue       chan *ssu2TransportSession
-	egressFree     chan *ssu2EgressSlot
-	egressQueue    chan *ssu2EgressSlot
-	ioStats        ssu2IOStats
-	metrics        *observability.Registry
-	logger         *slog.Logger
-	kernelDrops    atomic.Uint64
+	receiveFree chan *ssu2ReceiveBatch
+	authQueue   chan ssu2ReceiveJob
+	setupFree   chan *ssu2SetupPacket
+	// setupFreeBudget bounds total ssu2SetupPacket values ever allocated for
+	// setupFree at maxPending, same as before, but lets them come into
+	// existence lazily under load instead of all at Start().
+	setupFreeBudget atomic.Int32
+	setupQueue      chan *ssu2SetupPacket
+	dispatchQueues  []chan *ssu2DispatchBatch
+	dispatchFree    chan *ssu2DispatchBatch
+	// dispatchFreeBudget bounds the number of ssu2DispatchBatch values ever
+	// allocated for dispatchFree at ssu2DispatchQueueSize, same as before, but
+	// lets them come into existence lazily under load instead of all at
+	// Start(); each holds a [ssu2ReceiveBatchSize*8]ssu2DispatchItem array, so
+	// eagerly filling the whole channel cost >1MB an idle manager never used.
+	dispatchFreeBudget atomic.Int32
+	ackQueue           chan *ssu2TransportSession
+	egressFree         chan *ssu2EgressSlot
+	egressQueue        chan *ssu2EgressSlot
+	ioStats            ssu2IOStats
+	metrics            *observability.Registry
+	logger             *slog.Logger
+	kernelDrops        atomic.Uint64
 
 	sessionsByPeer      map[foundation.Hash]*ssu2TransportSession
 	sessionsByID        map[uint64]*ssu2TransportSession
@@ -816,10 +826,8 @@ func (m *SSU2Manager) Start(parent context.Context, bindings TransportBindings) 
 	m.receiveFree = receiveFree
 	m.authQueue = make(chan ssu2ReceiveJob, ssu2ReceiveBatchCount*ssu2ReceiveBatchSize)
 	m.setupFree = make(chan *ssu2SetupPacket, m.maxPending)
+	m.setupFreeBudget.Store(int32(m.maxPending))
 	m.setupQueue = make(chan *ssu2SetupPacket, m.maxPending)
-	for range m.maxPending {
-		m.setupFree <- new(ssu2SetupPacket)
-	}
 	m.ackQueue = make(chan *ssu2TransportSession, m.maxSessions)
 	authWorkers := parallelism.Workers(cap(m.authQueue))
 	dispatchWorkers := parallelism.Workers(ssu2DispatchQueueSize)
@@ -831,9 +839,7 @@ func (m *SSU2Manager) Start(parent context.Context, bindings TransportBindings) 
 		m.dispatchQueues[index] = make(chan *ssu2DispatchBatch, dispatchCapacity)
 	}
 	m.dispatchFree = make(chan *ssu2DispatchBatch, ssu2DispatchQueueSize)
-	for range ssu2DispatchQueueSize {
-		m.dispatchFree <- &ssu2DispatchBatch{done: make(chan error, 1)}
-	}
+	m.dispatchFreeBudget.Store(ssu2DispatchQueueSize)
 	m.egressFree = egressFree
 	m.egressQueue = make(chan *ssu2EgressSlot, ssu2EgressSlots)
 	if m.metrics != nil {
@@ -4065,6 +4071,18 @@ func (m *SSU2Manager) borrowDispatchBatch() (*ssu2DispatchBatch, error) {
 	if !running {
 		return nil, ErrSSU2Session
 	}
+	select {
+	case batch := <-free:
+		return batch, nil
+	default:
+	}
+	// The pre-existing budget still bounds total batches in circulation at
+	// ssu2DispatchQueueSize; only the timing of their allocation moved from
+	// Start() to first use under concurrent dispatch load.
+	if m.dispatchFreeBudget.Add(-1) >= 0 {
+		return &ssu2DispatchBatch{done: make(chan error, 1)}, nil
+	}
+	m.dispatchFreeBudget.Add(1)
 	select {
 	case batch := <-free:
 		return batch, nil

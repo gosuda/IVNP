@@ -27,21 +27,39 @@ func (m *SSU2Manager) establishedPacket(packet []byte) bool {
 }
 
 func (m *SSU2Manager) enqueueSetupPacket(packet dataplanessu2.Datagram) {
-	select {
-	case job := <-m.setupFree:
-		job.length = copy(job.data[:], packet.Data[:packet.Len])
-		job.remote = packet.Addr
-		m.setupQueue <- job
-		if m.metrics != nil {
-			m.metrics.AddSSU2EnqueuedDatagrams(1)
-			m.metrics.IncSSU2IngressQueueDepth()
-		}
-	default:
+	job := m.borrowSetupPacket()
+	if job == nil {
 		m.ioStats.dropped.Add(1)
 		if m.metrics != nil {
 			m.metrics.AddSSU2ReceiveQueueDrops(1)
 		}
+		return
 	}
+	job.length = copy(job.data[:], packet.Data[:packet.Len])
+	job.remote = packet.Addr
+	m.setupQueue <- job
+	if m.metrics != nil {
+		m.metrics.AddSSU2EnqueuedDatagrams(1)
+		m.metrics.IncSSU2IngressQueueDepth()
+	}
+}
+
+// borrowSetupPacket reuses a released packet from setupFree, or lazily
+// allocates a fresh one while setupFreeBudget still allows it. The budget
+// still bounds total packets in circulation at maxPending, same as the
+// eager fill this replaced, but lets an idle manager avoid paying upfront
+// for maxPending 1.5KB buffers it may never need.
+func (m *SSU2Manager) borrowSetupPacket() *ssu2SetupPacket {
+	select {
+	case job := <-m.setupFree:
+		return job
+	default:
+	}
+	if m.setupFreeBudget.Add(-1) >= 0 {
+		return new(ssu2SetupPacket)
+	}
+	m.setupFreeBudget.Add(1)
+	return nil
 }
 
 func (m *SSU2Manager) setupLoop() {
