@@ -34,11 +34,13 @@ var (
 
 // RatchetManager coordinates sharded ECIES ratchet sessions across worker routines.
 type RatchetManager struct {
-	routeMu   sync.RWMutex
-	tagMu     sync.RWMutex
-	tagRoutes map[dataplanegarlicecies.SessionTag]int
-	shards    []*dataplanegarlicecies.RatchetManager
-	once      sync.Once
+	routeMu sync.RWMutex
+	tagMu   sync.RWMutex
+	// The lowest live owner routes each tag; collisions retain the other owners.
+	tagRoutes     map[dataplanegarlicecies.SessionTag]int
+	tagCollisions map[dataplanegarlicecies.SessionTag]map[int]struct{}
+	shards        []*dataplanegarlicecies.RatchetManager
+	once          sync.Once
 }
 
 type ratchetTagObserver struct {
@@ -47,21 +49,55 @@ type ratchetTagObserver struct {
 }
 
 func (o ratchetTagObserver) TagAdded(tag dataplanegarlicecies.SessionTag) {
-	o.manager.tagMu.Lock()
-	if owner, exists := o.manager.tagRoutes[tag]; !exists || owner == o.shard {
-		o.manager.tagRoutes[tag] = o.shard
-	} else {
-		o.manager.tagRoutes[tag] = -1
+	m := o.manager
+	m.tagMu.Lock()
+	defer m.tagMu.Unlock()
+	owner, exists := m.tagRoutes[tag]
+	if !exists {
+		m.tagRoutes[tag] = o.shard
+		return
 	}
-	o.manager.tagMu.Unlock()
+	if owner == o.shard {
+		return
+	}
+	owners := m.tagCollisions[tag]
+	if owners == nil {
+		if m.tagCollisions == nil {
+			m.tagCollisions = make(map[dataplanegarlicecies.SessionTag]map[int]struct{})
+		}
+		owners = map[int]struct{}{owner: {}}
+		m.tagCollisions[tag] = owners
+	}
+	owners[o.shard] = struct{}{}
+	m.tagRoutes[tag] = min(owner, o.shard)
 }
 
 func (o ratchetTagObserver) TagRemoved(tag dataplanegarlicecies.SessionTag) {
-	o.manager.tagMu.Lock()
-	if o.manager.tagRoutes[tag] == o.shard {
-		delete(o.manager.tagRoutes, tag)
+	m := o.manager
+	m.tagMu.Lock()
+	defer m.tagMu.Unlock()
+	owner, exists := m.tagRoutes[tag]
+	if !exists {
+		return
 	}
-	o.manager.tagMu.Unlock()
+	owners := m.tagCollisions[tag]
+	if owners == nil {
+		if owner == o.shard {
+			delete(m.tagRoutes, tag)
+		}
+		return
+	}
+	delete(owners, o.shard)
+	if owner == o.shard {
+		owner = len(m.shards)
+		for remaining := range owners {
+			owner = min(owner, remaining)
+		}
+		m.tagRoutes[tag] = owner
+	}
+	if len(owners) == 1 {
+		delete(m.tagCollisions, tag)
+	}
 }
 
 // NewRatchetManager creates a sharded RatchetManager for a local destination.
@@ -76,16 +112,27 @@ func NewRatchetManager(local *foundation.LocalDestination, config RatchetConfig)
 	}
 	lookahead := config.TagLookahead
 	if lookahead <= 0 {
-		lookahead = 32
+		lookahead = dataplanegarlicecies.DefaultTagLookahead
 	}
-	shardCount := min(parallelism.Workers(maxSessions), max(1, maxTags/lookahead))
-	config.MaxSessions = (maxSessions + shardCount - 1) / shardCount
-	config.MaxInboundTags = (maxTags + shardCount - 1) / shardCount
+	if lookahead > 65536 || lookahead > maxTags {
+		return nil, ErrRatchet
+	}
+	config.TagLookahead = lookahead
+	// Reserve future and history windows for an active set and its DH replacement.
+	shardCount := min(parallelism.Workers(maxSessions), max(1, maxTags/(4*lookahead)))
 	manager := &RatchetManager{
 		tagRoutes: make(map[dataplanegarlicecies.SessionTag]int, maxTags),
 		shards:    make([]*dataplanegarlicecies.RatchetManager, 0, shardCount),
 	}
 	for index := range shardCount {
+		config.MaxSessions = maxSessions / shardCount
+		if index < maxSessions%shardCount {
+			config.MaxSessions++
+		}
+		config.MaxInboundTags = maxTags / shardCount
+		if index < maxTags%shardCount {
+			config.MaxInboundTags++
+		}
 		observer := ratchetTagObserver{manager: manager, shard: index}
 		shard, err := dataplanegarlicecies.NewRatchetManagerWithTagObserver(local, config, observer)
 		if err != nil {
@@ -121,15 +168,8 @@ func (m *RatchetManager) packetShard(packet []byte) (int, *dataplanegarlicecies.
 		m.tagMu.RLock()
 		owner, indexed := m.tagRoutes[tag]
 		m.tagMu.RUnlock()
-		if indexed && owner >= 0 {
-			return owner, m.shards[owner]
-		}
 		if indexed {
-			for index, shard := range m.shards {
-				if shard.OwnsTag(packet) {
-					return index, shard
-				}
-			}
+			return owner, m.shards[owner]
 		}
 	}
 	index := uint64(0)
@@ -245,6 +285,7 @@ func (m *RatchetManager) ReleaseSensitive() {
 		}
 		m.tagMu.Lock()
 		clear(m.tagRoutes)
+		clear(m.tagCollisions)
 		m.tagMu.Unlock()
 	})
 }

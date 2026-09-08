@@ -23,7 +23,7 @@ const (
 	ratchetACKRequest          = 9
 	ratchetGarlicClove         = 11
 	ratchetPadding             = 254
-	defaultLookahead           = 32
+	DefaultTagLookahead        = 512
 	defaultMaxSessions         = 256
 	defaultMaxTags             = 8192
 	defaultSessionLife         = 10 * 60 * 1000
@@ -47,9 +47,12 @@ var (
 // CryptoTypes orders the accepted New Session formats. An empty set enables
 // ML-KEM-1024/X25519, ML-KEM-768/X25519, then X25519.
 type RatchetConfig struct {
-	CryptoTypes     []uint16
-	MaxSessions     int
-	MaxInboundTags  int
+	CryptoTypes []uint16
+	MaxSessions int
+	// MaxInboundTags bounds registered receive tags, including retained history.
+	MaxInboundTags int
+	// TagLookahead is the forward window; nonpositive selects DefaultTagLookahead.
+	// Up to the same number of earlier indices are retained when the tag budget allows.
 	TagLookahead    int
 	SessionLifetime uint64
 	ReplayLifetime  uint64
@@ -150,14 +153,17 @@ type tagEntry struct {
 }
 
 type tagSet struct {
-	id       uint16
-	root     [32]byte
-	nextRoot [32]byte
-	tagChain [32]byte
-	tagConst [32]byte
-	keyChain [32]byte
-	next     uint32
-	consumed uint32
+	id                uint16
+	root              [32]byte
+	nextRoot          [32]byte
+	tagChain          [32]byte
+	tagConst          [32]byte
+	keyChain          [32]byte
+	next              uint32
+	receivedHighWater uint32
+	receiveFloor      uint32
+	receiveTags       []receiveTag
+	previous          *tagSet
 
 	expires  uint64
 	oldUntil uint64
@@ -233,19 +239,21 @@ type RatchetStats struct {
 // the caller. Session tags are removed before AEAD verification, so a replay or
 // forgery can never be retried as either an Existing or New Session.
 type RatchetManager struct {
-	mu          sync.Mutex
-	owner       foundation.Hash
-	private     [32]byte
-	cryptoTypes [3]uint16
-	cryptoCount int
-	config      RatchetConfig
-	closed      bool
-	sessions    map[foundation.Hash]*session
-	inbound     map[[ratchetTagLen]byte]tagEntry
-	pending     map[[ratchetTagLen]byte]pendingInitiator
-	replays     map[[32]byte]uint64
-	metrics     *observability.Registry
-	tagObserver TagObserver
+	mu            sync.Mutex
+	owner         foundation.Hash
+	private       [32]byte
+	cryptoTypes   [3]uint16
+	cryptoCount   int
+	config        RatchetConfig
+	closed        bool
+	sessions      map[foundation.Hash]*session
+	inbound       map[[ratchetTagLen]byte]tagEntry
+	pending       map[[ratchetTagLen]byte]pendingInitiator
+	replays       map[[32]byte]uint64
+	metrics       *observability.Registry
+	tagObserver   TagObserver
+	windowScratch []tagEntry
+	windowTags    map[[ratchetTagLen]byte]struct{}
 
 	newSessions       uint64
 	newSessionReplies uint64
@@ -296,9 +304,9 @@ func newRatchetManager(local *foundation.LocalDestination, config RatchetConfig,
 		config.MaxInboundTags = defaultMaxTags
 	}
 	if config.TagLookahead <= 0 {
-		config.TagLookahead = defaultLookahead
+		config.TagLookahead = DefaultTagLookahead
 	}
-	if config.TagLookahead > config.MaxInboundTags {
+	if config.TagLookahead > config.MaxInboundTags || config.TagLookahead > 65536 {
 		return nil, ErrRatchet
 	}
 	if config.SessionLifetime == 0 {
@@ -313,19 +321,24 @@ func newRatchetManager(local *foundation.LocalDestination, config RatchetConfig,
 	}
 	cryptoCount := len(config.CryptoTypes)
 	config.CryptoTypes = nil
-	return &RatchetManager{owner: local.Hash(), private: private, cryptoTypes: cryptoTypes, cryptoCount: cryptoCount, config: config, metrics: config.Metrics, tagObserver: observer, sessions: make(map[foundation.Hash]*session), inbound: make(map[[ratchetTagLen]byte]tagEntry), pending: make(map[[ratchetTagLen]byte]pendingInitiator), replays: make(map[[32]byte]uint64)}, nil
+	return &RatchetManager{owner: local.Hash(), private: private, cryptoTypes: cryptoTypes, cryptoCount: cryptoCount, config: config, metrics: config.Metrics, tagObserver: observer, sessions: make(map[foundation.Hash]*session), inbound: make(map[[ratchetTagLen]byte]tagEntry), pending: make(map[[ratchetTagLen]byte]pendingInitiator), replays: make(map[[32]byte]uint64), windowScratch: make([]tagEntry, config.TagLookahead), windowTags: make(map[[ratchetTagLen]byte]struct{}, config.TagLookahead)}, nil
 }
 func (m *RatchetManager) addInboundTagLocked(entry tagEntry) {
 	m.inbound[entry.tag] = entry
+	entry.set.recordInbound(entry.tag, entry.n, m.config.TagLookahead)
 	if m.tagObserver != nil {
 		m.tagObserver.TagAdded(SessionTag(entry.tag))
 	}
 }
 
 func (m *RatchetManager) removeInboundTagLocked(tag [ratchetTagLen]byte) {
-	if _, exists := m.inbound[tag]; !exists {
+	entry, exists := m.inbound[tag]
+	if !exists {
 		return
 	}
+	entry.set.forgetInbound(tag, entry.n)
+	clear(entry.key[:])
+	m.inbound[tag] = entry
 	delete(m.inbound, tag)
 	if m.tagObserver != nil {
 		m.tagObserver.TagRemoved(SessionTag(tag))
@@ -852,12 +865,8 @@ func (m *RatchetManager) receiveExistingLocked(dst, packet []byte, tag [ratchetT
 	// malformed packet fall through to a New Session parse or retry this tag.
 	m.removeInboundTagLocked(tag)
 	defer clear(entry.key[:])
-	entry.set.consumed++
 	if entry.set.expires < now || entry.set.oldUntil != 0 && entry.set.oldUntil < now {
 		return RatchetResult{}, ErrRatchetExpired
-	}
-	if err := m.extendInboundLocked(entry.set); err != nil {
-		return RatchetResult{}, err
 	}
 
 	if len(packet) < ratchetTagLen+cryptography.ChaChaTagSize || len(dst) < len(packet)-ratchetTagLen-cryptography.ChaChaTagSize {
@@ -868,6 +877,10 @@ func (m *RatchetManager) receiveExistingLocked(dst, packet []byte, tag [ratchetT
 	plain, err := cryptography.OpenChaCha20Poly1305To(dst, entry.key[:], nonce[:], packet[ratchetTagLen:], packet[:ratchetTagLen])
 	if err != nil {
 		return RatchetResult{}, ErrRatchet
+	}
+	if err := m.advanceInboundWindowLocked(entry.set, uint32(entry.n)); err != nil {
+		clear(plain)
+		return RatchetResult{}, err
 	}
 	result, err := m.parseExistingLocked(entry, plain, now)
 	if err != nil {
@@ -1150,6 +1163,7 @@ func (m *RatchetManager) commitRatchetDirectionLocked(s *session, outbound bool,
 	if s.inbound != nil {
 		s.inbound.oldUntil = now + previousSetLife
 	}
+	next.previous = s.inbound
 	s.inbound = next
 	for _, entry := range entries {
 		m.addInboundTagLocked(entry)
@@ -1247,28 +1261,6 @@ func (m *RatchetManager) installSessionLocked(s *session, now uint64) error {
 	return nil
 }
 
-func (m *RatchetManager) extendInboundLocked(set *tagSet) error {
-	for set.next-set.consumed < uint32(m.config.TagLookahead) {
-		if len(m.inbound) >= m.config.MaxInboundTags {
-			return ErrRatchetTagExhausted
-		}
-		entry, err := set.nextEntry()
-		if err != nil {
-			return err
-		}
-		if _, exists := m.inbound[entry.tag]; exists {
-			clear(entry.key[:])
-			return ErrRatchet
-		}
-		if _, exists := m.pending[entry.tag]; exists {
-			clear(entry.key[:])
-			return ErrRatchet
-		}
-		m.addInboundTagLocked(entry)
-	}
-	return nil
-}
-
 func (m *RatchetManager) checkLocked(now uint64) error {
 	if m.closed {
 		return ErrRatchetClosed
@@ -1295,34 +1287,29 @@ func (m *RatchetManager) checkLocked(now uint64) error {
 }
 
 func (m *RatchetManager) expireOldTagsLocked(s *session, now uint64) {
-	var expired map[*tagSet]struct{}
-	for tag, entry := range m.inbound {
-		expireOldTagsLockedSelected := entry.set.owner == s
-		if expireOldTagsLockedSelected {
-			expireOldTagsLockedSelected = (entry.set.expires < now || entry.set.oldUntil != 0 && entry.set.oldUntil < now)
-		}
-		if expireOldTagsLockedSelected {
-			clear(entry.key[:])
-			m.removeInboundTagLocked(tag)
-			if entry.set != s.inbound {
-				if expired == nil {
-					expired = make(map[*tagSet]struct{})
-				}
-				expired[entry.set] = struct{}{}
-			}
-		}
+	if s.inbound == nil {
+		return
 	}
-	for set := range expired {
+	if s.inbound.expires < now {
+		m.removeTagSetTagsLocked(s.inbound)
+	}
+	previous := s.inbound
+	for set := previous.previous; set != nil; set = previous.previous {
+		if set.expires >= now && (set.oldUntil == 0 || set.oldUntil >= now) {
+			previous = set
+			continue
+		}
+		previous.previous = set.previous
+		m.removeTagSetTagsLocked(set)
 		releaseTagSet(set)
 	}
 }
 func (m *RatchetManager) removeSessionTagsLocked(s *session) {
-	for tag, entry := range m.inbound {
-		if entry.set.owner == s {
-			clear(entry.key[:])
-			releaseTagSet(entry.set)
-			m.removeInboundTagLocked(tag)
-		}
+	if s == nil {
+		return
+	}
+	for set := s.inbound; set != nil; set = set.previous {
+		m.removeTagSetTagsLocked(set)
 	}
 }
 
@@ -1371,15 +1358,15 @@ func (m *RatchetManager) ReleaseSensitive() {
 		p.handshake.ReleaseSensitive()
 		m.removePendingTagLocked(tag)
 	}
-	for tag, entry := range m.inbound {
-		clear(entry.key[:])
-		releaseTagSet(entry.set)
-		m.removeInboundTagLocked(tag)
-	}
 	for peer, s := range m.sessions {
-		releaseSession(s)
-		delete(m.sessions, peer)
+		m.discardSessionLocked(peer, s)
 	}
+	for tag, entry := range m.inbound {
+		m.removeInboundTagLocked(tag)
+		releaseTagSet(entry.set)
+	}
+	clear(m.windowScratch)
+	clear(m.windowTags)
 	clear(m.private[:])
 	m.closed = true
 }
@@ -1390,7 +1377,11 @@ func releaseSession(s *session) {
 		return
 	}
 	releaseTagSet(s.outbound)
-	releaseTagSet(s.inbound)
+	for set := s.inbound; set != nil; {
+		previous := set.previous
+		releaseTagSet(set)
+		set = previous
+	}
 	s.forwardDH.localKey.ReleaseSensitive()
 	s.reverseDH.localKey.ReleaseSensitive()
 	s.forwardDH = dhRatchet{}
@@ -1407,6 +1398,9 @@ func releaseTagSet(s *tagSet) {
 	clear(s.tagChain[:])
 	clear(s.tagConst[:])
 	clear(s.keyChain[:])
+	clear(s.receiveTags)
+	s.receiveTags = nil
+	s.previous = nil
 }
 
 func validateNewPayload(payload []byte, now uint64) ([]byte, error) {
@@ -1437,6 +1431,12 @@ func newTagSet(id uint16, root [32]byte, input []byte, expires uint64) (*tagSet,
 }
 
 func (s *tagSet) nextEntry() (tagEntry, error) {
+	entry, err := s.deriveEntry()
+	entry.set = s
+	return entry, err
+}
+
+func (s *tagSet) deriveEntry() (tagEntry, error) {
 	if s == nil || s.next > 65535 {
 		return tagEntry{}, ErrRatchetTagExhausted
 	}
@@ -1445,7 +1445,7 @@ func (s *tagSet) nextEntry() (tagEntry, error) {
 	defer clear(tagData[:])
 	defer clear(keyData[:])
 	var entry tagEntry
-	entry.set, entry.n = s, uint16(s.next)
+	entry.n = uint16(s.next)
 	copy(entry.key[:], keyData[32:])
 	copy(entry.tag[:], tagData[32:40])
 	copy(s.tagChain[:], tagData[:32])

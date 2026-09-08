@@ -52,6 +52,9 @@ Import `gosuda.org/ivnp`. See [the Go examples](example_test.go) for starting a
 router and opening an I2P connection. Close the router and connections when your
 application is finished with them.
 
+ECIES receive windows look ahead **512 tags** by default and retain bounded
+history for packet loss and reordering. This does not change the I2P wire format.
+
 ## Development
 
 ```sh
