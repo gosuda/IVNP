@@ -259,6 +259,13 @@ type ssu2DispatchBatch struct {
 	count uint8
 	done  chan error
 }
+
+var directDispatchBatchPool = sync.Pool{
+	New: func() any {
+		return &ssu2DispatchBatch{done: make(chan error, 1)}
+	},
+}
+
 type ssu2EgressSlot struct {
 	data   [dataplanessu2.MaxIPv4PacketLen]byte
 	length int
@@ -4051,9 +4058,9 @@ func (m *SSU2Manager) borrowDispatchBatch() (*ssu2DispatchBatch, error) {
 	free, running := m.dispatchFree, m.runningLocked()
 	m.mu.RUnlock()
 	if free == nil {
-		// Direct, non-started callers use a stack-local batch; the live path
-		// always leases preallocated storage from dispatchFree.
-		return &ssu2DispatchBatch{}, nil
+		batch := directDispatchBatchPool.Get().(*ssu2DispatchBatch)
+		batch.count = 0
+		return batch, nil
 	}
 	if !running {
 		return nil, ErrSSU2Session
@@ -4078,6 +4085,7 @@ func (m *SSU2Manager) releaseDispatchBatch(batch *ssu2DispatchBatch) {
 	free := m.dispatchFree
 	m.mu.RUnlock()
 	if free == nil {
+		directDispatchBatchPool.Put(batch)
 		return
 	}
 	select {

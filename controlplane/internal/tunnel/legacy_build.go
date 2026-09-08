@@ -254,23 +254,25 @@ func encryptLongECIESBuildRequest(dst []byte, hop foundation.Hash, static, plain
 	}
 	copy(dst[:legacyBuildPeerSize], hop[:legacyBuildPeerSize])
 	copy(dst[longBuildEphemeralOffset:longBuildCipherOffset], ephemeral.PublicKey().Bytes())
-	state := initializeShortBuild(static, ephemeral.PublicKey().Bytes())
-	defer state.ReleaseSensitive()
+	state := newShortBuildState(static, ephemeral.PublicKey().Bytes())
+	defer state.releaseSensitive()
 	shared, err := ephemeral.ECDH(remote)
 	if err != nil {
 		return keys, ErrLegacyBuildKey
 	}
 	defer clear(shared)
-	if err = state.MixKey(shared); err != nil {
-		return keys, err
-	}
-	ciphertext, err := state.EncryptAndHash(dst[longBuildCipherOffset:VariableBuildRecordSize], plaintext)
+	var cipherKey [32]byte
+	state.chainingKey, cipherKey = shortBuildKDF2(state.chainingKey, shared)
+	defer clear(cipherKey[:])
+	var nonce [cryptography.ChaChaNonceSize]byte
+	ciphertext, err := cryptography.SealChaCha20Poly1305To(dst[longBuildCipherOffset:VariableBuildRecordSize], cipherKey[:], nonce[:], plaintext, state.hash[:])
 	if err != nil || len(ciphertext) != LongBuildRequestPlainSize+cryptography.ChaChaTagSize {
 		return keys, ErrLegacyBuildRecord
 	}
+	state.mixHash(ciphertext)
 	keys.Kind = VariableBuildLongECIES
-	keys.ResponseKey = state.ChainingKey()
-	keys.ResponseAD = state.Hash()
+	keys.ResponseKey = state.chainingKey
+	keys.ResponseAD = state.hash
 	copy(keys.LayerKey[:], plaintext[40:72])
 	copy(keys.IVKey[:], plaintext[72:104])
 	copy(keys.ReplyKey[:], plaintext[104:136])
@@ -293,24 +295,27 @@ func DecryptLongECIESBuildRequest(dst, record []byte, local foundation.Hash, sta
 	if err != nil || subtle.ConstantTimeCompare(ephemeral.Bytes(), private.PublicKey().Bytes()) == 1 || allZero(ephemeral.Bytes()) {
 		return nil, keys, ErrLegacyBuildKey
 	}
-	state := initializeShortBuild(private.PublicKey().Bytes(), ephemeral.Bytes())
-	defer state.ReleaseSensitive()
+	state := newShortBuildState(private.PublicKey().Bytes(), ephemeral.Bytes())
+	defer state.releaseSensitive()
 	shared, err := private.ECDH(ephemeral)
 	if err != nil {
 		return nil, keys, ErrLegacyBuildKey
 	}
 	defer clear(shared)
-	if err = state.MixKey(shared); err != nil {
-		return nil, keys, err
-	}
-	plaintext, err := state.DecryptAndHash(dst[:LongBuildRequestPlainSize], record[longBuildCipherOffset:])
+	var cipherKey [32]byte
+	state.chainingKey, cipherKey = shortBuildKDF2(state.chainingKey, shared)
+	defer clear(cipherKey[:])
+	var nonce [cryptography.ChaChaNonceSize]byte
+	ciphertext := record[longBuildCipherOffset:]
+	plaintext, err := cryptography.OpenChaCha20Poly1305To(dst[:LongBuildRequestPlainSize], cipherKey[:], nonce[:], ciphertext, state.hash[:])
 	if err != nil {
 		clear(dst[:LongBuildRequestPlainSize])
 		return nil, keys, ErrLegacyBuildRecord
 	}
+	state.mixHash(ciphertext)
 	keys.Kind = VariableBuildLongECIES
-	keys.ResponseKey = state.ChainingKey()
-	keys.ResponseAD = state.Hash()
+	keys.ResponseKey = state.chainingKey
+	keys.ResponseAD = state.hash
 	copy(keys.LayerKey[:], plaintext[40:72])
 	copy(keys.IVKey[:], plaintext[72:104])
 	copy(keys.ReplyKey[:], plaintext[104:136])
