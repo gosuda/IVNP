@@ -59,9 +59,11 @@ func MarshalDatabaseStore(key foundation.Hash, typeID i2np.StoreType, data []byt
 	return payload, nil
 }
 
-// One compressor bounds retained deflate state independently of caller concurrency.
-var routerInfoCompressor struct {
-	sync.Mutex
+// routerInfoCompressorPool caches compressor instances across concurrent callers
+// while allowing the garbage collector to reclaim retained deflate state when idle.
+var routerInfoCompressorPool sync.Pool
+
+type routerInfoCompressorEntry struct {
 	writer *gzip.Writer
 	buffer bytes.Buffer
 }
@@ -72,30 +74,29 @@ func CompressRouterInfo(raw []byte) ([]byte, error) {
 	if len(raw) == 0 || len(raw) > i2np.MaxRouterInfoBytes {
 		return nil, ErrInvalidDatabaseStore
 	}
-	routerInfoCompressor.Lock()
-	defer routerInfoCompressor.Unlock()
-	compressed := &routerInfoCompressor.buffer
-	compressed.Reset()
-	writer := routerInfoCompressor.writer
-	if writer == nil {
+	entry, ok := routerInfoCompressorPool.Get().(*routerInfoCompressorEntry)
+	if !ok || entry == nil {
+		entry = new(routerInfoCompressorEntry)
 		var err error
-		writer, err = gzip.NewWriterLevel(compressed, gzip.BestCompression)
+		entry.writer, err = gzip.NewWriterLevel(&entry.buffer, gzip.BestCompression)
 		if err != nil {
 			return nil, err
 		}
-		routerInfoCompressor.writer = writer
 	} else {
-		writer.Reset(compressed)
+		entry.buffer.Reset()
+		entry.writer.Reset(&entry.buffer)
 	}
-	writer.Header.ModTime = time.Unix(0, 0)
-	writer.Header.OS = 255
-	_, err := writer.Write(raw)
-	err = errors.Join(err, writer.Close())
+	defer routerInfoCompressorPool.Put(entry)
+
+	entry.writer.Header.ModTime = time.Unix(0, 0)
+	entry.writer.Header.OS = 255
+	_, err := entry.writer.Write(raw)
+	err = errors.Join(err, entry.writer.Close())
 	if err != nil {
 		return nil, err
 	}
-	if compressed.Len() == 0 || compressed.Len() > 0xffff {
+	if entry.buffer.Len() == 0 || entry.buffer.Len() > 0xffff {
 		return nil, ErrInvalidDatabaseStore
 	}
-	return bytes.Clone(compressed.Bytes()), nil
+	return bytes.Clone(entry.buffer.Bytes()), nil
 }

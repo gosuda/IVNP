@@ -869,36 +869,13 @@ func TestGarlicReceiverUnregisterWaitsForInflightAndReleasesStaticKey(t *testing
 	receiver.destinationsMu.RLock()
 	state := receiver.destinations[local.Hash()]
 	receiver.destinationsMu.RUnlock()
-	heldScratch := make([]*garlicReceiveScratch, 0, cap(state.scratch))
-	for range cap(state.scratch) {
-		heldScratch = append(heldScratch, <-state.scratch)
-	}
-	payload := make([]byte, 4+64)
-	binary.BigEndian.PutUint32(payload[:4], 64)
-	handleDone := make(chan struct{})
-	go func() {
-		_ = receiver.HandleGarlic(foundation.I2NPMessage{Header: foundation.I2NPHeader{Type: foundation.I2NPGarlic}, Payload: payload})
-		close(handleDone)
-	}()
-	deadline := time.NewTimer(time.Second)
-	ticker := time.NewTicker(time.Millisecond)
-	defer deadline.Stop()
-	defer ticker.Stop()
-	for {
-		state.inFlightMu.Lock()
-		inFlight := state.inFlight
-		state.inFlightMu.Unlock()
-		if inFlight == 1 {
-			break
-		}
-		select {
-		case <-deadline.C:
-			for _, scratch := range heldScratch {
-				state.scratch <- scratch
-			}
-			t.Fatal("garlic handler never acquired its destination snapshot")
-		case <-ticker.C:
-		}
+	// Hold the destination in-flight directly through acquire/done, the same
+	// bookkeeping HandleGarlicFrom uses around its whole receive. This
+	// exercises retireAndWait's wait-for-in-flight guarantee without relying
+	// on scratch-buffer exhaustion, which no longer blocks now that scratch
+	// buffers come from a lazily-allocating sync.Pool.
+	if !state.acquire() {
+		t.Fatal("destination unexpectedly retired before in-flight receive started")
 	}
 	removeDone := make(chan struct{})
 	go func() {
@@ -907,20 +884,10 @@ func TestGarlicReceiverUnregisterWaitsForInflightAndReleasesStaticKey(t *testing
 	}()
 	select {
 	case <-removeDone:
-		for _, scratch := range heldScratch {
-			state.scratch <- scratch
-		}
 		t.Fatal("destination unregister returned during in-flight receive")
 	case <-time.After(20 * time.Millisecond):
 	}
-	for _, scratch := range heldScratch {
-		state.scratch <- scratch
-	}
-	select {
-	case <-handleDone:
-	case <-time.After(time.Second):
-		t.Fatal("garlic receive did not finish")
-	}
+	state.done()
 	select {
 	case <-removeDone:
 	case <-time.After(time.Second):
