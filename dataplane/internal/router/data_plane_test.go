@@ -785,6 +785,64 @@ func TestGarlicReceiverConstructorFailureDoesNotReturnSensitiveOwner(t *testing.
 		t.Fatalf("NewGarlicReceiver partial failure = %#v, %v", receiver, err)
 	}
 }
+
+func TestGarlicReceiverDestinationCapacityCanBeReused(t *testing.T) {
+	local, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.ReleaseSensitive()
+	ratchet, err := dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ratchet.ReleaseSensitive()
+	receiver, err := NewGarlicReceiver(GarlicReceiverConfig{
+		Service: NewService(Sinks{}), ReplyKeys: dataplanegarlic.NewReplyKeyRegistry(1), Now: func() uint64 { return 1 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.ReleaseSensitive()
+	const capacity = 256
+	removals := make([]func(), 0, capacity)
+	for index := range capacity {
+		var hash foundation.Hash
+		binary.BigEndian.PutUint32(hash[:4], uint32(index+1))
+		remove, err := receiver.RegisterDestination(hash, GarlicDestination{Ratchet: ratchet})
+		if err != nil {
+			t.Fatalf("register destination %d: %v", index+1, err)
+		}
+		removals = append(removals, remove)
+	}
+	overflow := foundation.Hash{0xff}
+	if _, err := receiver.RegisterDestination(overflow, GarlicDestination{Ratchet: ratchet}); !errors.Is(err, ErrDataPlaneConfig) {
+		t.Fatalf("registration over maximum capacity: %v", err)
+	}
+	removals[0]()
+	remove, err := receiver.RegisterDestination(overflow, GarlicDestination{Ratchet: ratchet})
+	if err != nil {
+		t.Fatalf("reuse removed destination slot: %v", err)
+	}
+	remove()
+	remove()
+	for _, remove := range removals {
+		remove()
+	}
+	remove, err = receiver.RegisterDestination(local.Hash(), GarlicDestination{Ratchet: ratchet})
+	if err != nil {
+		t.Fatalf("registration after all destinations removed: %v", err)
+	}
+	receiver.ReleaseSensitive()
+	remove()
+	if _, ok := receiver.BandwidthSnapshot(local.Hash()); ok {
+		t.Fatal("released receiver retained a destination")
+	}
+	if _, err := receiver.RegisterDestination(local.Hash(), GarlicDestination{Ratchet: ratchet}); !errors.Is(err, ErrDataPlaneConfig) {
+		t.Fatalf("registration after receiver release: %v", err)
+	}
+}
+
 func TestGarlicReceiverUnregisterWaitsForInflightAndReleasesStaticKey(t *testing.T) {
 	local, err := foundation.GenerateLegacyLocalDestination()
 	if err != nil {

@@ -72,6 +72,18 @@ func (c clientDestinationController) CreateDestination(ctx context.Context, spec
 	if err := policy.Validate(); err != nil {
 		return nil, err
 	}
+	d.destinationMu.Lock()
+	defer d.destinationMu.Unlock()
+	d.mu.Lock()
+	closed := d.closed
+	d.mu.Unlock()
+	if closed {
+		return nil, net.ErrClosed
+	}
+	if d.clientRuntimeCount() >= d.config.State.MaxDestinations {
+		return nil, ErrTooManyDestinations
+	}
+
 	var local *foundation.LocalDestination
 	var err error
 	if spec.Local != nil {
@@ -95,15 +107,6 @@ func (c clientDestinationController) CreateDestination(ctx context.Context, spec
 		}()
 	}
 
-	d.destinationMu.Lock()
-	defer d.destinationMu.Unlock()
-	d.mu.Lock()
-	closed := d.closed
-	d.mu.Unlock()
-	if closed {
-		local.ReleaseSensitive()
-		return nil, net.ErrClosed
-	}
 	runtime, err := d.destinationFactory.create(name, local, durable, nil, spec.Policy.CryptoTypes)
 	if err != nil {
 		return nil, err

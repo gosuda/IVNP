@@ -17,6 +17,9 @@ func TestParseOperatingDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if config.State.MaxDestinations != 64 {
+		t.Fatalf("default destination capacity = %d, want 64", config.State.MaxDestinations)
+	}
 	if config.Network.ID != 2 || !config.Network.IPv4 || config.Network.IPv6 {
 		t.Fatalf("network = %#v", config.Network)
 	}
@@ -357,6 +360,27 @@ func TestParseOperatingTunnelAndNetDB(t *testing.T) {
 	}
 }
 
+func TestParseOperatingDestinationCapacity(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  int
+	}{
+		{value: "1", want: 1},
+		{value: "190", want: 190},
+		{value: "256", want: 256},
+	} {
+		t.Run(test.value, func(t *testing.T) {
+			config, err := ParseOperating("[state]\nmax_destinations = "+test.value+"\n", "/etc/ivnp/ivnp.conf")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if config.State.MaxDestinations != test.want {
+				t.Fatalf("destination capacity = %d, want %d", config.State.MaxDestinations, test.want)
+			}
+		})
+	}
+}
+
 func TestParseOperatingRejectsUnsafeTunnelBoundsAndUnknownKeys(t *testing.T) {
 	for _, text := range []string{
 		"[netdb]\nunknown = 1\n",
@@ -367,7 +391,8 @@ func TestParseOperatingRejectsUnsafeTunnelBoundsAndUnknownKeys(t *testing.T) {
 		"[tunnel]\nhops = 8\n",
 		"[tunnel]\nrenew_before = 10m\n",
 		"[tunnel]\nrenew_before = 30s\nmaintenance_interval = 31s\n",
-		"[state]\nmax_destinations = 65\n",
+		"[state]\nmax_destinations = 0\n",
+		"[state]\nmax_destinations = 257\n",
 	} {
 		if _, err := ParseOperating(text, "/etc/ivnp/ivnp.conf"); !errors.Is(err, ErrInvalidOperating) {
 			t.Fatalf("ParseOperating(%q) error = %v", text, err)

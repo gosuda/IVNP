@@ -651,7 +651,7 @@ func (d *Controller) CreateDestination(ctx context.Context, name string, policy 
 		d.mu.Unlock()
 		return DestinationSummary{}, ErrDestinationExists
 	}
-	if len(d.bundle.DestinationPrivate)+len(d.bundle.Destinations) >= d.config.State.MaxDestinations || len(d.bundle.DestinationPrivate) >= 64 {
+	if len(d.bundle.DestinationPrivate)+len(d.bundle.Destinations) >= d.config.State.MaxDestinations || d.clientRuntimeCount() >= d.config.State.MaxDestinations {
 		d.mu.Unlock()
 		return DestinationSummary{}, ErrTooManyDestinations
 	}

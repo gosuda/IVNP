@@ -512,7 +512,7 @@ func applyState(operating *Operating, values map[entryKey]string) error {
 		}
 	}
 	if value, ok := valueOf(values, "state", "max_destinations"); ok {
-		parsed, err := parseUint(value, 1, 64)
+		parsed, err := parseUint(value, 1, 256)
 		if err != nil {
 			return invalid("state", "max_destinations")
 		}

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"net"
 	"path/filepath"
 	"testing"
 	"testing/synctest"
@@ -67,6 +68,73 @@ func TestNeutralDestinationControllerUsesDaemonOwnedIsolatedGraph(t *testing.T) 
 	}
 	if len(d.clientRuntimeSnapshot()) != len(beforeRuntime) {
 		t.Fatal("DestroyDestination left transient owner registered")
+	}
+}
+
+func TestDestinationCapacityIncludesTransientClients(t *testing.T) {
+	const capacity = 190
+	cfg := daemonTestConfig(t)
+	cfg.Tunnel.Enabled = true
+	cfg.State.MaxDestinations = capacity
+	d, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets), Logger: discardNATLogger()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := d.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	controller := d.DestinationController()
+	endpoints := make([]destination.DestinationEndpoint, 0, capacity-1)
+	hashes := make([]foundation.Hash, 0, capacity-1)
+	for index := range capacity - 1 {
+		endpoint, err := controller.CreateDestination(t.Context(), destination.DestinationSpec{})
+		if err != nil {
+			t.Fatalf("create transient destination %d: %v", index+1, err)
+		}
+		endpoints = append(endpoints, endpoint)
+		hashes = append(hashes, endpoint.Hash())
+		if _, ok := d.garlicReceiver.BandwidthSnapshot(endpoint.Hash()); !ok {
+			t.Fatalf("transient destination %d is missing its Garlic receiver", index+1)
+		}
+	}
+	if _, err := controller.CreateDestination(t.Context(), destination.DestinationSpec{}); !errors.Is(err, ErrTooManyDestinations) {
+		t.Fatalf("transient destination over total capacity: %v", err)
+	}
+	if _, err := d.CreateDestination(t.Context(), "overflow", DestinationPolicy{}); !errors.Is(err, ErrTooManyDestinations) {
+		t.Fatalf("durable destination over total capacity: %v", err)
+	}
+	if err := endpoints[0].Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := d.garlicReceiver.BandwidthSnapshot(hashes[0]); ok {
+		t.Fatal("closed transient destination retained its Garlic registration")
+	}
+	if _, err := d.CreateDestination(t.Context(), "replacement", DestinationPolicy{}); err != nil {
+		t.Fatalf("reuse transient capacity for a durable destination: %v", err)
+	}
+	if _, err := controller.CreateDestination(t.Context(), destination.DestinationSpec{}); !errors.Is(err, ErrTooManyDestinations) {
+		t.Fatalf("transient destination exceeded capacity after durable replacement: %v", err)
+	}
+	if err := d.DestroyDestination(t.Context(), "replacement"); err != nil {
+		t.Fatal(err)
+	}
+	endpoints[0], err = controller.CreateDestination(t.Context(), destination.DestinationSpec{})
+	if err != nil {
+		t.Fatalf("reuse durable capacity for a transient destination: %v", err)
+	}
+	hashes[0] = endpoints[0].Hash()
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for index, endpoint := range endpoints {
+		if _, err := endpoint.Subscribe(destination.DestinationRoute{Protocol: 17}, 1); !errors.Is(err, net.ErrClosed) {
+			t.Errorf("transient destination %d after controller close: %v", index+1, err)
+		}
+		if _, ok := d.garlicReceiver.BandwidthSnapshot(hashes[index]); ok {
+			t.Errorf("controller close retained transient Garlic registration %d", index+1)
+		}
 	}
 }
 

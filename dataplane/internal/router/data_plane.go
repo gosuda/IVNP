@@ -33,7 +33,7 @@ var (
 const (
 	dataPlaneEnvelopeLifetime uint64 = 60_000
 	destinationDataHeaderLen         = 23
-	maxGarlicDestinations            = 64
+	maxGarlicDestinations            = 256
 )
 
 // GarlicDestination identifies one local Garlic endpoint. ECIES state is

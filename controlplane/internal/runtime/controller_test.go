@@ -434,6 +434,19 @@ func TestNewRejectsEnabledTunnelLifetimeOutsideWireLifetime(t *testing.T) {
 	}
 }
 
+func TestNewRejectsInvalidDestinationCapacity(t *testing.T) {
+	for _, capacity := range []int{0, 257} {
+		cfg := daemonTestConfig(t)
+		cfg.State.MaxDestinations = capacity
+		if d, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets)}); !errors.Is(err, state.ConfigurationErrInvalidOperating) {
+			if d != nil {
+				_ = d.Close()
+			}
+			t.Fatalf("New destination capacity %d error = %v, want invalid operating config", capacity, err)
+		}
+	}
+}
+
 func TestNewRejectsDestinationBoundsAndDuplicateIdentities(t *testing.T) {
 	t.Run("duplicate", func(t *testing.T) {
 		cfg := daemonTestConfig(t)
@@ -458,19 +471,19 @@ func TestNewRejectsDestinationBoundsAndDuplicateIdentities(t *testing.T) {
 		}
 	})
 
-	t.Run("bound", func(t *testing.T) {
+	t.Run("configured bound", func(t *testing.T) {
 		cfg := daemonTestConfig(t)
-		cfg.State.MaxDestinations = 65
+		cfg.State.MaxDestinations = 2
 		d, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets)})
 		if err != nil {
 			t.Fatal(err)
 		}
-		address, err := foundation.GenerateLocalAddress()
-		if err != nil {
-			t.Fatal(err)
-		}
-		d.bundle.Destinations = make(map[string]foundation.LocalAddress, 65)
-		for index := range 65 {
+		d.bundle.Destinations = make(map[string]foundation.LocalAddress, 2)
+		for index := range 2 {
+			address, err := foundation.GenerateLocalAddress()
+			if err != nil {
+				t.Fatal(err)
+			}
 			d.bundle.Destinations[string(rune(index+1))] = address
 		}
 		if err := d.store.Save(d.bundle); err != nil {
@@ -479,9 +492,11 @@ func TestNewRejectsDestinationBoundsAndDuplicateIdentities(t *testing.T) {
 		if err := d.Close(); err != nil {
 			t.Fatal(err)
 		}
+		cfg.State.MaxDestinations = 1
 		cfg.Tunnel.Enabled = true
-		if _, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets)}); !errors.Is(err, ErrTooManyDestinations) {
-			t.Fatalf("too many destinations error = %v", err)
+		if d, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets)}); err == nil {
+			_ = d.Close()
+			t.Fatal("New loaded two durable destinations with capacity one")
 		}
 	})
 }

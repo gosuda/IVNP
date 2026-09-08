@@ -49,6 +49,7 @@ const (
 	daemonTunnelBuildCandidates               = 512
 	daemonNetDBExplorationBootstrapDelay      = time.Second
 	daemonNetDBExplorationSteadyDelay         = 5 * time.Second
+	daemonMaxDestinations                     = 256
 )
 
 func daemonReplyKeyCapacity(buildPending, maxDestinations int) int {
@@ -332,6 +333,9 @@ type Controller struct {
 
 // NewController initializes a Daemon with the given configuration and optional runtime overrides.
 func NewController(cfg state.ConfigurationOperating, options ControllerOptions) (*Controller, error) {
+	if cfg.State.MaxDestinations < 1 || cfg.State.MaxDestinations > daemonMaxDestinations {
+		return nil, fmt.Errorf("%w: state max_destinations must be between 1 and %d", state.ConfigurationErrInvalidOperating, daemonMaxDestinations)
+	}
 	if cfg.Network.ID > 255 {
 		return nil, fmt.Errorf("daemon: network id %d cannot be used by native transports", cfg.Network.ID)
 	}
@@ -390,7 +394,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Tunnel.Enabled && len(bundle.Destinations)+len(bundle.DestinationPrivate) > 64 {
+	if cfg.Tunnel.Enabled && len(bundle.Destinations)+len(bundle.DestinationPrivate) > cfg.State.MaxDestinations {
 		return nil, ErrTooManyDestinations
 	}
 	if cfg.Tunnel.Enabled {
@@ -684,9 +688,6 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		bundle.ReleaseSensitive()
 	}()
 	if cfg.Tunnel.Enabled {
-		if len(bundle.DestinationPrivate) > 64 {
-			return nil, ErrTooManyDestinations
-		}
 		seenDestinations := make(map[foundation.Hash]string, len(bundle.DestinationPrivate))
 		for name, encoded := range bundle.DestinationPrivate {
 			destination, importErr := foundation.ImportLocalDestination(encoded)
@@ -1950,6 +1951,13 @@ func (d *Controller) DestinationBandwidthSnapshot(name string) (dataplane.Router
 		}
 	}
 	return dataplane.RouterDestinationBandwidthSnapshot{}, false
+}
+
+func (d *Controller) clientRuntimeCount() int {
+	d.clientRuntimesMu.RLock()
+	count := len(d.clientRuntimes)
+	d.clientRuntimesMu.RUnlock()
+	return count
 }
 
 func (d *Controller) clientRuntimeSnapshot() []*destinationRuntime {
