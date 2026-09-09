@@ -1,0 +1,33 @@
+name: Register commit in Go checksum database
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOPROXY: https://proxy.golang.org
+      GOSUMDB: sum.golang.org
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Fetch module at commit SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          temp_dir=$(mktemp -d)
+          trap 'rm -rf -- "$temp_dir"' EXIT
+          cd "$temp_dir"
+          go mod init sumdb-registration
+          go get "gosuda.org/ivnp@${GITHUB_SHA}"
