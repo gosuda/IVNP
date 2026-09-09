@@ -46,13 +46,13 @@ func (*blockedTransportPeers) PeerAtEndpoint(netip.AddrPort) (foundation.Hash, b
 
 func TestNativeSendRejectsMissingSessionWithoutSetup(t *testing.T) {
 	peers := new(blockedTransportPeers)
-	ntcp := &NTCP2Manager{
+	ntcp := &NTCP2Manager{networkID: 2,
 		started: true, ctx: t.Context(), peers: peers,
 		sessions: make(map[foundation.Hash]*dataplanentcp2.Session),
 		dialing:  make(map[foundation.Hash]*ntcp2DialAttempt),
 		pending:  make(chan struct{}, 1), bindings: TransportBindings{Clock: WallClock{}},
 	}
-	ssu := &SSU2Manager{
+	ssu := &SSU2Manager{networkID: 2,
 		started: true, ctx: t.Context(), peers: peers,
 		bindings: TransportBindings{Clock: WallClock{}},
 	}

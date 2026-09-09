@@ -13,7 +13,7 @@ import (
 )
 
 func TestNTCP2ReplayAdmissionUsesBoundedRing(t *testing.T) {
-	manager := &NTCP2Manager{replaySeen: make(map[[32]byte]struct{}, ntcp2ReplayEntries)}
+	manager := &NTCP2Manager{networkID: 2, replaySeen: make(map[[32]byte]struct{}, ntcp2ReplayEntries)}
 	var ephemeral [32]byte
 	for index := range ntcp2ReplayEntries {
 		ephemeral[0] = byte(index)
@@ -54,7 +54,7 @@ func TestSSU2ManagerDataFramingUsesReceiveAndSessionBuffers(t *testing.T) {
 		t.Fatal(err)
 	}
 	var delivered foundation.I2NPMessage
-	manager := &SSU2Manager{bindings: TransportBindings{
+	manager := &SSU2Manager{networkID: 2, bindings: TransportBindings{
 		Clock: transportTestClock{now: time.Unix(1, 0)},
 		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message foundation.I2NPMessage, _ uint64, _ bool) error {
 			delivered = message
@@ -172,7 +172,7 @@ func BenchmarkSSU2ManagerDataSendFraming(b *testing.B) {
 	free := make(chan *ssu2EgressSlot, 1)
 	queue := make(chan *ssu2EgressSlot, 1)
 	free <- &ssu2EgressSlot{done: make(chan error, 1)}
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		started:        true,
 		ctx:            context.Background(),
 		sessionsByID:   map[uint64]*ssu2TransportSession{7: session},
@@ -230,7 +230,7 @@ func BenchmarkSSU2ManagerDataReceiveFraming(b *testing.B) {
 	key[0] = 1
 	send, _ := dataplanessu2.NewDataCipher(key[:], key[:], key[:])
 	receive, _ := dataplanessu2.NewDataCipher(key[:], key[:], key[:])
-	manager := &SSU2Manager{ctx: context.Background(), bindings: TransportBindings{Clock: transportTestClock{now: time.Unix(1, 0)}, HandleI2NPContext: func(context.Context, foundation.Hash, foundation.I2NPMessage, uint64, bool) error { return nil }}}
+	manager := &SSU2Manager{networkID: 2, ctx: context.Background(), bindings: TransportBindings{Clock: transportTestClock{now: time.Unix(1, 0)}, HandleI2NPContext: func(context.Context, foundation.Hash, foundation.I2NPMessage, uint64, bool) error { return nil }}}
 	session := &ssu2TransportSession{receiveID: 7, receive: receive}
 	packetBuffer := make([]byte, dataplanessu2.MaxIPv4PacketLen)
 	b.ReportAllocs()
@@ -275,7 +275,7 @@ func BenchmarkNTCP2ManagerWriteFrame(b *testing.B) {
 }
 
 func BenchmarkNTCP2ReplayAdmission(b *testing.B) {
-	manager := &NTCP2Manager{replaySeen: make(map[[32]byte]struct{}, ntcp2ReplayEntries)}
+	manager := &NTCP2Manager{networkID: 2, replaySeen: make(map[[32]byte]struct{}, ntcp2ReplayEntries)}
 	for index := range ntcp2ReplayEntries {
 		input := managerHotReplayInput(index)
 		if manager.replayedRequest(input[:]) {

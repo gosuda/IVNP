@@ -59,7 +59,7 @@ func TestOutOfSessionPeerTestRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	destinationID, sourceID := PeerTestConnectionIDs(7)
-	if _, err = BuildPeerTest(make([]byte, MaxIPv4PacketLen), make([]byte, 32), destinationID, sourceID, 9, block); err == nil {
+	if _, err = BuildPeerTest(make([]byte, MaxIPv4PacketLen), make([]byte, 32), destinationID, sourceID, 9, block, 2); err == nil {
 		t.Fatal("out-of-session PeerTest accepted a missing DateTime block")
 	}
 	var timestamp [4]byte
@@ -70,11 +70,11 @@ func TestOutOfSessionPeerTestRoundTrip(t *testing.T) {
 	}
 	payload = append(payload, block...)
 	destinationID, sourceID = PeerTestConnectionIDs(7)
-	packet, err := BuildPeerTest(make([]byte, MaxIPv4PacketLen), make([]byte, 32), destinationID, sourceID, 9, payload)
+	packet, err := BuildPeerTest(make([]byte, MaxIPv4PacketLen), make([]byte, 32), destinationID, sourceID, 9, payload, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	header, opened, err := ParsePeerTest(append([]byte(nil), packet...), make([]byte, 32))
+	header, opened, err := ParsePeerTest(append([]byte(nil), packet...), make([]byte, 32), 2)
 	if err != nil || header.DestinationID != destinationID || header.SourceID != sourceID || !bytes.Equal(opened, payload) {
 		t.Fatalf("out-of-session PeerTest = %#v, %x, %v", header, opened, err)
 	}

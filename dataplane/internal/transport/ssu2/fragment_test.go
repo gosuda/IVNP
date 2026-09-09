@@ -22,7 +22,7 @@ func TestSSU2SessionConfirmedFragmentsReassembleOutOfOrder(t *testing.T) {
 	if _, err = rand.Read(intro); err != nil {
 		t.Fatal(err)
 	}
-	initiator, err := NewInitiator(bobStatic.PublicKey().Bytes(), intro, 11, 12)
+	initiator, err := NewInitiator(bobStatic.PublicKey().Bytes(), intro, 11, 12, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestSSU2SessionConfirmedFragmentsReassembleOutOfOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	responder, _, _, err := ParseSessionRequest(append([]byte(nil), request...), bobStatic.Bytes(), intro)
+	responder, _, _, err := ParseSessionRequest(append([]byte(nil), request...), bobStatic.Bytes(), intro, 2)
 	if err != nil {
 		t.Fatal(err)
 	}

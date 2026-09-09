@@ -25,7 +25,7 @@ must be enabled in the configuration before use.
 
 ## Configuration and saved data
 
-IVNP creates `ivnp.conf` if it does not exist. Unspecified options use defaults.
+The daemon creates `ivnp.conf` if it does not exist. Unspecified options use defaults.
 Router data is saved in `./data`, relative to the directory where you start it.
 To choose another location:
 
@@ -48,9 +48,51 @@ machine.
 go get gosuda.org/ivnp
 ```
 
-Import `gosuda.org/ivnp`. See [the Go examples](example_test.go) for starting a
-router and opening an I2P connection. Close the router and connections when your
-application is finished with them.
+The embedding API starts in memory: it creates no config files, state directories,
+or default application identity. Create a Destination before opening streams or
+packet sockets; the Router itself has no networking methods.
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+defer cancel()
+
+cfg := ivnp.DefaultRouterConfig()
+router, err := ivnp.NewRouter(ctx, cfg)
+if err != nil {
+    return err
+}
+defer router.Close()
+
+dest, err := router.NewDestination(ctx, ivnp.DefaultDestinationConfig())
+if err != nil {
+    return err
+}
+defer dest.Close()
+
+listener, err := dest.ListenContext(ctx, "i2p", ":8080")
+if err != nil {
+    return err
+}
+defer listener.Close()
+fmt.Println(net.JoinHostPort(dest.B32(), "8080"))
+```
+
+Import `gosuda.org/ivnp` and the standard `context`, `time`, `net`, and `fmt`
+packages for this snippet. Destination construction waits for its tunnels and
+confirmed publication, so use a bounded context. Successful constructors
+transfer lifetime ownership to the returned object; later context cancellation
+does not close it.
+
+To retain router state across runs, explicitly set
+`cfg.Persistence = &ivnp.PersistenceConfig{Directory: "./router-data"}` before
+`NewRouter`. This does not persist automatically generated application
+Destinations; supply an application-owned identity through
+`DestinationConfig.Identity` when a stable service address is required.
+
+Share `dest.B32()` and a port with clients. Connect through a Destination with
+`dest.DialContext(ctx, "i2p", serviceAddress)`. Human-readable `.i2p` names require
+an explicitly supplied `RouterConfig.Resolver`; B32 addresses need no resolver.
+See [the Go examples](example_test.go) and [the API contract](API.md).
 
 ECIES receive windows look ahead **512 tags** by default and retain bounded
 history for packet loss and reordering. This does not change the I2P wire format.

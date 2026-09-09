@@ -16,11 +16,12 @@ import (
 	"testing"
 	"time"
 
-	"gosuda.org/ivnp"
+	"gosuda.org/ivnp/node"
 	"gosuda.org/ivnp/observability"
+	"gosuda.org/ivnp/state"
 )
 
-func createTestNode(t *testing.T) (*ivnp.Node, string, *slog.LevelVar) {
+func createTestNode(t *testing.T) (*node.Subsystem, string, *slog.LevelVar) {
 	t.Helper()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "ivnp.conf")
@@ -28,13 +29,13 @@ func createTestNode(t *testing.T) (*ivnp.Node, string, *slog.LevelVar) {
 	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
 		t.Fatalf("write test config: %v", err)
 	}
-	config, err := ivnp.LoadConfig(configPath)
+	config, err := state.ConfigurationLoadOperating(configPath)
 	if err != nil {
 		t.Fatalf("load test config: %v", err)
 	}
 	level := new(slog.LevelVar)
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: level}))
-	node, err := ivnp.New(config, ivnp.Options{Logger: logger})
+	node, err := node.NewSubsystem(config, node.Options{Logger: logger})
 	if err != nil {
 		t.Fatalf("create test node: %v", err)
 	}
@@ -247,7 +248,7 @@ func TestUpdateINIPreservesCommentsAndAddsKeys(t *testing.T) {
 
 func TestWebUIConfigViewMarshalsEmptyLists(t *testing.T) {
 	t.Parallel()
-	payload, err := json.Marshal(newWebUIConfigView(ivnp.Config{}, ivnp.Config{}))
+	payload, err := json.Marshal(newWebUIConfigView(state.ConfigurationOperating{}, state.ConfigurationOperating{}))
 	if err != nil {
 		t.Fatalf("marshal empty config view: %v", err)
 	}
@@ -400,7 +401,7 @@ func TestWebUIServerEndpointsAndConfigUpdate(t *testing.T) {
 	if !slices.Contains(result.Applied, "log.level") || !slices.Contains(result.RestartRequired, "tunnel.hops") {
 		t.Fatalf("update result = %#v", result)
 	}
-	persisted, err := ivnp.LoadConfig(configPath)
+	persisted, err := state.ConfigurationLoadOperating(configPath)
 	if err != nil {
 		t.Fatalf("load persisted config: %v", err)
 	}

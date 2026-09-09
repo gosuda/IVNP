@@ -42,14 +42,14 @@ func TestSSU2LiveVectorReadAuthDispatchWriteDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	aliceMetrics, bobMetrics := observability.NewRegistry(), observability.NewRegistry()
-	aliceManager, err := NewSSU2Manager(SSU2ManagerConfig{
+	aliceManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2,
 		Peers: aliceDB, StaticPrivate: aliceStatic, IntroKey: aliceIntro,
 		IdleTimeout: time.Minute, HandshakeTimeout: 2 * time.Second, Metrics: aliceMetrics,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{
+	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2,
 		Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro,
 		IdleTimeout: time.Minute, HandshakeTimeout: 2 * time.Second, Metrics: bobMetrics,
 	})

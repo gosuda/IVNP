@@ -522,7 +522,7 @@ func TestTransportMuxTunnelEligibilityMatchesIPv4Binding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{Local: local})
+	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{NetworkID: 2, Local: local})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +536,7 @@ func TestTransportMuxTunnelEligibilityMatchesIPv4Binding(t *testing.T) {
 	if err = owner.Publish(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := dataplane.RouterNewNTCP2Manager(dataplane.RouterNTCP2ManagerConfig{Peers: NewTransportPeerSource(database), StaticPrivate: key.Bytes(), StaticIV: make([]byte, 16)})
+	manager, err := dataplane.RouterNewNTCP2Manager(dataplane.RouterNTCP2ManagerConfig{NetworkID: 2, Peers: NewTransportPeerSource(database), StaticPrivate: key.Bytes(), StaticIV: make([]byte, 16)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -733,7 +733,7 @@ func muxTestPeerAtHost(t *testing.T, ntcp2, ssu2 bool, host string) (*controlpla
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{Local: local, RouterVersion: "mux-test"})
+	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{NetworkID: 2, Local: local, RouterVersion: "mux-test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -781,7 +781,7 @@ func muxTestFirewalledSSU2Peer(t *testing.T) (*controlplanenetdb.Database, found
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{Local: local, RouterVersion: "mux-test"})
+	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{NetworkID: 2, Local: local, RouterVersion: "mux-test"})
 	if err != nil {
 		t.Fatal(err)
 	}

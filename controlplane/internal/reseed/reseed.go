@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +31,8 @@ const (
 
 var (
 	ErrInsecureURL     = errors.New("reseed: HTTPS endpoint required")
-	ErrInvalidURL      = errors.New("reseed: endpoint must have exactly the netid=2 query and no credentials or fragment")
+	ErrInvalidURL      = errors.New("reseed: endpoint must have exactly the selected netid query and no credentials or fragment")
+	ErrNetwork         = errors.New("reseed: RouterInfo network does not match selected network")
 	ErrUnsafeRedirect  = errors.New("reseed: unsafe redirect")
 	ErrArchiveTooLarge = errors.New("reseed: archive exceeds configured limit")
 	ErrTooManyEntries  = errors.New("reseed: router info count exceeds configured limit")
@@ -41,6 +43,7 @@ var (
 // Client fetches and processes reseed archives.
 type Client struct {
 	HTTPClient          *http.Client
+	NetworkID           uint8
 	MaxArchiveBytes     int64
 	MaxRouterInfos      int
 	MaxTotalRouterBytes int64
@@ -64,9 +67,9 @@ func (c Client) limits() (archive int64, infos int, total int64) {
 	return archive, infos, total
 }
 
-func validateEndpoint(endpoint *url.URL, allowHTTP bool) error {
+func validateEndpoint(endpoint *url.URL, allowHTTP bool, networkID uint8) error {
 	validateEndpointRejected := endpoint == nil || endpoint.Hostname() == "" || endpoint.User != nil ||
-		endpoint.Fragment != "" || endpoint.RawQuery != "netid=2"
+		endpoint.Fragment != "" || endpoint.RawQuery != "netid="+strconv.FormatUint(uint64(networkID), 10)
 	if !validateEndpointRejected {
 		validateEndpointRejected = endpoint.ForceQuery
 	}
@@ -114,7 +117,7 @@ func (c Client) httpClientFor(endpoint *url.URL) *http.Client {
 		if len(via) == 0 || !sameOrigin(endpoint, request.URL) {
 			return ErrUnsafeRedirect
 		}
-		if err := validateEndpoint(request.URL, c.AllowHTTP); err != nil {
+		if err := validateEndpoint(request.URL, c.AllowHTTP, c.NetworkID); err != nil {
 			return fmt.Errorf("%w: %v", ErrUnsafeRedirect, err)
 		}
 		if previous != nil {
@@ -137,7 +140,7 @@ func (c Client) FetchInto(ctx context.Context, endpoint string, database *contro
 	if err != nil {
 		return 0, err
 	}
-	if err := validateEndpoint(parsedURL, c.AllowHTTP); err != nil {
+	if err := validateEndpoint(parsedURL, c.AllowHTTP, c.NetworkID); err != nil {
 		return 0, err
 	}
 	client := c.httpClientFor(parsedURL)
@@ -226,6 +229,9 @@ func (c Client) FetchInto(ctx context.Context, endpoint string, database *contro
 					continue
 				}
 				info, parseErr := foundation.NetworkDatabaseParseRouterInfo(data)
+				if parseErr == nil && !routerInfoMatchesNetwork(info, c.NetworkID) {
+					parseErr = ErrNetwork
+				}
 				if parseErr == nil {
 					parseErr = database.AdmitReseedRouterInfo(info,
 						seenAt)
@@ -251,6 +257,20 @@ func (c Client) FetchInto(ctx context.Context, endpoint string, database *contro
 		return 0, ErrNoRouterInfos
 	}
 	return accepted, nil
+}
+
+func routerInfoMatchesNetwork(info foundation.NetworkDatabaseRouterInfo, networkID uint8) bool {
+	iterator := info.Options.Iterator()
+	for {
+		key, value, ok, err := iterator.Next()
+		if err != nil || !ok {
+			return false
+		}
+		if string(key) == "netId" {
+			id, err := strconv.ParseUint(string(value), 10, 8)
+			return err == nil && uint8(id) == networkID
+		}
+	}
 }
 
 type fetchResult struct {

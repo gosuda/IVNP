@@ -163,15 +163,15 @@ func TestHolePunchEnvelopeRequiresIntroductionPayload(t *testing.T) {
 	}
 	payload = append(payload, response...)
 	destinationID, sourceID := RelayConnectionIDs(7)
-	packet, err := BuildHolePunch(make([]byte, MaxIPv4PacketLen), make([]byte, 32), destinationID, sourceID, 9, 10, payload)
+	packet, err := BuildHolePunch(make([]byte, MaxIPv4PacketLen), make([]byte, 32), destinationID, sourceID, 9, 10, payload, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	header, opened, err := ParseHolePunch(append([]byte(nil), packet...), make([]byte, 32))
+	header, opened, err := ParseHolePunch(append([]byte(nil), packet...), make([]byte, 32), 2)
 	if err != nil || header.DestinationID != destinationID || header.SourceID != sourceID || header.Token != 9 || !bytes.Equal(opened, payload) {
 		t.Fatalf("Hole Punch = %#v, %x, %v", header, opened, err)
 	}
-	if _, err = BuildHolePunch(make([]byte, MaxIPv4PacketLen), make([]byte, 32), destinationID, sourceID, 0, 10, response); err == nil {
+	if _, err = BuildHolePunch(make([]byte, MaxIPv4PacketLen), make([]byte, 32), destinationID, sourceID, 0, 10, response, 2); err == nil {
 		t.Fatal("Hole Punch accepted a payload without DateTime and Address blocks")
 	}
 }

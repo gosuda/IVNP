@@ -15,11 +15,11 @@ func TestSSU2TokenRequestAndRetry(t *testing.T) {
 	}
 	payload := handshakeDateTimePayload(t, 123)
 
-	request, err := BuildTokenRequest(make([]byte, MaxIPv4PacketLen), intro, 11, 22, 33, payload)
+	request, err := BuildTokenRequest(make([]byte, MaxIPv4PacketLen), intro, 11, 22, 33, payload, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	header, opened, err := ParseTokenRequest(append([]byte(nil), request...), intro)
+	header, opened, err := ParseTokenRequest(append([]byte(nil), request...), intro, 2)
 	sSU2TokenRequestAndRetryRejected := err != nil || header.DestinationID != 11 || header.SourceID != 22 || header.PacketNumber != 33 || header.Token != 0
 	if !sSU2TokenRequestAndRetryRejected {
 		sSU2TokenRequestAndRetryRejected = !bytes.Equal(opened, payload)
@@ -28,11 +28,11 @@ func TestSSU2TokenRequestAndRetry(t *testing.T) {
 		t.Fatalf("TokenRequest = %#v, %x, %v", header, opened, err)
 	}
 
-	retry, err := BuildRetry(make([]byte, MaxIPv4PacketLen), intro, 22, 11, 44, 55, payload)
+	retry, err := BuildRetry(make([]byte, MaxIPv4PacketLen), intro, 22, 11, 44, 55, payload, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	header, opened, err = ParseRetry(append([]byte(nil), retry...), intro)
+	header, opened, err = ParseRetry(append([]byte(nil), retry...), intro, 2)
 	sSU2TokenRequestAndRetryRejected = err != nil || header.DestinationID != 22 || header.SourceID != 11 || header.PacketNumber != 55 || header.Token != 44
 	if !sSU2TokenRequestAndRetryRejected {
 		sSU2TokenRequestAndRetryRejected = !bytes.Equal(opened, payload)
@@ -43,7 +43,7 @@ func TestSSU2TokenRequestAndRetry(t *testing.T) {
 
 	tampered := append([]byte(nil), retry...)
 	tampered[len(tampered)-1] ^= 1
-	if _, _, err := ParseRetry(tampered, intro); err == nil {
+	if _, _, err := ParseRetry(tampered, intro, 2); err == nil {
 		t.Fatal("tampered Retry was accepted")
 	}
 }
@@ -57,7 +57,7 @@ func TestTokenRequestMatchesJavaI2PDHeaderCounter(t *testing.T) {
 		intro[index] = byte(index)
 	}
 	payload := []byte{BlockDateTime, 0, 4, 0x1f, 0x20, 0x21, 0x22, BlockPadding, 0, 1, 0x42}
-	packet, err := BuildTokenRequest(make([]byte, MaxIPv4PacketLen), intro, 0x0102030405060708, 0x1112131415161718, 0x21222324, payload)
+	packet, err := BuildTokenRequest(make([]byte, MaxIPv4PacketLen), intro, 0x0102030405060708, 0x1112131415161718, 0x21222324, payload, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,13 +73,13 @@ func TestTokenRequestMatchesJavaI2PDHeaderCounter(t *testing.T) {
 func TestSSUOutOfSessionRejectsShortPackets(t *testing.T) {
 	intro := make([]byte, 32)
 	payload := handshakeDateTimePayload(t, 1)
-	request, err := BuildTokenRequest(make([]byte, MaxIPv4PacketLen), intro, 11, 22, 33, payload)
+	request, err := BuildTokenRequest(make([]byte, MaxIPv4PacketLen), intro, 11, 22, 33, payload, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for size := MinPacketLen; size < LongHeaderLen+PacketTagLen+8; size++ {
-		for _, parse := range []func([]byte, []byte) (LongHeader, []byte, error){ParseTokenRequest, ParseRetry} {
-			if _, _, err := parse(append([]byte(nil), request[:size]...), intro); !errors.Is(err, ErrHandshake) {
+		for _, parse := range []func([]byte, []byte, uint8) (LongHeader, []byte, error){ParseTokenRequest, ParseRetry} {
+			if _, _, err := parse(append([]byte(nil), request[:size]...), intro, 2); !errors.Is(err, ErrHandshake) {
 				t.Errorf("length %d error = %v, want %v", size, err, ErrHandshake)
 			}
 		}

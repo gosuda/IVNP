@@ -28,6 +28,7 @@ type Initiator struct {
 	peerEphemeral    *ecdh.PublicKey
 	destinationID    uint64
 	sourceID         uint64
+	networkID        uint8
 	requestHeaderKey [cryptography.ChaChaKeySize]byte
 	confirmHeaderKey [cryptography.ChaChaKeySize]byte
 	completed        bool
@@ -42,6 +43,7 @@ type Responder struct {
 	ephemeral        *ecdh.PrivateKey
 	destinationID    uint64
 	sourceID         uint64
+	networkID        uint8
 	requestHeaderKey [cryptography.ChaChaKeySize]byte
 	confirmHeaderKey [cryptography.ChaChaKeySize]byte
 	completed        bool
@@ -83,7 +85,7 @@ func (r *Responder) ReleaseSensitive() {
 
 // NewInitiator prepares a one-use exchange. destinationID and sourceID are
 // Alice's random nonzero connection IDs and must be distinct.
-func NewInitiator(remoteStatic, introKey []byte, destinationID, sourceID uint64) (*Initiator, error) {
+func NewInitiator(remoteStatic, introKey []byte, destinationID, sourceID uint64, networkID uint8) (*Initiator, error) {
 	if len(introKey) != cryptography.ChaChaKeySize || destinationID == 0 || sourceID == 0 || SameConnectionID(destinationID, sourceID) {
 		return nil, ErrHandshake
 	}
@@ -100,7 +102,7 @@ func NewInitiator(remoteStatic, introKey []byte, destinationID, sourceID uint64)
 	state.MixHash(remote.Bytes())
 	var key [cryptography.ChaChaKeySize]byte
 	copy(key[:], introKey)
-	return &Initiator{state: state, introKey: key, remoteStatic: remote, ephemeral: ephemeral, destinationID: destinationID, sourceID: sourceID}, nil
+	return &Initiator{state: state, introKey: key, remoteStatic: remote, ephemeral: ephemeral, destinationID: destinationID, sourceID: sourceID, networkID: networkID}, nil
 }
 
 // BuildSessionRequest writes an encrypted long-header SessionRequest. payload
@@ -116,7 +118,7 @@ func (i *Initiator) BuildSessionRequest(dst, payload []byte, packetNumber uint32
 	if len(dst) < total {
 		return nil, wire.ErrShortBuffer
 	}
-	header := LongHeader{DestinationID: i.destinationID, PacketNumber: packetNumber, Type: SessionRequest, Version: Version, NetworkID: NetworkID, SourceID: i.sourceID, Token: token}
+	header := LongHeader{DestinationID: i.destinationID, PacketNumber: packetNumber, Type: SessionRequest, Version: Version, NetworkID: i.networkID, SourceID: i.sourceID, Token: token}
 	if err := header.MarshalTo(dst[:LongHeaderLen]); err != nil {
 		return nil, err
 	}
@@ -144,7 +146,7 @@ func (i *Initiator) BuildSessionRequest(dst, payload []byte, packetNumber uint32
 // PeekSessionRequest authenticates neither the ephemeral key nor the payload;
 // it only removes enough header protection to validate a token before the
 // responder performs an expensive X25519 operation. packet remains unchanged.
-func PeekSessionRequest(packet, introKey []byte) (LongHeader, error) {
+func PeekSessionRequest(packet, introKey []byte, networkID uint8) (LongHeader, error) {
 	if len(packet) < LongHeaderLen+32+PacketTagLen || len(packet) > MaxIPv4PacketLen || len(introKey) != cryptography.ChaChaKeySize {
 		return LongHeader{}, ErrHandshake
 	}
@@ -159,7 +161,7 @@ func PeekSessionRequest(packet, introKey []byte) (LongHeader, error) {
 	if err := maskHeaderExtension(raw[16:], introKey); err != nil {
 		return LongHeader{}, err
 	}
-	header, err := ParseLongHeader(raw[:], NetworkID)
+	header, err := ParseLongHeader(raw[:], networkID)
 	if err != nil || header.Type != SessionRequest || header.DestinationID == 0 || header.SourceID == 0 || SameConnectionID(header.DestinationID, header.SourceID) {
 		return LongHeader{}, ErrHandshake
 	}
@@ -188,14 +190,14 @@ func PeekDestinationID(packet, receiverIntroKey []byte) (uint64, error) {
 
 // ParseSessionRequest removes header protection and authenticates one complete
 // SessionRequest. packet is modified in place and must be caller-owned.
-func ParseSessionRequest(packet, staticPrivate, introKey []byte) (*Responder, LongHeader, []byte, error) {
+func ParseSessionRequest(packet, staticPrivate, introKey []byte, networkID uint8) (*Responder, LongHeader, []byte, error) {
 	if len(packet) < LongHeaderLen+32+PacketTagLen || len(packet) > MaxIPv4PacketLen || len(introKey) != cryptography.ChaChaKeySize {
 		return nil, LongHeader{}, nil, ErrHandshake
 	}
 	if err := ProtectHeader(packet, introKey, introKey, 48); err != nil {
 		return nil, LongHeader{}, nil, err
 	}
-	header, err := ParseLongHeader(packet[:LongHeaderLen], NetworkID)
+	header, err := ParseLongHeader(packet[:LongHeaderLen], networkID)
 	if err != nil || header.Type != SessionRequest || header.DestinationID == 0 || header.SourceID == 0 || SameConnectionID(header.DestinationID, header.SourceID) {
 		return nil, LongHeader{}, nil, ErrHandshake
 	}
@@ -233,6 +235,7 @@ func ParseSessionRequest(packet, staticPrivate, introKey []byte) (*Responder, Lo
 		peerEphemeral:    peer,
 		destinationID:    header.DestinationID,
 		sourceID:         header.SourceID,
+		networkID:        networkID,
 		requestHeaderKey: deriveHeaderKey(state.ChainingKey(), "SessCreateHeader"),
 	}
 	return responder, header, plain, nil
@@ -250,7 +253,7 @@ func (r *Responder) BuildSessionCreated(dst, payload []byte, packetNumber uint32
 	if len(dst) < total {
 		return nil, wire.ErrShortBuffer
 	}
-	header := LongHeader{DestinationID: r.sourceID, PacketNumber: packetNumber, Type: SessionCreated, Version: Version, NetworkID: NetworkID, SourceID: r.destinationID}
+	header := LongHeader{DestinationID: r.sourceID, PacketNumber: packetNumber, Type: SessionCreated, Version: Version, NetworkID: r.networkID, SourceID: r.destinationID}
 	if err := header.MarshalTo(dst[:LongHeaderLen]); err != nil {
 		return nil, err
 	}
@@ -289,7 +292,7 @@ func (i *Initiator) ParseSessionCreated(packet []byte) (LongHeader, []byte, erro
 	if err := ProtectHeader(packet, i.introKey[:], i.requestHeaderKey[:], 48); err != nil {
 		return LongHeader{}, nil, err
 	}
-	header, err := ParseLongHeader(packet[:LongHeaderLen], NetworkID)
+	header, err := ParseLongHeader(packet[:LongHeaderLen], i.networkID)
 	if err != nil || header.Type != SessionCreated || header.DestinationID != i.sourceID || header.SourceID != i.destinationID || header.Token != 0 {
 		return LongHeader{}, nil, ErrHandshake
 	}

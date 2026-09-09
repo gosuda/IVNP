@@ -462,7 +462,7 @@ func (m *SSU2Manager) sendHolePunch(aliceAddress ssu2PeerAddress, remote netip.A
 	if err != nil {
 		return
 	}
-	packet, err := dataplanessu2.BuildHolePunch(make([]byte, dataplanessu2.MaxIPv4PacketLen), aliceAddress.intro[:], destinationID, sourceID, 0, packetNumber, payload)
+	packet, err := dataplanessu2.BuildHolePunch(make([]byte, dataplanessu2.MaxIPv4PacketLen), aliceAddress.intro[:], destinationID, sourceID, 0, packetNumber, payload, m.networkID)
 	if err == nil {
 		_ = m.writeRelayTo(packet, udpAddressFromAddrPort(remote), uint64(response.Nonce))
 	}

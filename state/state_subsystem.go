@@ -37,6 +37,7 @@ const (
 
 var (
 	ConfigurationErrInvalidOperating   = configuration.ErrInvalidOperating
+	ConfigurationDefaultOperating      = configuration.DefaultOperating
 	ConfigurationLoadOperating         = configuration.LoadOperating
 	ConfigurationLoadOrCreateOperating = configuration.LoadOrCreateOperating
 	ConfigurationParseOperating        = configuration.ParseOperating
@@ -45,4 +46,5 @@ var (
 	FilesystemStoreWriteAtomic         = filesystemstore.WriteAtomic
 	SecureStateErrStateLocked          = securestore.ErrStateLocked
 	SecureStateNewStore                = securestore.NewStore
+	SecureStateNewMemoryStore          = securestore.NewMemoryStore
 )

@@ -95,9 +95,9 @@ func TestMaintenanceErrorsPreserveIndependentFailures(t *testing.T) {
 			d.ctx = ctx
 			d.maintainer = runtime.maintainer
 			d.tunnelWake = make(chan struct{}, 1)
-			d.wg.Add(1)
+			d.maintenanceWG.Add(1)
 			go d.tunnelMaintenanceLoop()
-			defer func() { cancel(); d.wg.Wait() }()
+			defer func() { cancel(); d.maintenanceWG.Wait() }()
 			d.requestExploratoryMaintenance()
 			synctest.Wait()
 		}},

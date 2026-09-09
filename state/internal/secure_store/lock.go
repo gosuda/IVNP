@@ -26,6 +26,9 @@ func (s *Store) AcquireLock() (*Lock, error) {
 	if err := s.validConfig(); err != nil {
 		return nil, err
 	}
+	if s.memory {
+		return &Lock{}, nil
+	}
 	dir, err := ensureParent(s.StatePath)
 	if err != nil {
 		return nil, err

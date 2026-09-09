@@ -495,7 +495,7 @@ func newNATMappingTestLocal(t *testing.T) *router.LocalRouterInfo {
 	if err != nil {
 		t.Fatal(err)
 	}
-	local, err := router.NewLocalRouterInfo(router.LocalRouterInfoConfig{Local: identity, RouterVersion: "nat-mapping-test"})
+	local, err := router.NewLocalRouterInfo(router.LocalRouterInfoConfig{NetworkID: 2, Local: identity, RouterVersion: "nat-mapping-test"})
 	if err != nil {
 		t.Fatal(err)
 	}

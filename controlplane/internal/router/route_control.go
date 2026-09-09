@@ -522,7 +522,7 @@ func (s *StreamingTunnelSender) resolveRoute(ctx context.Context, remote foundat
 	var outbound controlplanetunnel.Entry
 	var circuit dataplane.TunnelCircuitInfo
 	found := false
-	entries := s.pool.Snapshot(now)
+	entries := s.pool.SelectableOutbound(now)
 	for attempt := 0; attempt < leaseCount && !found; attempt++ {
 		if attempt != 0 {
 			if set2 != nil {
@@ -677,6 +677,12 @@ func cloneValidatedRemoteELS(policies map[foundation.Hash]RemoteELSContext) (map
 				return nil, dataplane.RouterErrDataPlaneConfig
 			}
 		}
+		identity, consumed, err := foundation.ParseIdentity(append([]byte(nil), policy.Identity.Bytes()...))
+		if err != nil || consumed != len(policy.Identity.Bytes()) {
+			releaseRemoteELSPolicies(updated)
+			return nil, dataplane.RouterErrDataPlaneConfig
+		}
+		policy.Identity = identity
 		policy.Secret = append([]byte(nil), policy.Secret...)
 		updated[hash] = policy
 	}

@@ -358,6 +358,11 @@ var defaultAddressBookSubscriptions = []string{
 	"https://raw.githubusercontent.com/i2p/i2p.i2p/master/installer/resources/hosts.txt",
 }
 
+// DefaultOperating returns independent defaults without reading or creating files.
+func DefaultOperating() Operating {
+	return defaultOperating("")
+}
+
 func defaultOperating(base string) Operating {
 	dataDir := "./data"
 	stateDir := filepath.Join(dataDir, "state")

@@ -11,6 +11,7 @@ var (
 	ErrAddressInUse          = errors.New("i2p: address already listening")
 	ErrAddressUnavailable    = errors.New("i2p: address is not listening")
 	ErrAddressInvalid        = errors.New("i2p: invalid address")
+	ErrNoPortsAvailable      = errors.New("i2p: no ports available")
 	ErrStreamNetworkRequired = errors.New("i2p: StreamNetwork is required")
 )
 

@@ -26,6 +26,7 @@ import (
 	"gosuda.org/ivnp/controlplane/internal/tunnel"
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/observability"
@@ -39,6 +40,7 @@ var (
 	ErrDuplicateDestination   = errors.New("daemon: duplicate destination identity")
 	ErrReseedUnavailable      = errors.New("daemon: reseed is unavailable")
 	ErrTunnelProbeUnavailable = errors.New("daemon: tunnel probe is unavailable")
+	ErrStateConflict          = errors.New("router: persistent state conflicts with embedded ownership")
 )
 
 const (
@@ -77,6 +79,9 @@ type NATRuntime interface {
 
 // ControllerOptions supplies the core router's host-owned dependencies.
 type ControllerOptions struct {
+	Embedded             bool
+	BootstrapRouterInfos [][]byte
+	Exploratory          *destination.TunnelPoolConfig
 	// SocketRuntime provides low-level network socket creation.
 	SocketRuntime dataplane.RouterSocketRuntime
 	// Transport overrides the default NTCP2/SSU2 transport manager.
@@ -307,6 +312,8 @@ type Controller struct {
 	publication            *router.PublicationMaintenance
 	destinationFactory     *destinationRuntimeFactory
 	releaseRouterInfoSeeds func()
+	closeNativeTransports  func() error
+	maintenanceWG          sync.WaitGroup
 	buildReplies           *destinationBuildReplyRegistry
 	requestHandlers        *destinationRequestRegistry
 	destinationPublishers  *destinationPublisherRegistry
@@ -335,7 +342,24 @@ type Controller struct {
 }
 
 // NewController initializes a Daemon with the given configuration and optional runtime overrides.
-func NewController(cfg state.ConfigurationOperating, options ControllerOptions) (*Controller, error) {
+func NewController(cfg state.ConfigurationOperating, options ControllerOptions) (_ *Controller, resultErr error) {
+	if options.Embedded && (cfg.StatePath == "") != (cfg.KeyPath == "") {
+		return nil, fmt.Errorf("%w: both state and key paths are required", ErrStateConflict)
+	}
+	exploratory := destination.TunnelPoolConfig{
+		Inbound:     destination.TunnelDirectionConfig{Hops: cfg.Tunnel.Hops, Count: cfg.Tunnel.ExploratoryInboundTarget},
+		Outbound:    destination.TunnelDirectionConfig{Hops: cfg.Tunnel.Hops, Count: cfg.Tunnel.ExploratoryOutboundTarget},
+		RenewBefore: cfg.Tunnel.RenewBefore,
+	}
+	if options.Exploratory != nil {
+		exploratory = *options.Exploratory
+	}
+	if cfg.Tunnel.Enabled && options.Embedded {
+		if err := validateEmbeddedPool(exploratory); err != nil {
+			return nil, err
+		}
+		cfg.Tunnel.ExploratoryPoolCapacity = 2 * (exploratory.Inbound.Count + exploratory.Inbound.Backup + exploratory.Outbound.Count + exploratory.Outbound.Backup)
+	}
 	if cfg.State.MaxDestinations < 1 || cfg.State.MaxDestinations > daemonMaxDestinations {
 		return nil, fmt.Errorf("%w: state max_destinations must be between 1 and %d", state.ConfigurationErrInvalidOperating, daemonMaxDestinations)
 	}
@@ -369,7 +393,16 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		sockets = &dataplane.RouterNativeSocketRuntime{}
 	}
 
-	store, err := state.SecureStateNewStore(cfg.StatePath, cfg.KeyPath)
+	var store *state.SecureStateStore
+	var err error
+	if options.Embedded && cfg.StatePath == "" {
+		if cfg.StateDir != "" || cfg.DataDir != "" || len(cfg.NetDB.BootstrapRouterInfoPaths) != 0 {
+			return nil, fmt.Errorf("%w: memory state cannot use filesystem paths", ErrStateConflict)
+		}
+		store = state.SecureStateNewMemoryStore()
+	} else {
+		store, err = state.SecureStateNewStore(cfg.StatePath, cfg.KeyPath)
+	}
 	reporter := options.PanicReporter
 	if reporter ==
 		nil {
@@ -378,29 +411,55 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 
 	reporter = metricPanicReporter{metrics: registry, next: reporter}
 	if err != nil {
+		if options.Embedded && cfg.StatePath != "" {
+			return nil, errors.Join(ErrStateConflict, err)
+		}
 		return nil, err
 	}
 	store.MaxStateBytes = int(cfg.State.MaxBytes)
 	store.MaxDestinations = cfg.State.MaxDestinations
 	store.MaxNameBytes = cfg.State.MaxNameBytes
+	keepStore := false
+	defer func() {
+		if !keepStore {
+			resultErr = errors.Join(resultErr, store.Close())
+		}
+	}()
 	stateLock, err := store.AcquireLock()
 	if err != nil {
+		if options.Embedded && cfg.StatePath != "" {
+			return nil, errors.Join(ErrStateConflict, err)
+		}
 		return nil, err
 	}
 	keepStateLock := false
 	defer func() {
 		if !keepStateLock {
-			_ = stateLock.Close()
+			resultErr = errors.Join(resultErr, stateLock.Close())
 		}
 	}()
 	bundle, err := store.LoadOrCreate()
 	if err != nil {
+		if options.Embedded && cfg.StatePath != "" {
+			return nil, errors.Join(ErrStateConflict, err)
+		}
 		return nil, err
+	}
+	keepBundle := false
+	defer func() {
+		if !keepBundle {
+			bundle.ReleaseSensitive()
+		}
+	}()
+	hasIdentities := len(bundle.Destinations) != 0 || len(bundle.DestinationPrivate) != 0
+	hasPolicies := len(bundle.EncryptedLeaseSetPolicies) != 0 || len(bundle.DestinationAddressPolicies) != 0
+	if options.Embedded && (hasIdentities || hasPolicies) {
+		return nil, fmt.Errorf("%w: named application state requires the daemon", ErrStateConflict)
 	}
 	if cfg.Tunnel.Enabled && len(bundle.Destinations)+len(bundle.DestinationPrivate) > cfg.State.MaxDestinations {
 		return nil, ErrTooManyDestinations
 	}
-	if cfg.Tunnel.Enabled {
+	if cfg.Tunnel.Enabled && !options.Embedded {
 		if bundle.DestinationPrivate == nil {
 			bundle.DestinationPrivate = make(map[string][]byte)
 		}
@@ -479,6 +538,9 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 	}
 	database := netdb.NewDatabase(bundle.Router.Hash, cfg.NetDB.BucketCapacity)
+	if options.Embedded {
+		database.Routers().SetRouterLimit(netdb.BucketCount * cfg.NetDB.BucketCapacity)
+	}
 	database.SetMetrics(registry)
 	registry.SetNetDBRouters(uint64(database.Routers().Len()))
 	var netdbStore *netdb.RouterInfoStore
@@ -500,12 +562,22 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 	}
 	var bootstrapPeers []foundation.Hash
+	for index, wire := range options.BootstrapRouterInfos {
+		info, loadErr := validateBootstrapRouterInfo(wire, cfg, uint64(clock.Now().UnixMilli()))
+		if loadErr != nil {
+			return nil, fmt.Errorf("bootstrap RouterInfo %d: %w", index, loadErr)
+		}
+		if loadErr = database.AdmitRouterInfo(info, false, uint64(clock.Now().UnixMilli())); loadErr != nil {
+			return nil, fmt.Errorf("bootstrap RouterInfo %d: %w", index, loadErr)
+		}
+		bootstrapPeers = append(bootstrapPeers, info.Hash())
+	}
 	if len(cfg.NetDB.BootstrapRouterInfoPaths) != 0 {
 		loadedPeers, loadErr := netdb.LoadStaticRouterInfos(cfg.NetDB.BootstrapRouterInfoPaths, database, uint64(clock.Now().UnixMilli()))
 		if loadErr != nil {
 			return nil, loadErr
 		}
-		bootstrapPeers = loadedPeers
+		bootstrapPeers = append(bootstrapPeers, loadedPeers...)
 		logger.Info("loaded verified static bootstrap RouterInfos", "count", len(bootstrapPeers))
 	}
 	localInfo, err := router.NewLocalRouterInfo(router.LocalRouterInfoConfig{
@@ -518,18 +590,26 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		return nil, err
 	}
 	staticAddresses, err := newStaticAddressPublisher(cfg, bundle)
+	defer func() {
+		if !keepBundle {
+			localInfo.ReleaseSensitive()
+		}
+	}()
 	if err != nil {
 		return nil, err
 	}
-	addresses := newNATMappingPublisher(
-		staticAddresses,
-		automaticTransportConfig(cfg.NTCP2),
-		automaticTransportConfig(cfg.SSU2),
-		cfg.NAT.NATPMPEndpoint,
-		cfg.NAT.UPnPEndpoint,
-		localInfo,
-		logger,
-	)
+	var addresses router.AddressPublisher = staticAddresses
+	if !options.Embedded {
+		addresses = newNATMappingPublisher(
+			staticAddresses,
+			automaticTransportConfig(cfg.NTCP2),
+			automaticTransportConfig(cfg.SSU2),
+			cfg.NAT.NATPMPEndpoint,
+			cfg.NAT.UPnPEndpoint,
+			localInfo,
+			logger,
+		)
+	}
 	if publisher, ok := addresses.(*natMappingPublisher); ok && options.NAT != nil {
 		publisher.newNATPMP = options.NAT.NewNATPMP
 		publisher.upnp = options.NAT.UPnP()
@@ -541,16 +621,38 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		publisher.wait = options.NAT.Wait
 	}
 	var ntcp dataplane.RouterTransportManager
+	var ssu dataplane.RouterTransportManager
+	closeNativeTransports := func() error {
+		var result error
+		if ntcp != nil {
+			result = errors.Join(result, ntcp.Close())
+		}
+		if ssu != nil {
+			result = errors.Join(result, ssu.Close())
+		}
+		if ntcp != nil {
+			result = errors.Join(result, ntcp.Wait())
+		}
+		if ssu != nil {
+			result = errors.Join(result, ssu.Wait())
+		}
+		return result
+	}
+	defer func() {
+		if !keepBundle {
+			resultErr = errors.Join(resultErr, closeNativeTransports())
+		}
+	}()
 	if cfg.NTCP2.Enabled {
 		ntcp, err = dataplane.RouterNewNTCP2Manager(dataplane.RouterNTCP2ManagerConfig{
 			Peers: router.NewTransportPeerSource(database), StaticPrivate: bundle.NTCP2StaticPrivate, StaticIV: bundle.NTCP2StaticIV,
 			NetworkID: uint8(cfg.Network.ID), MaxSessions: cfg.NTCP2.MaxSessions, PanicReporter: reporter, Metrics: registry, Logger: logger,
+			IdleTimeout: cfg.NTCP2.IdleTimeout,
 		})
 		if err != nil {
 			return nil, err
 		}
 	}
-	var ssu dataplane.RouterTransportManager
 	if cfg.SSU2.Enabled {
 		ssu, err = dataplane.RouterNewSSU2Manager(dataplane.RouterSSU2ManagerConfig{
 			Peers: router.NewTransportPeerSource(database), StaticPrivate: bundle.SSU2StaticPrivate, IntroKey: bundle.SSU2IntroKey,
@@ -637,6 +739,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 		client := &reseed.Client{
 			HTTPClient: httpClient, SU3Signers: signers,
+			NetworkID:       uint8(cfg.Network.ID),
 			MaxArchiveBytes: cfg.Reseed.MaxArchiveBytes, MaxRouterInfos: cfg.Reseed.MaxRouterInfos, MaxTotalRouterBytes: cfg.Reseed.MaxTotalBytes,
 		}
 		reseedRunner = client
@@ -669,26 +772,40 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	newOK := false
 	seedRouterInfo, releaseRouterInfoSeeds := buildReplyRouterInfoSeeder(database, mux, now)
 	defer func() {
-		if newOK {
-			return
+		if !keepBundle {
+			if maintainer != nil {
+				resultErr = errors.Join(resultErr, maintainer.Close())
+			}
+			if health != nil {
+				resultErr = errors.Join(resultErr, health.Close())
+			}
+			if requests != nil {
+				resultErr = errors.Join(resultErr, requests.Close())
+			}
+			if tunnels != nil {
+				tunnels.Expire(^uint64(0))
+			}
 		}
-		if destinations != nil {
-			_ = destinations.Close()
+	}()
+	defer func() {
+		if !newOK {
+			if destinations != nil {
+				resultErr = errors.Join(resultErr, destinations.Close())
+			}
+			for _, sessions := range garlicSessions {
+				sessions.Close()
+			}
+			for _, runtime := range clientRuntimes {
+				runtime.release()
+			}
+			if garlicReceiver != nil {
+				garlicReceiver.ReleaseSensitive()
+			}
+			if buildManager != nil {
+				buildManager.ReleaseSensitive()
+			}
+			releaseRouterInfoSeeds()
 		}
-		for _, sessions := range garlicSessions {
-			sessions.Close()
-		}
-		for _, runtime := range clientRuntimes {
-			runtime.release()
-		}
-		if garlicReceiver != nil {
-			garlicReceiver.ReleaseSensitive()
-		}
-		if buildManager != nil {
-			buildManager.ReleaseSensitive()
-		}
-		releaseRouterInfoSeeds()
-		bundle.ReleaseSensitive()
 	}()
 	if cfg.Tunnel.Enabled {
 		seenDestinations := make(map[foundation.Hash]string, len(bundle.DestinationPrivate))
@@ -753,7 +870,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			return nil, err
 		}
 		inboundSource, sourceErr := tunnel.NewNetDBInboundBuildSource(tunnel.NetDBInboundBuildSourceConfig{
-			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: cfg.Tunnel.Hops,
+			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: exploratory.Inbound.Hops,
 			Lifetime:  uint64(cfg.Tunnel.Lifetime / time.Millisecond),
 			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
 			Eligible: eligible, Connected: connected, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
@@ -762,7 +879,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			return nil, fmt.Errorf("create exploratory inbound build source: %w", sourceErr)
 		}
 		outboundSource, sourceErr := tunnel.NewNetDBOutboundBuildSource(tunnel.NetDBOutboundBuildSourceConfig{
-			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: cfg.Tunnel.Hops,
+			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: exploratory.Outbound.Hops,
 			Lifetime:  uint64(cfg.Tunnel.Lifetime / time.Millisecond),
 			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
 			Eligible: eligible, Connected: connected, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
@@ -772,8 +889,9 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 		maintainer, err = tunnel.NewPairedPoolMaintainer(tunnel.PairedPoolMaintainerConfig{
 			Pool: pool, Runtime: tunnels, Builder: buildManager, InboundSource: inboundSource, OutboundSource: outboundSource,
-			Now: now, InboundTarget: cfg.Tunnel.ExploratoryInboundTarget, OutboundTarget: cfg.Tunnel.ExploratoryOutboundTarget,
-			RenewBefore: uint64(cfg.Tunnel.RenewBefore / time.Millisecond),
+			Now: now, InboundTarget: exploratory.Inbound.Count, OutboundTarget: exploratory.Outbound.Count,
+			InboundBackup: exploratory.Inbound.Backup, OutboundBackup: exploratory.Outbound.Backup,
+			RenewBefore: uint64(exploratory.RenewBefore / time.Millisecond),
 		})
 		if err != nil {
 			return nil, err
@@ -847,7 +965,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			if encrypted, ok := bundle.EncryptedLeaseSetPolicies[name]; ok {
 				policy = &encrypted
 			}
-			clientRuntime, createErr := destinationFactory.create(name, destination, policy, bundle.DestinationAddressPolicies[name], nil)
+			clientRuntime, createErr := destinationFactory.create(name, destination, policy, bundle.DestinationAddressPolicies[name], nil, nil)
 			if createErr != nil {
 				return nil, createErr
 			}
@@ -897,6 +1015,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		service: service, tunnels: tunnels, pool: pool, profiles: profiles, tunnelHealth: health, replyKeys: replyKeys, buildManager: buildManager, maintainer: maintainer, requests: requests, destinations: destinations, garlicSessions: garlicSessions, garlicReceiver: garlicReceiver, statusMux: statusMux, publication: publication,
 		destinationFactory: destinationFactory, buildReplies: buildReplies, requestHandlers: requestHandlers, destinationPublishers: destinationPublishers, clientRuntimes: clientRuntimes,
 		responderStore:         responderStore,
+		closeNativeTransports:  closeNativeTransports,
 		releaseRouterInfoSeeds: releaseRouterInfoSeeds,
 		startReady:             make(chan struct{}),
 		destinationWake:        make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
@@ -915,6 +1034,8 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	}
 	newOK = true
 	keepStateLock = true
+	keepStore = true
+	keepBundle = true
 	return d, nil
 }
 
@@ -1014,17 +1135,18 @@ func (d *Controller) startMaintenance() {
 	if interval <= 0 {
 		interval = time.Minute
 	}
+	interval = min(interval, time.Second)
 	d.maintenanceDone = make(chan struct{})
 	d.publicationWake = make(chan struct{}, 1)
 	destinationWorkers := parallelism.Workers(max(1, d.config.State.MaxDestinations))
-	d.wg.Add(5 + destinationWorkers)
+	d.maintenanceWG.Add(5 + destinationWorkers)
 	go d.publicationMaintenanceLoop()
 	go d.observabilityLoop()
 	go d.netdbSaveLoop()
 	go d.tunnelMaintenanceLoop()
 	if d.explorer != nil {
 		d.explorationDone = make(chan struct{})
-		d.wg.Go(d.explorationLoop)
+		d.maintenanceWG.Go(d.explorationLoop)
 	}
 	for range destinationWorkers {
 		go d.destinationMaintenanceLoop()
@@ -1056,7 +1178,7 @@ func (d *Controller) requestAllTunnelMaintenance() {
 }
 
 func (d *Controller) tunnelMaintenanceLoop() {
-	defer d.wg.Done()
+	defer d.maintenanceWG.Done()
 	for {
 		select {
 		case <-d.ctx.Done():
@@ -1071,7 +1193,7 @@ func (d *Controller) tunnelMaintenanceLoop() {
 }
 
 func (d *Controller) publicationMaintenanceLoop() {
-	defer d.wg.Done()
+	defer d.maintenanceWG.Done()
 	for {
 		select {
 		case <-d.ctx.Done():
@@ -1095,7 +1217,7 @@ func (d *Controller) maintainPublication() {
 }
 
 func (d *Controller) observabilityLoop() {
-	defer d.wg.Done()
+	defer d.maintenanceWG.Done()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -1115,7 +1237,7 @@ func (d *Controller) observabilityLoop() {
 }
 
 func (d *Controller) netdbSaveLoop() {
-	defer d.wg.Done()
+	defer d.maintenanceWG.Done()
 	for {
 		select {
 		case <-d.ctx.Done():
@@ -1176,7 +1298,7 @@ func (d *Controller) explorationLoop() {
 }
 
 func (d *Controller) destinationMaintenanceLoop() {
-	defer d.wg.Done()
+	defer d.maintenanceWG.Done()
 	for {
 		select {
 		case <-d.ctx.Done():
@@ -1213,7 +1335,7 @@ func (d *Controller) maintainDestination(runtime *destinationRuntime) {
 }
 
 func (d *Controller) periodicMaintenanceLoop(interval time.Duration) {
-	defer d.wg.Done()
+	defer d.maintenanceWG.Done()
 	defer close(d.maintenanceDone)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -1518,6 +1640,23 @@ func (d *Controller) teardown() error {
 		if d.explorationDone != nil {
 			<-d.explorationDone
 		}
+		d.maintenanceWG.Wait()
+		if d.maintainer != nil {
+			result = errors.Join(result, d.maintainer.Close())
+		}
+		if d.tunnelHealth != nil {
+			result = errors.Join(result, d.tunnelHealth.Close())
+		}
+		if d.tunnels != nil {
+			d.tunnels.Expire(^uint64(0))
+		}
+		if d.pool != nil {
+			d.pool.Clear()
+		}
+		if d.closeNativeTransports != nil {
+			result = errors.Join(result, d.closeNativeTransports())
+		}
+		d.localInfo.ReleaseSensitive()
 		if d.garlicReceiver != nil {
 			d.garlicReceiver.ReleaseSensitive()
 		}
@@ -1539,6 +1678,10 @@ func (d *Controller) teardown() error {
 		}
 		if d.store != nil {
 			result = errors.Join(result, d.store.Save(d.bundle))
+			result = errors.Join(result, d.store.Close())
+		}
+		if d.destinationFactory != nil {
+			clear(d.destinationFactory.staticPrivate)
 		}
 		d.bundle.ReleaseSensitive()
 		if d.stateLock != nil {
@@ -1564,6 +1707,7 @@ func (d *Controller) Wait() error {
 	}
 	<-ready
 	d.wg.Wait()
+	d.maintenanceWG.Wait()
 	d.mu.Lock()
 	err := d.err
 	d.mu.Unlock()
@@ -2218,11 +2362,14 @@ func (s inboundLeaseSource) CurrentInboundLeases(now uint64) []foundation.Networ
 	if s.pool == nil {
 		return nil
 	}
-	entries := s.pool.Snapshot(now)
+	entries := s.pool.PublishableInbound(now)
 	leases := make([]foundation.NetworkDatabaseLease, 0, len(entries))
 	for _, entry := range entries {
 		if entry.Direction == tunnel.Inbound && entry.Gateway != (foundation.Hash{}) && entry.GatewayTunnelID != 0 && entry.Expires > now {
 			leases = append(leases, foundation.NetworkDatabaseLease{Gateway: entry.Gateway, TunnelID: entry.GatewayTunnelID, EndDate: entry.Expires})
+			if len(leases) == 16 {
+				break
+			}
 		}
 	}
 	return leases

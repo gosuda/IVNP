@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"net/netip"
+	"strconv"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
@@ -26,6 +27,9 @@ func InspectSSU2Peer(info foundation.NetworkDatabaseRouterInfo, now uint64) SSU2
 }
 
 func (m *SSU2Manager) InspectPeer(info foundation.NetworkDatabaseRouterInfo, now uint64) SSU2PeerCapabilities {
+	if !routerInfoMatchesNetwork(info, m.networkID) {
+		return SSU2PeerCapabilities{}
+	}
 	return inspectSSU2Peer(info, now, m.ipv6Available.Load())
 }
 
@@ -44,6 +48,9 @@ func inspectSSU2Peer(info foundation.NetworkDatabaseRouterInfo, now uint64, allo
 }
 
 func (m *NTCP2Manager) PeerReachable(info foundation.NetworkDatabaseRouterInfo) bool {
+	if !routerInfoMatchesNetwork(info, m.networkID) {
+		return false
+	}
 	_, err := selectNTCP2AddressForNetwork(info, ntcp2AddressSelection(m.currentBindings().NTCP2))
 	return err == nil
 }
@@ -96,6 +103,20 @@ func hasCurrentTransportAddress(info foundation.NetworkDatabaseRouterInfo, nowMi
 		}
 		if address.Expiration == 0 || address.Expiration > nowMillis {
 			return true
+		}
+	}
+}
+
+func routerInfoMatchesNetwork(info foundation.NetworkDatabaseRouterInfo, networkID uint8) bool {
+	iterator := info.Options.Iterator()
+	for {
+		key, value, ok, err := iterator.Next()
+		if err != nil || !ok {
+			return false
+		}
+		if string(key) == "netId" {
+			id, err := strconv.ParseUint(string(value), 10, 8)
+			return err == nil && uint8(id) == networkID
 		}
 	}
 }

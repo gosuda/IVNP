@@ -32,11 +32,11 @@ func TestNTCP2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 		t.Fatalf("admit Bob RouterInfo: %v", err)
 	}
 
-	aliceManager, err := NewNTCP2Manager(NTCP2ManagerConfig{Peers: aliceDB, StaticPrivate: aliceStatic, StaticIV: aliceIV})
+	aliceManager, err := NewNTCP2Manager(NTCP2ManagerConfig{NetworkID: 2, Peers: aliceDB, StaticPrivate: aliceStatic, StaticIV: aliceIV})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobManager, err := NewNTCP2Manager(NTCP2ManagerConfig{Peers: bobDB, StaticPrivate: bobStatic, StaticIV: bobIV})
+	bobManager, err := NewNTCP2Manager(NTCP2ManagerConfig{NetworkID: 2, Peers: bobDB, StaticPrivate: bobStatic, StaticIV: bobIV})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestNTCP2InboundRouterInfoPolicyRejectsStaleFutureAndRotationDowngrade(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewNTCP2Manager(NTCP2ManagerConfig{Peers: newTransportTestPeers(), StaticPrivate: managerStatic.Bytes(),
+	manager, err := NewNTCP2Manager(NTCP2ManagerConfig{NetworkID: 2, Peers: newTransportTestPeers(), StaticPrivate: managerStatic.Bytes(),
 		StaticIV: make([]byte, 16)})
 	if err != nil {
 		t.Fatal(err)
@@ -394,7 +394,7 @@ func TestNTCP2ManagerReleasesResponderOnPostConstructionFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewNTCP2Manager(NTCP2ManagerConfig{StaticPrivate: staticPrivate, StaticIV: staticIV})
+	manager, err := NewNTCP2Manager(NTCP2ManagerConfig{NetworkID: 2, StaticPrivate: staticPrivate, StaticIV: staticIV})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -40,6 +40,39 @@ func (c *recoverableEgressBatchConn) WriteBatchPrefix(_ *dataplanessu2.Batch, co
 func (c *recoverableEgressBatchConn) KernelDrops() uint64 { return 0 }
 func (c *recoverableEgressBatchConn) Close() error        { return nil }
 
+func TestSSU2ManagerUnstartedCloseWaitClearsKeys(t *testing.T) {
+	staticPrivate := bytes.Repeat([]byte{1}, 32)
+	introKey := bytes.Repeat([]byte{2}, 32)
+	manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2,
+		StaticPrivate: staticPrivate,
+		IntroKey:      introKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownedStatic, ownedIntro := manager.staticPrivate, manager.introKey
+	ownedToken := manager.tokenSecret[:]
+	if err := manager.Close(); err != nil {
+		t.Errorf("close unstarted manager: %v", err)
+	}
+	if err := manager.Wait(); err != nil {
+		t.Errorf("wait for unstarted manager: %v", err)
+	}
+	for name, secret := range map[string][]byte{
+		"static private key": ownedStatic,
+		"introduction key":   ownedIntro,
+		"token secret":       ownedToken,
+	} {
+		if !bytes.Equal(secret, make([]byte, len(secret))) {
+			t.Errorf("unstarted manager retained %s", name)
+		}
+	}
+	if !bytes.Equal(staticPrivate, bytes.Repeat([]byte{1}, 32)) ||
+		!bytes.Equal(introKey, bytes.Repeat([]byte{2}, 32)) {
+		t.Error("manager cleanup overwrote caller-owned keys")
+	}
+}
+
 func TestSSU2I2NPFragmentsStartAtJavaMinimumMTU(t *testing.T) {
 	message := foundation.I2NPMessage{
 		Header:  foundation.I2NPHeader{Type: foundation.I2NPData, ID: 1, Expiration: uint64(time.Now().Add(time.Minute).UnixMilli())},
@@ -205,7 +238,7 @@ func newSSU2ConfirmedInitiator(t *testing.T) (*dataplanessu2.Initiator, []byte) 
 		t.Fatal(err)
 	}
 	intro := bytes.Repeat([]byte{0x33}, 32)
-	initiator, err := dataplanessu2.NewInitiator(remoteStatic.PublicKey().Bytes(), intro, 11, 12)
+	initiator, err := dataplanessu2.NewInitiator(remoteStatic.PublicKey().Bytes(), intro, 11, 12, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +250,7 @@ func newSSU2ConfirmedInitiator(t *testing.T) (*dataplanessu2.Initiator, []byte) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	responder, _, _, err := dataplanessu2.ParseSessionRequest(append([]byte(nil), request...), remoteStatic.Bytes(), intro)
+	responder, _, _, err := dataplanessu2.ParseSessionRequest(append([]byte(nil), request...), remoteStatic.Bytes(), intro, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +301,7 @@ func TestSSU2RouterInfoStorePreservesSignedWireBytes(t *testing.T) {
 func TestSSU2RelayRouterInfoStoreCacheReusesAndRefreshesLocalSnapshot(t *testing.T) {
 	local, static, intro := newSSU2TestLocal(t, "127.0.0.1:23456")
 	now := time.UnixMilli(1_700_000_000_000)
-	manager := &SSU2Manager{routerInfoStores: make(map[foundation.Hash]ssu2RouterInfoStoreSnapshot)}
+	manager := &SSU2Manager{networkID: 2, routerInfoStores: make(map[foundation.Hash]ssu2RouterInfoStoreSnapshot)}
 
 	info := local.Snapshot()
 	if _, err := manager.cachedSSU2RouterInfoStore(info, now); err != nil {
@@ -325,7 +358,7 @@ func TestSSU2RelayRouterInfoStoreCacheReusesAndRefreshesLocalSnapshot(t *testing
 func TestSSU2DispatchI2NPUsesClockAndRejectsExpired(t *testing.T) {
 	now := time.UnixMilli(1_700_000_000_000)
 	var deliveredAt uint64
-	manager := &SSU2Manager{ctx: context.Background(), bindings: TransportBindings{
+	manager := &SSU2Manager{networkID: 2, ctx: context.Background(), bindings: TransportBindings{
 		Clock: transportTestClock{now: now},
 		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, _ foundation.I2NPMessage, nowMillis uint64, _ bool) error {
 			deliveredAt = nowMillis
@@ -344,7 +377,7 @@ func TestSSU2DispatchI2NPUsesClockAndRejectsExpired(t *testing.T) {
 	}
 
 	service := NewService(Sinks{})
-	manager = &SSU2Manager{ctx: context.Background(), bindings: TransportBindings{
+	manager = &SSU2Manager{networkID: 2, ctx: context.Background(), bindings: TransportBindings{
 		Clock: transportTestClock{now: now},
 		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message foundation.I2NPMessage, nowMillis uint64, floodfill bool) error {
 			return service.HandleI2NP(message, nowMillis, floodfill)
@@ -377,11 +410,11 @@ func TestSSU2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 		t.Fatalf("admit Bob RouterInfo: %v", err)
 	}
 
-	aliceManager, err := NewSSU2Manager(SSU2ManagerConfig{Peers: aliceDB, StaticPrivate: aliceStatic, IntroKey: aliceIntro})
+	aliceManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: aliceDB, StaticPrivate: aliceStatic, IntroKey: aliceIntro})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro})
+	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,7 +580,7 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 		}
 	}
 	received := make(chan foundation.I2NPMessage, 4)
-	aliceManager, err := NewSSU2Manager(SSU2ManagerConfig{Peers: aliceDB, StaticPrivate: aliceStatic,
+	aliceManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: aliceDB, StaticPrivate: aliceStatic,
 		IntroKey: aliceIntro,
 		SignControl: func(message []byte) ([]byte, error) {
 			return alice.Sign(message), nil
@@ -558,11 +591,11 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro})
+	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro})
 	if err != nil {
 		t.Fatal(err)
 	}
-	charlieManager, err := NewSSU2Manager(SSU2ManagerConfig{Peers: charlieDB, StaticPrivate: charlieStatic,
+	charlieManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: charlieDB, StaticPrivate: charlieStatic,
 		IntroKey: charlieIntro,
 		SignControl: func(message []byte) ([]byte, error) {
 			return charlie.Sign(message), nil
@@ -746,7 +779,7 @@ func TestSSU2SessionEvictionRemovesBothIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewSSU2Manager(SSU2ManagerConfig{
+	manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2,
 		StaticPrivate: static.Bytes(),
 		IntroKey:      make([]byte, 32),
 		IdleTimeout:   time.Second,
@@ -807,7 +840,7 @@ func TestSSU2SessionReleaseSynchronizesWithReceive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := &SSU2Manager{bindings: TransportBindings{Clock: WallClock{}}}
+	manager := &SSU2Manager{networkID: 2, bindings: TransportBindings{Clock: WallClock{}}}
 	session.receiveMu.Lock()
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -841,7 +874,7 @@ func TestSSU2SessionReleaseSynchronizesWithReceive(t *testing.T) {
 		sent:      map[uint32]*ssu2SentPacket{1: {payload: append([]byte(nil), payload...), sentAt: time.Time{}}},
 		fragments: make(map[uint32]*ssu2FragmentAssembly),
 	}
-	activeManager := &SSU2Manager{
+	activeManager := &SSU2Manager{networkID: 2,
 		started: true, ctx: context.Background(),
 		sessionsByPeer: map[foundation.Hash]*ssu2TransportSession{sendSession.peer: sendSession},
 		sessionsByID:   map[uint64]*ssu2TransportSession{sendSession.receiveID: sendSession},
@@ -904,7 +937,7 @@ func TestSSU2ReplayDropsACKAndPathChallengeBlocks(t *testing.T) {
 		sent:      map[uint32]*ssu2SentPacket{7: {inUse: true}},
 		fragments: make(map[uint32]*ssu2FragmentAssembly),
 	}
-	manager := &SSU2Manager{bindings: TransportBindings{Clock: WallClock{}}}
+	manager := &SSU2Manager{networkID: 2, bindings: TransportBindings{Clock: WallClock{}}}
 	manager.handleDataFrom(session, append([]byte(nil), packet...), expected)
 	if len(session.sent) != 0 {
 		t.Fatal("new packet did not apply its ACK block")
@@ -950,7 +983,7 @@ func TestSSU2SessionReleaseWaitsForAuthenticatedDispatch(t *testing.T) {
 	}
 	entered := make(chan struct{})
 	resume := make(chan struct{})
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		ctx: context.Background(),
 		bindings: TransportBindings{
 			Clock: WallClock{},
@@ -1013,7 +1046,7 @@ func TestSSU2EstablishReleasesEvictedIdleSession(t *testing.T) {
 		lastActivity: time.Now().Add(-time.Hour), sent: make(map[uint32]*ssu2SentPacket),
 		fragments: make(map[uint32]*ssu2FragmentAssembly),
 	}
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		started: true, ctx: context.Background(), idleTimeout: time.Second,
 		bindings:       TransportBindings{Clock: WallClock{}},
 		sessionsByPeer: map[foundation.Hash]*ssu2TransportSession{peer: stale},
@@ -1038,7 +1071,7 @@ func TestSSU2OutboundInitiatorCannotBeSupersededOrReleasedDuringParse(t *testing
 	if _, err = rand.Read(intro[:]); err != nil {
 		t.Fatal(err)
 	}
-	initiator, err := dataplanessu2.NewInitiator(remoteStatic.PublicKey().Bytes(), intro[:], 11, 12)
+	initiator, err := dataplanessu2.NewInitiator(remoteStatic.PublicKey().Bytes(), intro[:], 11, 12, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1049,7 +1082,7 @@ func TestSSU2OutboundInitiatorCannotBeSupersededOrReleasedDuringParse(t *testing
 		destinationID: 11, sourceID: 12, ready: make(chan struct{}),
 	}
 	endpoint, _ := addrPortKey(remote)
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		started: true, ctx: context.Background(),
 		outbound:     map[foundation.Hash]*ssu2OutboundPending{peer: pending},
 		outboundAddr: map[netip.AddrPort]*ssu2OutboundPending{endpoint: pending},
@@ -1095,7 +1128,7 @@ func TestSSU2RetryTokensAreStatelessAndEndpointBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifetime := 7 * time.Minute
-	manager, err := NewSSU2Manager(SSU2ManagerConfig{StaticPrivate: static.Bytes(), IntroKey: intro, TokenLifetime: lifetime})
+	manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, StaticPrivate: static.Bytes(), IntroKey: intro, TokenLifetime: lifetime})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1157,7 +1190,7 @@ func TestLocalConfirmedPayloadCompressesFragmentedRouterInfo(t *testing.T) {
 		}
 	}
 	owner, static, intro := newSSU2TestLocal(t, "127.0.0.1:1", options...)
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		staticPrivate: static,
 		introKey:      intro,
 		bindings:      TransportBindings{LocalInfo: owner},
@@ -1187,7 +1220,7 @@ func TestSSU2EgressBackpressuresWhenSlotsAreBusy(t *testing.T) {
 		free := make(chan *ssu2EgressSlot, 1)
 		free <- &ssu2EgressSlot{done: make(chan error, 1)}
 		queue := make(chan *ssu2EgressSlot, 1)
-		manager := &SSU2Manager{
+		manager := &SSU2Manager{networkID: 2,
 			started:     true,
 			ctx:         ctx,
 			egressFree:  free,
@@ -1229,7 +1262,7 @@ func TestSSU2EgressContinuesAfterDestinationWriteError(t *testing.T) {
 		free <- &ssu2EgressSlot{done: make(chan error, 1)}
 	}
 	writeErr := errors.New("destination unavailable")
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		started:     true,
 		ctx:         ctx,
 		batchConn:   &recoverableEgressBatchConn{err: writeErr},
@@ -1268,7 +1301,7 @@ func TestSSU2CanceledEgressConsumesSealedPacketNumber(t *testing.T) {
 		session.initReliability(ssu2MaximumNetworkMTU)
 		managerCtx, stopManager := context.WithCancel(t.Context())
 		defer stopManager()
-		manager := &SSU2Manager{
+		manager := &SSU2Manager{networkID: 2,
 			started:        true,
 			ctx:            managerCtx,
 			idleTimeout:    time.Hour,
@@ -1605,7 +1638,7 @@ func TestSSU2IdleShrinkReclaimsPayloadStorage(t *testing.T) {
 func TestSSU2EgressCollectsOnlyReadyDatagrams(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	manager := &SSU2Manager{started: true, ctx: ctx, egressQueue: make(chan *ssu2EgressSlot, ssu2EgressSlots)}
+	manager := &SSU2Manager{networkID: 2, started: true, ctx: ctx, egressQueue: make(chan *ssu2EgressSlot, ssu2EgressSlots)}
 	for index := range 3 {
 		manager.egressQueue <- &ssu2EgressSlot{length: index + 1}
 	}
@@ -1621,7 +1654,7 @@ func TestSSU2QueuedWriteReturnsBeforeSocketCompletion(t *testing.T) {
 	defer cancel()
 	free := make(chan *ssu2EgressSlot, 1)
 	free <- &ssu2EgressSlot{done: make(chan error, 1)}
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		started:     true,
 		ctx:         ctx,
 		egressFree:  free,
@@ -1645,7 +1678,7 @@ func TestSSU2QueuedWriteReturnsBeforeSocketCompletion(t *testing.T) {
 func TestSSU2QueuesOnePendingACKPerSession(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	manager := &SSU2Manager{started: true, ctx: ctx, ackQueue: make(chan *ssu2TransportSession, 4)}
+	manager := &SSU2Manager{networkID: 2, started: true, ctx: ctx, ackQueue: make(chan *ssu2TransportSession, 4)}
 	session := new(ssu2TransportSession)
 	for range 3 {
 		manager.queueACK(session)
@@ -1678,7 +1711,7 @@ func newSSU2SendTestHarness(t *testing.T) (*SSU2Manager, *ssu2TransportSession) 
 	managerCtx, cancel := context.WithCancel(t.Context())
 	free := make(chan *ssu2EgressSlot, 1)
 	free <- &ssu2EgressSlot{done: make(chan error, 1)}
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		started:        true,
 		ctx:            managerCtx,
 		idleTimeout:    time.Hour,

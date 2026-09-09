@@ -9,86 +9,86 @@ import (
 
 // BuildTokenRequest creates an authenticated SSU2 TokenRequest. The payload
 // must contain a DateTime block; sourceID is Alice's connection ID.
-func BuildTokenRequest(dst, introKey []byte, destinationID, sourceID uint64, packetNumber uint32, payload []byte) ([]byte, error) {
+func BuildTokenRequest(dst, introKey []byte, destinationID, sourceID uint64, packetNumber uint32, payload []byte, networkID uint8) ([]byte, error) {
 	return buildOutOfSession(dst, introKey, LongHeader{
 		DestinationID: destinationID,
 		PacketNumber:  packetNumber,
 		Type:          TokenRequest,
 		Version:       Version,
-		NetworkID:     NetworkID,
+		NetworkID:     networkID,
 		SourceID:      sourceID,
 	}, payload)
 }
 
 // ParseTokenRequest authenticates one caller-owned TokenRequest packet.
-func ParseTokenRequest(packet, introKey []byte) (LongHeader, []byte, error) {
-	return parseOutOfSession(packet, introKey, TokenRequest)
+func ParseTokenRequest(packet, introKey []byte, networkID uint8) (LongHeader, []byte, error) {
+	return parseOutOfSession(packet, introKey, TokenRequest, networkID)
 }
 
 // ParseOutOfSession authenticates a caller-owned TokenRequest, Retry, Peer
 // Test, or Hole Punch packet. The returned payload aliases packet and is valid
 // only until the caller reuses it.
-func ParseOutOfSession(packet, introKey []byte) (LongHeader, []byte, error) {
-	return parseOutOfSession(packet, introKey, 0)
+func ParseOutOfSession(packet, introKey []byte, networkID uint8) (LongHeader, []byte, error) {
+	return parseOutOfSession(packet, introKey, 0, networkID)
 }
 
 // BuildRetry creates an authenticated SSU2 Retry containing Bob's connection
 // ID and the token bound by the receiver to the source UDP endpoint.
-func BuildRetry(dst, introKey []byte, destinationID, sourceID, token uint64, packetNumber uint32, payload []byte) ([]byte, error) {
+func BuildRetry(dst, introKey []byte, destinationID, sourceID, token uint64, packetNumber uint32, payload []byte, networkID uint8) ([]byte, error) {
 	return buildOutOfSession(dst, introKey, LongHeader{
 		DestinationID: destinationID,
 		PacketNumber:  packetNumber,
 		Type:          Retry,
 		Version:       Version,
-		NetworkID:     NetworkID,
+		NetworkID:     networkID,
 		SourceID:      sourceID,
 		Token:         token,
 	}, payload)
 }
 
 // ParseRetry authenticates one caller-owned Retry packet.
-func ParseRetry(packet, introKey []byte) (LongHeader, []byte, error) {
-	return parseOutOfSession(packet, introKey, Retry)
+func ParseRetry(packet, introKey []byte, networkID uint8) (LongHeader, []byte, error) {
+	return parseOutOfSession(packet, introKey, Retry, networkID)
 }
 
 // BuildPeerTest creates an authenticated out-of-session SSU2 Peer Test packet
 // for phases 5-7. The IDs must come from PeerTestConnectionIDs for the test
 // block nonce.
-func BuildPeerTest(dst, introKey []byte, destinationID, sourceID uint64, packetNumber uint32, payload []byte) ([]byte, error) {
+func BuildPeerTest(dst, introKey []byte, destinationID, sourceID uint64, packetNumber uint32, payload []byte, networkID uint8) ([]byte, error) {
 	return buildOutOfSession(dst, introKey, LongHeader{
 		DestinationID: destinationID,
 		PacketNumber:  packetNumber,
 		Type:          PeerTest,
 		Version:       Version,
-		NetworkID:     NetworkID,
+		NetworkID:     networkID,
 		SourceID:      sourceID,
 	}, payload)
 }
 
 // ParsePeerTest authenticates one caller-owned out-of-session Peer Test packet.
-func ParsePeerTest(packet, introKey []byte) (LongHeader, []byte, error) {
-	return parseOutOfSession(packet, introKey, PeerTest)
+func ParsePeerTest(packet, introKey []byte, networkID uint8) (LongHeader, []byte, error) {
+	return parseOutOfSession(packet, introKey, PeerTest, networkID)
 }
 
 // BuildHolePunch creates an authenticated out-of-session SSU2 Hole Punch.
 // The IDs must come from RelayConnectionIDs for the relay nonce. The header
 // token is ignored by Alice; the Session Request token is in the Relay
 // Response payload block.
-func BuildHolePunch(dst, introKey []byte, destinationID, sourceID, token uint64, packetNumber uint32, payload []byte) ([]byte, error) {
+func BuildHolePunch(dst, introKey []byte, destinationID, sourceID, token uint64, packetNumber uint32, payload []byte, networkID uint8) ([]byte, error) {
 	return buildOutOfSession(dst, introKey, LongHeader{
 		DestinationID: destinationID,
 		PacketNumber:  packetNumber,
 		Type:          HolePunch,
 		Version:       Version,
-		NetworkID:     NetworkID,
+		NetworkID:     networkID,
 		SourceID:      sourceID,
 		Token:         token,
 	}, payload)
 }
 
 // ParseHolePunch authenticates one caller-owned out-of-session Hole Punch.
-func ParseHolePunch(packet, introKey []byte) (LongHeader, []byte, error) {
-	return parseOutOfSession(packet, introKey, HolePunch)
+func ParseHolePunch(packet, introKey []byte, networkID uint8) (LongHeader, []byte, error) {
+	return parseOutOfSession(packet, introKey, HolePunch, networkID)
 }
 
 func buildOutOfSession(dst, introKey []byte, header LongHeader, payload []byte) ([]byte, error) {
@@ -128,7 +128,7 @@ func buildOutOfSession(dst, introKey []byte, header LongHeader, payload []byte) 
 	return dst[:total], nil
 }
 
-func parseOutOfSession(packet, introKey []byte, expected PacketType) (LongHeader, []byte, error) {
+func parseOutOfSession(packet, introKey []byte, expected PacketType, networkID uint8) (LongHeader, []byte, error) {
 	if len(packet) < LongHeaderLen+PacketTagLen+8 || len(packet) > MaxIPv4PacketLen || len(introKey) != cryptography.ChaChaKeySize {
 		return LongHeader{}, nil, ErrHandshake
 	}
@@ -138,7 +138,7 @@ func parseOutOfSession(packet, introKey []byte, expected PacketType) (LongHeader
 	if err := maskHeaderExtension(packet[16:LongHeaderLen], introKey); err != nil {
 		return LongHeader{}, nil, err
 	}
-	header, err := ParseLongHeader(packet[:LongHeaderLen], NetworkID)
+	header, err := ParseLongHeader(packet[:LongHeaderLen], networkID)
 	parseOutOfSessionRejected := err != nil || (expected != 0 && header.Type != expected) || header.DestinationID == 0
 	if !parseOutOfSessionRejected {
 		parseOutOfSessionRejected = header.SourceID == 0

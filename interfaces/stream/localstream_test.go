@@ -1,4 +1,4 @@
-package ivnp
+package stream
 
 import (
 	"bytes"
@@ -10,7 +10,7 @@ import (
 )
 
 func TestLocalStreamNetworkDialListen(t *testing.T) {
-	network := NewLocalStreamNetwork()
+	network := newLocalStreamNetwork()
 	listener, err := ListenerConfig{Network: network}.Listen(context.Background(), "service.i2p")
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +45,7 @@ func TestLocalStreamNetworkDialListen(t *testing.T) {
 }
 
 func TestLocalStreamNetworkRejectsCanceledListen(t *testing.T) {
-	network := NewLocalStreamNetwork()
+	network := newLocalStreamNetwork()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -60,7 +60,7 @@ func TestLocalStreamNetworkRejectsCanceledListen(t *testing.T) {
 }
 
 func TestLocalStreamNetworkCancellationClosesAndReleasesAddress(t *testing.T) {
-	network := NewLocalStreamNetwork()
+	network := newLocalStreamNetwork()
 	ctx, cancel := context.WithCancel(context.Background())
 	listener, err := network.ListenI2P(ctx, "reusable.i2p")
 	if err != nil {
@@ -82,7 +82,7 @@ func TestLocalStreamNetworkCancellationClosesAndReleasesAddress(t *testing.T) {
 
 func TestLocalStreamNetworkCloseRejectsBlockedDial(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		network := NewLocalStreamNetwork().(*localStreamNetwork)
+		network := newLocalStreamNetwork().(*localStreamNetwork)
 		rawListener, err := network.ListenI2P(context.Background(), "closing.i2p")
 		if err != nil {
 			t.Fatal(err)
@@ -124,23 +124,4 @@ func TestLocalStreamNetworkCloseRejectsBlockedDial(t *testing.T) {
 			t.Fatalf("blocked DialI2P error = %v, want net.ErrClosed", dialed.err)
 		}
 	})
-}
-
-func TestLocalListenerAcceptRejectsConnectionAfterCloseStarts(t *testing.T) {
-	listener := &localListener{incoming: make(chan net.Conn, 1), closed: make(chan struct{})}
-	client, server := net.Pipe()
-	defer client.Close()
-	listener.incoming <- server
-	listener.mu.Lock()
-	listener.closing = true
-	listener.mu.Unlock()
-
-	connection, err := listener.Accept()
-	if connection != nil {
-		_ = connection.Close()
-		t.Fatal("Accept returned a connection after listener close started")
-	}
-	if !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("Accept error = %v, want net.ErrClosed", err)
-	}
 }

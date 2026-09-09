@@ -31,7 +31,6 @@ import (
 )
 
 const (
-	defaultSSU2NetworkID        = 2
 	defaultSSU2HandshakeTimeout = 30 * time.Second
 	defaultSSU2MaxSessions      = 256
 	defaultSSU2MaxPending       = 64
@@ -796,12 +795,6 @@ func NewSSU2Manager(config SSU2ManagerConfig) (*SSU2Manager, error) {
 	if _, err := ecdh.X25519().NewPrivateKey(config.StaticPrivate); err != nil {
 		return nil, ErrSSU2ManagerConfig
 	}
-	if config.NetworkID == 0 {
-		config.NetworkID = defaultSSU2NetworkID
-	}
-	if config.NetworkID != defaultSSU2NetworkID {
-		return nil, ErrSSU2ManagerConfig
-	}
 	if config.HandshakeTimeout <= 0 {
 		config.HandshakeTimeout = defaultSSU2HandshakeTimeout
 	}
@@ -1241,7 +1234,7 @@ func (m *SSU2Manager) SendPeerTest(ctx context.Context, peer foundation.Hash, te
 	}
 
 	var packetStorage [dataplanessu2.MaxIPv4PacketLen]byte
-	packet, err := dataplanessu2.BuildPeerTest(packetStorage[:], address.intro[:], destinationID, sourceID, packetNumber, payload)
+	packet, err := dataplanessu2.BuildPeerTest(packetStorage[:], address.intro[:], destinationID, sourceID, packetNumber, payload, m.networkID)
 	if err != nil {
 		return err
 	}
@@ -1473,8 +1466,12 @@ func (m *SSU2Manager) syncRelayTagPublication() {
 
 func (m *SSU2Manager) relayPublicationSnapshot() (ssu2IntroducerPublisher, uint64, []SSU2Introducer) {
 	m.mu.RLock()
-	bindings := m.bindings
+	publisher, _ := m.bindings.LocalInfo.(ssu2IntroducerPublisher)
 	revision := m.relayRevision
+	if publisher == nil {
+		m.mu.RUnlock()
+		return nil, revision, nil
+	}
 	now := m.nowLocked()
 	leases := make([]SSU2Introducer, 0, ssu2RelayTarget)
 	for _, lease := range m.advertisedRelays {
@@ -1492,7 +1489,6 @@ func (m *SSU2Manager) relayPublicationSnapshot() (ssu2IntroducerPublisher, uint6
 	if len(leases) > ssu2RelayTarget {
 		leases = leases[:ssu2RelayTarget]
 	}
-	publisher, _ := bindings.LocalInfo.(ssu2IntroducerPublisher)
 	return publisher, revision, leases
 }
 
@@ -1816,6 +1812,9 @@ func (m *SSU2Manager) resolveOutbound(peer foundation.Hash) (ssu2PeerAddress, *n
 	if err != nil {
 		return ssu2PeerAddress{}, nil, errors.Join(ErrSSU2Peer, err)
 	}
+	if !routerInfoMatchesNetwork(info, m.networkID) {
+		return ssu2PeerAddress{}, nil, ErrSSU2Peer
+	}
 	address, err := m.selectSSU2Address(info)
 	if err != nil {
 		return ssu2PeerAddress{}, nil, err
@@ -1890,7 +1889,7 @@ func (m *SSU2Manager) sendTokenRequest(pending *ssu2OutboundPending) error {
 	if err != nil {
 		return err
 	}
-	packet, err := dataplanessu2.BuildTokenRequest(make([]byte, dataplanessu2.MaxIPv4PacketLen), pending.address.intro[:], pending.destinationID, pending.sourceID, packetNumber, payload)
+	packet, err := dataplanessu2.BuildTokenRequest(make([]byte, dataplanessu2.MaxIPv4PacketLen), pending.address.intro[:], pending.destinationID, pending.sourceID, packetNumber, payload, m.networkID)
 	if err != nil {
 		return err
 	}
@@ -2148,7 +2147,7 @@ func (m *SSU2Manager) handlePacket(packet []byte, remote netip.AddrPort) {
 		}
 	}
 
-	if header, err := dataplanessu2.PeekSessionRequest(packet, m.introKey); err == nil {
+	if header, err := dataplanessu2.PeekSessionRequest(packet, m.introKey, m.networkID); err == nil {
 		m.handleSessionRequest(packet, ssu2PacketAddr{value: remote}, header)
 		return
 	}
@@ -2161,7 +2160,7 @@ func (m *SSU2Manager) handlePacket(packet []byte, remote netip.AddrPort) {
 			return
 		}
 	}
-	header, payload, err := dataplanessu2.ParseOutOfSession(packet, m.introKey)
+	header, payload, err := dataplanessu2.ParseOutOfSession(packet, m.introKey, m.networkID)
 	if err != nil || !m.timestampValid(payload) {
 		return
 	}
@@ -2189,7 +2188,7 @@ func (m *SSU2Manager) handleOutbound(packet []byte, pending *ssu2OutboundPending
 	}()
 	scratch := pending.packet[:len(packet)]
 	copy(scratch, packet)
-	if header, payload, err := dataplanessu2.ParseRetry(scratch, pending.address.intro[:]); err == nil {
+	if header, payload, err := dataplanessu2.ParseRetry(scratch, pending.address.intro[:], m.networkID); err == nil {
 		if header.DestinationID != pending.sourceID || header.SourceID != pending.destinationID || header.Token == 0 || !m.timestampValid(payload) {
 			return true
 		}
@@ -2748,7 +2747,7 @@ func (m *SSU2Manager) sendSessionRequestLocked(pending *ssu2OutboundPending, tok
 	if !active || pending.initiator != nil {
 		return
 	}
-	initiator, err := dataplanessu2.NewInitiator(pending.address.static[:], pending.address.intro[:], pending.destinationID, pending.sourceID)
+	initiator, err := dataplanessu2.NewInitiator(pending.address.static[:], pending.address.intro[:], pending.destinationID, pending.sourceID, m.networkID)
 	if err != nil {
 		m.markOutboundFailed(pending, err)
 		return
@@ -2873,7 +2872,7 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 		return
 	}
 	m.mu.Unlock()
-	responder, requestHeader, payload, err := dataplanessu2.ParseSessionRequest(packet, m.staticPrivate, m.introKey)
+	responder, requestHeader, payload, err := dataplanessu2.ParseSessionRequest(packet, m.staticPrivate, m.introKey, m.networkID)
 	if err != nil || requestHeader != header || !m.timestampValid(payload) {
 		return
 	}
@@ -3721,7 +3720,7 @@ func (m *SSU2Manager) sendRetry(remote net.Addr, request dataplanessu2.LongHeade
 	if err != nil {
 		return
 	}
-	packet, err := dataplanessu2.BuildRetry(make([]byte, dataplanessu2.MaxIPv4PacketLen), m.introKey, request.SourceID, request.DestinationID, token, packetNumber, payload)
+	packet, err := dataplanessu2.BuildRetry(make([]byte, dataplanessu2.MaxIPv4PacketLen), m.introKey, request.SourceID, request.DestinationID, token, packetNumber, payload, m.networkID)
 	if err == nil {
 		_ = m.writeTo(packet, remote)
 	}
@@ -3762,11 +3761,11 @@ func (m *SSU2Manager) localConfirmedPayload(maxPacket int) ([]byte, error) {
 }
 
 func (m *SSU2Manager) admitSSU2Peer(peer foundation.NetworkDatabaseRouterInfo, static []byte, now time.Time) bool {
-	if m.peers == nil {
+	if m.peers == nil || !routerInfoMatchesNetwork(peer, m.networkID) {
 		return false
 	}
 	if current, ok := m.peers.RouterInfo(peer.Hash()); ok && current.Published > peer.Published {
-		if !hasSSU2Static(current, static) {
+		if !routerInfoMatchesNetwork(current, m.networkID) || !hasSSU2Static(current, static) {
 			return false
 		}
 	}

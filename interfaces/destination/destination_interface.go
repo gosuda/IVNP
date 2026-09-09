@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"sync"
+	"time"
 
 	"gosuda.org/ivnp/foundation"
 )
@@ -26,8 +27,39 @@ type LeaseSetPolicy struct {
 // DestinationSpec holds configuration and keys for creating a local destination.
 // The destination controller creates an internal copy of the key material.
 type DestinationSpec struct {
-	Local  *foundation.LocalDestination
-	Policy LeaseSetPolicy
+	Local        *foundation.LocalDestination
+	Policy       LeaseSetPolicy
+	Tunnels      *TunnelPoolConfig
+	RemoteAccess []RemoteLeaseSetAccess
+}
+
+type TunnelDirectionConfig struct {
+	Hops   int
+	Count  int
+	Backup int
+}
+
+type TunnelPoolConfig struct {
+	Inbound     TunnelDirectionConfig
+	Outbound    TunnelDirectionConfig
+	RenewBefore time.Duration
+}
+
+type RemoteAuthKind uint8
+
+const (
+	RemoteAuthNone RemoteAuthKind = iota
+	RemoteAuthDH
+	RemoteAuthPSK
+)
+
+type RemoteLeaseSetAccess struct {
+	Identity  []byte
+	Secret    []byte
+	Kind      RemoteAuthKind
+	DHPrivate [32]byte
+	DHPublic  [32]byte
+	PSK       [32]byte
 }
 
 // DestinationRoute matches an I2CP protocol and local port. Port 0 acts as a wildcard.
@@ -100,9 +132,22 @@ type ModernDatagramEndpoint interface {
 	MarshalDatagramV3To(dst []byte, payload []byte) (int, error)
 }
 
+// DatagramPayloadEndpoint reports the local application-byte limit for a
+// protocol using the endpoint's current signing identity.
+type DatagramPayloadEndpoint interface {
+	DatagramMaxPayload(protocol uint8) (int, error)
+}
+
 // SourcePortDestinationEndpoint is an optional interface for endpoints that allow selecting the local virtual port.
 type SourcePortDestinationEndpoint interface {
 	DialI2PFromPort(context.Context, string, uint16) (net.Conn, error)
+}
+
+// StreamDestinationEndpoint binds exact virtual ports and detaches successful
+// listeners from the setup context. DialStream reserves its source port.
+type StreamDestinationEndpoint interface {
+	DialStream(context.Context, string, uint16) (net.Conn, error)
+	ListenStream(context.Context, string) (net.Listener, error)
 }
 
 // BoundedDestinationEndpoint supports subscriptions bounded by both per-route queue limits and a shared byte budget.

@@ -16,6 +16,7 @@ import (
 	"gosuda.org/ivnp/controlplane/internal/tunnel"
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/observability"
 	"gosuda.org/ivnp/state"
@@ -392,25 +393,40 @@ func (p destinationRequestPath) SendBlock(ctx context.Context, id uint32, block 
 	return p.tunnels.SendBlockPrepared(ctx, entry.Circuit, block)
 }
 
-func (f *destinationRuntimeFactory) create(name string, destination *foundation.LocalDestination, policy *state.SecureStateEncryptedLeaseSetPolicy, remotePolicies []state.SecureStateRemoteELSAuthorization, requestedCrypto []uint16) (*destinationRuntime, error) {
-	createSelected := f == nil || destination == nil || f.database == nil || f.service == nil || f.tunnels == nil || f.destinations == nil || f.replyKeys == nil || f.replySender == nil || f.transport == nil || f.profiles == nil || f.now == nil || f.clockNow == nil || f.garlicReceiver == nil || f.status == nil || f.buildReplies == nil || f.requests == nil
+func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalDestination, policy *state.SecureStateEncryptedLeaseSetPolicy, remotePolicies []state.SecureStateRemoteELSAuthorization, requestedCrypto []uint16, requestedTunnels *destination.TunnelPoolConfig) (*destinationRuntime, error) {
+	createSelected := f == nil || local == nil || f.database == nil || f.service == nil || f.tunnels == nil || f.destinations == nil || f.replyKeys == nil || f.replySender == nil || f.transport == nil || f.profiles == nil || f.now == nil || f.clockNow == nil || f.garlicReceiver == nil || f.status == nil || f.buildReplies == nil || f.requests == nil
 	if !createSelected {
 		createSelected = f.publishers == nil
 	}
 	if createSelected {
-		if destination != nil {
-			destination.ReleaseSensitive()
+		if local != nil {
+			local.ReleaseSensitive()
 		}
 		return nil, ErrDestinationCreation
 	}
 	releaseDestination := true
 	defer func() {
 		if releaseDestination {
-			destination.ReleaseSensitive()
+			local.ReleaseSensitive()
 		}
 	}()
+	tunnelPolicy := destination.TunnelPoolConfig{
+		Inbound:     destination.TunnelDirectionConfig{Hops: f.cfg.Tunnel.Hops, Count: f.cfg.Tunnel.ClientInboundTarget},
+		Outbound:    destination.TunnelDirectionConfig{Hops: f.cfg.Tunnel.Hops, Count: f.cfg.Tunnel.ClientOutboundTarget},
+		RenewBefore: f.cfg.Tunnel.RenewBefore,
+	}
+	capacity := f.cfg.Tunnel.ClientPoolCapacity
+	lifetime := f.cfg.Tunnel.Lifetime
+	if requestedTunnels != nil {
+		tunnelPolicy = *requestedTunnels
+		if err := validateDestinationTunnels(tunnelPolicy); err != nil {
+			return nil, err
+		}
+		capacity = 2 * (tunnelPolicy.Inbound.Count + tunnelPolicy.Inbound.Backup + tunnelPolicy.Outbound.Count + tunnelPolicy.Outbound.Backup)
+		lifetime = 10 * time.Minute
+	}
 
-	ratchet, err := dataplane.GarlicNewRatchetManager(destination, dataplane.GarlicRatchetConfig{Metrics: f.metrics})
+	ratchet, err := dataplane.GarlicNewRatchetManager(local, dataplane.GarlicRatchetConfig{Metrics: f.metrics})
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +437,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 		}
 	}()
 
-	owner := destination.Hash()
+	owner := local.Hash()
 	preferredPeers := append([]foundation.Hash(nil), f.preferredPeers...)
 	if len(preferredPeers) > 1 {
 		// Spread destination LeaseSet publication across the verified bootstrap
@@ -430,7 +446,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 		offset := 1 + int(owner[0])%(len(preferredPeers)-1)
 		preferredPeers = append(preferredPeers[offset:], preferredPeers[:offset]...)
 	}
-	pool := tunnel.NewOwnedPool(owner, f.cfg.Tunnel.ClientPoolCapacity)
+	pool := tunnel.NewOwnedPool(owner, capacity)
 	var runtime *destinationRuntime
 	profiles := f.profiles
 	build, err := tunnel.NewBuildManager(tunnel.BuildManagerConfig{
@@ -462,16 +478,16 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 		}
 	}()
 	inboundSource, err := tunnel.NewNetDBInboundBuildSource(tunnel.NetDBInboundBuildSourceConfig{
-		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: f.cfg.Tunnel.Hops,
-		Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
+		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: tunnelPolicy.Inbound.Hops,
+		Lifetime: uint64(lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
 		Eligible: f.eligible, Connected: f.connected, AllowUnknownTransports: f.allowUnknownTransports,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create destination inbound build source: %w", err)
 	}
 	outboundSource, err := tunnel.NewNetDBOutboundBuildSource(tunnel.NetDBOutboundBuildSourceConfig{
-		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: f.cfg.Tunnel.Hops,
-		Lifetime: uint64(f.cfg.Tunnel.Lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
+		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: tunnelPolicy.Outbound.Hops,
+		Lifetime: uint64(lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
 		Eligible: f.eligible, Connected: f.connected, AllowUnknownTransports: f.allowUnknownTransports,
 	})
 	if err != nil {
@@ -479,8 +495,9 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	}
 	maintainer, err := tunnel.NewPairedPoolMaintainer(tunnel.PairedPoolMaintainerConfig{
 		Pool: pool, Runtime: f.tunnels, Builder: build, InboundSource: inboundSource, OutboundSource: outboundSource,
-		Now: f.now, InboundTarget: f.cfg.Tunnel.ClientInboundTarget, OutboundTarget: f.cfg.Tunnel.ClientOutboundTarget,
-		RenewBefore: uint64(f.cfg.Tunnel.RenewBefore.Milliseconds()),
+		Now: f.now, InboundTarget: tunnelPolicy.Inbound.Count, OutboundTarget: tunnelPolicy.Outbound.Count,
+		InboundBackup: tunnelPolicy.Inbound.Backup, OutboundBackup: tunnelPolicy.Outbound.Backup,
+		RenewBefore: uint64(tunnelPolicy.RenewBefore.Milliseconds()),
 	})
 	if err != nil {
 		return nil, err
@@ -560,7 +577,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	for index, cryptoType := range requestedCrypto {
 		cryptoTypes[index] = foundation.CryptoKeyType(cryptoType)
 	}
-	localLeaseSet, err := netdb.NewLocalLeaseSet2WithTypes(destination, cryptoTypes)
+	localLeaseSet, err := netdb.NewLocalLeaseSet2WithTypes(local, cryptoTypes)
 	if err != nil {
 		return nil, err
 	}
@@ -570,14 +587,14 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 			staticKeyLookup:     tunnel.NewNetDBBuildStaticKeyLookup(f.database.Routers()),
 			seedReplyRouterInfo: f.seedRouterInfo,
 		},
-		Discovery: requests, Sign: destination.Sign, Now: f.now, Random: randomNonZeroID, FloodfillLimit: netdb.PublicationFloodfillK,
-		RepublishBefore: uint64(f.cfg.Tunnel.RenewBefore.Milliseconds()), Registry: f.publicationTokens,
+		Discovery: requests, Sign: local.Sign, Now: f.now, Random: randomNonZeroID, FloodfillLimit: netdb.PublicationFloodfillK,
+		RepublishBefore: uint64(tunnelPolicy.RenewBefore.Milliseconds()), Registry: f.publicationTokens,
 		ReplyPath: daemonReplyRoute{local: f.localRouter, maintainer: maintainer, now: f.now}, PreferredTargets: preferredPeers, Logger: f.logger,
 	}
 	var encrypted *netdb.LocalEncryptedLeaseSet
 	if policy != nil {
 		var encryptedErr error
-		encrypted, encryptedErr = netdb.NewLocalEncryptedLeaseSet(destination, localLeaseSet, netdb.EncryptedLeaseSetAuthorization{DHClients: policy.DHClients, PSKClients: policy.PSKClients}, policy.Secret)
+		encrypted, encryptedErr = netdb.NewLocalEncryptedLeaseSet(local, localLeaseSet, netdb.EncryptedLeaseSetAuthorization{DHClients: policy.DHClients, PSKClients: policy.PSKClients}, policy.Secret)
 		if encryptedErr != nil {
 			return nil, encryptedErr
 		}
@@ -590,7 +607,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	}
 	published := &destinationPublisher{publisher: publisher, sender: sender}
 
-	runtime = &destinationRuntime{name: name, local: destination, ratchet: ratchet, pool: pool, profiles: profiles, build: build, maintainer: maintainer, health: health, requests: requests, publisher: published, tunnels: f.tunnels, sender: sender, bandwidth: bandwidth, now: f.now}
+	runtime = &destinationRuntime{name: name, local: local, ratchet: ratchet, pool: pool, profiles: profiles, build: build, maintainer: maintainer, health: health, requests: requests, publisher: published, tunnels: f.tunnels, sender: sender, bandwidth: bandwidth, now: f.now}
 	runtime.requestPath = requestPath
 	runtime.unregister = append(runtime.unregister,
 		f.buildReplies.register(build),
@@ -607,7 +624,7 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	}
 	runtime.unregister = append(runtime.unregister, removeGarlic)
 	session, createErr := f.destinations.Create(dataplane.RouterDestinationSessionConfig{
-		Streaming: dataplane.StreamingTunnelTunnelNetworkConfig{Destination: destination, Sender: sender, HandshakeObserver: sender}, Default: name == "default", Release: runtime.release,
+		Streaming: dataplane.StreamingTunnelTunnelNetworkConfig{Destination: local, Sender: sender, HandshakeObserver: sender}, Default: name == "default", Release: runtime.release,
 	})
 	if createErr != nil {
 		runtime.release()
@@ -619,6 +636,25 @@ func (f *destinationRuntimeFactory) create(name string, destination *foundation.
 	releaseBuild, releaseSender = false, false
 	releaseMaintainer, releaseHealth, releaseRequests = false, false, false
 	return runtime, nil
+}
+
+func validateDestinationTunnels(policy destination.TunnelPoolConfig) error {
+	for _, direction := range [...]destination.TunnelDirectionConfig{policy.Inbound, policy.Outbound} {
+		if direction.Hops < 1 || direction.Hops > 7 {
+			return tunnel.ErrPairedMaintenanceConfig
+		}
+		if direction.Count < 1 || direction.Count > 16 {
+			return tunnel.ErrPairedMaintenanceConfig
+		}
+		validBackup := direction.Backup >= 0 && direction.Backup <= 15
+		if !validBackup || direction.Count+direction.Backup > 16 {
+			return tunnel.ErrPairedMaintenanceConfig
+		}
+	}
+	if policy.RenewBefore < time.Second || policy.RenewBefore >= 10*time.Minute {
+		return tunnel.ErrPairedMaintenanceConfig
+	}
+	return nil
 }
 
 // CreateDestination creates and starts a new local destination with the given name and policy.
@@ -698,7 +734,7 @@ func (d *Controller) CreateDestination(ctx context.Context, name string, policy 
 	d.mu.Unlock()
 	clear(encoded)
 
-	runtime, err := d.destinationFactory.create(name, destination, durable, nil, nil)
+	runtime, err := d.destinationFactory.create(name, destination, durable, nil, nil, nil)
 	if err != nil {
 		d.mu.Lock()
 		rollbackErr := d.store.Save(previous)

@@ -234,6 +234,41 @@ func TestPairedMaintainerRenewsDirectionsWithOverlap(t *testing.T) {
 		t.Fatal("old outbound removed before replacement completed")
 	}
 }
+
+func TestPairedMaintainerBuildsReservesAfterActiveTargetsAreSatisfied(t *testing.T) {
+	const now = uint64(1_700_000_000_000)
+	inbound := &pairedInboundSource{builds: []InboundBuild{pairedInboundBuild(t, 101, now+10_000)}}
+	outbound := &pairedOutboundSource{builds: []OutboundBuild{rotationBuild(t, 201, now+10_000)}}
+	initial, pool, runtime, manager, _ := newPairedMaintainer(t, now, 1, 100, inbound, outbound)
+	defer manager.ReleaseSensitive()
+	if err := initial.Close(); err != nil {
+		t.Fatal(err)
+	}
+	maintainer, err := NewPairedPoolMaintainer(PairedPoolMaintainerConfig{
+		Pool: pool, Runtime: runtime, Builder: manager, InboundSource: inbound, OutboundSource: outbound,
+		Now: func() uint64 { return now }, InboundTarget: 1, OutboundTarget: 1,
+		InboundBackup: 1, OutboundBackup: 1, RenewBefore: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintainer.Close()
+	if err := pool.Add(Entry{ID: 100, Direction: Inbound, Expires: now + 10_000, Gateway: foundation.Hash{3}, GatewayTunnelID: 700}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 200, FirstHop: foundation.Hash{4}, NextTunnelID: 201, ExpiresAt: now + 10_000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.Add(Entry{ID: 200, Circuit: buildCircuitToken(t, runtime, 200), Direction: Outbound, Expires: now + 10_000, HopCount: 1, Hops: [foundation.I2NPMaxVariableBuildRecords]foundation.Hash{{4}}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if started, err := maintainer.Maintain(context.Background()); err != nil || started != 2 {
+		t.Fatalf("reserve builds started=%d err=%v, want two", started, err)
+	}
+	if started, err := maintainer.Maintain(context.Background()); err != nil || started != 0 {
+		t.Fatalf("pending reserve demand duplicated: started=%d err=%v", started, err)
+	}
+}
 func TestPairedMaintainerCloseCancelsAndJoinsActiveTransition(t *testing.T) {
 	const now = uint64(1_700_000_000_000)
 	sender := new(buildCaptureSender)

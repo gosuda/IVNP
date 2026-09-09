@@ -105,7 +105,7 @@ func (m *DestinationManager) Session(hash foundation.Hash) (*DestinationSession,
 }
 
 // SetDefault chooses the session used when the manager is supplied directly as
-// Router.StreamBackend or ivnp.StreamNetwork.
+// Router.StreamBackend or stream.StreamNetwork.
 func (m *DestinationManager) SetDefault(hash foundation.Hash) error {
 	if m == nil {
 		return ErrDestinationNotFound
@@ -236,8 +236,7 @@ func (s *DestinationSession) StreamingStats() dataplanestreamingtunnel.NetworkSt
 	return s.stream.Stats()
 }
 
-// DialI2P and ListenI2P make a session directly usable with ivnp.Dialer and
-// ivnp.ListenerConfig.
+// DialI2P and ListenI2P support the daemon's interfaces/stream adapters.
 func (s *DestinationSession) DialI2P(ctx context.Context, address string) (net.Conn, error) {
 	if s == nil || s.stream == nil {
 		return nil, net.ErrClosed
@@ -259,6 +258,20 @@ func (s *DestinationSession) ListenI2P(ctx context.Context, address string) (net
 	return s.stream.ListenI2P(ctx, address)
 }
 
+func (s *DestinationSession) DialStream(ctx context.Context, address string, localPort uint16) (net.Conn, error) {
+	if s == nil || s.stream == nil {
+		return nil, net.ErrClosed
+	}
+	return s.stream.DialStream(ctx, address, localPort)
+}
+
+func (s *DestinationSession) ListenStream(ctx context.Context, address string) (net.Listener, error) {
+	if s == nil || s.stream == nil {
+		return nil, net.ErrClosed
+	}
+	return s.stream.ListenStream(ctx, address)
+}
+
 // SendMessage routes a non-streaming destination payload. A payload addressed
 // to this session is delivered through the authenticated local ingress path;
 // remote payloads use this Destination's isolated sender and pool. Local
@@ -275,7 +288,14 @@ func (s *DestinationSession) SendMessage(ctx context.Context, delivery dataplane
 		return dataplanestreamingtunnel.ErrTunnelDestination
 	}
 	if delivery.To == s.hash && delivery.Protocol != dataplanestreamingtunnel.ProtocolStreaming {
-		return s.manager.deliverLocalMessage(s, delivery)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := s.manager.deliverLocalMessage(s, delivery)
+		if errors.Is(err, ErrDestinationBackpressure) {
+			return nil
+		}
+		return err
 	}
 	return s.sender.SendTunnel(ctx, delivery)
 }
@@ -373,6 +393,10 @@ func (s *destinationSubscription) enqueue(delivery dataplanestreamingtunnel.Deli
 	if s.closed {
 		s.mu.Unlock()
 		return net.ErrClosed
+	}
+	if len(s.messages) == cap(s.messages) {
+		s.mu.Unlock()
+		return ErrDestinationBackpressure
 	}
 	if s.maxBytes > 0 && (int64(size) > s.maxBytes || s.queuedBytes > s.maxBytes-int64(size)) {
 		s.mu.Unlock()

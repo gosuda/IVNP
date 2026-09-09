@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"gosuda.org/ivnp"
+	"gosuda.org/ivnp/state"
 )
 
 type webUIConfigView struct {
@@ -191,7 +191,7 @@ func (s *WebUIServer) updateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nextText := updateINI(string(current), updates)
-	nextConfig, err := ivnp.ParseConfig(nextText, s.config.ConfigPath)
+	nextConfig, err := state.ConfigurationParseOperating(nextText, s.config.ConfigPath)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
@@ -216,7 +216,7 @@ func (s *WebUIServer) updateConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, http.StatusOK, configUpdateResult{Status: "saved", Applied: applied, RestartRequired: restartRequired})
 }
 
-func newWebUIConfigView(config, runtime ivnp.Config) webUIConfigView {
+func newWebUIConfigView(config, runtime state.ConfigurationOperating) webUIConfigView {
 	view := webUIConfigView{}
 	view.Network.ID, view.Network.IPv4, view.Network.IPv6 = config.Network.ID, config.Network.IPv4, config.Network.IPv6
 	view.Router.Floodfill, view.Router.Family, view.Router.Version = config.Router.Floodfill, config.Router.Family, config.Router.Version
@@ -246,7 +246,7 @@ func newWebUIConfigView(config, runtime ivnp.Config) webUIConfigView {
 	return view
 }
 
-func configINIUpdates(request webUIConfigUpdate, current ivnp.Config) []iniUpdate {
+func configINIUpdates(request webUIConfigUpdate, current state.ConfigurationOperating) []iniUpdate {
 	boolean := strconv.FormatBool
 	integer := strconv.Itoa
 	return []iniUpdate{
@@ -375,7 +375,7 @@ func applyINIUpdate(line, section string, updates []iniUpdate, seenKeys map[stri
 	return "", false
 }
 
-func changedConfigKeys(previous, next ivnp.Config) (applied, restartRequired []string) {
+func changedConfigKeys(previous, next state.ConfigurationOperating) (applied, restartRequired []string) {
 	applied = []string{}
 	restartRequired = []string{}
 	if previous.Log.Level != next.Log.Level {
@@ -395,7 +395,7 @@ func changedConfigKeys(previous, next ivnp.Config) (applied, restartRequired []s
 	return applied, restartRequired
 }
 
-func configComparableValues(config ivnp.Config) map[string]string {
+func configComparableValues(config state.ConfigurationOperating) map[string]string {
 	view := newWebUIConfigView(config, config)
 	updates := configINIUpdates(webUIConfigUpdateFromView(view), config)
 	values := make(map[string]string, len(updates))
@@ -436,12 +436,12 @@ func webUIConfigUpdateFromView(view webUIConfigView) webUIConfigUpdate {
 	return update
 }
 
-func configRequiresRestart(config, runtime ivnp.Config) bool {
+func configRequiresRestart(config, runtime state.ConfigurationOperating) bool {
 	config.Log.Level = runtime.Log.Level
 	return !reflect.DeepEqual(config, runtime)
 }
 
-func cloneConfig(config ivnp.Config) ivnp.Config {
+func cloneConfig(config state.ConfigurationOperating) state.ConfigurationOperating {
 	config.NetDB.BootstrapRouterInfoPaths = append([]string(nil), config.NetDB.BootstrapRouterInfoPaths...)
 	config.Reseed.Endpoints = append([]string(nil), config.Reseed.Endpoints...)
 	config.AddressBook.Subscriptions = append([]string(nil), config.AddressBook.Subscriptions...)

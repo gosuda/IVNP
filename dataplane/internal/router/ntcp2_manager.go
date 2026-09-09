@@ -26,7 +26,6 @@ import (
 )
 
 const (
-	defaultNTCP2NetworkID        = 2
 	defaultNTCP2HandshakeTimeout = 30 * time.Second
 	defaultNTCP2MaxSessions      = 256
 	defaultNTCP2MaxPending       = 64
@@ -50,12 +49,14 @@ type NTCP2ManagerConfig struct {
 	StaticIV         []byte
 	NetworkID        uint8
 	HandshakeTimeout time.Duration
-	MaxClockSkew     time.Duration
-	MaxSessions      int
-	MaxPending       int
-	PanicReporter    ingress.Reporter
-	Metrics          *observability.Registry
-	Logger           *slog.Logger
+	// IdleTimeout closes established connections after inactivity. Zero disables it.
+	IdleTimeout   time.Duration
+	MaxClockSkew  time.Duration
+	MaxSessions   int
+	MaxPending    int
+	PanicReporter ingress.Reporter
+	Metrics       *observability.Registry
+	Logger        *slog.Logger
 }
 
 type ntcp2SessionRequestReader func(io.Reader, []byte, []byte, []byte, uint8, bool) (*dataplanentcp2.Responder, dataplanentcp2.SessionRequestOptions, error)
@@ -76,6 +77,7 @@ type NTCP2Manager struct {
 	staticIV           [aes.BlockSize]byte
 	networkID          uint8
 	timeout            time.Duration
+	idleTimeout        time.Duration
 	maxClockSkew       time.Duration
 	maxSessions        int
 	mu                 sync.RWMutex
@@ -121,8 +123,8 @@ func NewNTCP2Manager(config NTCP2ManagerConfig) (*NTCP2Manager, error) {
 	if _, err := ecdh.X25519().NewPrivateKey(config.StaticPrivate); err != nil {
 		return nil, ErrNTCP2ManagerConfig
 	}
-	if config.NetworkID == 0 {
-		config.NetworkID = defaultNTCP2NetworkID
+	if config.IdleTimeout < 0 {
+		return nil, ErrNTCP2ManagerConfig
 	}
 	if config.HandshakeTimeout <= 0 {
 		config.HandshakeTimeout = defaultNTCP2HandshakeTimeout
@@ -140,6 +142,7 @@ func NewNTCP2Manager(config NTCP2ManagerConfig) (*NTCP2Manager, error) {
 		peers:              config.Peers,
 		networkID:          config.NetworkID,
 		timeout:            config.HandshakeTimeout,
+		idleTimeout:        config.IdleTimeout,
 		maxClockSkew:       config.MaxClockSkew,
 		maxSessions:        config.MaxSessions,
 		done:               make(chan struct{}),
@@ -458,8 +461,12 @@ func (m *NTCP2Manager) acceptOne(conn net.Conn) {
 	if err != nil || peer.Hash() == localHash || !m.admitInboundPeer(peer, static, nowMillis) {
 		return
 	}
+	if conn.SetDeadline(time.Time{}) != nil {
+		return
+	}
+	conn = m.establishedConn(conn)
 	session, err := responder.NewDataSession(conn)
-	if err != nil || conn.SetDeadline(time.Time{}) != nil || !m.install(peer.Hash(), session) {
+	if err != nil || !m.install(peer.Hash(), session) {
 		return
 	}
 	conn = nil
@@ -482,6 +489,9 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer foundation.Hash) e
 	info, err := m.peers.DialRouterInfo(peer, uint64(bindings.Clock.Now().UnixMilli()))
 	if err != nil {
 		return errors.Join(ErrNTCP2Peer, err)
+	}
+	if !routerInfoMatchesNetwork(info, m.networkID) {
+		return ErrNTCP2Peer
 	}
 	remote, err := selectNTCP2AddressForNetwork(info, ntcp2AddressSelection(bindings.NTCP2))
 	if err != nil {
@@ -563,8 +573,17 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer foundation.Hash) e
 	if m.logger != nil {
 		m.logger.Debug("public transport handshake phase", "transport", "NTCP2", "peer", routerHashDiagnostic(peer), "phase", "session_confirmed_sent")
 	}
-	session, err := initiator.NewDataSession(conn)
-	if err != nil || conn.SetDeadline(time.Time{}) != nil {
+	if err = conn.SetDeadline(time.Time{}); err != nil {
+		return err
+	}
+	dataConn := m.establishedConn(conn)
+	defer func() {
+		if !keep {
+			_ = dataConn.Close()
+		}
+	}()
+	session, err := initiator.NewDataSession(dataConn)
+	if err != nil {
 		return err
 	}
 	if !m.install(peer, session) {
@@ -598,6 +617,78 @@ func (m *NTCP2Manager) install(peer foundation.Hash, session *dataplanentcp2.Ses
 	m.wg.Add(1)
 	go m.readSession(peer, session)
 	return true
+}
+
+// The inactivity timer never changes socket deadlines: caller deadlines and
+// handshake deadlines remain independent of the established transport lifetime.
+func (m *NTCP2Manager) establishedConn(conn net.Conn) net.Conn {
+	if m.idleTimeout == 0 {
+		return conn
+	}
+	idle := &ntcp2IdleConn{Conn: conn, timeout: m.idleTimeout, lastActivity: time.Now()}
+	idle.mu.Lock()
+	idle.timer = time.AfterFunc(idle.timeout, idle.expire)
+	idle.mu.Unlock()
+	return idle
+}
+
+type ntcp2IdleConn struct {
+	net.Conn
+	mu           sync.Mutex
+	timeout      time.Duration
+	lastActivity time.Time
+	timer        *time.Timer
+	closed       bool
+}
+
+func (c *ntcp2IdleConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.recordActivity()
+	}
+	return n, err
+}
+
+func (c *ntcp2IdleConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if n > 0 {
+		c.recordActivity()
+	}
+	return n, err
+}
+
+func (c *ntcp2IdleConn) recordActivity() {
+	c.mu.Lock()
+	c.lastActivity = time.Now()
+	c.mu.Unlock()
+}
+
+func (c *ntcp2IdleConn) expire() {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	if remaining := c.timeout - time.Since(c.lastActivity); remaining > 0 {
+		c.timer.Reset(remaining)
+		c.mu.Unlock()
+		return
+	}
+	c.closed = true
+	c.mu.Unlock()
+	_ = c.Conn.Close()
+}
+
+func (c *ntcp2IdleConn) Close() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	c.timer.Stop()
+	c.mu.Unlock()
+	return c.Conn.Close()
 }
 
 func (m *NTCP2Manager) readSession(peer foundation.Hash, session *dataplanentcp2.Session) {
@@ -697,7 +788,7 @@ func (m *NTCP2Manager) handleNTCP2RouterInfoBlock(peer foundation.Hash, data []b
 		return false
 	}
 	info, err := foundation.NetworkDatabaseParseRouterInfo(data[1:])
-	if err != nil || info.Hash() != peer {
+	if err != nil || info.Hash() != peer || !routerInfoMatchesNetwork(info, m.networkID) {
 		return false
 	}
 	valid, err := info.Verify()
@@ -772,14 +863,14 @@ func validateNTCP2HandshakePayload(payload, static []byte) (foundation.NetworkDa
 }
 
 func (m *NTCP2Manager) admitInboundPeer(peer foundation.NetworkDatabaseRouterInfo, static []byte, nowMillis uint64) bool {
-	if m.peers == nil {
+	if m.peers == nil || !routerInfoMatchesNetwork(peer, m.networkID) {
 		return false
 	}
 	if current, ok := m.peers.RouterInfo(peer.Hash()); ok && current.Published > peer.Published {
 		// The current, newer RouterInfo owns the live static key. An archived
 		// RouterInfo can authenticate only if its handshake key still matches,
 		// and Database admission below retains the newer wire record.
-		if !hasNTCP2Static(current, static) {
+		if !routerInfoMatchesNetwork(current, m.networkID) || !hasNTCP2Static(current, static) {
 			return false
 		}
 	}

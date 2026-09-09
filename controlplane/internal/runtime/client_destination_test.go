@@ -71,6 +71,118 @@ func TestNeutralDestinationControllerUsesDaemonOwnedIsolatedGraph(t *testing.T) 
 	}
 }
 
+func TestDuplicateDestinationPreservesExistingOwner(t *testing.T) {
+	for _, named := range []bool{false, true} {
+		name := "transient"
+		if named {
+			name = "named"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := daemonTestConfig(t)
+			cfg.Tunnel.Enabled = true
+			d, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets), Logger: discardNATLogger()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := d.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			controller := d.DestinationController()
+			var first *clientDestinationEndpoint
+			if named {
+				first = &clientDestinationEndpoint{runtime: d.clientRuntimeSnapshot()[0]}
+			} else {
+				endpoint, err := controller.CreateDestination(t.Context(), destination.DestinationSpec{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				first = endpoint.(*clientDestinationEndpoint)
+			}
+			source, err := first.runtime.local.Clone()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer source.ReleaseSensitive()
+			owner := first.Hash()
+			if _, err := d.tunnels.RegisterOutbound(dataplane.TunnelOutboundCircuit{
+				Owner: owner, ID: 9001, FirstHop: foundation.Hash{1}, NextTunnelID: 9002,
+				ExpiresAt: uint64(time.Now().Add(time.Minute).UnixMilli()),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if duplicate, err := controller.CreateDestination(t.Context(), destination.DestinationSpec{Local: source}); !errors.Is(err, ErrDuplicateDestination) || duplicate != nil {
+				t.Fatalf("duplicate destination = %v, %v; want nil, ErrDuplicateDestination", duplicate, err)
+			}
+			if got, ok := d.tunnels.CircuitOwner(9001); !ok || got != owner {
+				t.Errorf("original circuit owner = %v, %v; want %v, true", got, ok, owner)
+			}
+			var wire [4096]byte
+			n, err := first.MarshalDatagramV1To(wire[:], []byte("still usable"))
+			if err != nil {
+				t.Fatalf("original destination signing after duplicate rejection: %v", err)
+			}
+			packet, err := dataplane.DatagramParseV1(wire[:n])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if valid, err := packet.Verify(); err != nil || !valid {
+				t.Fatalf("original destination signature = %v, %v", valid, err)
+			}
+			if string(packet.Payload) != "still usable" {
+				t.Fatalf("original destination payload = %q", packet.Payload)
+			}
+		})
+	}
+}
+
+func TestClosingDestinationReservesIdentityUntilUnregistered(t *testing.T) {
+	cfg := daemonTestConfig(t)
+	cfg.Tunnel.Enabled = true
+	d, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets), Logger: discardNATLogger()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := d.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	controller := d.DestinationController()
+	endpoint, err := controller.CreateDestination(t.Context(), destination.DestinationSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := endpoint.(*clientDestinationEndpoint).runtime
+	source, err := runtime.local.Clone()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.ReleaseSensitive()
+	erased := make(chan struct{})
+	unregister := make(chan struct{})
+	closed := make(chan error, 1)
+	runtime.onRelease = func(runtime *destinationRuntime) {
+		close(erased)
+		<-unregister
+		d.removeClientRuntime(runtime)
+	}
+	go func() { closed <- endpoint.Close() }()
+	<-erased
+	duplicate, duplicateErr := controller.CreateDestination(t.Context(), destination.DestinationSpec{Local: source})
+	close(unregister)
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(duplicateErr, ErrDuplicateDestination) || duplicate != nil {
+		t.Fatalf("duplicate while closing = %v, %v; want nil, ErrDuplicateDestination", duplicate, duplicateErr)
+	}
+	if _, err := controller.CreateDestination(t.Context(), destination.DestinationSpec{Local: source}); err != nil {
+		t.Fatalf("reuse identity after close completed: %v", err)
+	}
+}
+
 func TestDestinationCapacityIncludesTransientClients(t *testing.T) {
 	const capacity = 190
 	cfg := daemonTestConfig(t)

@@ -54,7 +54,7 @@ func TestReadRouterInfoUsesBoundedPoolBuffer(t *testing.T) {
 }
 
 func TestClientRejectsInsecureEndpointBeforeNetwork(t *testing.T) {
-	client := Client{}
+	client := Client{NetworkID: 2}
 	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
 	if _, err := client.FetchInto(context.Background(), "http://example.invalid/reseed.zip?netid=2", database, 0); !errors.Is(err, ErrInsecureURL) {
 		t.Fatalf("FetchInto() error = %v, want ErrInsecureURL", err)
@@ -62,7 +62,7 @@ func TestClientRejectsInsecureEndpointBeforeNetwork(t *testing.T) {
 }
 
 func TestClientRequiresExactNetworkQueryAndNoCredentials(t *testing.T) {
-	client := Client{}
+	client := Client{NetworkID: 2}
 	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
 	for _, endpoint := range []string{
 		"https://reseed.example/i2pseeds.su3",
@@ -85,7 +85,7 @@ func TestClientRejectsPlainZIPWithoutTestFixtureOption(t *testing.T) {
 	defer server.Close()
 
 	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
-	client := Client{HTTPClient: server.Client()}
+	client := Client{NetworkID: 2, HTTPClient: server.Client()}
 	endpoint := server.URL + "/i2pseeds.su3?netid=2"
 	if _, err := client.FetchInto(context.Background(), endpoint, database, 1); !errors.Is(err, ErrUnsignedArchive) {
 		t.Fatalf("production FetchInto() error = %v, want ErrUnsignedArchive", err)
@@ -104,7 +104,7 @@ func TestClientSendsStandardReseedUserAgent(t *testing.T) {
 		http.Error(writer, "expected test response", http.StatusForbidden)
 	}))
 	defer server.Close()
-	client := Client{HTTPClient: server.Client(), AllowHTTP: true}
+	client := Client{NetworkID: 2, HTTPClient: server.Client(), AllowHTTP: true}
 	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
 	_, _ = client.FetchInto(context.Background(), server.URL+"/i2pseeds.su3?netid=2", database, 0)
 	if gotAgent != ReseedUserAgent || gotQuery != "netid=2" {
@@ -136,7 +136,7 @@ func TestClientRejectsUnsafeRedirects(t *testing.T) {
 				http.Redirect(writer, request, location(server), http.StatusFound)
 			}))
 			defer server.Close()
-			client := Client{HTTPClient: server.Client()}
+			client := Client{NetworkID: 2, HTTPClient: server.Client()}
 			database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
 			_, err := client.FetchInto(context.Background(), server.URL+"/i2pseeds.su3?netid=2", database, 0)
 			if !errors.Is(err, ErrUnsafeRedirect) {
@@ -158,7 +158,7 @@ func TestLiveReseedIntegration(t *testing.T) {
 		"https://reseed.stormycloud.org/i2pseeds.su3?netid=2",
 	}
 	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
-	client := Client{HTTPClient: &http.Client{Timeout: 30 * time.Second}}
+	client := Client{NetworkID: 2, HTTPClient: &http.Client{Timeout: 30 * time.Second}}
 	now := time.Now()
 	successes := 0
 	var failures []error
@@ -183,4 +183,45 @@ func TestLiveReseedIntegration(t *testing.T) {
 		t.Fatalf("admitted live RouterInfos = %d, want at least 50", count)
 	}
 	t.Logf("admitted %d distinct current RouterInfos from %d live endpoints", database.Routers().Len(), successes)
+}
+
+func TestClientImportsOnlySelectedNetwork(t *testing.T) {
+	for _, networkID := range []uint8{0, 3, 255} {
+		t.Run(fmt.Sprint(networkID), func(t *testing.T) {
+			local, err := foundation.GenerateLocalAddress()
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner, err := controlplanenetdb.NewLocalRouterInfo(controlplanenetdb.LocalRouterInfoConfig{
+				Local: local,
+				Contacts: controlplanenetdb.RouterInfoContacts{Options: []foundation.MappingEntry{
+					{Key: []byte("netId"), Value: []byte(fmt.Sprint(networkID))},
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := owner.Publish(1000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			archive := zipArchiveBytes(t, "routerInfo-test.dat", info.Bytes())
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write(archive)
+			}))
+			defer server.Close()
+			for _, selected := range []uint8{networkID, 2} {
+				client := Client{NetworkID: selected, HTTPClient: server.Client(), allowUnsignedZIP: true}
+				database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+				count, err := client.FetchInto(context.Background(), server.URL+"?netid="+fmt.Sprint(selected), database, 1000)
+				if selected == networkID {
+					if err != nil || count != 1 || database.Routers().Len() != 1 {
+						t.Fatalf("matching network import = %d, %v", count, err)
+					}
+				} else if !errors.Is(err, ErrNoRouterInfos) || database.Routers().Len() != 0 {
+					t.Fatalf("wrong network import = %d, %v", count, err)
+				}
+			}
+		})
+	}
 }

@@ -16,7 +16,7 @@ import (
 func TestSSU2PeerTestOutcomeTable(t *testing.T) {
 	endpoint := netip.MustParseAddrPort("198.51.100.7:42000")
 	observed := netip.MustParseAddrPort("198.51.100.7:43000")
-	manager := &SSU2Manager{symmetricEvidence: make(map[string]ssu2PeerTestEvidence)}
+	manager := &SSU2Manager{networkID: 2, symmetricEvidence: make(map[string]ssu2PeerTestEvidence)}
 	resultFor := func(withFive bool, received netip.AddrPort) PeerTestResult {
 		t.Helper()
 		state := &ssu2PeerTestState{
@@ -52,7 +52,7 @@ func TestSSU2RelayTagPublicationAndExpiry(t *testing.T) {
 	now := time.Now()
 	var peer foundation.Hash
 	peer[0] = 9
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		bindings:         TransportBindings{LocalInfo: local, Clock: WallClock{}},
 		advertisedRelays: map[foundation.Hash]ssu2RelayTagLease{peer: {peer: peer, tag: 77, expires: now.Add(time.Minute)}},
 	}
@@ -77,7 +77,7 @@ func TestSSU2NewTokenCacheExpiryAndPathTimeout(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	peer := foundation.Hash{1}
 	remote := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 34567}
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		bindings:      TransportBindings{Clock: transportTestClock{now: now}},
 		tokenLifetime: time.Minute,
 		newTokens: map[string]ssu2NewTokenLease{
@@ -112,7 +112,7 @@ func TestSSU2ManagerLiveEgressShutdownAndIOStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	local, static, intro := newSSU2TestLocal(t, conn.LocalAddr().String())
-	manager, err := NewSSU2Manager(SSU2ManagerConfig{StaticPrivate: static, IntroKey: intro})
+	manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, StaticPrivate: static, IntroKey: intro})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,16 +179,16 @@ func TestSSU2ManagerLivePeerTestOrchestration(t *testing.T) {
 		}
 	}
 	results := make(chan PeerTestResult, 1)
-	aliceManager, err := NewSSU2Manager(SSU2ManagerConfig{Peers: aliceDB, StaticPrivate: aliceStatic, IntroKey: aliceIntro,
+	aliceManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: aliceDB, StaticPrivate: aliceStatic, IntroKey: aliceIntro,
 		OnPeerTestResult: func(result PeerTestResult) { results <- result }})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro})
+	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro})
 	if err != nil {
 		t.Fatal(err)
 	}
-	charlieManager, err := NewSSU2Manager(SSU2ManagerConfig{Peers: charlieDB, StaticPrivate: charlieStatic, IntroKey: charlieIntro})
+	charlieManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: charlieDB, StaticPrivate: charlieStatic, IntroKey: charlieIntro})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestSSU2DispatchShutdownCancelsContextAwareCallback(t *testing.T) {
 	defer cancel()
 	entered := make(chan struct{})
 	queue := make(chan *ssu2DispatchBatch, 1)
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		ctx:            ctx,
 		dispatchQueues: []chan *ssu2DispatchBatch{queue},
 		bindings: TransportBindings{
@@ -509,7 +509,7 @@ func newSSU2LoopbackConn(t *testing.T) *net.UDPConn {
 
 func newSSU2LiveManager(t *testing.T, database *transportTestPeers, static, intro []byte, tokenLifetime, idleTimeout time.Duration) *SSU2Manager {
 	t.Helper()
-	manager, err := NewSSU2Manager(SSU2ManagerConfig{Peers: database, StaticPrivate: static, IntroKey: intro, TokenLifetime: tokenLifetime,
+	manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: database, StaticPrivate: static, IntroKey: intro, TokenLifetime: tokenLifetime,
 		HandshakeTimeout: time.Second, IdleTimeout: idleTimeout})
 	if err != nil {
 		t.Fatal(err)
@@ -662,7 +662,7 @@ func (p *ssu2TokenProxy) Start(intro []byte) {
 			}
 			wire := append([]byte(nil), packet[:n]...)
 			if sameUDPAddress(remote, p.alice) {
-				if header, _, parseErr := dataplanessu2.ParseOutOfSession(append([]byte(nil), wire...), p.intro); parseErr == nil {
+				if header, _, parseErr := dataplanessu2.ParseOutOfSession(append([]byte(nil), wire...), p.intro, 2); parseErr == nil {
 					p.mu.Lock()
 					if header.Type == dataplanessu2.TokenRequest {
 						p.requests++
@@ -671,7 +671,7 @@ func (p *ssu2TokenProxy) Start(intro []byte) {
 				}
 				_, _ = p.conn.WriteToUDP(wire, p.bob)
 			} else if sameUDPAddress(remote, p.bob) {
-				if header, _, parseErr := dataplanessu2.ParseOutOfSession(append([]byte(nil), wire...), p.intro); parseErr == nil && header.Type == dataplanessu2.Retry {
+				if header, _, parseErr := dataplanessu2.ParseOutOfSession(append([]byte(nil), wire...), p.intro, 2); parseErr == nil && header.Type == dataplanessu2.Retry {
 					p.mu.Lock()
 					p.retries++
 					p.mu.Unlock()
@@ -805,7 +805,7 @@ func TestSSU2PeerTestOutOfSessionRolesRequireApprovedExactEndpoints(t *testing.T
 		nonce: 41, alice: alice.Hash(), bob: foundation.Hash{9}, expires: now.Add(time.Minute),
 	}
 	callbacks := 0
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		peers:        database,
 		maxClockSkew: time.Minute,
 		bindings:     TransportBindings{LocalInfo: alice, Clock: transportTestClock{now: now}},
@@ -854,7 +854,7 @@ func TestSSU2PeerTestOutOfSessionRolesRequireApprovedExactEndpoints(t *testing.T
 	charlieState := &ssu2PeerTestState{
 		nonce: 42, alice: remoteAlice.Hash(), bob: foundation.Hash{8}, charlie: charlie.Hash(), expires: now.Add(time.Minute),
 	}
-	charlieManager := &SSU2Manager{
+	charlieManager := &SSU2Manager{networkID: 2,
 		peers:     charlieDB,
 		bindings:  TransportBindings{LocalInfo: charlie, Clock: transportTestClock{now: now}},
 		peerTests: map[uint32]*ssu2PeerTestState{charlieState.nonce: charlieState},
@@ -872,7 +872,7 @@ func TestSSU2PeerTestOutOfSessionRolesRequireApprovedExactEndpoints(t *testing.T
 
 func TestSSU2RelayTagDirectionsRenewPerPeerAndCapDistinctAdvertisements(t *testing.T) {
 	now := time.Now()
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		started:          true,
 		ctx:              context.Background(),
 		maxPending:       16,
@@ -927,7 +927,7 @@ func TestSSU2RelayPublicationWorkerRetriesToExactSnapshot(t *testing.T) {
 	conn := newSSU2LoopbackConn(t)
 	local, static, intro := newSSU2TestLocal(t, conn.LocalAddr().String())
 	flaky := &flakyIntroducerLocal{transportTestLocal: local, failures: 2, firstCall: make(chan struct{})}
-	manager, err := NewSSU2Manager(SSU2ManagerConfig{StaticPrivate: static, IntroKey: intro, HandshakeTimeout: time.Second})
+	manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, StaticPrivate: static, IntroKey: intro, HandshakeTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -973,7 +973,7 @@ func TestSSU2RelayPublicationWorkerRetriesToExactSnapshot(t *testing.T) {
 
 func TestSSU2NewTokenCacheIsBoundedReplacesAndClears(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		started:        true,
 		ctx:            context.Background(),
 		tokenLifetime:  time.Hour,
@@ -1054,7 +1054,7 @@ func TestSSU2PeerTestControlUsesBoundedRelayMixingClass(t *testing.T) {
 	free := make(chan *ssu2EgressSlot, 1)
 	queue := make(chan *ssu2EgressSlot, 1)
 	free <- &ssu2EgressSlot{done: make(chan error, 1)}
-	manager := &SSU2Manager{
+	manager := &SSU2Manager{networkID: 2,
 		peers: database, started: true, ctx: context.Background(),
 		bindings:   TransportBindings{Clock: transportTestClock{now: now}},
 		egressFree: free, egressQueue: queue,
@@ -1088,7 +1088,7 @@ func TestSSU2PeerTestControlUsesBoundedRelayMixingClass(t *testing.T) {
 func TestSSU2StartRejectsBlockingLegacyDispatchBinding(t *testing.T) {
 	conn := newSSU2LoopbackConn(t)
 	local, static, intro := newSSU2TestLocal(t, conn.LocalAddr().String())
-	manager, err := NewSSU2Manager(SSU2ManagerConfig{StaticPrivate: static, IntroKey: intro})
+	manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, StaticPrivate: static, IntroKey: intro})
 	if err != nil {
 		t.Fatal(err)
 	}

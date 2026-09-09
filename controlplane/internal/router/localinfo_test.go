@@ -11,6 +11,30 @@ import (
 	"gosuda.org/ivnp/observability"
 )
 
+func TestLocalRouterInfoPreservesSelectedNetwork(t *testing.T) {
+	for _, network := range []struct {
+		id   uint32
+		text string
+	}{{0, "0"}, {3, "3"}, {255, "255"}} {
+		t.Run(network.text, func(t *testing.T) {
+			local, err := foundation.GenerateLocalAddress()
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{Local: local, NetworkID: network.id})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := owner.Publish(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got := mappingValue(t, owner.Snapshot().Options, "netId"); got != network.text {
+				t.Fatalf("netId = %q, want %q", got, network.text)
+			}
+		})
+	}
+}
+
 func TestLocalRouterInfoPublishesRouterLifecycleState(t *testing.T) {
 	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
@@ -20,7 +44,7 @@ func TestLocalRouterInfoPublishesRouterLifecycleState(t *testing.T) {
 	clock := fixedClock{now: time.UnixMilli(123456789)}
 	metrics := observability.NewRegistry()
 	database.SetMetrics(metrics)
-	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{
+	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{NetworkID: 2,
 		Local:         local,
 		Database:      database,
 		Clock:         clock,
@@ -98,7 +122,7 @@ func TestLocalRouterInfoAdvertisesConfiguredFloodfillWithReachabilityState(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{Local: local, Floodfill: true})
+	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{NetworkID: 2, Local: local, Floodfill: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,13 +177,13 @@ func TestLocalRouterInfoRejectsMalformedOptionsAndCanceledPublication(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = NewLocalRouterInfo(LocalRouterInfoConfig{
+	if _, err = NewLocalRouterInfo(LocalRouterInfoConfig{NetworkID: 2,
 		Local:   local,
 		Options: []MappingOption{{Key: "caps", Value: "R"}},
 	}); !errors.Is(err, ErrLocalRouterInfoOptions) {
 		t.Fatalf("caller caps option error = %v, want ErrLocalRouterInfoOptions", err)
 	}
-	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{Local: local})
+	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{NetworkID: 2, Local: local})
 	if err != nil {
 		t.Fatal(err)
 	}

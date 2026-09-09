@@ -73,7 +73,7 @@ func TestStableRouterSSU2Interop(t *testing.T) {
 		_ = connection.Close()
 		t.Fatalf("admit current stable SSU2 RouterInfo: %v", err)
 	}
-	manager, err := NewSSU2Manager(SSU2ManagerConfig{Peers: database, StaticPrivate: staticPrivate, IntroKey: introKey,
+	manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: database, StaticPrivate: staticPrivate, IntroKey: introKey,
 		HandshakeTimeout: 30 * time.Second, IdleTimeout: time.Minute})
 	if err != nil {
 		_ = connection.Close()

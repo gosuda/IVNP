@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -130,6 +131,8 @@ type TunnelNetwork struct {
 	mu             sync.RWMutex
 	listeners      map[uint16]*tunnelListener
 	byID           map[uint32]*tunnelConn
+	outboundPorts  map[uint16]int
+	inboundPorts   map[uint16]int
 	inbound        map[inboundKey]*tunnelConn
 	closed         bool
 	ctx            context.Context
@@ -217,6 +220,8 @@ func NewTunnelNetwork(config TunnelNetworkConfig) (*TunnelNetwork, error) {
 		handshakeObserver:    config.HandshakeObserver,
 		listeners:            make(map[uint16]*tunnelListener),
 		byID:                 make(map[uint32]*tunnelConn),
+		outboundPorts:        make(map[uint16]int),
+		inboundPorts:         make(map[uint16]int),
 		inbound:              make(map[inboundKey]*tunnelConn),
 		ctx:                  lifetime,
 		cancel:               cancel,
@@ -280,6 +285,14 @@ func (n *TunnelNetwork) DialI2P(ctx context.Context, address string) (net.Conn, 
 // DialI2PFromPort opens an authenticated Streaming connection using localPort.
 // A zero localPort selects a cryptographically-random ephemeral virtual port.
 func (n *TunnelNetwork) DialI2PFromPort(ctx context.Context, address string, localPort uint16) (_ net.Conn, err error) {
+	return n.dialStream(ctx, address, localPort, false)
+}
+
+func (n *TunnelNetwork) DialStream(ctx context.Context, address string, localPort uint16) (net.Conn, error) {
+	return n.dialStream(ctx, address, localPort, true)
+}
+
+func (n *TunnelNetwork) dialStream(ctx context.Context, address string, localPort uint16, exclusive bool) (_ net.Conn, err error) {
 	target, port, err := parsePeerAddress(address)
 	if err != nil {
 		return nil, err
@@ -292,6 +305,25 @@ func (n *TunnelNetwork) DialI2PFromPort(ctx context.Context, address string, loc
 	defer stopNetwork()
 	defer cancel()
 	var feedback HandshakeFeedback
+	if !exclusive {
+		localPort = cmp.Or(localPort, randomPort())
+	}
+	localID, err := n.allocateID()
+	if err != nil {
+		return nil, err
+	}
+	connection := n.newConn(localID, 0, target, foundation.Identity{}, localPort, port, true)
+	connection.exclusivePort = exclusive
+	connection.standardConn = exclusive
+	connection.handshakeCtx = handshake
+	if err = n.register(connection); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			connection.abort(false)
+		}
+	}()
 	if n.handshakeObserver != nil {
 		feedback, err = n.handshakeObserver.PrepareHandshake(handshake, target)
 		if err != nil {
@@ -301,22 +333,9 @@ func (n *TunnelNetwork) DialI2PFromPort(ctx context.Context, address string, loc
 			return nil, err
 		}
 	}
-	localPort = cmp.Or(localPort, randomPort())
-	localID, err := n.allocateID()
-	if err != nil {
-		return nil, err
-	}
-	connection := n.newConn(localID, 0, target, foundation.Identity{}, localPort, port, true)
-	connection.handshakeCtx = handshake
+	connection.mu.Lock()
 	connection.handshakeFeedback = feedback
-	if err = n.register(connection); err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err != nil {
-			connection.abort(false)
-		}
-	}()
+	connection.mu.Unlock()
 	if err = connection.sendSynchronize(handshake, true); err != nil {
 		if ctx.Err() != nil {
 			err = ctx.Err()
@@ -382,6 +401,11 @@ func (n *TunnelNetwork) ListenI2P(ctx context.Context, address string) (net.List
 	if _, exists := n.listeners[port]; exists {
 		return nil, stream.ErrAddressInUse
 	}
+	for _, connection := range n.byID {
+		if connection.exclusivePort && connection.portReserved && connection.localPort == port {
+			return nil, stream.ErrAddressInUse
+		}
+	}
 	n.listeners[port] = listener
 	go func() {
 		select {
@@ -392,6 +416,45 @@ func (n *TunnelNetwork) ListenI2P(ctx context.Context, address string) (net.List
 		}
 	}()
 	return listener, nil
+}
+
+func (n *TunnelNetwork) ListenStream(ctx context.Context, address string) (net.Listener, error) {
+	host, port, err := splitI2PAddress(address)
+	if err != nil || (host != "" && !strings.EqualFold(host, n.localB32)) {
+		return nil, ErrTunnelAddress
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.closed {
+		return nil, net.ErrClosed
+	}
+	port, err = n.availablePortLocked(port, nil)
+	if err != nil {
+		return nil, err
+	}
+	listener := &tunnelListener{network: n, port: port, incoming: make(chan net.Conn, n.acceptCapacity), closed: make(chan struct{})}
+	listener.standardConn = true
+	n.listeners[port] = listener
+	return listener, nil
+}
+
+func (n *TunnelNetwork) availablePortLocked(port uint16, accepted map[uint16]int) (uint16, error) {
+	if port != 0 {
+		if n.listeners[port] != nil || n.outboundPorts[port] != 0 || accepted[port] != 0 {
+			return 0, stream.ErrAddressInUse
+		}
+		return port, nil
+	}
+	for candidate := 49152; candidate <= 65535; candidate++ {
+		port := uint16(candidate)
+		if n.listeners[port] == nil && n.outboundPorts[port] == 0 && accepted[port] == 0 {
+			return port, nil
+		}
+	}
+	return 0, stream.ErrNoPortsAvailable
 }
 
 // HandleDelivery accepts one routed I2CP protocol-6 payload. The caller must
@@ -502,6 +565,7 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 		return err
 	}
 	connection := n.newConn(localID, packet.ReceiveStreamID, delivery.From, peer.identity, delivery.ToPort, delivery.FromPort, false)
+	connection.standardConn = listener.standardConn
 	connection.setPeerControlLocked(peer)
 	if len(packet.Payload) != 0 {
 		connection.mu.Lock()
@@ -520,13 +584,18 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 		connection.abort(false)
 		return err
 	}
-	select {
-	case listener.incoming <- connection:
-		return nil
-	case <-listener.closed:
+	n.mu.RLock()
+	if n.listeners[listener.port] != listener {
+		n.mu.RUnlock()
 		connection.abort(true)
 		return net.ErrClosed
+	}
+	select {
+	case listener.incoming <- connection:
+		n.mu.RUnlock()
+		return nil
 	default:
+		n.mu.RUnlock()
 		connection.abort(true)
 		return ErrTunnelBackpressure
 	}
@@ -551,7 +620,10 @@ func (n *TunnelNetwork) newConn(localID, remoteID uint32, peer foundation.Hash, 
 		established:        make(chan struct{}),
 		peerClosed:         make(chan struct{}),
 		done:               make(chan struct{}),
+		applicationDone:    make(chan struct{}),
 		wake:               make(chan struct{}, 1),
+		readLimit:          newConnDeadline(),
+		writeLimit:         newConnDeadline(),
 		rto:                dataplanestreaming.NewRTOEstimator(n.retransmit),
 		congestion:         dataplanestreaming.NewCongestionWindow(dataplanestreaming.MinWindow),
 	}
@@ -569,6 +641,27 @@ func (n *TunnelNetwork) register(connection *tunnelConn) error {
 	}
 	if _, exists := n.byID[connection.localID]; exists {
 		return ErrTunnelPacket
+	}
+	if !connection.exclusivePort && connection.outbound {
+		if listener := n.listeners[connection.localPort]; listener != nil && listener.standardConn {
+			return stream.ErrAddressInUse
+		}
+		for _, existing := range n.byID {
+			if existing.exclusivePort && existing.portReserved && existing.localPort == connection.localPort {
+				return stream.ErrAddressInUse
+			}
+		}
+	}
+	if connection.exclusivePort {
+		port, err := n.availablePortLocked(connection.localPort, n.inboundPorts)
+		if err != nil {
+			return err
+		}
+		connection.localPort = port
+	}
+	if connection.outbound {
+		n.outboundPorts[connection.localPort]++
+		connection.portReserved = true
 	}
 	n.byID[connection.localID] = connection
 	return nil
@@ -589,6 +682,8 @@ func (n *TunnelNetwork) registerInbound(key inboundKey, connection *tunnelConn) 
 	n.byID[connection.localID] = connection
 	n.inbound[key] = connection
 	connection.inboundKey = &key
+	n.inboundPorts[connection.localPort]++
+	connection.portReserved = true
 	return nil
 }
 
@@ -596,11 +691,27 @@ func (n *TunnelNetwork) unregister(connection *tunnelConn) {
 	n.mu.Lock()
 	if n.byID[connection.localID] == connection {
 		delete(n.byID, connection.localID)
+		n.releasePortLocked(connection)
 	}
 	if connection.inboundKey != nil && n.inbound[*connection.inboundKey] == connection {
 		delete(n.inbound, *connection.inboundKey)
 	}
 	n.mu.Unlock()
+}
+
+func (n *TunnelNetwork) releasePortLocked(connection *tunnelConn) {
+	if !connection.portReserved {
+		return
+	}
+	connection.portReserved = false
+	ports := n.outboundPorts
+	if !connection.outbound {
+		ports = n.inboundPorts
+	}
+	ports[connection.localPort]--
+	if ports[connection.localPort] == 0 {
+		delete(ports, connection.localPort)
+	}
 }
 
 func (n *TunnelNetwork) allocateID() (uint32, error) {
@@ -1054,6 +1165,10 @@ type tunnelConn struct {
 	localPort         uint16
 	remotePort        uint16
 	outbound          bool
+	exclusivePort     bool
+	standardConn      bool
+	portReserved      bool
+	applicationClosed atomic.Bool
 	inboundKey        *inboundKey
 	handshakeCtx      context.Context
 	handshakeFailed   bool
@@ -1078,22 +1193,23 @@ type tunnelConn struct {
 	localCloseSequence uint32
 	reset              bool
 
-	reads          chan []byte
-	readCurrent    []byte
-	readMu         sync.Mutex
-	peerClosed     chan struct{}
-	peerOnce       sync.Once
-	established    chan struct{}
-	establishOnce  sync.Once
-	done           chan struct{}
-	closeOnce      sync.Once
-	gracefulOnce   sync.Once
-	closeTimerOnce sync.Once
-	wake           chan struct{}
+	reads           chan []byte
+	readCurrent     []byte
+	readMu          sync.Mutex
+	peerClosed      chan struct{}
+	peerOnce        sync.Once
+	established     chan struct{}
+	establishOnce   sync.Once
+	done            chan struct{}
+	applicationDone chan struct{}
+	applicationOnce sync.Once
+	closeOnce       sync.Once
+	gracefulOnce    sync.Once
+	closeTimerOnce  sync.Once
+	wake            chan struct{}
 
-	deadlineMu    sync.Mutex
-	readDeadline  time.Time
-	writeDeadline time.Time
+	readLimit  connDeadline
+	writeLimit connDeadline
 }
 
 type pendingPacket struct {
@@ -1201,6 +1317,9 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 		c.peerClosedOK = true
 		c.signalPeerClosedLocked()
 		c.mu.Unlock()
+		c.network.mu.Lock()
+		c.network.releasePortLocked(c)
+		c.network.mu.Unlock()
 		return ErrTunnelReset
 	}
 	if c.remoteID != 0 && len(c.preSynchronize) != 0 {
@@ -1555,6 +1674,10 @@ func (c *tunnelConn) queueProtocolRequest(request sendRequest) error {
 }
 
 func (c *tunnelConn) sendWireOwned(ctx context.Context, wire []byte, lease *wireLease) error {
+	if err := ctx.Err(); err != nil {
+		lease.release()
+		return err
+	}
 	completion := c.network.acquireCompletion()
 	request := sendRequest{connection: c, wire: wire, lease: lease, ctx: ctx, result: completion}
 	c.network.outboundMu.RLock()
@@ -1576,6 +1699,18 @@ func (c *tunnelConn) sendWireOwned(ctx context.Context, wire []byte, lease *wire
 		completion.release()
 		lease.release()
 		return net.ErrClosed
+	case <-c.applicationDone:
+		c.network.outboundMu.RUnlock()
+		completion.release()
+		completion.release()
+		lease.release()
+		return net.ErrClosed
+	case <-c.done:
+		c.network.outboundMu.RUnlock()
+		completion.release()
+		completion.release()
+		lease.release()
+		return net.ErrClosed
 	case <-ctx.Done():
 		c.network.outboundMu.RUnlock()
 		completion.release()
@@ -1586,8 +1721,15 @@ func (c *tunnelConn) sendWireOwned(ctx context.Context, wire []byte, lease *wire
 	defer completion.release()
 	select {
 	case err := <-completion.value:
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return err
 	case <-c.network.done:
+		return net.ErrClosed
+	case <-c.done:
+		return net.ErrClosed
+	case <-c.applicationDone:
 		return net.ErrClosed
 	case <-ctx.Done():
 		return ctx.Err()
@@ -1646,12 +1788,21 @@ func (c *tunnelConn) retry(now time.Time) []leasedSend {
 }
 
 func (c *tunnelConn) Read(dst []byte) (int, error) {
+	if c.applicationClosed.Load() {
+		return 0, net.ErrClosed
+	}
 	if len(dst) == 0 {
 		return 0, nil
 	}
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 	for {
+		if c.applicationClosed.Load() {
+			return 0, net.ErrClosed
+		}
+		if err := c.readLimit.Err(); err != nil {
+			return 0, err
+		}
 		if len(c.readCurrent) != 0 {
 			n := copy(dst, c.readCurrent)
 			c.readCurrent = c.readCurrent[n:]
@@ -1663,9 +1814,6 @@ func (c *tunnelConn) Read(dst []byte) (int, error) {
 			continue
 		default:
 		}
-		if c.isDone() {
-			return 0, net.ErrClosed
-		}
 		if c.isPeerClosed() {
 			c.mu.Lock()
 			reset := c.reset
@@ -1675,26 +1823,27 @@ func (c *tunnelConn) Read(dst []byte) (int, error) {
 			}
 			return 0, io.EOF
 		}
-		timer, timeout := deadlineTimer(c.currentReadDeadline())
-		if timer != nil {
-			defer timer.Stop()
+		if c.isDone() {
+			return 0, net.ErrClosed
 		}
 		select {
 		case payload := <-c.reads:
 			c.readCurrent = payload
 		case <-c.done:
+			continue
+		case <-c.applicationDone:
 			return 0, net.ErrClosed
 		case <-c.peerClosed:
 			continue
-		case <-timeout:
-			return 0, timeoutError{}
+		case <-c.readLimit.Done():
+			return 0, os.ErrDeadlineExceeded
 		}
 	}
 }
 
 func (c *tunnelConn) Write(src []byte) (int, error) {
 	if len(src) == 0 {
-		if c.isDone() {
+		if c.isDone() || c.applicationClosed.Load() {
 			return 0, net.ErrClosed
 		}
 		return 0, nil
@@ -1726,7 +1875,11 @@ func (c *tunnelConn) Write(src []byte) (int, error) {
 		if err != nil {
 			return written, err
 		}
-		if err = c.sendWireOwned(c.network.ctx, wire, lease); err != nil {
+		if err = c.sendWireOwned(writeContext{Context: c.network.ctx, limit: &c.writeLimit, done: c.writeLimit.Done()}, wire, lease); err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) || c.applicationClosed.Load() {
+				c.network.scheduleRetry(c)
+				return written + chunkLen, err
+			}
 			c.mu.Lock()
 			pending := c.pending[sequence]
 			delete(c.pending, sequence)
@@ -1743,8 +1896,11 @@ func (c *tunnelConn) Write(src []byte) (int, error) {
 
 func (c *tunnelConn) waitForWindow() error {
 	for {
+		if err := c.writeLimit.Err(); err != nil {
+			return err
+		}
 		c.mu.Lock()
-		if c.isDoneLocked() || c.localWriteClosed {
+		if c.isDoneLocked() || c.localWriteClosed || c.applicationClosed.Load() {
 			c.mu.Unlock()
 			return net.ErrClosed
 		}
@@ -1757,21 +1913,33 @@ func (c *tunnelConn) waitForWindow() error {
 			return nil
 		}
 		c.mu.Unlock()
-		timer, timeout := deadlineTimer(c.currentWriteDeadline())
-		if timer != nil {
-			defer timer.Stop()
-		}
 		select {
 		case <-c.wake:
 		case <-c.done:
 			return net.ErrClosed
-		case <-timeout:
-			return timeoutError{}
+		case <-c.applicationDone:
+			return net.ErrClosed
+		case <-c.writeLimit.Done():
+			return os.ErrDeadlineExceeded
 		}
 	}
 }
 
 func (c *tunnelConn) Close() error {
+	if c.standardConn {
+		c.applicationOnce.Do(func() {
+			c.applicationClosed.Store(true)
+			close(c.applicationDone)
+			if err := c.initiateClose(); err != nil {
+				c.abort(false)
+			}
+			c.network.mu.Lock()
+			c.network.releasePortLocked(c)
+			c.network.mu.Unlock()
+			c.scheduleGracefulCleanup()
+		})
+		return nil
+	}
 	if err := c.initiateClose(); err != nil {
 		c.abort(false)
 		if errors.Is(err, net.ErrClosed) {
@@ -1797,19 +1965,13 @@ func (c *tunnelConn) Close() error {
 		if done {
 			return nil
 		}
-		timer, timeout := deadlineTimer(c.currentWriteDeadline())
+		timeout := c.writeLimit.Done()
 		select {
 		case <-c.wake:
 		case <-c.done:
 		case <-timeout:
-			if timer != nil {
-				timer.Stop()
-			}
 			c.abort(false)
 			return timeoutError{}
-		}
-		if timer != nil {
-			timer.Stop()
 		}
 	}
 }
@@ -1838,6 +2000,8 @@ func (c *tunnelConn) abort(sendReset bool) {
 	}
 	c.closeOnce.Do(func() {
 		close(c.done)
+		c.readLimit.set(time.Time{})
+		c.writeLimit.set(time.Time{})
 		c.mu.Lock()
 		for sequence, pending := range c.pending {
 			pending.release()
@@ -1857,9 +2021,11 @@ func (c *tunnelConn) abort(sendReset bool) {
 }
 
 func (c *tunnelConn) SetDeadline(deadline time.Time) error {
-	c.deadlineMu.Lock()
-	c.readDeadline, c.writeDeadline = deadline, deadline
-	c.deadlineMu.Unlock()
+	if c.isDone() || c.applicationClosed.Load() {
+		return net.ErrClosed
+	}
+	c.readLimit.set(deadline)
+	c.writeLimit.set(deadline)
 	return nil
 }
 
@@ -1888,6 +2054,9 @@ func (c *tunnelConn) RemoteI2PPort() uint16 { return c.remotePort }
 // data are acknowledged (or the connection's retry/deadline policy expires)
 // before releasing the connection.
 func (c *tunnelConn) CloseWrite() error {
+	if c.applicationClosed.Load() {
+		return net.ErrClosed
+	}
 	return c.initiateClose()
 }
 
@@ -1917,6 +2086,10 @@ func (c *tunnelConn) initiateClose() error {
 			result = err
 			return
 		}
+		if c.standardConn {
+			result = c.queueProtocolOwned(wire, lease)
+			return
+		}
 		if result = c.sendWireOwned(c.network.ctx, wire, lease); result != nil {
 			c.mu.Lock()
 			pending := c.pending[sequence]
@@ -1937,29 +2110,19 @@ func (c *tunnelConn) RemoteAddr() net.Addr {
 }
 
 func (c *tunnelConn) SetReadDeadline(deadline time.Time) error {
-	c.deadlineMu.Lock()
-	c.readDeadline = deadline
-	c.deadlineMu.Unlock()
+	if c.isDone() || c.applicationClosed.Load() {
+		return net.ErrClosed
+	}
+	c.readLimit.set(deadline)
 	return nil
 }
 
 func (c *tunnelConn) SetWriteDeadline(deadline time.Time) error {
-	c.deadlineMu.Lock()
-	c.writeDeadline = deadline
-	c.deadlineMu.Unlock()
+	if c.isDone() || c.applicationClosed.Load() {
+		return net.ErrClosed
+	}
+	c.writeLimit.set(deadline)
 	return nil
-}
-
-func (c *tunnelConn) currentReadDeadline() time.Time {
-	c.deadlineMu.Lock()
-	defer c.deadlineMu.Unlock()
-	return c.readDeadline
-}
-
-func (c *tunnelConn) currentWriteDeadline() time.Time {
-	c.deadlineMu.Lock()
-	defer c.deadlineMu.Unlock()
-	return c.writeDeadline
 }
 
 func (c *tunnelConn) signalPeerClosedLocked() {
@@ -2007,16 +2170,23 @@ func (c *tunnelConn) isPeerClosed() bool {
 }
 
 type tunnelListener struct {
-	network  *TunnelNetwork
-	port     uint16
-	incoming chan net.Conn
-	closed   chan struct{}
-	once     sync.Once
+	network      *TunnelNetwork
+	port         uint16
+	standardConn bool
+	incoming     chan net.Conn
+	closed       chan struct{}
+	once         sync.Once
 }
 
 func (l *tunnelListener) Accept() (net.Conn, error) {
 	select {
 	case connection := <-l.incoming:
+		select {
+		case <-l.closed:
+			connection.(*tunnelConn).abort(false)
+			return nil, net.ErrClosed
+		default:
+		}
 		return connection, nil
 	case <-l.closed:
 		return nil, net.ErrClosed
@@ -2027,8 +2197,8 @@ func (l *tunnelListener) Accept() (net.Conn, error) {
 
 func (l *tunnelListener) Close() error {
 	l.once.Do(func() {
-		close(l.closed)
 		l.network.mu.Lock()
+		close(l.closed)
 		if l.network.listeners[l.port] == l {
 			delete(l.network.listeners, l.port)
 		}
@@ -2036,7 +2206,7 @@ func (l *tunnelListener) Close() error {
 		for {
 			select {
 			case connection := <-l.incoming:
-				_ = connection.Close()
+				connection.(*tunnelConn).abort(false)
 			default:
 				return
 			}
@@ -2370,19 +2540,12 @@ func containsNACK(nacks []byte, sequence uint32) bool {
 	return false
 }
 
-func deadlineTimer(deadline time.Time) (*time.Timer, <-chan time.Time) {
-	if deadline.IsZero() {
-		return nil, nil
-	}
-	timer := time.NewTimer(time.Until(deadline))
-	return timer, timer.C
-}
-
 type timeoutError struct{}
 
 func (timeoutError) Error() string   { return "i/o timeout" }
 func (timeoutError) Timeout() bool   { return true }
 func (timeoutError) Temporary() bool { return true }
+func (timeoutError) Unwrap() error   { return os.ErrDeadlineExceeded }
 
 func randomPort() uint16 {
 	var encoded [2]byte

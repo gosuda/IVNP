@@ -42,10 +42,13 @@ type Entry struct {
 
 // Pool stores active tunnel descriptors with capacity bounds and expiration tracking.
 type Pool struct {
-	mu      sync.RWMutex
-	max     int
-	owner   foundation.Hash
-	tunnels map[uint32]Entry
+	mu             sync.RWMutex
+	max            int
+	owner          foundation.Hash
+	tunnels        map[uint32]Entry
+	activeOutbound map[uint32]struct{}
+	outboundTarget int
+	renewBefore    uint64
 }
 
 func NewPool(max int) *Pool { return NewOwnedPool(foundation.Hash{}, max) }
@@ -145,11 +148,17 @@ func (p *Pool) Get(id uint32, now uint64) (Entry, bool) {
 	return e, ok && e.Expires > now
 }
 func (p *Pool) Select(direction Direction, now uint64) (Entry, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.promoteOutboundLocked(now)
 	var best Entry
 	ok := false
 	for _, e := range p.tunnels {
+		if direction == Outbound && p.outboundTarget > 0 {
+			if _, active := p.activeOutbound[e.ID]; !active {
+				continue
+			}
+		}
 		selectSelected := e.Direction == direction && e.Expires > now
 		if selectSelected {
 			selectSelected = (!ok || e.Expires > best.Expires)
@@ -211,6 +220,78 @@ func (p *Pool) renewalIDs(direction Direction, now, cutoff uint64) []uint32 {
 		ids[index] = entry.ID
 	}
 	return ids
+}
+
+// SelectableOutbound excludes reserves while preserving the active set until
+// failure or renewal. Previously admitted circuit users retain their tokens.
+func (p *Pool) SelectableOutbound(now uint64) []Entry {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.promoteOutboundLocked(now)
+	entries := make([]Entry, 0, p.outboundTarget)
+	for id, entry := range p.tunnels {
+		if entry.Direction != Outbound || entry.Expires <= now {
+			continue
+		}
+		if p.outboundTarget > 0 {
+			if _, active := p.activeOutbound[id]; !active {
+				continue
+			}
+		}
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
+	return entries
+}
+
+func (p *Pool) promoteOutboundLocked(now uint64) {
+	if p.outboundTarget == 0 {
+		return
+	}
+	cutoff := saturatingDeadline(now, p.renewBefore)
+	for id := range p.activeOutbound {
+		entry, exists := p.tunnels[id]
+		if !exists || entry.Expires <= cutoff {
+			delete(p.activeOutbound, id)
+		}
+	}
+	for len(p.activeOutbound) < p.outboundTarget {
+		var best Entry
+		for id, entry := range p.tunnels {
+			if entry.Direction != Outbound || entry.Expires <= now {
+				continue
+			}
+			if _, active := p.activeOutbound[id]; active {
+				continue
+			}
+			if entry.Expires > best.Expires || entry.Expires == best.Expires && entry.ID < best.ID {
+				best = entry
+			}
+		}
+		if best.ID == 0 {
+			break
+		}
+		p.activeOutbound[best.ID] = struct{}{}
+	}
+}
+
+// PublishableInbound includes ready reserves but bounds renewal overlap to the
+// wire lease limit. Newer leases replace draining advertisements, not circuits.
+func (p *Pool) PublishableInbound(now uint64) []Entry {
+	entries := p.Snapshot(now)
+	inbound := entries[:0]
+	for _, entry := range entries {
+		if entry.Direction == Inbound {
+			inbound = append(inbound, entry)
+		}
+	}
+	sort.Slice(inbound, func(i, j int) bool {
+		if inbound[i].Expires == inbound[j].Expires {
+			return inbound[i].ID < inbound[j].ID
+		}
+		return inbound[i].Expires > inbound[j].Expires
+	})
+	return inbound[:min(len(inbound), 16)]
 }
 
 func (p *Pool) Expire(now uint64) int {

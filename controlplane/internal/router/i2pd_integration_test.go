@@ -56,7 +56,7 @@ func TestI2PDNTCP2Interop(t *testing.T) {
 	if err = database.AdmitRouterInfo(peer, false, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatalf("admit native i2pd RouterInfo: %v", err)
 	}
-	manager, err := dataplane.RouterNewNTCP2Manager(dataplane.RouterNTCP2ManagerConfig{
+	manager, err := dataplane.RouterNewNTCP2Manager(dataplane.RouterNTCP2ManagerConfig{NetworkID: 2,
 		Peers:            NewTransportPeerSource(database),
 		StaticPrivate:    aliceStatic,
 		StaticIV:         aliceIV,
@@ -158,7 +158,7 @@ func newI2PDInteropLocal(t *testing.T) (*LocalRouterInfo, []byte, []byte) {
 	if _, err = rand.Read(iv); err != nil {
 		t.Fatal(err)
 	}
-	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{
+	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{NetworkID: 2,
 		Local:         local,
 		RouterVersion: "0.9.70",
 	})
@@ -262,7 +262,7 @@ func TestI2PDShortTunnelBuildDiagnostic(t *testing.T) {
 	if err = database.AdmitRouterInfo(replyPeer, false, now()); err != nil {
 		t.Fatalf("admit native reply-gateway i2pd RouterInfo: %v", err)
 	}
-	transportManager, err := dataplane.RouterNewNTCP2Manager(dataplane.RouterNTCP2ManagerConfig{
+	transportManager, err := dataplane.RouterNewNTCP2Manager(dataplane.RouterNTCP2ManagerConfig{NetworkID: 2,
 		Peers:            NewTransportPeerSource(database),
 		StaticPrivate:    aliceStatic,
 		StaticIV:         aliceIV,

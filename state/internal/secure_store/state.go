@@ -151,7 +151,10 @@ type Store struct {
 	MaxDestinations int
 	MaxNameBytes    int
 
-	mu sync.Mutex
+	mu       sync.Mutex
+	memory   bool
+	snapshot []byte
+	closed   bool
 }
 
 // NewStore creates a Store with default limits.
@@ -167,6 +170,24 @@ func NewStore(statePath, masterKeyPath string) (*Store, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+// NewMemoryStore retains serialized state only until Close.
+func NewMemoryStore() *Store {
+	return &Store{memory: true, MaxStateBytes: DefaultMaxStateBytes, MaxDestinations: DefaultMaxDestinations, MaxNameBytes: DefaultMaxNameBytes}
+}
+
+// Close wipes the in-memory snapshot and rejects further store operations.
+func (s *Store) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clear(s.snapshot)
+	s.snapshot = nil
+	s.closed = true
+	return nil
 }
 
 // Load decrypts and deserializes the state bundle from disk.
@@ -199,6 +220,20 @@ func (s *Store) LoadOrCreate() (Bundle, error) {
 	if err := s.validConfig(); err != nil {
 		return Bundle{}, err
 	}
+	if s.memory {
+		if s.snapshot != nil {
+			return s.load()
+		}
+		bundle, err := generateBundle()
+		if err != nil {
+			return Bundle{}, err
+		}
+		if err := s.save(bundle); err != nil {
+			bundle.ReleaseSensitive()
+			return Bundle{}, err
+		}
+		return bundle, nil
+	}
 	file, err := s.openPrivateFile(s.StatePath)
 	if err == nil {
 		file.Close()
@@ -228,6 +263,7 @@ func (s *Store) LoadOrCreate() (Bundle, error) {
 	if err != nil {
 		return Bundle{}, err
 	}
+	defer bundle.ReleaseSensitive()
 	if err := s.save(bundle); err != nil {
 		return Bundle{}, err
 	}
@@ -237,6 +273,12 @@ func (s *Store) LoadOrCreate() (Bundle, error) {
 func (s *Store) load() (Bundle, error) {
 	if err := s.validConfig(); err != nil {
 		return Bundle{}, err
+	}
+	if s.memory {
+		if s.snapshot == nil {
+			return Bundle{}, os.ErrNotExist
+		}
+		return s.decodeBundle(s.snapshot)
 	}
 	key, err := s.loadMasterKey()
 	if err != nil {
@@ -274,6 +316,19 @@ func (s *Store) load() (Bundle, error) {
 func (s *Store) save(bundle Bundle) error {
 	if err := s.validConfig(); err != nil {
 		return err
+	}
+	if s.memory {
+		encoded, err := s.encodeBundle(bundle)
+		if err != nil {
+			return err
+		}
+		if len(encoded) > s.maxStateBytes() {
+			clear(encoded)
+			return fmt.Errorf("%w: encoded state exceeds limit", ErrInvalidBundle)
+		}
+		clear(s.snapshot)
+		s.snapshot = encoded
+		return nil
 	}
 	if file, err := s.openPrivateFile(s.StatePath); err == nil {
 		file.Close()
@@ -1026,7 +1081,11 @@ func generateBundle() (Bundle, error) {
 }
 
 func (s *Store) validConfig() error {
-	validConfigRejected := s.StatePath == "" || s.MasterKeyPath == "" || filepath.Clean(s.StatePath) == filepath.Clean(s.MasterKeyPath) || s.MaxStateBytes < 0 || s.MaxDestinations < 0
+	if s.closed {
+		return ErrStoreConfig
+	}
+	invalidPaths := !s.memory && (s.StatePath == "" || s.MasterKeyPath == "" || filepath.Clean(s.StatePath) == filepath.Clean(s.MasterKeyPath))
+	validConfigRejected := invalidPaths || s.MaxStateBytes < 0 || s.MaxDestinations < 0
 	if !validConfigRejected {
 		validConfigRejected = s.MaxNameBytes < 0
 	}

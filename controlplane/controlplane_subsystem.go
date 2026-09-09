@@ -240,6 +240,7 @@ var (
 	ErrProxyWithoutTunnels                                   = noderuntime.ErrProxyWithoutTunnels
 	ErrReseedUnavailable                                     = noderuntime.ErrReseedUnavailable
 	ErrStarted                                               = noderuntime.ErrStarted
+	ErrStateConflict                                         = noderuntime.ErrStateConflict
 	ErrTooManyDestinations                                   = noderuntime.ErrTooManyDestinations
 	ErrTunnelProbeUnavailable                                = noderuntime.ErrTunnelProbeUnavailable
 	NetworkAddressTranslationPortMappingErrGatewayRequired   = natpmp.ErrGatewayRequired

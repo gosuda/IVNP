@@ -1,4 +1,4 @@
-package ivnp_test
+package ivnp
 
 import (
 	"context"
@@ -8,13 +8,13 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/netip"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
-	"gosuda.org/ivnp"
 	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
@@ -231,85 +231,102 @@ func embeddedTestFloodfill(t *testing.T) foundation.NetworkDatabaseRouterInfo {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer clear(private)
 	identity := make([]byte, foundation.IdentityBaseLength+7)
 	copy(identity[352:384], public)
 	identity[384] = byte(foundation.CertificateKey)
 	identity[385], identity[386] = 0, 4
 	identity[387], identity[388] = 0, byte(foundation.SigningEdDSASHA512Ed25519)
 	identity[389], identity[390] = 0, byte(foundation.CryptoElGamal)
-	options := make([]byte, 16)
-	optionLen, err := foundation.MarshalMappingTo(options, []foundation.MappingEntry{{Key: []byte("caps"), Value: []byte("f")}})
+	local := foundation.LocalAddress{
+		Destination: []byte(foundation.EncodeI2PBase64(identity)), Hash: foundation.Sum(identity),
+		SigningPublic: public, SigningPrivate: private,
+	}
+	var static [32]byte
+	var iv [16]byte
+	if _, err = cryptorand.Read(static[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = cryptorand.Read(iv[:]); err != nil {
+		t.Fatal(err)
+	}
+	builder, err := controlplane.NetworkDatabaseNewLocalRouterInfo(controlplane.NetworkDatabaseLocalRouterInfoConfig{
+		Local: local,
+		Contacts: controlplane.NetworkDatabaseRouterInfoContacts{
+			Addresses: []controlplane.NetworkDatabaseLocalRouterAddress{{
+				Cost: 3, TransportStyle: []byte("NTCP2"),
+				Options: []foundation.MappingEntry{
+					{Key: []byte("host"), Value: []byte("192.0.2.254")},
+					{Key: []byte("i"), Value: []byte(foundation.EncodeI2PBase64(iv[:]))},
+					{Key: []byte("port"), Value: []byte("12345")},
+					{Key: []byte("s"), Value: []byte(foundation.EncodeI2PBase64(static[:]))},
+					{Key: []byte("v"), Value: []byte("2")},
+				},
+			}},
+			Options: []foundation.MappingEntry{
+				{Key: []byte("caps"), Value: []byte("f")},
+				{Key: []byte("netId"), Value: []byte("2")},
+			},
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := uint64(time.Now().UnixMilli())
-	unsigned := append(identity, make([]byte, 10)...)
-	binary.BigEndian.PutUint64(unsigned[len(identity):len(identity)+8], now)
-	unsigned = append(unsigned, options[:optionLen]...)
-	info, err := foundation.NetworkDatabaseParseRouterInfo(append(unsigned, ed25519.Sign(private, unsigned)...))
+	defer builder.ReleaseSensitive()
+	info, err := builder.Publish(uint64(time.Now().UnixMilli()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return info
 }
 
-func embeddedTestConfig(t *testing.T) ivnp.Config {
+func embeddedTestConfig(t *testing.T) RouterConfig {
 	t.Helper()
 	base := t.TempDir()
 	if err := os.Chmod(base, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	var cfg ivnp.Config
-	cfg.DataDir = base
-	cfg.StateDir = base
-	cfg.StatePath = filepath.Join(base, "router.state")
-	cfg.KeyPath = filepath.Join(base, "router.keys")
-	cfg.Network.ID = 2
-	cfg.Network.IPv4 = true
-	cfg.Router.Version = "0.9.70"
-	cfg.State.MaxBytes = 1 << 20
-	cfg.State.MaxDestinations = 16
-	cfg.State.MaxNameBytes = 64
-	cfg.Tunnel.ExploratoryInboundTarget = 1
-	cfg.Tunnel.ExploratoryOutboundTarget = 1
-	cfg.Tunnel.ExploratoryPoolCapacity = 2
-	cfg.NetDB.BucketCapacity = 16
-	cfg.NetDB.LookupCapacity = 32
-	cfg.Tunnel.Enabled = true
-	cfg.Tunnel.Hops = 1
-	cfg.Tunnel.ClientInboundTarget = 1
-	cfg.Tunnel.ClientOutboundTarget = 1
-	cfg.Tunnel.ClientPoolCapacity = 2
-	cfg.Tunnel.BuildPendingCapacity = 4
-	cfg.Tunnel.Lifetime = 10 * time.Minute
-	cfg.Tunnel.RenewBefore = 10 * time.Second
-	cfg.Tunnel.MaintenanceInterval = 100 * time.Millisecond
-	cfg.Tunnel.BandwidthRateBytesPerSecond = 64 * 1024
+	cfg := DefaultRouterConfig()
+	cfg.Persistence = &PersistenceConfig{Directory: base}
+	cfg.NTCP2.Advertised = netip.MustParseAddrPort("192.0.2.1:12345")
+	cfg.Bootstrap = BootstrapConfig{}
+	cfg.Exploratory = TunnelPoolConfig{
+		Inbound:     TunnelDirectionConfig{Hops: 1, Count: 1},
+		Outbound:    TunnelDirectionConfig{Hops: 1, Count: 1},
+		RenewBefore: 10 * time.Second,
+	}
 	return cfg
 }
 
-func captureEmbeddedRouterInfo(t *testing.T, cfg ivnp.Config, network *embeddedMemoryNetwork) []byte {
+func newEmbeddedTestRouter(t *testing.T, cfg RouterConfig, transport *embeddedMemoryTransport) *Router {
 	t.Helper()
-	transport := network.transport()
-	router, err := ivnp.New(cfg, ivnp.Options{Transport: transport})
+	settings, options, err := routerSettings(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = router.DestroyDestination(context.Background(), "default"); err != nil {
+	options.Transport = transport
+	router, err := newRouter(t.Context(), cfg, settings, options)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err = router.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() {
+		if err := router.Close(); err != nil {
+			t.Errorf("close embedded router: %v", err)
+		}
+	})
+	return router
+}
+
+func captureEmbeddedRouterInfo(t *testing.T, cfg RouterConfig, network *embeddedMemoryNetwork) []byte {
+	t.Helper()
+	transport := network.transport()
+	router := newEmbeddedTestRouter(t, cfg, transport)
 	info := transport.routerInfo()
 	encoded := append([]byte(nil), info.Bytes()...)
 	if len(encoded) == 0 {
 		t.Fatal("started node did not expose its local RouterInfo to the transport")
 	}
-	if err = router.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err = router.Wait(); err != nil {
+	if err := router.Close(); err != nil {
 		t.Fatal(err)
 	}
 	return encoded
@@ -318,81 +335,42 @@ func captureEmbeddedRouterInfo(t *testing.T, cfg ivnp.Config, network *embeddedM
 func TestEmbeddedDestinationLifecycle(t *testing.T) {
 	flood := embeddedTestFloodfill(t)
 	network := newEmbeddedMemoryNetwork(flood)
-	configs := []ivnp.Config{embeddedTestConfig(t), embeddedTestConfig(t), embeddedTestConfig(t)}
+	configs := []RouterConfig{embeddedTestConfig(t), embeddedTestConfig(t), embeddedTestConfig(t)}
 	routerInfos := make([][]byte, len(configs))
 	for index := range configs {
 		routerInfos[index] = captureEmbeddedRouterInfo(t, configs[index], network)
 	}
 
-	bootstrapDir := t.TempDir()
-	bootstrapPaths := make([]string, 0, len(routerInfos)+1)
-	for index, info := range routerInfos {
-		path := filepath.Join(bootstrapDir, "router-"+string(rune('a'+index))+".dat")
-		if err := os.WriteFile(path, info, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		bootstrapPaths = append(bootstrapPaths, path)
-	}
-	floodPath := filepath.Join(bootstrapDir, "floodfill.dat")
-	if err := os.WriteFile(floodPath, flood.Bytes(), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	for index := range configs {
-		paths := make([]string, 0, len(configs))
-		for peerIndex, path := range bootstrapPaths {
+		for peerIndex, info := range routerInfos {
 			if peerIndex != index {
-				paths = append(paths, path)
+				configs[index].Bootstrap.RouterInfos = append(configs[index].Bootstrap.RouterInfos, info)
 			}
 		}
-		configs[index].NetDB.BootstrapRouterInfoPaths = append(paths, floodPath)
+		configs[index].Bootstrap.RouterInfos = append(configs[index].Bootstrap.RouterInfos, flood.Bytes())
 	}
 
-	routers := make([]*ivnp.Node, 0, len(configs))
+	routers := make([]*Router, 0, len(configs))
 	for _, cfg := range configs {
-		router, err := ivnp.New(cfg, ivnp.Options{Transport: network.transport()})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = router.DestroyDestination(context.Background(), "default"); err != nil {
-			t.Fatal(err)
-		}
-		routers = append(routers, router)
-	}
-	t.Cleanup(func() {
-		for _, router := range routers {
-			_ = router.Close()
-			_ = router.Wait()
-		}
-	})
-	for _, router := range routers {
-		if err := router.Start(context.Background()); err != nil {
-			t.Fatal(err)
-		}
+		routers = append(routers, newEmbeddedTestRouter(t, cfg, network.transport()))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), embeddedTestTimeout)
 	defer cancel()
-	source, err := routers[0].DestinationController().CreateDestination(ctx, ivnp.DestinationSpec{})
+	destinationConfig := DefaultDestinationConfig()
+	destinationConfig.Tunnels = configs[0].Exploratory
+	source, err := routers[0].NewDestination(ctx, destinationConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer source.Close()
-	target, err := routers[1].DestinationController().CreateDestination(ctx, ivnp.DestinationSpec{})
+	target, err := routers[1].NewDestination(ctx, destinationConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer target.Close()
-	for _, endpoint := range []ivnp.DestinationEndpoint{source, target} {
-		ready, ok := endpoint.(ivnp.ReadyDestinationEndpoint)
-		if !ok {
-			t.Fatalf("endpoint %T does not implement ivnp.ReadyDestinationEndpoint", endpoint)
-		}
-		if err = ready.WaitReady(ctx); err != nil {
-			t.Fatalf("destination readiness: %v; source=%+v target=%+v", err, routers[0].RegistrySnapshot(), routers[1].RegistrySnapshot())
-		}
-	}
 
-	listener, err := target.ListenI2P(ctx, ":8080")
+	listener, err := target.Listen("i2p", ":8080")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +385,7 @@ func TestEmbeddedDestinationLifecycle(t *testing.T) {
 		}
 		accepted <- connection
 	}()
-	outbound, err := source.DialI2P(ctx, target.B32()+":8080")
+	outbound, err := source.DialContext(ctx, "i2p", net.JoinHostPort(target.B32(), "8080"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,6 +418,96 @@ func TestEmbeddedDestinationLifecycle(t *testing.T) {
 		t.Fatalf("received %q, want %q", got, payload)
 	}
 
+	t.Run("HTTP transport over B32", func(t *testing.T) {
+		httpListener, err := target.Listen("i2p", ":8082")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if _, err := io.WriteString(w, "embedded HTTP response"); err != nil {
+				t.Error(err)
+			}
+		})}
+		served := make(chan error, 1)
+		go func() { served <- server.Serve(httpListener) }()
+		t.Cleanup(func() {
+			if err := server.Close(); err != nil {
+				t.Error(err)
+			}
+			if err := <-served; !errors.Is(err, http.ErrServerClosed) {
+				t.Errorf("HTTP server shutdown: %v", err)
+			}
+		})
+		transport := &http.Transport{DialContext: source.DialContext}
+		defer transport.CloseIdleConnections()
+		client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+		response, err := client.Get("http://" + net.JoinHostPort(target.B32(), "8082") + "/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, readErr := io.ReadAll(response.Body)
+		closeErr := response.Body.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusOK || string(body) != "embedded HTTP response" {
+			t.Fatalf("HTTP response = %d %q", response.StatusCode, body)
+		}
+	})
+
+	t.Run("signed datagram round trip", func(t *testing.T) {
+		sender, err := source.ListenPacket("i2p-datagram2", ":0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sender.Close()
+		receiver, err := target.ListenPacket("i2p-datagram2", ":8081")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer receiver.Close()
+		packetDeadline := time.Now().Add(5 * time.Second)
+		if err = sender.SetDeadline(packetDeadline); err != nil {
+			t.Fatal(err)
+		}
+		if err = receiver.SetDeadline(packetDeadline); err != nil {
+			t.Fatal(err)
+		}
+		sourceAddress := sender.LocalAddr().(Addr)
+		if sourceAddress.Port < 49152 {
+			t.Fatalf("ephemeral source port = %d, want dynamic port", sourceAddress.Port)
+		}
+		request := []byte("signed request")
+		if n, err := sender.WriteTo(request, receiver.LocalAddr()); err != nil || n != len(request) {
+			t.Fatalf("send signed request: bytes=%d error=%v", n, err)
+		}
+		buffer := make([]byte, 128)
+		n, from, err := receiver.ReadFrom(buffer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(buffer[:n]) != string(request) {
+			t.Fatalf("signed request = %q, want %q", buffer[:n], request)
+		}
+		if address, ok := from.(Addr); !ok || address.Hash != source.Hash() || address.Port != sourceAddress.Port {
+			t.Fatalf("verified source = %v, want %v", from, sourceAddress)
+		}
+		reply := []byte("signed reply")
+		if n, err := receiver.WriteTo(reply, from); err != nil || n != len(reply) {
+			t.Fatalf("send signed reply: bytes=%d error=%v", n, err)
+		}
+		n, from, err = sender.ReadFrom(buffer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(buffer[:n]) != string(reply) {
+			t.Fatalf("signed reply = %q, want %q", buffer[:n], reply)
+		}
+		if address, ok := from.(Addr); !ok || address.Hash != target.Hash() || address.Port != 8081 {
+			t.Fatalf("verified reply source = %v, want %v", from, receiver.LocalAddr())
+		}
+	})
+
 	if err = source.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -448,11 +516,6 @@ func TestEmbeddedDestinationLifecycle(t *testing.T) {
 	}
 	for _, router := range routers {
 		if err = router.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, router := range routers {
-		if err = router.Wait(); err != nil {
 			t.Fatal(err)
 		}
 	}

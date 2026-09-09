@@ -20,7 +20,8 @@ import (
 	"sync"
 	"time"
 
-	"gosuda.org/ivnp"
+	"gosuda.org/ivnp/node"
+	"gosuda.org/ivnp/state"
 )
 
 //go:embed all:webui/build
@@ -55,7 +56,7 @@ type trafficSample struct {
 type WebUIServer struct {
 	config        WebUIConfig
 	policy        webUIAccessPolicy
-	node          *ivnp.Node
+	node          *node.Subsystem
 	logger        *slog.Logger
 	logLevel      *slog.LevelVar
 	started       time.Time
@@ -68,7 +69,7 @@ type WebUIServer struct {
 	scriptSources string
 
 	configMu        sync.RWMutex
-	persistedConfig ivnp.Config
+	persistedConfig state.ConfigurationOperating
 
 	trafficMu sync.RWMutex
 	traffic   trafficSample
@@ -82,7 +83,7 @@ type WebUIServer struct {
 }
 
 // NewWebUIServer validates the listener policy before any socket is opened.
-func NewWebUIServer(cfg WebUIConfig, node *ivnp.Node, logger *slog.Logger, level *slog.LevelVar) (*WebUIServer, error) {
+func NewWebUIServer(cfg WebUIConfig, node *node.Subsystem, logger *slog.Logger, level *slog.LevelVar) (*WebUIServer, error) {
 	if node == nil {
 		return nil, errors.New("webui: node is required")
 	}

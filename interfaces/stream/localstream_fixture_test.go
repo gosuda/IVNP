@@ -1,4 +1,4 @@
-package ivnp
+package stream
 
 import (
 	"context"
@@ -38,9 +38,7 @@ func (n *localStreamNetwork) DialI2P(ctx context.Context, address string) (net.C
 	}
 }
 
-// NewLocalStreamNetwork connects only listeners on the returned in-memory
-// network. It does not join I2P or encrypt traffic.
-func NewLocalStreamNetwork() StreamNetwork {
+func newLocalStreamNetwork() StreamNetwork {
 	return &localStreamNetwork{listeners: make(map[string]*localListener)}
 }
 func (n *localStreamNetwork) ListenI2P(ctx context.Context, address string) (net.Listener, error) {

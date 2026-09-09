@@ -98,6 +98,16 @@ func NewLocalRouterInfo(config LocalRouterInfoConfig) (*LocalRouterInfo, error) 
 // Hash returns the immutable RouterIdentity hash.
 func (r *LocalRouterInfo) Hash() foundation.Hash { return r.hash }
 
+// ReleaseSensitive wipes the signing key after all publication work has joined.
+func (r *LocalRouterInfo) ReleaseSensitive() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	clear(r.private)
+	r.mu.Unlock()
+}
+
 // Sign returns an Ed25519 signature made by this local RouterInfo's immutable
 // router signing key. It is intended for authenticated router transport
 // control messages such as SSU2 introductions.

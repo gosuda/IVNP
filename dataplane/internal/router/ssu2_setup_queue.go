@@ -14,7 +14,7 @@ type ssu2SetupPacket struct {
 
 func (m *SSU2Manager) establishedPacket(packet []byte) bool {
 	destination, err := dataplanessu2.PeekDestinationID(packet, m.introKey)
-	if _, err := dataplanessu2.PeekSessionRequest(packet, m.introKey); err == nil {
+	if _, err := dataplanessu2.PeekSessionRequest(packet, m.introKey, m.networkID); err == nil {
 		return false
 	}
 	if err != nil {

@@ -43,6 +43,8 @@ type PairedPoolMaintainerConfig struct {
 	Now            func() uint64
 	InboundTarget  int
 	OutboundTarget int
+	InboundBackup  int
+	OutboundBackup int
 	RenewBefore    uint64
 	Hooks          []MaintenanceHook
 }
@@ -59,6 +61,8 @@ type PairedPoolMaintainer struct {
 	now              func() uint64
 	inboundTarget    int
 	outboundTarget   int
+	inboundBackup    int
+	outboundBackup   int
 	renewBefore      uint64
 	hooks            []MaintenanceHook
 	maintenanceMu    sync.Mutex
@@ -72,17 +76,24 @@ type PairedPoolMaintainer struct {
 
 func NewPairedPoolMaintainer(config PairedPoolMaintainerConfig) (*PairedPoolMaintainer, error) {
 	newPairedPoolMaintainerRejected := config.Pool == nil || config.Runtime == nil || config.Builder == nil || config.Builder.pool != config.Pool || config.Builder.runtime != config.Runtime || config.InboundSource == nil || config.OutboundSource == nil || config.Now == nil || config.InboundTarget < 1 || config.OutboundTarget < 1 || config.RenewBefore >= 10*60*1000
+	newPairedPoolMaintainerRejected = newPairedPoolMaintainerRejected || config.InboundBackup < 0 || config.OutboundBackup < 0
 	if !newPairedPoolMaintainerRejected {
-		newPairedPoolMaintainerRejected = config.InboundTarget+config.OutboundTarget > config.Pool.max
+		newPairedPoolMaintainerRejected = config.InboundTarget+config.InboundBackup+config.OutboundTarget+config.OutboundBackup > config.Pool.max
 	}
 	if newPairedPoolMaintainerRejected {
 		return nil, ErrPairedMaintenanceConfig
 	}
+	config.Pool.mu.Lock()
+	config.Pool.outboundTarget = config.OutboundTarget
+	config.Pool.renewBefore = config.RenewBefore
+	config.Pool.activeOutbound = make(map[uint32]struct{}, config.OutboundTarget)
+	config.Pool.mu.Unlock()
 	lifecycle, cancel := context.WithCancel(context.Background())
 	return &PairedPoolMaintainer{
 		pool: config.Pool, runtime: config.Runtime, builder: config.Builder,
 		inboundSource: config.InboundSource, outboundSource: config.OutboundSource,
 		now: config.Now, inboundTarget: config.InboundTarget, outboundTarget: config.OutboundTarget, renewBefore: config.RenewBefore,
+		inboundBackup: config.InboundBackup, outboundBackup: config.OutboundBackup,
 		hooks: append([]MaintenanceHook(nil), config.Hooks...), ctx: lifecycle, cancel: cancel,
 	}, nil
 }
@@ -145,8 +156,13 @@ func (m *PairedPoolMaintainer) Maintain(ctx context.Context) (int, error) {
 			reserve(Outbound, 1, 1, now)
 		}
 	default:
-		reserve(Inbound, m.inboundTarget, 2, cutoff)
-		reserve(Outbound, m.outboundTarget, 2, cutoff)
+		inboundTarget, outboundTarget := m.inboundTarget, m.outboundTarget
+		if m.pool.Count(Inbound, cutoff) >= inboundTarget && m.pool.Count(Outbound, cutoff) >= outboundTarget {
+			inboundTarget += m.inboundBackup
+			outboundTarget += m.outboundBackup
+		}
+		reserve(Inbound, inboundTarget, 2, cutoff)
+		reserve(Outbound, outboundTarget, 2, cutoff)
 	}
 	if !waiting {
 		m.builder.creatorBudget.cancelWait(m.builder)

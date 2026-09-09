@@ -14,13 +14,11 @@ import (
 	"gosuda.org/ivnp/observability"
 )
 
-const defaultNetworkID = 2
-
 var ErrLocalRouterInfoOptions = errors.New("router: invalid local RouterInfo options")
 
 // LocalRouterInfoConfig configures the concrete LocalInfo implementation used
 // by an embedded router. Local may own either a modern RouterIdentity or a
-// legacy Destination. NetworkID defaults to the public I2P network (2).
+// legacy Destination. NetworkID is explicit, including network zero.
 // Options extend the generated netId and optional router.version properties;
 // callers must not supply duplicate property keys.
 type LocalRouterInfoConfig struct {
@@ -62,9 +60,6 @@ func NewLocalRouterInfo(config LocalRouterInfoConfig) (*LocalRouterInfo, error) 
 	if config.Clock == nil {
 		config.Clock = dataplane.RouterWallClock{}
 	}
-	if config.NetworkID == 0 {
-		config.NetworkID = defaultNetworkID
-	}
 	baseOptions, err := localRouterBaseOptions(config.NetworkID, config.RouterVersion, config.Options)
 	if err != nil {
 		return nil, err
@@ -94,6 +89,13 @@ func NewLocalRouterInfo(config LocalRouterInfoConfig) (*LocalRouterInfo, error) 
 
 // Hash returns the immutable local RouterIdentity hash.
 func (l *LocalRouterInfo) Hash() foundation.Hash { return l.info.Hash() }
+
+// ReleaseSensitive wipes the owned signing key after publication has stopped.
+func (l *LocalRouterInfo) ReleaseSensitive() {
+	if l != nil {
+		l.info.ReleaseSensitive()
+	}
+}
 
 // Sign returns an authenticated signature for a native router transport
 // control message using this local RouterInfo's immutable signing key.

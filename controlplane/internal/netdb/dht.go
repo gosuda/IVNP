@@ -41,6 +41,7 @@ type Table struct {
 	routing       kBucketSet
 	generation    uint64
 	selectionPool chan *routerSelectionBuffer
+	routerLimit   int
 }
 
 func NewTable(local foundation.Hash, bucketCapacity int) *Table {
@@ -56,6 +57,37 @@ func NewTable(local foundation.Hash, bucketCapacity int) *Table {
 		table.selectionPool <- new(routerSelectionBuffer)
 	}
 	return table
+}
+
+// SetRouterLimit bounds retained RouterInfos independently of the routing index.
+// A nonpositive limit preserves the daemon's unbounded retention policy.
+func (t *Table) SetRouterLimit(limit int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.routerLimit = limit
+	for limit > 0 && len(t.routers) > limit {
+		t.evictOldestLocked()
+	}
+}
+
+func (t *Table) evictOldestLocked() {
+	var oldest foundation.Hash
+	var oldestSeen uint64
+	found := false
+	for hash, entry := range t.routers {
+		replace := !found || entry.lastSeen < oldestSeen
+		if !replace && entry.lastSeen == oldestSeen {
+			replace = distanceLess(t.local, oldest, hash)
+		}
+		if replace {
+			oldest, oldestSeen, found = hash, entry.lastSeen, true
+		}
+	}
+	if found {
+		delete(t.routers, oldest)
+		t.routing.remove(t.local, oldest)
+		t.generation++
+	}
 }
 
 func (t *Table) Len() int {
@@ -223,6 +255,9 @@ func (t *Table) StoreVerified(info foundation.NetworkDatabaseRouterInfo, floodfi
 		t.routers[hash] = old
 		t.generation++
 		return
+	}
+	if t.routerLimit > 0 && len(t.routers) >= t.routerLimit {
+		t.evictOldestLocked()
 	}
 	t.routing.add(t.local, hash, seenAt)
 	t.routers[hash] = routerEntry{info: info, floodfill: floodfill, lastSeen: seenAt}

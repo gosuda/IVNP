@@ -5,8 +5,61 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"testing"
 )
+
+func TestSSU2HandshakeSeparatesSelectedNetworks(t *testing.T) {
+	for _, networkID := range []uint8{0, 3, 255} {
+		t.Run(fmt.Sprint(networkID), func(t *testing.T) {
+			static, err := ecdh.X25519().GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			intro := make([]byte, 32)
+			initiator, err := NewInitiator(static.PublicKey().Bytes(), intro, 1, 2, networkID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer initiator.ReleaseSensitive()
+			payload := handshakeDateTimePayload(t, 1)
+			request, err := initiator.BuildSessionRequest(make([]byte, MaxIPv4PacketLen), payload, 1, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := PeekSessionRequest(request, intro, 2); err == nil {
+				t.Fatal("public network accepted private-network request")
+			}
+			if _, _, _, err := ParseSessionRequest(bytes.Clone(request), static.Bytes(), intro, 2); err == nil {
+				t.Fatal("public network authenticated private-network request")
+			}
+			responder, header, _, err := ParseSessionRequest(bytes.Clone(request), static.Bytes(), intro, networkID)
+			if err != nil || header.NetworkID != networkID {
+				t.Fatalf("matching request network = %d, %v", header.NetworkID, err)
+			}
+			defer responder.ReleaseSensitive()
+			created, err := responder.BuildSessionCreated(make([]byte, MaxIPv4PacketLen), payload, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			header, _, err = initiator.ParseSessionCreated(created)
+			if err != nil || header.NetworkID != networkID {
+				t.Fatalf("matching response network = %d, %v", header.NetworkID, err)
+			}
+			token, err := BuildTokenRequest(make([]byte, MaxIPv4PacketLen), intro, 1, 2, 3, payload, networkID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := ParseTokenRequest(bytes.Clone(token), intro, 2); err == nil {
+				t.Fatal("public network accepted private-network token request")
+			}
+			header, _, err = ParseTokenRequest(token, intro, networkID)
+			if err != nil || header.NetworkID != networkID {
+				t.Fatalf("matching token network = %d, %v", header.NetworkID, err)
+			}
+		})
+	}
+}
 
 func TestSSU2HandshakeAndDataCiphers(t *testing.T) {
 	curve := ecdh.X25519()
@@ -26,7 +79,7 @@ func TestSSU2HandshakeAndDataCiphers(t *testing.T) {
 	if _, err = rand.Read(aliceIntro); err != nil {
 		t.Fatal(err)
 	}
-	initiator, err := NewInitiator(bobStatic.PublicKey().Bytes(), bobIntro, 1, 2)
+	initiator, err := NewInitiator(bobStatic.PublicKey().Bytes(), bobIntro, 1, 2, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,11 +88,11 @@ func TestSSU2HandshakeAndDataCiphers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	peeked, err := PeekSessionRequest(request, bobIntro)
+	peeked, err := PeekSessionRequest(request, bobIntro, 2)
 	if err != nil || peeked.DestinationID != 1 || peeked.SourceID != 2 || peeked.Token != 0 {
 		t.Fatalf("PeekSessionRequest = %#v, %v", peeked, err)
 	}
-	responder, requestHeader, openedRequest, err := ParseSessionRequest(append([]byte(nil), request...), bobStatic.Bytes(), bobIntro)
+	responder, requestHeader, openedRequest, err := ParseSessionRequest(append([]byte(nil), request...), bobStatic.Bytes(), bobIntro, 2)
 	if err != nil || requestHeader.Type != SessionRequest || !bytes.Equal(openedRequest, requestPayload) {
 		t.Fatalf("ParseSessionRequest = %#v, %x, %v", requestHeader, openedRequest, err)
 	}
@@ -110,7 +163,7 @@ func TestSSU2SessionConfirmedFragmentReassembly(t *testing.T) {
 	if _, err = rand.Read(bobIntro); err != nil {
 		t.Fatal(err)
 	}
-	initiator, err := NewInitiator(bobStatic.PublicKey().Bytes(), bobIntro, 1, 2)
+	initiator, err := NewInitiator(bobStatic.PublicKey().Bytes(), bobIntro, 1, 2, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +171,7 @@ func TestSSU2SessionConfirmedFragmentReassembly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	responder, _, _, err := ParseSessionRequest(append([]byte(nil), request...), bobStatic.Bytes(), bobIntro)
+	responder, _, _, err := ParseSessionRequest(append([]byte(nil), request...), bobStatic.Bytes(), bobIntro, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
