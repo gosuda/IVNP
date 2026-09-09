@@ -110,9 +110,12 @@ func TestRatchetManagerDuplicateNewDoesNotEvictCandidateShardVictim(t *testing.T
 	if afterReceive.Sessions != before.Sessions || afterReceive.InboundTags != before.InboundTags {
 		t.Fatalf("Receive mutated full candidate shard: before=%+v after=%+v", before, afterReceive)
 	}
-	commit, commitErr := manager.CommitNew(result.Candidate, observed, 2_000)
-	if commitErr != nil || commit != NewSessionRetained {
-		t.Fatalf("duplicate New Session commit = %v, %v", commit, commitErr)
+	retained, retainErr := manager.RetainNew(result.Candidate, observed, 2_000)
+	if retainErr != nil || !retained {
+		t.Fatalf("duplicate New Session retention = %t, %v", retained, retainErr)
+	}
+	if _, err := manager.CommitNew(result.Candidate, observed, 2_000); !errors.Is(err, ErrRatchet) {
+		t.Fatalf("retained candidate remained committable: %v", err)
 	}
 	afterCommit := manager.shards[1].Stats()
 	if afterCommit.Sessions != before.Sessions || afterCommit.InboundTags != before.InboundTags {

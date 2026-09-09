@@ -640,6 +640,7 @@ func TestGarlicReceiverDeliversConcurrentNewSessionPayloads(t *testing.T) {
 		if err = receiver.HandleGarlic(message); err != nil {
 			t.Fatal(err)
 		}
+		admitReply = false
 	}
 	if len(delivered) != 2 || delivered[0] != 1 || delivered[1] != 3 {
 		t.Fatalf("delivered Data IDs = %v, want [1 3]", delivered)

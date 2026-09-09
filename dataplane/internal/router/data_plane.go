@@ -435,20 +435,31 @@ func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState
 	if targetErr != nil {
 		return targetErr
 	}
-	if destination.ReserveRatchetReply == nil {
-		return ErrGarlicDestination
-	}
-	reservation, err := destination.ReserveRatchetReply(target)
+	retained, err := destination.Ratchet.RetainNew(result.Candidate, target, now)
 	if err != nil {
 		return err
 	}
-	defer reservation.Release()
-	if err := reservation.Activate(); err != nil {
-		return err
-	}
-	commit, err := destination.Ratchet.CommitNew(result.Candidate, target, now)
-	if err != nil {
-		return err
+	var reservation RatchetReplyReservation
+	if !retained {
+		if destination.ReserveRatchetReply == nil {
+			return ErrGarlicDestination
+		}
+		reservation, err = destination.ReserveRatchetReply(target)
+		if err != nil {
+			return err
+		}
+		defer reservation.Release()
+		if err := reservation.Activate(); err != nil {
+			return err
+		}
+		commit, err := destination.Ratchet.CommitNew(result.Candidate, target, now)
+		if err != nil {
+			return err
+		}
+		if commit == dataplanegarlic.NewSessionRetained {
+			reservation.Release()
+			reservation = nil
+		}
 	}
 	result.Peer = target
 	remaining := cloves[:0]
@@ -460,15 +471,13 @@ func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState
 		}
 		remaining = append(remaining, clove)
 	}
-	if commit != dataplanegarlic.NewSessionRetained {
+	if reservation != nil {
 		if err := reservation.Send(context.Background(), result.Reply); err != nil {
 			return appendError(dispatchErr, err)
 		}
 		if r.metrics != nil {
 			r.metrics.IncGarlicECIESNewSessionSent()
 		}
-	} else {
-		reservation.Release()
 	}
 	for _, clove := range remaining {
 		dispatchErr = appendError(dispatchErr, r.service.dispatchClove(result.Peer, clove.Delivery, clove.Message, now, false))
