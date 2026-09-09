@@ -114,7 +114,10 @@ func TestStreamPendingReadObservesDeadlineChanges(t *testing.T) {
 		if err := inbound.SetReadDeadline(time.Time{}); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(time.Hour)
+		observation := time.NewTimer(time.Hour)
+		defer observation.Stop()
+		<-observation.C
+		synctest.Wait()
 		select {
 		case err := <-result:
 			t.Fatalf("cleared deadline woke read: %v", err)

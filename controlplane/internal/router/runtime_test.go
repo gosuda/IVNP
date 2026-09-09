@@ -16,6 +16,8 @@ import (
 
 var _ stream.StreamNetwork = (*Router)(nil)
 
+var errUnexpectedSocketDial = errors.New("unexpected dial")
+
 type eventLog struct {
 	mu     sync.Mutex
 	events []string
@@ -69,7 +71,7 @@ func (s *fakeSockets) ListenStream(context.Context, dataplane.RouterEndpoint) (n
 	return &fakeListener{log: s.log}, nil
 }
 func (s *fakeSockets) DialStream(context.Context, dataplane.RouterEndpoint) (net.Conn, error) {
-	return nil, errors.New("unexpected dial")
+	return nil, errUnexpectedSocketDial
 }
 func (s *fakeSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (*net.UDPConn, error) {
 	s.log.add("listen-packet")

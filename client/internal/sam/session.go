@@ -13,6 +13,8 @@ import (
 	"gosuda.org/ivnp/interfaces/destination"
 )
 
+var errUnknownSubsession = errors.New("sam: unknown subsession")
+
 type sessionStyle string
 
 const (
@@ -229,7 +231,7 @@ func (s *samSession) removeChild(id string) error {
 	}
 	r.mu.Unlock()
 	if child == nil {
-		return errors.New("sam: unknown subsession")
+		return errUnknownSubsession
 	}
 	r.server.removeSession(child)
 	child.closeChild()

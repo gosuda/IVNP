@@ -16,6 +16,8 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var errTestMessagePolicyRejection = errors.New("message policy rejection")
+
 func TestNTCP2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -56,7 +58,7 @@ func TestNTCP2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 		HandleI2NP: func(message foundation.I2NPMessage, _ uint64, _ bool) error {
 			if message.Header.ID == 9 {
 				rejected <- struct{}{}
-				return errors.New("message policy rejection")
+				return errTestMessagePolicyRejection
 			}
 			received <- message
 			return nil

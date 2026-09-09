@@ -12,6 +12,8 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var errTestInitiatorSessionNotEstablished = errors.New("initiator session was not established")
+
 func establishRatchetShard(shard *dataplanegarlicecies.RatchetManager, peer foundation.Hash, remote *foundation.LocalDestination, now uint64) error {
 	remoteManager, err := dataplanegarlicecies.NewRatchetManager(remote, dataplanegarlicecies.RatchetConfig{TagLookahead: 4, MaxInboundTags: 64})
 	if err != nil {
@@ -37,7 +39,7 @@ func establishRatchetShard(shard *dataplanegarlicecies.RatchetManager, peer foun
 		return err
 	}
 	if !shard.HasPeer(peer) {
-		return errors.New("initiator session was not established")
+		return errTestInitiatorSessionNotEstablished
 	}
 	return nil
 }

@@ -11,6 +11,8 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var errNegativeControlHandlerTimeout = errors.New("router: negative control handler timeout")
+
 type ControlSinks struct {
 	DatabaseLookup      func(foundation.I2NPDatabaseLookupMessage) error
 	DatabaseSearchReply func(context.Context, foundation.I2NPDatabaseSearchReplyMessage) error
@@ -40,7 +42,7 @@ type ControlDispatcher struct {
 
 func NewControlDispatcher(database *controlplanenetdb.Database, sinks ControlSinks, config ControlDispatcherConfig) (*ControlDispatcher, error) {
 	if config.HandlerTimeout < 0 {
-		return nil, errors.New("router: negative control handler timeout")
+		return nil, errNegativeControlHandlerTimeout
 	}
 	if config.HandlerTimeout == 0 {
 		config.HandlerTimeout = 30 * time.Second

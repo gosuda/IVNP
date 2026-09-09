@@ -18,6 +18,11 @@ import (
 	"gosuda.org/ivnp/observability"
 )
 
+var (
+	errDuplicatedID          = errors.New("DUPLICATED_ID")
+	errDuplicatedDestination = errors.New("DUPLICATED_DEST")
+)
+
 const (
 	defaultMaxCommandBytes  = 8192
 	defaultMaxDatagramBytes = 32768
@@ -485,10 +490,10 @@ func (s *Server) addRoot(root *samSession) error {
 		return net.ErrClosed
 	}
 	if _, exists := s.sessions[root.id]; exists {
-		return errors.New("DUPLICATED_ID")
+		return errDuplicatedID
 	}
 	if _, exists := s.destinations[root.endpoint.Hash()]; exists {
-		return errors.New("DUPLICATED_DEST")
+		return errDuplicatedDestination
 	}
 	s.sessions[root.id], s.destinations[root.endpoint.Hash()] = root, root
 	return nil
@@ -500,7 +505,7 @@ func (s *Server) addChild(child *samSession) error {
 		return net.ErrClosed
 	}
 	if _, exists := s.sessions[child.id]; exists {
-		return errors.New("DUPLICATED_ID")
+		return errDuplicatedID
 	}
 	s.sessions[child.id] = child
 	return nil

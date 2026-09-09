@@ -14,8 +14,16 @@ import (
 )
 
 var (
-	ErrStreamUnavailable = errors.New("router: stream backend unavailable")
-	ErrTransportStopped  = errors.New("router: transport stopped unexpectedly")
+	ErrStreamUnavailable             = errors.New("router: stream backend unavailable")
+	ErrTransportStopped              = errors.New("router: transport stopped unexpectedly")
+	errMissingDatabase               = errors.New("router: missing database")
+	errMissingLocalInfo              = errors.New("router: missing local info")
+	errMissingTransport              = errors.New("router: missing transport manager")
+	errMissingSockets                = errors.New("router: missing socket runtime")
+	errMissingAddressPublisher       = errors.New("router: missing address publisher")
+	errMissingClock                  = errors.New("router: missing clock")
+	errGarlicReceiverServiceMismatch = errors.New("router: Garlic receiver uses a different service")
+	errIncompleteEndpoint            = errors.New("router: endpoint requires network and address")
 )
 
 const (
@@ -215,22 +223,22 @@ type Router struct {
 // New validates and wires an embedded Router. It performs no network I/O.
 func New(cfg Config, deps Dependencies) (*Router, error) {
 	if deps.Database == nil {
-		return nil, errors.New("router: missing database")
+		return nil, errMissingDatabase
 	}
 	if deps.LocalInfo == nil {
-		return nil, errors.New("router: missing local info")
+		return nil, errMissingLocalInfo
 	}
 	if deps.Transport == nil {
-		return nil, errors.New("router: missing transport manager")
+		return nil, errMissingTransport
 	}
 	if deps.Sockets == nil {
-		return nil, errors.New("router: missing socket runtime")
+		return nil, errMissingSockets
 	}
 	if deps.Addresses == nil {
-		return nil, errors.New("router: missing address publisher")
+		return nil, errMissingAddressPublisher
 	}
 	if deps.Clock == nil {
-		return nil, errors.New("router: missing clock")
+		return nil, errMissingClock
 	}
 	if err := validateEndpoint(cfg.NTCP2); err != nil {
 		return nil, err
@@ -310,7 +318,7 @@ func New(cfg Config, deps Dependencies) (*Router, error) {
 	}
 	if deps.GarlicReceiver != nil {
 		if !deps.GarlicReceiver.MatchesService(deps.Service) {
-			return nil, errors.New("router: Garlic receiver uses a different service")
+			return nil, errGarlicReceiverServiceMismatch
 		}
 		deps.Service.SetGarlicSink(deps.GarlicReceiver.HandleGarlicFrom)
 		if deps.Destinations != nil {
@@ -333,7 +341,7 @@ func New(cfg Config, deps Dependencies) (*Router, error) {
 
 func validateEndpoint(endpoint dataplane.RouterEndpoint) error {
 	if (endpoint.Network == "") != (endpoint.Address == "") {
-		return errors.New("router: endpoint requires network and address")
+		return errIncompleteEndpoint
 	}
 	return nil
 }

@@ -19,6 +19,11 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var (
+	errSeedBypassedPreparedSession = errors.New("seed bypassed its prepared session")
+	errSeedCloseModifiedPayload    = errors.New("close modified an active send's borrowed payload")
+)
+
 type seedTestSession struct {
 	calls atomic.Int32
 	send  func(context.Context, foundation.I2NPMessage) error
@@ -41,7 +46,7 @@ func (s *seedTestTransport) PrepareSession(context.Context, foundation.Hash) (da
 }
 
 func (*seedTestTransport) Send(context.Context, foundation.Hash, foundation.I2NPMessage) error {
-	return errors.New("seed bypassed its prepared session")
+	return errSeedBypassedPreparedSession
 }
 
 func seedTestRouterInfo(t testing.TB, published uint64) foundation.NetworkDatabaseRouterInfo {
@@ -362,7 +367,7 @@ func TestReplyRouterInfoSeedCloseReleasesHandlesAndWakesWaiters(t *testing.T) {
 			close(entered)
 			<-release
 			if !bytes.Equal(message.Payload, original) {
-				return errors.New("close modified an active send's borrowed payload")
+				return errSeedCloseModifiedPayload
 			}
 			return nil
 		}

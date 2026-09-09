@@ -19,6 +19,13 @@ import (
 
 const testB32 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b32.i2p"
 
+var (
+	errTestListenNotImplemented     = errors.New("not implemented")
+	errTestFirstOutproxyUnavailable = errors.New("first outproxy unavailable")
+	errTestOutproxyWarmup           = errors.New("warming outproxy failed")
+	errTestDialFailed               = errors.New("dial failed")
+)
+
 type fixedDestinationResolver string
 
 func (r fixedDestinationResolver) ResolveDestination(context.Context, string) (string, error) {
@@ -45,7 +52,7 @@ func (n *testNetwork) DialI2P(ctx context.Context, address string) (net.Conn, er
 }
 
 func (n *testNetwork) ListenI2P(context.Context, string) (net.Listener, error) {
-	return nil, errors.New("not implemented")
+	return nil, errTestListenNotImplemented
 }
 
 func (n *testNetwork) calls() []string {
@@ -370,7 +377,7 @@ func TestHTTPProxyOutproxyFailover(t *testing.T) {
 	const secondB32 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.b32.i2p"
 	network := &testNetwork{dial: func(_ context.Context, address string) (net.Conn, error) {
 		if address == testB32+":80" {
-			return nil, errors.New("first outproxy unavailable")
+			return nil, errTestFirstOutproxyUnavailable
 		}
 		client, server := net.Pipe()
 		_ = server.Close()
@@ -400,7 +407,7 @@ func TestHTTPProxyRetriesOutproxyWarmup(t *testing.T) {
 	attempted := make(chan struct{}, 2)
 	network := &testNetwork{dial: func(context.Context, string) (net.Conn, error) {
 		attempted <- struct{}{}
-		return nil, errors.New("warming outproxy failed")
+		return nil, errTestOutproxyWarmup
 	}}
 	proxy, err := NewHTTPProxy(HTTPProxyConfig{
 		Network: network, Resolver: fixedDestinationResolver(testB32), ListenAddress: "127.0.0.1:0",
@@ -900,7 +907,7 @@ func TestSOCKS5ResetsHandshakeDeadlineForDialFailure(t *testing.T) {
 		Network: &testNetwork{dial: func(context.Context, string) (net.Conn, error) {
 			close(dialStarted)
 			<-releaseDial
-			return nil, errors.New("dial failed")
+			return nil, errTestDialFailed
 		}},
 		ListenAddress:    "127.0.0.1:0",
 		HandshakeTimeout: 5 * time.Millisecond,

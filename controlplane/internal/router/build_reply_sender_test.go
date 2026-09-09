@@ -13,6 +13,11 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var (
+	errOutboundBuildNotDirect = errors.New("outbound build was not delivered by direct transport")
+	errBuildReplyIDsExhausted = errors.New("exhausted build reply IDs")
+)
+
 type buildReplyCaptureSender struct {
 	peer    foundation.Hash
 	message foundation.I2NPMessage
@@ -166,7 +171,7 @@ func TestOutboundBuildReplyTraversesInboundTunnelDataPlane(t *testing.T) {
 	var obepManager *controlplanetunnel.BuildManager
 	obepService, obepControl := newControlServiceForTest(t, nil, ControlSinks{TunnelBuild: func(ctx context.Context, source dataplane.RouterI2NPSource, _ foundation.I2NPBuildRecords, message foundation.I2NPMessage) error {
 		if !source.Direct {
-			return errors.New("outbound build was not delivered by direct transport")
+			return errOutboundBuildNotDirect
 		}
 		return obepManager.HandleBuildContext(ctx, controlplanetunnel.BuildSource{Router: source.Peer, Direct: source.Direct}, message)
 	}})
@@ -364,7 +369,7 @@ func buildReplyIDSource(ids ...uint32) dataplane.RouterMessageIDSource {
 	index := 0
 	return func() (uint32, error) {
 		if index == len(ids) {
-			return 0, errors.New("exhausted build reply IDs")
+			return 0, errBuildReplyIDsExhausted
 		}
 		id := ids[index]
 		index++

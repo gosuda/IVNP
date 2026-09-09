@@ -10,9 +10,11 @@ import (
 )
 
 var (
-	ErrControlOverloaded = errors.New("router: control ingress overloaded")
-	ErrControlStopped    = errors.New("router: control ingress stopped")
-	ErrControlStarted    = errors.New("router: control ingress already started")
+	ErrControlOverloaded         = errors.New("router: control ingress overloaded")
+	ErrControlStopped            = errors.New("router: control ingress stopped")
+	ErrControlStarted            = errors.New("router: control ingress already started")
+	errMissingControlHandler     = errors.New("router: missing control handler")
+	errInvalidControlQueueLimits = errors.New("router: invalid control queue limits")
 )
 
 // ControlMessage retains authenticated provenance across the asynchronous handoff.
@@ -77,12 +79,12 @@ type ControlQueue struct {
 
 func NewControlQueue(handler ControlHandler, limits ControlQueueLimits) (*ControlQueue, error) {
 	if handler == nil {
-		return nil, errors.New("router: missing control handler")
+		return nil, errMissingControlHandler
 	}
 	positiveLimits := limits.Items > 0 && limits.Bytes > 0 && limits.SourceItems > 0 && limits.SourceBytes > 0
 	withinGlobalLimits := limits.SourceItems <= limits.Items && limits.SourceBytes <= limits.Bytes
 	if !positiveLimits || !withinGlobalLimits {
-		return nil, errors.New("router: invalid control queue limits")
+		return nil, errInvalidControlQueueLimits
 	}
 	idle := make(chan struct{})
 	close(idle)

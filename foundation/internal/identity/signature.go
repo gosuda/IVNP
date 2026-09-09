@@ -20,6 +20,8 @@ import (
 
 var ErrUnsupportedSignature = errors.New("i2p: signature type is not supported by the configured crypto backend")
 
+var errMalformedDSAParameter = errors.New("i2p: malformed static DSA parameter")
+
 // VerifySignature verifies a signature against message using the specified signing key type.
 // first contains the primary public key bytes, and rest contains extra key data stored in certificates (if any).
 func VerifySignature(kind SigningKeyType, first, rest, message, signature []byte) (bool, error) {
@@ -171,7 +173,7 @@ func initDSAParameters() {
 func hexInt(encoded string) (*big.Int, error) {
 	value, ok := new(big.Int).SetString(encoded, 16)
 	if !ok {
-		return nil, errors.New("i2p: malformed static DSA parameter")
+		return nil, errMalformedDSAParameter
 	}
 	return value, nil
 }

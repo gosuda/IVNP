@@ -16,6 +16,8 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var errControlHandlerWithoutDeadline = errors.New("control handler has no deadline")
+
 func newControlServiceForTest(t *testing.T, database *controlplanenetdb.Database, sinks ControlSinks) (*dataplane.RouterService, *ControlDispatcher) {
 	t.Helper()
 	queue, err := NewControlDispatcher(database, sinks, ControlDispatcherConfig{QueueLimits: dataplane.RouterDefaultControlQueueLimits()})
@@ -479,7 +481,7 @@ func TestControlHandlerDeadlineAllowsFollowingWorkToComplete(t *testing.T) {
 					deadline, ok := ctx.Deadline()
 					if !ok {
 						remaining <- 0
-						return errors.New("control handler has no deadline")
+						return errControlHandlerWithoutDeadline
 					}
 					remaining <- time.Until(deadline)
 					if message.Header.ID == 1 {

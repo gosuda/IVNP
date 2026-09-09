@@ -27,9 +27,15 @@ var (
 	ErrRequestExpired = errors.New("netdb: lookup request expired")
 	// ErrNoFloodfill means no known floodfill (or searchable candidate) could
 	// receive the lookup.
-	ErrNoFloodfill          = errors.New("netdb: no floodfill route for lookup")
-	ErrInvalidReplyRoute    = errors.New("netdb: invalid lookup reply route")
-	ErrRequestManagerClosed = errors.New("netdb: request manager is closed")
+	ErrNoFloodfill                  = errors.New("netdb: no floodfill route for lookup")
+	ErrInvalidReplyRoute            = errors.New("netdb: invalid lookup reply route")
+	ErrRequestManagerClosed         = errors.New("netdb: request manager is closed")
+	errRequestManagerDependencies   = errors.New("netdb: request manager requires database, sender, and reply route")
+	errRequestManagerCapacity       = errors.New("netdb: request manager capacity must be positive")
+	errRequestManagerCandidateLimit = errors.New("netdb: request manager candidate limit exceeds lookup exclusions")
+	errRequestManagerTimeout        = errors.New("netdb: request manager timeout must be positive")
+	errRequestManagerClock          = errors.New("netdb: request manager requires a clock")
+	errUnknownLookupType            = errors.New("netdb: unknown lookup type")
 )
 
 const (
@@ -156,25 +162,25 @@ type RequestManager struct {
 // expiry policy remains deterministic and owned by the caller's scheduler.
 func NewRequestManager(database *Database, sender RequestSender, route ReplyRoute, config RequestManagerConfig) (*RequestManager, error) {
 	if database == nil || sender == nil || route == nil {
-		return nil, errors.New("netdb: request manager requires database, sender, and reply route")
+		return nil, errRequestManagerDependencies
 	}
 	if config.Capacity <= 0 {
-		return nil, errors.New("netdb: request manager capacity must be positive")
+		return nil, errRequestManagerCapacity
 	}
 	if config.MaxCandidates <= 0 {
 		config.MaxCandidates = 16
 	}
 	if config.MaxCandidates > foundation.I2NPMaxDatabaseLookupExcluded {
-		return nil, errors.New("netdb: request manager candidate limit exceeds lookup exclusions")
+		return nil, errRequestManagerCandidateLimit
 	}
 	if config.MaxWaiters <= 0 {
 		config.MaxWaiters = 64
 	}
 	if config.TimeoutMillis == 0 {
-		return nil, errors.New("netdb: request manager timeout must be positive")
+		return nil, errRequestManagerTimeout
 	}
 	if config.Now == nil {
-		return nil, errors.New("netdb: request manager requires a clock")
+		return nil, errRequestManagerClock
 	}
 	if config.Rand == nil {
 		config.Rand = cryptorand.Reader
@@ -225,7 +231,7 @@ func (m *RequestManager) Lookup(ctx context.Context, typeID LookupType, key foun
 
 func (m *RequestManager) lookup(ctx context.Context, typeID LookupType, key foundation.Hash, forceRefresh bool) (<-chan LookupResult, error) {
 	if typeID != RouterInfoLookup && typeID != LeaseSetLookup && typeID != ExplorationLookup {
-		return nil, errors.New("netdb: unknown lookup type")
+		return nil, errUnknownLookupType
 	}
 	if ctx ==
 		nil {
@@ -356,7 +362,7 @@ func BuildDatabaseLookup(key foundation.Hash, typeID LookupType, route ReplyRout
 	switch typeID {
 	case RouterInfoLookup, LeaseSetLookup, ExplorationLookup:
 	default:
-		return nil, errors.New("netdb: unknown lookup type")
+		return nil, errUnknownLookupType
 	}
 	length := 32 + 32 + 1 + 2 + len(exclusions)*foundation.HashLength
 	if tunnel {

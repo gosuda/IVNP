@@ -17,6 +17,16 @@ const soapEnvelopeNamespace = "http://schemas.xmlsoap.org/soap/envelope/"
 
 var ErrSOAPFault = errors.New("upnp: SOAP fault")
 
+var (
+	errExpectedSOAPEnvelope   = errors.New("expected SOAP Envelope")
+	errExpectedSOAPBody       = errors.New("expected SOAP Body")
+	errExpectedSOAPFault      = errors.New("expected SOAP Fault")
+	errMalformedSOAPBody      = errors.New("malformed SOAP Body")
+	errMalformedSOAPEnvelope  = errors.New("malformed SOAP Envelope")
+	errNonemptyResponseAction = errors.New("response action must be empty")
+	errMalformedSOAPFault     = errors.New("malformed SOAP fault")
+)
+
 // PortMapping represents a port forwarding mapping on a UPnP gateway.
 type PortMapping struct {
 	RemoteHost     string
@@ -216,7 +226,7 @@ func parseSOAPFault(reader io.Reader) (string, error) {
 	}
 	envelope, ok := token.(xml.StartElement)
 	if !ok || envelope.Name.Space != soapEnvelopeNamespace || envelope.Name.Local != "Envelope" {
-		return "", errors.New("expected SOAP Envelope")
+		return "", errExpectedSOAPEnvelope
 	}
 	token, err = nextSignificantToken(decoder)
 	if err != nil {
@@ -224,7 +234,7 @@ func parseSOAPFault(reader io.Reader) (string, error) {
 	}
 	body, ok := token.(xml.StartElement)
 	if !ok || body.Name.Space != soapEnvelopeNamespace || body.Name.Local != "Body" {
-		return "", errors.New("expected SOAP Body")
+		return "", errExpectedSOAPBody
 	}
 	token, err = nextSignificantToken(decoder)
 	if err != nil {
@@ -232,7 +242,7 @@ func parseSOAPFault(reader io.Reader) (string, error) {
 	}
 	fault, ok := token.(xml.StartElement)
 	if !ok || fault.Name.Space != soapEnvelopeNamespace || fault.Name.Local != "Fault" {
-		return "", errors.New("expected SOAP Fault")
+		return "", errExpectedSOAPFault
 	}
 	message, err := readSOAPElementText(decoder, fault)
 	if err != nil {
@@ -244,7 +254,7 @@ func parseSOAPFault(reader io.Reader) (string, error) {
 	}
 	endBody, ok := token.(xml.EndElement)
 	if !ok || endBody.Name != body.Name {
-		return "", errors.New("malformed SOAP Body")
+		return "", errMalformedSOAPBody
 	}
 	token, err = nextSignificantToken(decoder)
 	if err != nil {
@@ -252,7 +262,7 @@ func parseSOAPFault(reader io.Reader) (string, error) {
 	}
 	endEnvelope, ok := token.(xml.EndElement)
 	if !ok || endEnvelope.Name != envelope.Name {
-		return "", errors.New("malformed SOAP Envelope")
+		return "", errMalformedSOAPEnvelope
 	}
 	if err := requireEOF(decoder); err != nil {
 		return "", err
@@ -415,7 +425,7 @@ func requireEmptyElement(decoder *xml.Decoder, start xml.StartElement) error {
 	}
 	end, ok := token.(xml.EndElement)
 	if !ok || end.Name != start.Name {
-		return errors.New("response action must be empty")
+		return errNonemptyResponseAction
 	}
 	return nil
 }
@@ -434,7 +444,7 @@ func readSOAPElementText(decoder *xml.Decoder, start xml.StartElement) (string, 
 		case xml.EndElement:
 			depth--
 			if depth == 0 && value.Name != start.Name {
-				return "", errors.New("malformed SOAP fault")
+				return "", errMalformedSOAPFault
 			}
 		case xml.CharData:
 			text.Write([]byte(value))

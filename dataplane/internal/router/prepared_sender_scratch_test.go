@@ -15,6 +15,11 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var (
+	errTestDecryptedSenderPayloadChanged = errors.New("decrypted sender payload changed")
+	errTestScratchPinnedAcrossWrite      = errors.New("scratch pinned across tunnel write")
+)
+
 func assertSenderScratchWiped(t testing.TB, scratch *streamingSenderScratch) {
 	t.Helper()
 	for _, buffer := range []*senderScratchBuffer{&scratch.data, &scratch.clove, &scratch.ratchet, &scratch.plain, &scratch.encrypted} {
@@ -291,10 +296,10 @@ func newScratchTrafficFixture(t *testing.T) *scratchTrafficFixture {
 			return err
 		}
 		if !bytes.Contains(decoded, f.expected) {
-			return errors.New("decrypted sender payload changed")
+			return errTestDecryptedSenderPayloadChanged
 		}
 		if len(f.sender.scratch) != f.sender.scratchSlots {
-			return errors.New("scratch pinned across tunnel write")
+			return errTestScratchPinnedAcrossWrite
 		}
 		return nil
 	}

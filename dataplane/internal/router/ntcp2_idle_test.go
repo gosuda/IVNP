@@ -22,8 +22,10 @@ func TestNTCP2IdleTimeoutRenewsOnReadOrWrite(t *testing.T) {
 				conn := manager.establishedConn(left)
 				defer conn.Close()
 				defer right.Close()
+				activity := time.NewTicker(45 * time.Second)
+				defer activity.Stop()
 				for range 3 {
-					time.Sleep(45 * time.Second)
+					<-activity.C
 					done := make(chan error, 1)
 					reader, writer := conn, right
 					if operation == "write" {
@@ -44,10 +46,13 @@ func TestNTCP2IdleTimeoutRenewsOnReadOrWrite(t *testing.T) {
 						t.Fatalf("payload = %d, want 42", payload[0])
 					}
 				}
-				time.Sleep(time.Minute)
-				synctest.Wait()
+				activity.Stop()
+				idleSince := time.Now()
 				if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.ErrClosedPipe) {
 					t.Fatalf("idle read error = %v, want closed pipe", err)
+				}
+				if elapsed := time.Since(idleSince); elapsed != time.Minute {
+					t.Fatalf("idle session closed after %s, want %s", elapsed, time.Minute)
 				}
 			})
 		})
@@ -88,13 +93,16 @@ func TestNTCP2IdleTimeoutRetiresSessionAndUnblocksIO(t *testing.T) {
 			t.Fatal("session installation failed")
 		}
 		writeDone := make(chan error, 1)
+		idleSince := time.Now()
 		go func() { writeDone <- session.Write([]byte{1}) }()
-		synctest.Wait()
-		time.Sleep(time.Minute)
 		synctest.Wait()
 		if err := <-writeDone; !errors.Is(err, io.ErrClosedPipe) {
 			t.Fatalf("pending write error = %v, want closed pipe", err)
 		}
+		if elapsed := time.Since(idleSince); elapsed != time.Minute {
+			t.Fatalf("blocked session closed after %s, want %s", elapsed, time.Minute)
+		}
+		synctest.Wait()
 		if manager.HasSession(peer) {
 			t.Fatal("idle session remains available")
 		}
@@ -111,10 +119,13 @@ func TestNTCP2ActivityPreservesCallerReadDeadline(t *testing.T) {
 		conn := manager.establishedConn(left)
 		defer conn.Close()
 		defer right.Close()
-		if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		readDeadline := time.Now().Add(10 * time.Second)
+		if err := conn.SetReadDeadline(readDeadline); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(5 * time.Second)
+		activity := time.NewTimer(5 * time.Second)
+		defer activity.Stop()
+		<-activity.C
 		done := make(chan error, 1)
 		go func() {
 			_, err := right.Read(make([]byte, 1))
@@ -128,6 +139,9 @@ func TestNTCP2ActivityPreservesCallerReadDeadline(t *testing.T) {
 		}
 		if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
 			t.Fatalf("read error = %v, want caller deadline exceeded", err)
+		}
+		if !time.Now().Equal(readDeadline) {
+			t.Fatalf("read completed at %s, want original deadline %s", time.Now(), readDeadline)
 		}
 	})
 }

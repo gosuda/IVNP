@@ -16,6 +16,8 @@ import (
 	"gosuda.org/ivnp/state"
 )
 
+var errTestNoConnectedPeers = errors.New("no connected peers")
+
 type idleNodeTransport struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -38,7 +40,7 @@ func (m *idleNodeTransport) Wait() error {
 	return nil
 }
 func (m *idleNodeTransport) Send(context.Context, foundation.Hash, foundation.I2NPMessage) error {
-	return errors.New("no connected peers")
+	return errTestNoConnectedPeers
 }
 func (m *idleNodeTransport) Status() dataplane.RouterTransportStatus {
 	return dataplane.RouterTransportStatus{Running: m.ctx != nil && m.ctx.Err() == nil}

@@ -20,6 +20,24 @@ import (
 // ErrInvalidOperating indicates a syntactically valid config with invalid or unsupported settings.
 var ErrInvalidOperating = errors.New("config: invalid operating configuration")
 
+var (
+	errResolveOperating                    = errors.New("config: cannot resolve operating configuration")
+	errCreateOperating                     = errors.New("config: cannot create operating configuration")
+	errPersistOperating                    = errors.New("config: cannot persist operating configuration")
+	errOpenOperating                       = errors.New("config: cannot open operating configuration")
+	errUnsafeOperating                     = errors.New("config: unsafe operating configuration")
+	errReadOperating                       = errors.New("config: cannot read operating configuration")
+	errBearerCredentialsRequirePrivateFile = errors.New("config: bearer credentials require a private configuration file")
+	errInvalidEndpoint                     = errors.New("invalid endpoint")
+	errInvalidReseedEndpoint               = errors.New("invalid endpoint")
+	errInvalidReseedEndpointCount          = errors.New("invalid endpoint count")
+	errInvalidBoolean                      = errors.New("invalid boolean")
+	errInvalidInteger                      = errors.New("invalid integer")
+	errIntegerOutOfRange                   = errors.New("integer out of range")
+	errDurationOutOfRange                  = errors.New("duration out of range")
+	errInvalidPath                         = errors.New("invalid path")
+)
+
 // Operating represents the complete configuration for an IVNP node.
 type Operating struct {
 	DataDir   string
@@ -197,7 +215,7 @@ func LoadOrCreateOperating(path string) (Operating, error) {
 	}
 	absolute, absoluteErr := filepath.Abs(path)
 	if absoluteErr != nil {
-		return Operating{}, errors.New("config: cannot resolve operating configuration")
+		return Operating{}, errResolveOperating
 	}
 	if _, statErr := os.Lstat(absolute); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
 		return Operating{}, err
@@ -207,14 +225,14 @@ func LoadOrCreateOperating(path string) (Operating, error) {
 		if errors.Is(createErr, os.ErrExist) {
 			return LoadOperating(absolute)
 		}
-		return Operating{}, errors.New("config: cannot create operating configuration")
+		return Operating{}, errCreateOperating
 	}
 	if syncErr := filesystemstore.SyncCreated(file); syncErr != nil {
 		_ = file.Close()
-		return Operating{}, errors.New("config: cannot persist operating configuration")
+		return Operating{}, errPersistOperating
 	}
 	if closeErr := file.Close(); closeErr != nil {
-		return Operating{}, errors.New("config: cannot persist operating configuration")
+		return Operating{}, errPersistOperating
 	}
 	return LoadOperating(absolute)
 }
@@ -223,29 +241,29 @@ func LoadOrCreateOperating(path string) (Operating, error) {
 func LoadOperating(path string) (Operating, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		return Operating{}, errors.New("config: cannot resolve operating configuration")
+		return Operating{}, errResolveOperating
 	}
 	file, _, err := filesystemstore.OpenRegular(absolute)
 	if err != nil {
-		return Operating{}, errors.New("config: cannot open operating configuration")
+		return Operating{}, errOpenOperating
 	}
 	defer file.Close()
 	if err := filesystemstore.ValidateOwnedFile(file); err != nil {
-		return Operating{}, errors.New("config: unsafe operating configuration")
+		return Operating{}, errUnsafeOperating
 	}
 	contents, err := filesystemstore.ReadBoundedFile(file, maxConfigBytes)
 	if err != nil {
 		if errors.Is(err, filesystemstore.ErrTooLarge) {
 			return Operating{}, ErrMalformed
 		}
-		return Operating{}, errors.New("config: cannot read operating configuration")
+		return Operating{}, errReadOperating
 	}
 	operating, err := ParseOperating(string(contents), absolute)
 	if err != nil {
 		return Operating{}, err
 	}
 	if operatingHasBearerCredentials(operating) && filesystemstore.ValidatePrivateAccess(file) != nil {
-		return Operating{}, errors.New("config: bearer credentials require a private configuration file")
+		return Operating{}, errBearerCredentialsRequirePrivateFile
 	}
 	return operating, nil
 }
@@ -258,7 +276,7 @@ func operatingHasBearerCredentials(operating Operating) bool {
 func ParseOperating(text, path string) (Operating, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		return Operating{}, errors.New("config: cannot resolve operating configuration")
+		return Operating{}, errResolveOperating
 	}
 	entries, err := Parse(text)
 	if err != nil {
@@ -1070,11 +1088,11 @@ func applyOptionalEndpoint(endpoint *Endpoint, section, prefix string, values ma
 func parseEndpoint(host, port string, allowUnspecified, allowZeroPort bool) (Endpoint, error) {
 	address, err := netip.ParseAddr(host)
 	if err != nil {
-		return Endpoint{}, errors.New("invalid endpoint")
+		return Endpoint{}, errInvalidEndpoint
 	}
 	address = address.Unmap()
 	if address.IsMulticast() || (!allowUnspecified && address.IsUnspecified()) {
-		return Endpoint{}, errors.New("invalid endpoint")
+		return Endpoint{}, errInvalidEndpoint
 	}
 	minimumPort := int64(1)
 	if allowZeroPort {
@@ -1093,7 +1111,7 @@ func parseReseedEndpoints(value string) ([]string, error) {
 	}
 	parts := strings.Split(value, ",")
 	if len(parts) == 0 || len(parts) > maxReseedEndpoints {
-		return nil, errors.New("invalid endpoint count")
+		return nil, errInvalidReseedEndpointCount
 	}
 	endpoints := make([]string, 0, len(parts))
 	for _, part := range parts {
@@ -1106,7 +1124,7 @@ func parseReseedEndpoints(value string) ([]string, error) {
 			parseReseedEndpointsRejected = parsed.Fragment != ""
 		}
 		if parseReseedEndpointsRejected {
-			return nil, errors.New("invalid endpoint")
+			return nil, errInvalidReseedEndpoint
 		}
 		endpoints = append(endpoints, endpoint)
 	}
@@ -1120,31 +1138,31 @@ func parseBool(value string) (bool, error) {
 	case "false":
 		return false, nil
 	default:
-		return false, errors.New("invalid boolean")
+		return false, errInvalidBoolean
 	}
 }
 
 func parseUint(value string, min, max int64) (int64, error) {
 	if value == "" || strings.HasPrefix(value, "+") || strings.HasPrefix(value, "-") {
-		return 0, errors.New("invalid integer")
+		return 0, errInvalidInteger
 	}
 	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil || parsed < min || parsed > max {
-		return 0, errors.New("integer out of range")
+		return 0, errIntegerOutOfRange
 	}
 	return parsed, nil
 }
 func parseDuration(value string, min, max time.Duration) (time.Duration, error) {
 	parsed, err := time.ParseDuration(value)
 	if err != nil || parsed < min || parsed > max {
-		return 0, errors.New("duration out of range")
+		return 0, errDurationOutOfRange
 	}
 	return parsed, nil
 }
 
 func resolvePath(value, base string) (string, error) {
 	if value == "" || len(value) > maxOperatingPathBytes || strings.IndexByte(value, 0) >= 0 || !utf8.ValidString(value) {
-		return "", errors.New("invalid path")
+		return "", errInvalidPath
 	}
 	if filepath.IsAbs(value) {
 		return filepath.Clean(value), nil

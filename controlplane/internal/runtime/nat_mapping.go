@@ -30,6 +30,18 @@ const (
 
 var errUPnPDiscoveryUnavailable = errors.New("daemon: no UPnP Internet Gateway Device found")
 
+var (
+	errLoopbackMappingListener     = errors.New("daemon: automatic mapping requires a non-loopback transport listener")
+	errMappingSocketUnavailable    = errors.New("daemon: mapping socket is unavailable")
+	errMappingSocketUnassignedPort = errors.New("daemon: mapping socket has no assigned port")
+	errNoNATPMPGatewayCandidates   = errors.New("daemon: no NAT-PMP gateway candidates")
+	errEmptyNATPMPMapping          = errors.New("daemon: NAT-PMP returned an empty mapping")
+	errUPnPPublicIPv4Unavailable   = errors.New("daemon: UPnP gateway did not report a public IPv4 address")
+	errUPnPInternalAddressRejected = errors.New("daemon: transport listener does not accept the UPnP internal address")
+	errMappingInterfaceUnavailable = errors.New("daemon: cannot determine mapping interface")
+	errMappingInterfaceNotIPv4     = errors.New("daemon: mapping interface is not IPv4")
+)
+
 type natPMPClient interface {
 	PublicAddress(context.Context) (natpmp.PublicAddress, error)
 	Map(context.Context, natpmp.MappingRequest) (natpmp.Mapping, error)
@@ -203,7 +215,7 @@ func (p *natMappingPublisher) specForSocket(transport, protocol string, address 
 		return natMappingSpec{}, err
 	}
 	if bound.IsLoopback() {
-		return natMappingSpec{}, errors.New("daemon: automatic mapping requires a non-loopback transport listener")
+		return natMappingSpec{}, errLoopbackMappingListener
 	}
 	index := -1
 	for i := range p.base {
@@ -220,7 +232,7 @@ func (p *natMappingPublisher) specForSocket(transport, protocol string, address 
 
 func socketEndpoint(address net.Addr) (netip.Addr, uint16, error) {
 	if address == nil {
-		return netip.Addr{}, 0, errors.New("daemon: mapping socket is unavailable")
+		return netip.Addr{}, 0, errMappingSocketUnavailable
 	}
 	host, portText, err := net.SplitHostPort(address.String())
 	if err != nil {
@@ -232,7 +244,7 @@ func socketEndpoint(address net.Addr) (netip.Addr, uint16, error) {
 	}
 	port, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil || port == 0 {
-		return netip.Addr{}, 0, errors.New("daemon: mapping socket has no assigned port")
+		return netip.Addr{}, 0, errMappingSocketUnassignedPort
 	}
 	return parsedHost.Unmap(), uint16(port), nil
 }
@@ -277,7 +289,7 @@ func (p *natMappingPublisher) attemptNATPMP(ctx context.Context, spec natMapping
 		}
 	}
 	if len(candidates) == 0 {
-		return nil, errors.New("daemon: no NAT-PMP gateway candidates")
+		return nil, errNoNATPMPGatewayCandidates
 	}
 	var result error
 	for _, endpoint := range candidates {
@@ -327,7 +339,7 @@ func (p *natMappingPublisher) mapNATPMP(ctx context.Context, client natPMPClient
 		return nil, err
 	}
 	if mapping.ExternalPort == 0 || mapping.Lifetime <= 0 {
-		return nil, errors.New("daemon: NAT-PMP returned an empty mapping")
+		return nil, errEmptyNATPMPMapping
 	}
 	now := p.now()
 	return &activeNATMapping{spec: spec, method: "natpmp", public: public, externalPort: mapping.ExternalPort, lifetime: mapping.Lifetime, expiresAt: now.Add(mapping.Lifetime), natClient: client, natMapping: mapping}, nil
@@ -344,14 +356,14 @@ func (p *natMappingPublisher) attemptUPnP(ctx context.Context, spec natMappingSp
 		public = observed.Unmap()
 	}
 	if !validPublicIPv4(public) {
-		return nil, errors.New("daemon: UPnP gateway did not report a public IPv4 address")
+		return nil, errUPnPPublicIPv4Unavailable
 	}
 	internalIP, err := p.route(ctx, gateway.ControlURL.Hostname(), 80)
 	if err != nil {
 		return nil, err
 	}
 	if !boundAccepts(spec.boundAddress, internalIP) {
-		return nil, errors.New("daemon: transport listener does not accept the UPnP internal address")
+		return nil, errUPnPInternalAddressRejected
 	}
 
 	externalPort = cmp.Or(externalPort, spec.internalPort)
@@ -698,11 +710,11 @@ func routedLocalIPv4Host(ctx context.Context, host string, port uint16) (netip.A
 	defer connection.Close()
 	udp, ok := connection.LocalAddr().(*net.UDPAddr)
 	if !ok {
-		return netip.Addr{}, errors.New("daemon: cannot determine mapping interface")
+		return netip.Addr{}, errMappingInterfaceUnavailable
 	}
 	address, ok := netip.AddrFromSlice(udp.IP)
 	if !ok || !address.Is4() {
-		return netip.Addr{}, errors.New("daemon: mapping interface is not IPv4")
+		return netip.Addr{}, errMappingInterfaceNotIPv4
 	}
 	return address.Unmap(), nil
 }

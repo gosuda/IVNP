@@ -27,19 +27,24 @@ import (
 	"gosuda.org/ivnp/state"
 )
 
+var (
+	errUnexpectedSocket                 = errors.New("unexpected socket")
+	errMemoryNetworkIdentityPublication = errors.New("memory network requires control-plane identity publication")
+)
+
 type recordingSockets struct{ calls int }
 
 func (s *recordingSockets) ListenStream(context.Context, dataplane.RouterEndpoint) (net.Listener, error) {
 	s.calls++
-	return nil, errors.New("unexpected socket")
+	return nil, errUnexpectedSocket
 }
 func (s *recordingSockets) DialStream(context.Context, dataplane.RouterEndpoint) (net.Conn, error) {
 	s.calls++
-	return nil, errors.New("unexpected socket")
+	return nil, errUnexpectedSocket
 }
 func (s *recordingSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (*net.UDPConn, error) {
 	s.calls++
-	return nil, errors.New("unexpected socket")
+	return nil, errUnexpectedSocket
 }
 
 type blockingRequestSender struct {
@@ -166,7 +171,7 @@ func (n *daemonMemoryNetwork) transport() *daemonMemoryTransport {
 func (t *daemonMemoryTransport) Start(ctx context.Context, bindings dataplane.RouterTransportBindings) error {
 	localInfo, ok := bindings.LocalInfo.(router.LocalInfo)
 	if !ok {
-		return errors.New("memory network requires control-plane identity publication")
+		return errMemoryNetworkIdentityPublication
 	}
 	localInfo.SetReachability(router.ReachabilityReachable)
 	if err := localInfo.Publish(ctx); err != nil {

@@ -17,6 +17,8 @@ import (
 	"gosuda.org/ivnp/observability"
 )
 
+var errInboundBuildReturnSessionUnavailable = errors.New("creator has no inbound build return session")
+
 type buildCounterReader struct{ value byte }
 
 func (r *buildCounterReader) Read(dst []byte) (int, error) {
@@ -139,7 +141,7 @@ func (s *replyReadyBuildSender) EnsureSession(_ context.Context, peer foundation
 
 func (s *replyReadyBuildSender) Send(ctx context.Context, peer foundation.Hash, message foundation.I2NPMessage) error {
 	if !s.replyReady {
-		return errors.New("creator has no inbound build return session")
+		return errInboundBuildReturnSessionUnavailable
 	}
 	return s.buildCaptureSender.Send(ctx, peer, message)
 }

@@ -10,6 +10,8 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var errTestUnexpectedWritePayload = errors.New("write peer received an unexpected payload")
+
 type acknowledgingWritePeer struct {
 	network    *TunnelNetwork
 	connection *tunnelConn
@@ -23,7 +25,7 @@ func (p *acknowledgingWritePeer) SendTunnel(ctx context.Context, delivery Delive
 		return err
 	}
 	if !bytes.Equal(packet.Payload, p.payload) {
-		return errors.New("write peer received an unexpected payload")
+		return errTestUnexpectedWritePayload
 	}
 	ack := Packet{SendStreamID: p.connection.localID, ReceiveStreamID: p.connection.remoteID, AckThrough: packet.Sequence}
 	n, err := ack.MarshalTo(p.ack[:])

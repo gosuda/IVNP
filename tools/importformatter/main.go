@@ -18,6 +18,7 @@ import (
 )
 
 var errCgoImport = errors.New(`importformatter: import "C" must remain separate`)
+var errGoimportsRequired = errors.New("importformatter: goimports is required on PATH")
 
 func main() {
 	writeChanges := flag.Bool("write", false, "write files whose canonical import layout differs")
@@ -36,7 +37,7 @@ func run(root string, writeChanges bool) error {
 	}
 	goimports, err := exec.LookPath("goimports")
 	if err != nil {
-		return errors.New("importformatter: goimports is required on PATH")
+		return errGoimportsRequired
 	}
 	paths, err := repositoryGoFiles(absoluteRoot)
 	if err != nil {

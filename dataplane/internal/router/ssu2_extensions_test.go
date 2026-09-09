@@ -13,6 +13,8 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var errTestTransientPublicationFailure = errors.New("transient publication failure")
+
 func TestSSU2PeerTestOutcomeTable(t *testing.T) {
 	endpoint := netip.MustParseAddrPort("198.51.100.7:42000")
 	observed := netip.MustParseAddrPort("198.51.100.7:43000")
@@ -781,7 +783,7 @@ func (f *flakyIntroducerLocal) UpdateSSU2Introducers(ctx context.Context, introd
 	if f.failures > 0 {
 		f.failures--
 		f.mu.Unlock()
-		return errors.New("transient publication failure")
+		return errTestTransientPublicationFailure
 	}
 	f.mu.Unlock()
 	return f.transportTestLocal.UpdateSSU2Introducers(ctx, introducers)

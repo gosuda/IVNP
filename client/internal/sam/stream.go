@@ -14,6 +14,8 @@ import (
 	"gosuda.org/ivnp/internal/relay"
 )
 
+var errMissingDestinationMetadata = errors.New("sam: accepted connection lacks Destination metadata")
+
 type destinationConnection interface {
 	net.Conn
 	RemoteDestination() []byte
@@ -144,7 +146,7 @@ func (s *Server) handleStream(connection *serverConnection, cmd command) (bool, 
 		if !silent {
 			metadata, ok := inbound.(destinationConnection)
 			if !ok {
-				return true, errors.New("sam: accepted connection lacks Destination metadata")
+				return true, errMissingDestinationMetadata
 			}
 			if err = connection.writeLine(string(metadata.RemoteDestination()) + " FROM_PORT=" + itoa16(metadata.RemoteI2PPort()) + " TO_PORT=" + itoa16(metadata.LocalI2PPort())); err != nil {
 				return true, err

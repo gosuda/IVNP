@@ -29,6 +29,15 @@ var webUIStaticFS embed.FS
 
 const defaultWebUIListenAddress = "127.0.0.1:7070"
 
+var (
+	errWebUINodeRequired      = errors.New("webui: node is required")
+	errWebUITokenRequired     = errors.New("webui: explicit 0.0.0.0 requires IVNPD_WEBUI_TOKEN with at least 16 bytes")
+	errWebUIStarted           = errors.New("webui: already started")
+	errReseedNotStarted       = errors.New("reseed attempt did not start; an attempt may be backed off or unnecessary")
+	errUnterminatedScriptTag  = errors.New("unterminated script opening tag")
+	errUnterminatedScriptBody = errors.New("unterminated script body")
+)
+
 // WebUIConfig defines the ivnpd-owned WebUI listener.
 type WebUIConfig struct {
 	ListenAddress string
@@ -85,7 +94,7 @@ type WebUIServer struct {
 // NewWebUIServer validates the listener policy before any socket is opened.
 func NewWebUIServer(cfg WebUIConfig, node *node.Subsystem, logger *slog.Logger, level *slog.LevelVar) (*WebUIServer, error) {
 	if node == nil {
-		return nil, errors.New("webui: node is required")
+		return nil, errWebUINodeRequired
 	}
 	if cfg.ListenAddress == "" {
 		cfg.ListenAddress = defaultWebUIListenAddress
@@ -127,7 +136,7 @@ func parseWebUIAccessPolicy(listenAddress, bearerToken string) (webUIAccessPolic
 		return webUIAccessPolicy{}, fmt.Errorf("webui: listen host %q is not allowed; use localhost, a loopback address, or explicit 0.0.0.0", host)
 	}
 	if len(bearerToken) < 16 {
-		return webUIAccessPolicy{}, errors.New("webui: explicit 0.0.0.0 requires IVNPD_WEBUI_TOKEN with at least 16 bytes")
+		return webUIAccessPolicy{}, errWebUITokenRequired
 	}
 	return webUIAccessPolicy{listenHost: host, requireAuth: true}, nil
 }
@@ -135,7 +144,7 @@ func parseWebUIAccessPolicy(listenAddress, bearerToken string) (webUIAccessPolic
 // Start opens the listener and starts the telemetry stream.
 func (s *WebUIServer) Start(parent context.Context) error {
 	if s.server != nil {
-		return errors.New("webui: already started")
+		return errWebUIStarted
 	}
 	if parent == nil {
 		parent = context.Background()
@@ -236,7 +245,7 @@ func (s *WebUIServer) startReseedAction() error {
 	}
 	if done == nil {
 		cancel()
-		return errors.New("reseed attempt did not start; an attempt may be backed off or unnecessary")
+		return errReseedNotStarted
 	}
 	s.wg.Add(1)
 	go func() {
@@ -325,12 +334,12 @@ func inlineScriptCSPHashes(document []byte) (string, error) {
 		tagStart := offset + relativeStart
 		relativeTagEnd := bytes.IndexByte(lowerDocument[tagStart:], '>')
 		if relativeTagEnd < 0 {
-			return "", errors.New("unterminated script opening tag")
+			return "", errUnterminatedScriptTag
 		}
 		bodyStart := tagStart + relativeTagEnd + 1
 		relativeBodyEnd := bytes.Index(lowerDocument[bodyStart:], []byte(closingTag))
 		if relativeBodyEnd < 0 {
-			return "", errors.New("unterminated script body")
+			return "", errUnterminatedScriptBody
 		}
 		bodyEnd := bodyStart + relativeBodyEnd
 		openingTag := lowerDocument[tagStart:bodyStart]

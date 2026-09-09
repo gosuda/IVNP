@@ -18,6 +18,16 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var (
+	errUnexpectedLeaseSetLookup            = errors.New("unexpected LeaseSet lookup")
+	errStreamingSenderNotReady             = errors.New("streaming sender is not ready")
+	errUncorrelatedPublicationConfirmation = errors.New("publication confirmation was not correlated")
+	errUnknownALoopbackLease               = errors.New("unknown A loopback lease")
+	errUnexpectedATunnelMessage            = errors.New("unexpected A tunnel message")
+	errUnknownBLoopbackLease               = errors.New("unknown B loopback lease")
+	errUnexpectedBTunnelMessage            = errors.New("unexpected B tunnel message")
+)
+
 type controlPlaneTunnelSender struct {
 	mu       sync.Mutex
 	handle   func(context.Context, foundation.I2NPMessage) error
@@ -39,7 +49,7 @@ func (s *controlPlaneTunnelSender) Send(ctx context.Context, _ foundation.Hash, 
 type dataPlaneRequestSender struct{}
 
 func (dataPlaneRequestSender) Send(context.Context, controlplanenetdb.RouterRef, foundation.I2NPMessage) error {
-	return errors.New("unexpected LeaseSet lookup")
+	return errUnexpectedLeaseSetLookup
 }
 
 type dataPlaneReplyRoute struct{}
@@ -280,7 +290,7 @@ type dataPlaneSenderRef struct {
 
 func (r *dataPlaneSenderRef) SendTunnel(ctx context.Context, delivery dataplane.StreamingTunnelDelivery) error {
 	if r == nil || r.target == nil {
-		return errors.New("streaming sender is not ready")
+		return errStreamingSenderNotReady
 	}
 	return r.target.SendTunnel(ctx, delivery)
 }
@@ -305,7 +315,7 @@ func (l *dataPlanePublicationLoop) Send(_ context.Context, _ controlplanenetdb.R
 	l.stores = append(l.stores, store)
 	l.mu.Unlock()
 	if l.owner == nil || !l.owner.HandleDeliveryStatus(foundation.I2NPDeliveryStatusMessage{MessageID: store.ReplyToken, Timestamp: l.now}) {
-		return errors.New("publication confirmation was not correlated")
+		return errUncorrelatedPublicationConfirmation
 	}
 	return nil
 }
@@ -400,10 +410,10 @@ func TestProductionDestinationDataPlaneOverConfirmedLS2(t *testing.T) {
 			case bLease:
 				return bRuntime.HandleGateway(gateway.TunnelID, gateway.Embedded)
 			default:
-				return errors.New("unknown A loopback lease")
+				return errUnknownALoopbackLease
 			}
 		default:
-			return errors.New("unexpected A tunnel message")
+			return errUnexpectedATunnelMessage
 		}
 	}
 	bWire.handle = func(ctx context.Context, message foundation.I2NPMessage) error {
@@ -421,10 +431,10 @@ func TestProductionDestinationDataPlaneOverConfirmedLS2(t *testing.T) {
 			case bLease:
 				return bRuntime.HandleGateway(gateway.TunnelID, gateway.Embedded)
 			default:
-				return errors.New("unknown B loopback lease")
+				return errUnknownBLoopbackLease
 			}
 		default:
-			return errors.New("unexpected B tunnel message")
+			return errUnexpectedBTunnelMessage
 		}
 	}
 	for _, circuit := range []dataplane.TunnelOutboundCircuit{

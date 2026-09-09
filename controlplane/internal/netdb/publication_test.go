@@ -14,6 +14,8 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var errPublicationPayloadChanged = errors.New("publication payload changed before Send returned")
+
 type publisherLeaseSource struct {
 	leases []foundation.NetworkDatabaseLease
 }
@@ -396,7 +398,7 @@ func TestLeaseSetPublisherConfirmsBeforeReplicationDrains(t *testing.T) {
 						<-release
 					}
 					if !bytes.Equal(message.Payload, payload) {
-						return errors.New("publication payload changed before Send returned")
+						return errPublicationPayloadChanged
 					}
 					return nil
 				}),

@@ -11,6 +11,11 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var (
+	errRequestTestTransportUnavailable = errors.New("transport unavailable")
+	errFixedReaderExhausted            = errors.New("fixed reader exhausted")
+)
+
 type requestTestRoute struct {
 	gateway   foundation.Hash
 	tunnel    uint32
@@ -62,7 +67,7 @@ func (s *failFirstRequestSender) Send(context.Context, RouterRef, foundation.I2N
 	defer s.mu.Unlock()
 	s.attempted++
 	if s.attempted <= s.failures {
-		return errors.New("transport unavailable")
+		return errRequestTestTransportUnavailable
 	}
 	return nil
 }
@@ -977,7 +982,7 @@ type fixedReader struct {
 
 func (r *fixedReader) Read(dst []byte) (int, error) {
 	if len(r.bytes)-r.off < len(dst) {
-		return 0, errors.New("fixed reader exhausted")
+		return 0, errFixedReaderExhausted
 	}
 	copy(dst, r.bytes[r.off:r.off+len(dst)])
 	r.off += len(dst)

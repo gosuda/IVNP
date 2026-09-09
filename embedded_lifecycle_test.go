@@ -22,6 +22,8 @@ import (
 
 const embeddedTestTimeout = 20 * time.Second
 
+var errMemoryIdentityPublication = errors.New("memory network requires control-plane identity publication")
+
 type embeddedMemoryNetwork struct {
 	mu        sync.RWMutex
 	endpoints map[foundation.Hash]*embeddedMemoryTransport
@@ -64,7 +66,7 @@ func (n *embeddedMemoryNetwork) messageID() uint32 {
 func (t *embeddedMemoryTransport) Start(ctx context.Context, bindings dataplane.RouterTransportBindings) error {
 	localInfo, ok := bindings.LocalInfo.(controlplane.RouterLocalInfo)
 	if !ok {
-		return errors.New("memory network requires control-plane identity publication")
+		return errMemoryIdentityPublication
 	}
 	localInfo.SetReachability(controlplane.RouterReachabilityReachable)
 	if err := localInfo.Publish(ctx); err != nil {

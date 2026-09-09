@@ -16,6 +16,12 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var (
+	errTestFutureRouterInfo     = errors.New("future test RouterInfo")
+	errTestStaleRouterInfo      = errors.New("stale test RouterInfo")
+	errTestPeerSignatureInvalid = errors.New("test peer signature invalid")
+)
+
 type transportTestOption struct{ Key, Value string }
 type transportTestAddress struct {
 	Transport string
@@ -202,10 +208,10 @@ func (p *transportTestPeers) DialRouterInfo(peer foundation.Hash, now uint64) (f
 func transportTestFresh(info foundation.NetworkDatabaseRouterInfo, now uint64, maximumAge time.Duration) error {
 	if info.Published > now {
 		if info.Published-now > uint64(2*time.Minute/time.Millisecond) {
-			return errors.New("future test RouterInfo")
+			return errTestFutureRouterInfo
 		}
 	} else if now-info.Published > uint64(maximumAge/time.Millisecond) {
-		return errors.New("stale test RouterInfo")
+		return errTestStaleRouterInfo
 	}
 	return nil
 }
@@ -219,7 +225,7 @@ func (p *transportTestPeers) AdmitRouterInfo(info foundation.NetworkDatabaseRout
 		return err
 	}
 	if !valid {
-		return errors.New("test peer signature invalid")
+		return errTestPeerSignatureInvalid
 	}
 	if err := transportTestFresh(info, now, 90*time.Minute); err != nil {
 		return err

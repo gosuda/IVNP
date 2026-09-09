@@ -9,6 +9,8 @@ import (
 	"gosuda.org/ivnp/state"
 )
 
+var errStateSizeOverflow = errors.New("addressbook: state size limit overflows int")
+
 type persistedState struct {
 	Version  int                          `json:"version"`
 	Entries  map[string]string            `json:"entries"`
@@ -91,7 +93,7 @@ func saveState(path string, entries map[string]string, sources map[string]map[st
 		return err
 	}
 	if max > int64(^uint(0)>>1) {
-		return errors.New("addressbook: state size limit overflows int")
+		return errStateSizeOverflow
 	}
 	return state.FilesystemStoreWriteAtomic(path, data, 0600, int(max))
 }

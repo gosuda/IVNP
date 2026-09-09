@@ -22,6 +22,11 @@ const (
 
 var ErrInvalidSSDPResponse = errors.New("upnp: invalid SSDP response")
 
+var (
+	errRelativeURL    = errors.New("must be an absolute URL")
+	errInvalidHTTPURL = errors.New("must be an unauthenticated HTTP URL")
+)
+
 // DiscoveryResponse holds the response to an SSDP M-SEARCH discovery request.
 type DiscoveryResponse struct {
 	Location *url.URL
@@ -205,10 +210,10 @@ func parseHTTPURL(raw string) (*url.URL, error) {
 		if err != nil {
 			return nil, err
 		}
-		return nil, errors.New("must be an absolute URL")
+		return nil, errRelativeURL
 	}
 	if parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return nil, errors.New("must be an unauthenticated HTTP URL")
+		return nil, errInvalidHTTPURL
 	}
 	return parsed, nil
 }

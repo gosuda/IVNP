@@ -38,6 +38,8 @@ var (
 	ErrTooManyEntries  = errors.New("reseed: router info count exceeds configured limit")
 	ErrNoRouterInfos   = errors.New("reseed: archive contained no admissible router infos")
 	ErrUnsignedArchive = errors.New("reseed: authenticated SU3 archive required")
+	errRedirectLimit   = errors.New("stopped after 10 redirects")
+	errNilDatabase     = errors.New("reseed: nil database")
 )
 
 // Client fetches and processes reseed archives.
@@ -124,7 +126,7 @@ func (c Client) httpClientFor(endpoint *url.URL) *http.Client {
 			return previous(request, via)
 		}
 		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
+			return errRedirectLimit
 		}
 		return nil
 	}
@@ -134,7 +136,7 @@ func (c Client) httpClientFor(endpoint *url.URL) *http.Client {
 // FetchInto downloads a reseed archive, parses verified RouterInfos, and stores them in database.
 func (c Client) FetchInto(ctx context.Context, endpoint string, database *controlplanenetdb.Database, seenAt uint64) (int, error) {
 	if database == nil {
-		return 0, errors.New("reseed: nil database")
+		return 0, errNilDatabase
 	}
 	parsedURL, err := url.Parse(endpoint)
 	if err != nil {

@@ -157,7 +157,10 @@ func TestPacketExtendedDeadlineDoesNotCancelPendingReceive(t *testing.T) {
 		if err := c.SetReadDeadline(time.Time{}); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(2 * time.Second)
+		observation := time.NewTimer(2 * time.Second)
+		defer observation.Stop()
+		<-observation.C
+		synctest.Wait()
 		select {
 		case err := <-result:
 			t.Fatalf("cleared deadline interrupted receive: %v", err)

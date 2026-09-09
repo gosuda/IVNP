@@ -14,6 +14,12 @@ import (
 	"gosuda.org/ivnp/internal/parallelism"
 )
 
+var (
+	errTooManyRedirects           = errors.New("addressbook: too many redirects")
+	errCrossOriginRedirect        = errors.New("addressbook: cross-origin redirect")
+	errNotModifiedWithoutSnapshot = errors.New("addressbook: 304 without source snapshot")
+)
+
 func subscriptionURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u.User != nil || u.Fragment != "" || u.Host == "" {
@@ -36,13 +42,13 @@ func (s *Service) refresh(parent context.Context) error {
 	client.Timeout = s.config.RequestTimeout
 	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
 		if len(via) > s.config.MaxRedirects {
-			return errors.New("addressbook: too many redirects")
+			return errTooManyRedirects
 		}
 		if _, err := subscriptionURL(request.URL.String()); err != nil {
 			return err
 		}
 		if len(via) != 0 && (!strings.EqualFold(request.URL.Scheme, via[0].URL.Scheme) || !strings.EqualFold(request.URL.Host, via[0].URL.Host)) {
-			return errors.New("addressbook: cross-origin redirect")
+			return errCrossOriginRedirect
 		}
 		return nil
 	}
@@ -158,7 +164,7 @@ func (s *Service) fetchSubscription(parent context.Context, client *http.Client,
 	if response.StatusCode == http.StatusNotModified {
 		_ = response.Body.Close()
 		if !haveSnapshot {
-			return nil, "", "", false, errors.New("addressbook: 304 without source snapshot")
+			return nil, "", "", false, errNotModifiedWithoutSnapshot
 		}
 		return nil, "", "", true, nil
 	}
