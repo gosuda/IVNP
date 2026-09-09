@@ -899,3 +899,89 @@ func TestGarlicReceiverUnregisterWaitsForInflightAndReleasesStaticKey(t *testing
 		t.Fatal("garlic receiver retained sensitive static or destination state")
 	}
 }
+
+func TestGarlicReceiverClearsExpiredRatchetPlaintext(t *testing.T) {
+	const sentAt = uint64(1_000_000)
+	initiator, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(initiator.ReleaseSensitive)
+	responder, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(responder.ReleaseSensitive)
+	sender, err := dataplanegarlic.NewRatchetManager(initiator, dataplanegarlic.RatchetConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sender.ReleaseSensitive)
+	recipient, err := dataplanegarlic.NewRatchetManager(responder, dataplanegarlic.RatchetConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(recipient.ReleaseSensitive)
+	public := responder.X25519Public()
+	packet, err := sender.Encrypt(make([]byte, 2048), responder.Hash(), public[:], uint16(foundation.CryptoX25519), []byte("expired private payload"), sentAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRejectedGarlicScratchCleared(t, GarlicDestination{Ratchet: recipient}, packet, sentAt+301_000)
+}
+
+func TestGarlicReceiverClearsRejectedLegacyPlaintext(t *testing.T) {
+	tag, key := make([]byte, 32), make([]byte, 32)
+	tag[0], key[0] = 7, 8
+	sessions := dataplanegarlic.NewSessionManager(dataplanegarlic.SessionManagerConfig{})
+	t.Cleanup(func() {
+		if err := sessions.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if !sessions.InboundTags().Put(tag, key, 10) {
+		t.Fatal("failed to install inbound session tag")
+	}
+	packet, err := dataplanegarlic.EncryptExisting(make([]byte, 128), tag, key, []byte("private legacy payload"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Flip the preceding CBC block to change the key flag at plaintext byte 38 from 0 to 2.
+	packet[32+16+6] ^= 2
+	assertRejectedGarlicScratchCleared(t, GarlicDestination{Sessions: sessions}, packet, 1)
+}
+
+func assertRejectedGarlicScratchCleared(t *testing.T, destination GarlicDestination, packet []byte, now uint64) {
+	t.Helper()
+	hash := foundation.Hash{1}
+	receiver, err := NewGarlicReceiver(GarlicReceiverConfig{
+		Service: NewService(Sinks{}), ReplyKeys: dataplanegarlic.NewReplyKeyRegistry(1),
+		Now:          func() uint64 { return now },
+		Destinations: map[foundation.Hash]GarlicDestination{hash: destination},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(receiver.ReleaseSensitive)
+	var scratch *garlicReceiveScratch
+	receiver.destinations[hash].scratch.New = func() any {
+		scratch = new(garlicReceiveScratch)
+		return scratch
+	}
+	payload := make([]byte, 4+len(packet))
+	binary.BigEndian.PutUint32(payload, uint32(len(packet)))
+	copy(payload[4:], packet)
+	err = receiver.HandleGarlic(foundation.I2NPMessage{Header: foundation.I2NPHeader{Type: foundation.I2NPGarlic}, Payload: payload})
+	if !errors.Is(err, ErrGarlicDestination) {
+		t.Fatalf("rejected garlic error = %v, want %v", err, ErrGarlicDestination)
+	}
+	if scratch == nil {
+		t.Fatal("receive did not borrow a decrypt buffer")
+	}
+	if scratch.plaintext != ([foundation.I2NPI2PDMaxPayload]byte{}) {
+		t.Error("rejected garlic retained plaintext in its returned scratch buffer")
+	}
+	if scratch.reply != ([foundation.I2NPI2PDMaxPayload]byte{}) {
+		t.Error("rejected garlic retained reply data in its returned scratch buffer")
+	}
+}

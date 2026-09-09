@@ -649,6 +649,9 @@ func (s *ssu2TransportSession) shrinkSentSlotsLocked() {
 		}
 	}
 	clear(lastChunk)
+	// Reslicing alone leaves backing-array references visible to the GC.
+	clear(s.sentSlots[tailStart:])
+	s.sentChunks[len(s.sentChunks)-1] = nil
 	s.sentChunks = s.sentChunks[:len(s.sentChunks)-1]
 	s.sentSlots = s.sentSlots[:tailStart]
 }

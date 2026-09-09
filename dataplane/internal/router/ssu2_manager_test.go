@@ -9,11 +9,13 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
+	"weak"
 
 	dataplanessu2 "gosuda.org/ivnp/dataplane/internal/transport/ssu2"
 	"gosuda.org/ivnp/foundation"
@@ -1471,12 +1473,6 @@ func TestSSU2PacketNumberAliasesDoNotExhaustRetainedPayloadSlots(t *testing.T) {
 	})
 }
 
-// TestSSU2SentSlotsStartSmallAndGrowLazily checks that a fresh session starts
-// with ssu2InitialTrackedPackets slots rather than the full
-// ssu2MaxTrackedPackets ceiling, that retainPayload grows sentSlots on
-// demand by doubling, and that growth never invalidates a *ssu2SentPacket a
-// caller is already holding (its storage keeps the exact payload bytes it
-// was given, and its pointer identity is unchanged by a later grow).
 func TestSSU2SentSlotsStartSmallAndGrowLazily(t *testing.T) {
 	_, session := newSSU2SendTestHarness(t)
 	if got := len(session.sentSlots); got != ssu2InitialTrackedPackets {
@@ -1486,7 +1482,7 @@ func TestSSU2SentSlotsStartSmallAndGrowLazily(t *testing.T) {
 		t.Fatalf("initial sentChunks = %d, want 1", got)
 	}
 
-	held := make([]*ssu2SentPacket, 0, ssu2InitialTrackedPackets+1)
+	held := make([]*ssu2SentPacket, 0, ssu2InitialTrackedPackets)
 	for index := range ssu2InitialTrackedPackets {
 		payload := bytes.Repeat([]byte{byte(index)}, 4)
 		slot := session.retainPayload(payload, time.Unix(1, 0))
@@ -1504,7 +1500,6 @@ func TestSSU2SentSlotsStartSmallAndGrowLazily(t *testing.T) {
 	if overflow == nil {
 		t.Fatal("retainPayload returned nil instead of growing sentSlots")
 	}
-	held = append(held, overflow)
 	if got, want := len(session.sentSlots), 2*ssu2InitialTrackedPackets; got != want {
 		t.Fatalf("sentSlots after growth = %d, want %d (doubling)", got, want)
 	}
@@ -1512,12 +1507,7 @@ func TestSSU2SentSlotsStartSmallAndGrowLazily(t *testing.T) {
 		t.Fatalf("sentChunks after growth = %d, want 2", got)
 	}
 
-	// Growth must not disturb slots retained before it: same pointer
-	// identity, same payload bytes.
-	for index, slot := range held[:ssu2InitialTrackedPackets] {
-		if slot != held[index] {
-			t.Fatalf("slot %d identity changed", index)
-		}
+	for index, slot := range held {
 		want := byte(index)
 		if len(slot.payload) != 4 || slot.payload[0] != want {
 			t.Fatalf("slot %d payload = %v, want first byte %d", index, slot.payload, want)
@@ -1578,6 +1568,38 @@ func TestSSU2SentSlotsShrinkAfterSustainedIdleAndFloorAtInitial(t *testing.T) {
 	if got, want := len(session.sentSlots), ssu2InitialTrackedPackets; got != want {
 		t.Fatalf("sentSlots below floor = %d, want %d", got, want)
 	}
+}
+
+func TestSSU2IdleShrinkReclaimsPayloadStorage(t *testing.T) {
+	session := new(ssu2TransportSession)
+	session.initReliability(ssu2MinimumNetworkMTU)
+	t.Cleanup(session.ReleaseSensitive)
+	for range ssu2MaxTrackedPackets {
+		if session.retainPayload([]byte("retained payload"), time.Unix(1, 0)) == nil {
+			t.Fatal("failed to fill retained payload capacity")
+		}
+	}
+	var chunks []weak.Pointer[byte]
+	for _, chunk := range session.sentChunks[1:] {
+		chunks = append(chunks, weak.Make(&chunk[0]))
+	}
+	for _, slot := range session.sentSlots[1:] {
+		slot.release()
+	}
+	for range 4 * ssu2SentSlotIdleShrinkTicks {
+		session.maintainSentCapacity()
+	}
+	runtime.GC()
+	runtime.GC()
+	for index, chunk := range chunks {
+		if chunk.Value() != nil {
+			t.Errorf("idle shrink retained payload chunk %d after GC", index+1)
+		}
+	}
+	if got := string(session.sentSlots[0].payload); got != "retained payload" {
+		t.Errorf("idle shrink changed the active payload to %q", got)
+	}
+	runtime.KeepAlive(session)
 }
 
 func TestSSU2EgressCollectsOnlyReadyDatagrams(t *testing.T) {

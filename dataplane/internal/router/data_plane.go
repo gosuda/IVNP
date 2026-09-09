@@ -152,10 +152,7 @@ func (s *garlicDestinationState) retireAndWait() {
 		s.inFlightCond.Wait()
 	}
 	s.inFlightMu.Unlock()
-	// All borrowed scratch buffers are already cleared and returned by their
-	// callers (every acquire path in HandleGarlicFrom clears and puts back
-	// before returning, even on error), so dropping the pool here is safe;
-	// the GC reclaims its contents once unreferenced.
+	// Buffers must be wiped before pooling because a GC may discard them.
 	s.scratch = sync.Pool{}
 }
 
@@ -366,6 +363,8 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 		scratch := destination.getScratch()
 		result, receiveErr := destination.Ratchet.Receive(scratch.plaintext[:], scratch.reply[:], outer.Encrypted, now)
 		if receiveErr != nil {
+			clear(scratch.plaintext[:])
+			clear(scratch.reply[:])
 			destination.scratch.Put(scratch)
 			continue
 		}
@@ -391,6 +390,8 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 		scratch := destination.getScratch()
 		payload, _, _, receiveErr := destination.Sessions.Receive(scratch.plaintext[:], outer.Encrypted, destination.Private, now)
 		if receiveErr != nil {
+			clear(scratch.plaintext[:])
+			clear(scratch.reply[:])
 			destination.scratch.Put(scratch)
 			continue
 		}
