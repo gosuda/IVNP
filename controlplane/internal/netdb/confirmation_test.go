@@ -103,3 +103,28 @@ func TestConfirmedPublicationPrefersConfiguredVerifiedFloodfills(t *testing.T) {
 		}
 	}
 }
+
+func TestForcedPublicationDiscoversTargetsDuringBackoff(t *testing.T) {
+	const now = uint64(1_000)
+	key := foundation.Hash{9}
+	database := NewDatabase(foundation.Hash{1}, DefaultBucketCapacity)
+	sender := new(publicationTestSender)
+	publication := newConfirmedPublication(database, sender, publicationTestRoute{gateway: foundation.Hash{2}}, nil,
+		func() uint64 { return now }, func() uint32 { return 23 }, key, foundation.I2NPStoreLeaseSet2, nil, nil)
+	t.Cleanup(publication.close)
+	publication.replace([]byte{1})
+	if sent, err := publication.maintain(t.Context(), false); err != nil || sent != 0 {
+		t.Fatalf("publication without targets = %d, %v", sent, err)
+	}
+	target := requestTestHash(3)
+	addRequestTestFloodfill(database, target)
+	if sent, err := publication.maintain(t.Context(), false); err != nil || sent != 0 {
+		t.Fatalf("periodic publication ignored backoff: %d, %v", sent, err)
+	}
+	if sent, err := publication.maintain(t.Context(), true); err != nil || sent != 1 {
+		t.Fatalf("forced publication to discovered target = %d, %v", sent, err)
+	}
+	if len(sender.targets) != 1 || sender.targets[0] != target {
+		t.Fatalf("publication targets = %v, want [%x]", sender.targets, target)
+	}
+}
