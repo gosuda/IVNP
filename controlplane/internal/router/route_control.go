@@ -234,6 +234,16 @@ func (s *StreamingTunnelSender) BandwidthSnapshot() dataplane.RouterDestinationB
 	return s.execution.BandwidthSnapshot()
 }
 
+// MaintainScratch shrinks this destination's pooled send-scratch buffers that
+// grew for a large message but have gone unused at that size since the last
+// periodic maintenance pass. See PreparedRouteSender.MaintainScratch.
+func (s *StreamingTunnelSender) MaintainScratch() {
+	if s == nil {
+		return
+	}
+	s.execution.MaintainScratch()
+}
+
 func (s *StreamingTunnelSender) UpdateRemoteELS(policies map[foundation.Hash]RemoteELSContext) error {
 	if s == nil {
 		return dataplane.RouterErrDataPlaneConfig

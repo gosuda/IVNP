@@ -109,6 +109,37 @@ func (s *PreparedRouteSender) ReleaseSensitive() {
 	s.scratch = nil
 }
 
+// MaintainScratch shrinks pooled scratch buffers that grew for a large
+// message but have gone unused at that size since the last call. It is meant
+// to be driven from the same periodic per-destination maintenance pass that
+// already runs tunnel/health upkeep, not a dedicated timer. A slot currently
+// checked out by an in-flight send is left alone and simply skipped.
+func (s *PreparedRouteSender) MaintainScratch() {
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.released {
+		return
+	}
+	free := s.scratch
+	if free == nil {
+		return
+	}
+	drained := make([]*streamingSenderScratch, 0, cap(free))
+drain:
+	for {
+		select {
+		case scratch := <-free:
+			drained = append(drained, scratch)
+		default:
+			break drain
+		}
+	}
+	for _, scratch := range drained {
+		scratch.shrinkIdle()
+		free <- scratch
+	}
+}
+
 func (s *PreparedRouteSender) RetireRatchetPeer(peer foundation.Hash) {
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
@@ -125,17 +156,45 @@ type streamingSenderScratch struct {
 	encrypted senderScratchBuffer
 }
 
+// shrinkIdle releases the backing array of any of this slot's buffers that
+// grew past senderScratchBaselineCapacity but were not asked for that much
+// space again during the most recent maintenance window (see
+// PreparedRouteSender.MaintainScratch). A destination that sent one large
+// message would otherwise keep every pooled scratch buffer at up to
+// I2NPI2PDMaxPayload (~62KB) x 5 buffers x scratchSlots forever.
+func (s *streamingSenderScratch) shrinkIdle() {
+	s.data.shrinkIdle()
+	s.clove.shrinkIdle()
+	s.ratchet.shrinkIdle()
+	s.plain.shrinkIdle()
+	s.encrypted.shrinkIdle()
+}
+
+// senderScratchBaselineCapacity is the smallest capacity bytes() allocates
+// at; below it, growth/shrink churn isn't worth avoiding.
+const senderScratchBaselineCapacity = 4096
+
 type senderScratchBuffer struct {
 	exposed []byte
+	// usedAtLarge marks that bytes() was asked for more than
+	// senderScratchBaselineCapacity since the last shrinkIdle call. It is the
+	// signal shrinkIdle uses to tell a still-busy large buffer from one that
+	// grew once and has sat idle since; forecasting future demand from past
+	// samples would need to be right far more often than a plain "was it
+	// used this window" check to be worth the complexity.
+	usedAtLarge bool
 }
 
 // bytes records the entire writable span before handing it to serializers or
 // crypto: an error may leave output beyond the successfully returned length.
 func (b *senderScratchBuffer) bytes(size int) []byte {
 	size = min(size, foundation.I2NPI2PDMaxPayload)
+	if size > senderScratchBaselineCapacity {
+		b.usedAtLarge = true
+	}
 	if cap(b.exposed) < size {
 		clear(b.exposed)
-		capacity := 4096
+		capacity := senderScratchBaselineCapacity
 		if size > capacity {
 			capacity = foundation.I2NPI2PDMaxPayload
 		}
@@ -149,6 +208,17 @@ func (b *senderScratchBuffer) bytes(size int) []byte {
 func (b *senderScratchBuffer) clear() {
 	clear(b.exposed)
 	b.exposed = b.exposed[:0]
+}
+
+// shrinkIdle drops this buffer's backing array if it is larger than the
+// baseline capacity and was not used at a large size since the last call,
+// then rearms usedAtLarge for the next observation window.
+func (b *senderScratchBuffer) shrinkIdle() {
+	if cap(b.exposed) > senderScratchBaselineCapacity && !b.usedAtLarge {
+		clear(b.exposed)
+		b.exposed = nil
+	}
+	b.usedAtLarge = false
 }
 
 func (s *PreparedRouteSender) BandwidthSnapshot() DestinationBandwidthSnapshot {

@@ -91,6 +91,85 @@ func TestSenderScratchWipesPartialWritesAndRetiredBacking(t *testing.T) {
 	assertSenderScratchWiped(t, &scratch)
 }
 
+// TestSenderScratchBufferShrinksOnlyWhenUnusedAtLargeSinceLastWindow checks
+// senderScratchBuffer.shrinkIdle's core contract: a buffer that grew past
+// the baseline stays grown as long as bytes() keeps asking for large sizes
+// window over window, but releases its backing array the first window it
+// doesn't.
+func TestSenderScratchBufferShrinksOnlyWhenUnusedAtLargeSinceLastWindow(t *testing.T) {
+	var buffer senderScratchBuffer
+	buffer.bytes(senderScratchBaselineCapacity + 1)
+	if cap(buffer.exposed) <= senderScratchBaselineCapacity {
+		t.Fatalf("cap after large use = %d, want > %d", cap(buffer.exposed), senderScratchBaselineCapacity)
+	}
+
+	// Still being used at a large size every window: must not shrink.
+	for i := 0; i < 3; i++ {
+		buffer.shrinkIdle()
+		buffer.bytes(senderScratchBaselineCapacity + 1)
+	}
+	if cap(buffer.exposed) <= senderScratchBaselineCapacity {
+		t.Fatalf("cap while still used large = %d, want > %d (should not have shrunk)", cap(buffer.exposed), senderScratchBaselineCapacity)
+	}
+
+	// The loop above ends on a bytes() call, so one shrinkIdle just closes
+	// out that window (usedAtLarge is still set from it) without shrinking.
+	buffer.shrinkIdle()
+	if cap(buffer.exposed) <= senderScratchBaselineCapacity {
+		t.Fatalf("cap right after the last large use = %d, want > %d (should not have shrunk yet)", cap(buffer.exposed), senderScratchBaselineCapacity)
+	}
+
+	// Now a full window has passed with no bytes() call in between: must shrink.
+	buffer.shrinkIdle()
+	if buffer.exposed != nil {
+		t.Fatalf("exposed after idle shrink = %v, want nil", buffer.exposed)
+	}
+
+	// Below baseline afterward, growth/shrink churn is not worth avoiding,
+	// so small requests keep working against the released backing.
+	view := buffer.bytes(17)
+	if len(view) != 17 || cap(view) != 17 {
+		t.Fatalf("post-shrink small view = %d/%d, want 17/17", len(view), cap(view))
+	}
+}
+
+// TestPreparedSenderMaintainScratchSkipsCheckedOutSlots checks that
+// MaintainScratch only shrinks slots currently sitting free in the pool,
+// leaving a slot an in-flight send is holding untouched, and that it puts
+// every drained slot back so scratch admission capacity is unchanged.
+func TestPreparedSenderMaintainScratchSkipsCheckedOutSlots(t *testing.T) {
+	sender := &PreparedRouteSender{scratch: make(chan *streamingSenderScratch, 2), scratchSlots: 2}
+	idle := &streamingSenderScratch{}
+	idle.data.bytes(senderScratchBaselineCapacity + 1)
+	held := &streamingSenderScratch{}
+	held.data.bytes(senderScratchBaselineCapacity + 1)
+	sender.scratch <- idle
+
+	// The first pass just closes out the window idle.data grew in (bytes()
+	// marked it used-at-large); it must not shrink yet.
+	sender.MaintainScratch()
+	if cap(idle.data.exposed) <= senderScratchBaselineCapacity {
+		t.Fatal("idle slot shrunk on the same window it grew in")
+	}
+	// A full window with no further large use of the now-idle slot: shrink.
+	sender.MaintainScratch()
+
+	if len(sender.scratch) != 1 {
+		t.Fatalf("scratch admission capacity after maintenance = %d, want 1 (held slot stays checked out)", len(sender.scratch))
+	}
+	if idle.data.exposed != nil {
+		t.Fatal("idle slot's oversized buffer was not shrunk")
+	}
+	if cap(held.data.exposed) <= senderScratchBaselineCapacity {
+		t.Fatal("checked-out slot was shrunk despite never being observed idle")
+	}
+
+	sender.scratch <- held
+	if len(sender.scratch) != 2 {
+		t.Fatal("MaintainScratch dropped a returned slot")
+	}
+}
+
 func TestPreparedSenderWipesPartiallySerializedLeaseSet(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		t.Run(map[bool]string{false: "ratchet", true: "legacy"}[legacy], func(t *testing.T) {
