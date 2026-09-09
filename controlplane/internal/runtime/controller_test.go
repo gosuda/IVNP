@@ -1295,6 +1295,12 @@ func TestDaemonNewProductionGraphPublicAndEncryptedDestinations(t *testing.T) {
 	if err := encryptedDaemon.database.AdmitRouterInfo(flood, false, now); err != nil {
 		t.Fatal(err)
 	}
+	// Startup may have armed publication backoff before the floodfill was known.
+	for _, runtime := range []*destinationRuntime{publicRuntime, encryptedRuntime} {
+		if _, err := runtime.publisher.publisher.(*netdb.LeaseSetPublisher).Publish(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := publicDaemon.publication.Maintain(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -1622,6 +1628,12 @@ func testDaemonProductionGraphEncryptedAuthorization(t *testing.T, authorization
 	}
 	if err := targetDaemon.database.AdmitRouterInfo(flood, false, now); err != nil {
 		t.Fatal(err)
+	}
+	// Startup may have armed publication backoff before the floodfill was known.
+	for _, runtime := range []*destinationRuntime{sourceRuntime, targetRuntime} {
+		if _, err := runtime.publisher.publisher.(*netdb.LeaseSetPublisher).Publish(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := sourceDaemon.publication.Maintain(context.Background()); err != nil {
 		t.Fatal(err)

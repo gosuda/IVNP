@@ -289,6 +289,9 @@ func TestRatchetProductionEncryptReplacesRestartableSession(t *testing.T) {
 	if err != nil || !result.NewSession || result.Candidate == nil {
 		t.Fatalf("replacement new session = %#v, %v", result, err)
 	}
+	if retained, retainErr := b.RetainNewSession(result.Candidate, result.Peer, restartNow); retainErr != nil || retained {
+		t.Fatalf("restartable session retention = %t, %v", retained, retainErr)
+	}
 	if commit, commitErr := b.CommitNewSession(result.Candidate, result.Peer, restartNow); commitErr != nil || commit != NewSessionReplaced {
 		t.Fatalf("replacement commit = %v, %v", commit, commitErr)
 	}

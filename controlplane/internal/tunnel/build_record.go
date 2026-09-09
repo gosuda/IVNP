@@ -10,7 +10,6 @@ import (
 	"io"
 
 	"gosuda.org/ivnp/cryptography"
-	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 )
 
@@ -312,21 +311,23 @@ func encryptShortBuildRequest(dst []byte, hop foundation.Hash, hopStatic, plaint
 	}
 	copy(dst[:shortBuildPeerSize], hop[:shortBuildPeerSize])
 	copy(dst[shortBuildPeerSize:shortBuildCipherOffset], ephemeral.PublicKey().Bytes())
-	state := initializeShortBuild(hopStatic, ephemeral.PublicKey().Bytes())
-	defer state.ReleaseSensitive()
+	state := newShortBuildState(hopStatic, ephemeral.PublicKey().Bytes())
+	defer state.releaseSensitive()
 	shared, err := ephemeral.ECDH(remote)
 	if err != nil {
 		return keys, ErrShortBuildKey
 	}
 	defer clear(shared)
-	if err = state.MixKey(shared); err != nil {
-		return keys, err
-	}
-	ciphertext, err := state.EncryptAndHash(dst[shortBuildCipherOffset:ShortBuildRecordSize], plaintext)
+	var cipherKey [32]byte
+	state.chainingKey, cipherKey = shortBuildKDF2(state.chainingKey, shared)
+	defer clear(cipherKey[:])
+	var nonce [cryptography.ChaChaNonceSize]byte
+	ciphertext, err := cryptography.SealChaCha20Poly1305To(dst[shortBuildCipherOffset:ShortBuildRecordSize], cipherKey[:], nonce[:], plaintext, state.hash[:])
 	if err != nil || len(ciphertext) != ShortBuildRequestPlainSize+cryptography.ChaChaTagSize {
 		return keys, ErrShortBuildRecord
 	}
-	keys = deriveShortBuildKeys(state.ChainingKey(), state.Hash(), plaintext[shortBuildFlagOffset]&shortBuildEndpointFlag != 0)
+	state.mixHash(ciphertext)
+	keys = deriveShortBuildKeys(state.chainingKey, state.hash, plaintext[shortBuildFlagOffset]&shortBuildEndpointFlag != 0)
 	return keys, nil
 }
 
@@ -351,22 +352,25 @@ func decryptShortBuildRequestWithPrivate(dst, record []byte, local foundation.Ha
 	if err != nil {
 		return nil, keys, ErrShortBuildKey
 	}
-	state := initializeShortBuild(private.PublicKey().Bytes(), ephemeral.Bytes())
-	defer state.ReleaseSensitive()
+	state := newShortBuildState(private.PublicKey().Bytes(), ephemeral.Bytes())
+	defer state.releaseSensitive()
 	shared, err := private.ECDH(ephemeral)
 	if err != nil {
 		return nil, keys, ErrShortBuildKey
 	}
 	defer clear(shared)
-	if err = state.MixKey(shared); err != nil {
-		return nil, keys, err
-	}
-	plaintext, err := state.DecryptAndHash(dst[:ShortBuildRequestPlainSize], record[shortBuildCipherOffset:])
+	var cipherKey [32]byte
+	state.chainingKey, cipherKey = shortBuildKDF2(state.chainingKey, shared)
+	defer clear(cipherKey[:])
+	var nonce [cryptography.ChaChaNonceSize]byte
+	ciphertext := record[shortBuildCipherOffset:]
+	plaintext, err := cryptography.OpenChaCha20Poly1305To(dst[:ShortBuildRequestPlainSize], cipherKey[:], nonce[:], ciphertext, state.hash[:])
 	if err != nil {
 		clear(dst[:ShortBuildRequestPlainSize])
 		return nil, keys, ErrShortBuildRecord
 	}
-	keys = deriveShortBuildKeys(state.ChainingKey(), state.Hash(), plaintext[shortBuildFlagOffset]&shortBuildEndpointFlag != 0)
+	state.mixHash(ciphertext)
+	keys = deriveShortBuildKeys(state.chainingKey, state.hash, plaintext[shortBuildFlagOffset]&shortBuildEndpointFlag != 0)
 	return plaintext, keys, nil
 }
 
@@ -375,13 +379,8 @@ func SealShortBuildReply(dst, plaintext []byte, keys ShortBuildKeys, recordIndex
 	if recordIndex >= 8 || len(dst) < ShortBuildRecordSize || len(plaintext) != ShortBuildReplyPlainSize {
 		return nil, ErrShortBuildRecord
 	}
-	cipher, err := cryptography.NewChaCha20Poly1305(keys.ReplyKey[:])
-	if err != nil {
-		return nil, err
-	}
-	defer cipher.ReleaseSensitive()
 	nonce := shortBuildNonce(recordIndex)
-	return cipher.SealTo(dst[:ShortBuildRecordSize], nonce[:], plaintext, keys.Hash[:])
+	return cryptography.SealChaCha20Poly1305To(dst[:ShortBuildRecordSize], keys.ReplyKey[:], nonce[:], plaintext, keys.Hash[:])
 }
 
 // OpenShortBuildReply authenticates the creator's reply record at recordIndex.
@@ -389,13 +388,8 @@ func OpenShortBuildReply(dst, ciphertext []byte, keys ShortBuildKeys, recordInde
 	if recordIndex >= 8 || len(dst) < ShortBuildReplyPlainSize || len(ciphertext) != ShortBuildRecordSize {
 		return nil, ErrShortBuildRecord
 	}
-	cipher, err := cryptography.NewChaCha20Poly1305(keys.ReplyKey[:])
-	if err != nil {
-		return nil, err
-	}
-	defer cipher.ReleaseSensitive()
 	nonce := shortBuildNonce(recordIndex)
-	plaintext, err := cipher.OpenTo(dst[:ShortBuildReplyPlainSize], nonce[:], ciphertext, keys.Hash[:])
+	plaintext, err := cryptography.OpenChaCha20Poly1305To(dst[:ShortBuildReplyPlainSize], keys.ReplyKey[:], nonce[:], ciphertext, keys.Hash[:])
 	if err != nil {
 		clear(dst[:ShortBuildReplyPlainSize])
 		return nil, ErrShortBuildRecord
@@ -420,12 +414,38 @@ func TransformShortBuildRecord(dst, src []byte, replyKey [32]byte, recordIndex u
 	return nil
 }
 
-func initializeShortBuild(static, ephemeral []byte) *dataplane.NoiseSymmetricState {
-	state := dataplane.NoiseInitialize(shortBuildProtocol)
-	_ = state.MixHash(nil)
-	_ = state.MixHash(static)
-	_ = state.MixHash(ephemeral)
-	return state
+type shortBuildState struct {
+	chainingKey [32]byte
+	hash        [32]byte
+}
+
+func newShortBuildState(static, ephemeral []byte) shortBuildState {
+	var s shortBuildState
+	copy(s.hash[:], shortBuildProtocol)
+	s.chainingKey = s.hash
+	s.mixHash(nil)
+	s.mixHash(static)
+	s.mixHash(ephemeral)
+	return s
+}
+
+func (s *shortBuildState) mixHash(data []byte) {
+	if len(data) <= 512 {
+		var buf [32 + 512]byte
+		copy(buf[:32], s.hash[:])
+		copy(buf[32:], data)
+		s.hash = sha256.Sum256(buf[:32+len(data)])
+		return
+	}
+	h := sha256.New()
+	h.Write(s.hash[:])
+	h.Write(data)
+	h.Sum(s.hash[:0])
+}
+
+func (s *shortBuildState) releaseSensitive() {
+	clear(s.chainingKey[:])
+	clear(s.hash[:])
 }
 
 func deriveShortBuildKeys(chain, hash [32]byte, endpoint bool) ShortBuildKeys {
@@ -450,6 +470,59 @@ func tunnelKDF(salt [32]byte, info string) ([32]byte, [32]byte) {
 	second := shortBuildHMAC(prk, &first, info, 2)
 	clear(prk[:])
 	return first, second
+}
+
+func shortBuildKDF2(key [32]byte, input []byte) ([32]byte, [32]byte) {
+	temp := shortBuildHMACBytes(key, input)
+	first := shortBuildHMACBytes(temp, []byte{1})
+	second := shortBuildHMAC2(temp, first, 2)
+	clear(temp[:])
+	return first, second
+}
+
+func shortBuildHMACBytes(key [32]byte, data []byte) [32]byte {
+	var inner [128]byte
+	for i := range sha256.BlockSize {
+		inner[i] = 0x36
+	}
+	for i := range key {
+		inner[i] ^= key[i]
+	}
+	copy(inner[sha256.BlockSize:], data)
+	innerHash := sha256.Sum256(inner[:sha256.BlockSize+len(data)])
+
+	var outer [sha256.BlockSize + sha256.Size]byte
+	for i := range sha256.BlockSize {
+		outer[i] = 0x5c
+	}
+	for i := range key {
+		outer[i] ^= key[i]
+	}
+	copy(outer[sha256.BlockSize:], innerHash[:])
+	return sha256.Sum256(outer[:])
+}
+
+func shortBuildHMAC2(key, first [32]byte, counter byte) [32]byte {
+	var inner [sha256.BlockSize + 32 + 1]byte
+	for i := range sha256.BlockSize {
+		inner[i] = 0x36
+	}
+	for i := range key {
+		inner[i] ^= key[i]
+	}
+	copy(inner[sha256.BlockSize:], first[:])
+	inner[sha256.BlockSize+32] = counter
+	innerHash := sha256.Sum256(inner[:])
+
+	var outer [sha256.BlockSize + sha256.Size]byte
+	for i := range sha256.BlockSize {
+		outer[i] = 0x5c
+	}
+	for i := range key {
+		outer[i] ^= key[i]
+	}
+	copy(outer[sha256.BlockSize:], innerHash[:])
+	return sha256.Sum256(outer[:])
 }
 
 // shortBuildHMAC specializes HMAC-SHA256 for the bounded HKDF inputs above.

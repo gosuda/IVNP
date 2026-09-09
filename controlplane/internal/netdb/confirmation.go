@@ -215,7 +215,8 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 			}
 		}
 	}
-	if len(p.attempts) == 0 && p.confirmed < PublicationFloodfillK && p.nextTarget >= len(p.targets) && p.nextRetry <= now {
+	retryDue := force || p.nextRetry <= now
+	if len(p.attempts) == 0 && p.confirmed < PublicationFloodfillK && p.nextTarget >= len(p.targets) && retryDue {
 		p.targets = nil
 		p.nextTarget = 0
 	}

@@ -17,7 +17,6 @@ import (
 	dataplanestreaming "gosuda.org/ivnp/dataplane/internal/streaming"
 	dataplanestreamingtunnel "gosuda.org/ivnp/dataplane/internal/streaming/tunnel"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/observability"
 )
 
@@ -84,11 +83,20 @@ type GarlicReceiver struct {
 	logger         *slog.Logger
 	staticPrivate  [32]byte
 	hasStatic      bool
-	replyScratch   chan *[foundation.I2NPI2PDMaxPayload]byte
+	replyScratch   sync.Pool
 }
 
 func (r *GarlicReceiver) MatchesService(service *Service) bool {
 	return r.service == service
+}
+
+// getReplyScratch borrows a reply-decrypt buffer from the pool, allocating one
+// lazily on a cold pool so idle receivers hold no scratch memory.
+func (r *GarlicReceiver) getReplyScratch() *[foundation.I2NPI2PDMaxPayload]byte {
+	if v, ok := r.replyScratch.Get().(*[foundation.I2NPI2PDMaxPayload]byte); ok {
+		return v
+	}
+	return new([foundation.I2NPI2PDMaxPayload]byte)
 }
 
 type garlicReceiveScratch struct {
@@ -98,11 +106,20 @@ type garlicReceiveScratch struct {
 
 type garlicDestinationState struct {
 	GarlicDestination
-	scratch      chan *garlicReceiveScratch
+	scratch      sync.Pool
 	inFlightMu   sync.Mutex
 	inFlightCond *sync.Cond
 	inFlight     int
 	retired      bool
+}
+
+// getScratch borrows a receive-decrypt buffer pair from the pool, allocating
+// one lazily on a cold pool so idle destinations hold no scratch memory.
+func (s *garlicDestinationState) getScratch() *garlicReceiveScratch {
+	if v, ok := s.scratch.Get().(*garlicReceiveScratch); ok {
+		return v
+	}
+	return new(garlicReceiveScratch)
 }
 
 func (s *garlicDestinationState) acquire() bool {
@@ -135,12 +152,8 @@ func (s *garlicDestinationState) retireAndWait() {
 		s.inFlightCond.Wait()
 	}
 	s.inFlightMu.Unlock()
-	for range cap(s.scratch) {
-		scratch := <-s.scratch
-		clear(scratch.plaintext[:])
-		clear(scratch.reply[:])
-	}
-	s.scratch = nil
+	// Buffers must be wiped before pooling because a GC may discard them.
+	s.scratch = sync.Pool{}
 }
 
 func releaseGarlicSnapshot(destinations []*garlicDestinationState) {
@@ -157,14 +170,9 @@ func NewGarlicReceiver(config GarlicReceiverConfig) (*GarlicReceiver, error) {
 	if newGarlicReceiverRejected {
 		return nil, ErrDataPlaneConfig
 	}
-	replySlots := parallelism.CPUs()
 	receiver := &GarlicReceiver{
 		service: config.Service, destinations: make(map[foundation.Hash]*garlicDestinationState, len(config.Destinations)),
 		replyKeys: config.ReplyKeys, now: config.Now, metrics: config.Metrics, logger: config.Logger, hasStatic: len(config.StaticPrivate) == 32,
-		replyScratch: make(chan *[foundation.I2NPI2PDMaxPayload]byte, replySlots),
-	}
-	for range replySlots {
-		receiver.replyScratch <- new([foundation.I2NPI2PDMaxPayload]byte)
 	}
 	copy(receiver.staticPrivate[:], config.StaticPrivate)
 	for hash, destination := range config.Destinations {
@@ -198,11 +206,7 @@ func (r *GarlicReceiver) RegisterDestination(hash foundation.Hash, destination G
 		r.destinationsMu.Unlock()
 		return nil, ErrDataPlaneConfig
 	}
-	scratchSlots := parallelism.CPUs()
-	state := &garlicDestinationState{GarlicDestination: destination, scratch: make(chan *garlicReceiveScratch, scratchSlots)}
-	for range scratchSlots {
-		state.scratch <- new(garlicReceiveScratch)
-	}
+	state := &garlicDestinationState{GarlicDestination: destination}
 	r.destinations[hash] = state
 	r.destinationsMu.Unlock()
 	var once sync.Once
@@ -242,11 +246,10 @@ func (r *GarlicReceiver) ReleaseSensitive() {
 		state.retireAndWait()
 	}
 	clear(r.staticPrivate[:])
-	for range cap(r.replyScratch) {
-		scratch := <-r.replyScratch
-		clear(scratch[:])
-	}
-	r.replyScratch = nil
+	// Every acquire path below clears its reply buffer before returning it to
+	// the pool, even on error, so dropping the pool here is safe; the GC
+	// reclaims its contents once unreferenced.
+	r.replyScratch = sync.Pool{}
 	r.hasStatic = false
 	r.lifecycleMu.Unlock()
 }
@@ -318,7 +321,7 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 			if plainLen > foundation.I2NPI2PDMaxPayload {
 				return foundation.I2NPErrPayloadTooLarge
 			}
-			scratch := <-r.replyScratch
+			scratch := r.getReplyScratch()
 			reply, unwrapErr := dataplanegarlicecies.OpenOneTimeReplyExistingSession(scratch[:plainLen], key.Key, key.Tag, outer.Encrypted)
 			if unwrapErr == nil {
 				if r.logger != nil {
@@ -332,14 +335,14 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 			}
 
 			clear(scratch[:plainLen])
-			r.replyScratch <- scratch
+			r.replyScratch.Put(scratch)
 			return unwrapErr
 		}
 	}
 	if r.hasStatic {
 		plainLen := len(outer.Encrypted) - 32 - 16
 		if plainLen > 0 && plainLen <= foundation.I2NPI2PDMaxPayload {
-			scratch := <-r.replyScratch
+			scratch := r.getReplyScratch()
 			inner, openErr := dataplanegarlicecies.OpenRouterMessage(scratch[:plainLen], r.staticPrivate[:], outer.Encrypted, now)
 			if openErr == nil {
 				openErr = r.service.
@@ -347,7 +350,7 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 			}
 
 			clear(scratch[:plainLen])
-			r.replyScratch <- scratch
+			r.replyScratch.Put(scratch)
 			if openErr == nil {
 				return nil
 			}
@@ -357,10 +360,12 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 		if destination.Ratchet == nil || len(outer.Encrypted) > foundation.I2NPI2PDMaxPayload {
 			continue
 		}
-		scratch := <-destination.scratch
+		scratch := destination.getScratch()
 		result, receiveErr := destination.Ratchet.Receive(scratch.plaintext[:], scratch.reply[:], outer.Encrypted, now)
 		if receiveErr != nil {
-			destination.scratch <- scratch
+			clear(scratch.plaintext[:])
+			clear(scratch.reply[:])
+			destination.scratch.Put(scratch)
 			continue
 		}
 		if result.Candidate != nil {
@@ -369,28 +374,30 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 		if destination.Limiter != nil && !destination.Limiter.TryAcquire(uint64(len(outer.Encrypted))) {
 			clear(scratch.plaintext[:])
 			clear(scratch.reply[:])
-			destination.scratch <- scratch
+			destination.scratch.Put(scratch)
 			return ErrDestinationBandwidth
 		}
 		receiveErr = r.handleRatchetResult(destination, result, scratch.reply[:], now)
 		clear(scratch.plaintext[:])
 		clear(scratch.reply[:])
-		destination.scratch <- scratch
+		destination.scratch.Put(scratch)
 		return receiveErr
 	}
 	for _, destination := range destinations {
 		if destination.Sessions == nil || len(outer.Encrypted) > foundation.I2NPI2PDMaxPayload {
 			continue
 		}
-		scratch := <-destination.scratch
+		scratch := destination.getScratch()
 		payload, _, _, receiveErr := destination.Sessions.Receive(scratch.plaintext[:], outer.Encrypted, destination.Private, now)
 		if receiveErr != nil {
-			destination.scratch <- scratch
+			clear(scratch.plaintext[:])
+			clear(scratch.reply[:])
+			destination.scratch.Put(scratch)
 			continue
 		}
 		if destination.Limiter != nil && !destination.Limiter.TryAcquire(uint64(len(outer.Encrypted))) {
 			clear(scratch.plaintext[:])
-			destination.scratch <- scratch
+			destination.scratch.Put(scratch)
 			return ErrDestinationBandwidth
 		}
 		set, parseErr := dataplanegarlic.ParseCloveSet(payload)
@@ -400,7 +407,7 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 		}
 
 		clear(scratch.plaintext[:])
-		destination.scratch <- scratch
+		destination.scratch.Put(scratch)
 		return parseErr
 	}
 	return ErrGarlicDestination
@@ -428,20 +435,31 @@ func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState
 	if targetErr != nil {
 		return targetErr
 	}
-	if destination.ReserveRatchetReply == nil {
-		return ErrGarlicDestination
-	}
-	reservation, err := destination.ReserveRatchetReply(target)
+	retained, err := destination.Ratchet.RetainNew(result.Candidate, target, now)
 	if err != nil {
 		return err
 	}
-	defer reservation.Release()
-	if err := reservation.Activate(); err != nil {
-		return err
-	}
-	commit, err := destination.Ratchet.CommitNew(result.Candidate, target, now)
-	if err != nil {
-		return err
+	var reservation RatchetReplyReservation
+	if !retained {
+		if destination.ReserveRatchetReply == nil {
+			return ErrGarlicDestination
+		}
+		reservation, err = destination.ReserveRatchetReply(target)
+		if err != nil {
+			return err
+		}
+		defer reservation.Release()
+		if err := reservation.Activate(); err != nil {
+			return err
+		}
+		commit, err := destination.Ratchet.CommitNew(result.Candidate, target, now)
+		if err != nil {
+			return err
+		}
+		if commit == dataplanegarlic.NewSessionRetained {
+			reservation.Release()
+			reservation = nil
+		}
 	}
 	result.Peer = target
 	remaining := cloves[:0]
@@ -453,15 +471,13 @@ func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState
 		}
 		remaining = append(remaining, clove)
 	}
-	if commit != dataplanegarlic.NewSessionRetained {
+	if reservation != nil {
 		if err := reservation.Send(context.Background(), result.Reply); err != nil {
 			return appendError(dispatchErr, err)
 		}
 		if r.metrics != nil {
 			r.metrics.IncGarlicECIESNewSessionSent()
 		}
-	} else {
-		reservation.Release()
 	}
 	for _, clove := range remaining {
 		dispatchErr = appendError(dispatchErr, r.service.dispatchClove(result.Peer, clove.Delivery, clove.Message, now, false))

@@ -241,6 +241,9 @@ func (r *destinationRuntime) maintain(ctx context.Context, now uint64) error {
 		_, err := r.maintainer.Maintain(ctx)
 		result = errors.Join(result, err)
 	}
+	if r.sender != nil {
+		r.sender.MaintainScratch()
+	}
 	if r.requests != nil {
 		r.requests.Expire(now)
 	}

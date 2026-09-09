@@ -193,6 +193,18 @@ func (m *RatchetManager) CommitNew(candidate *NewSessionCandidate, peer foundati
 	return shard.CommitNewSession(candidate, peer, now)
 }
 
+// RetainNew consumes a duplicate candidate if its verified peer has a recent
+// session. Otherwise the caller retains the candidate for reply admission.
+func (m *RatchetManager) RetainNew(candidate *NewSessionCandidate, peer foundation.Hash, now uint64) (bool, error) {
+	if m == nil || candidate == nil || peer == (foundation.Hash{}) {
+		return false, ErrRatchet
+	}
+	m.routeMu.Lock()
+	defer m.routeMu.Unlock()
+	_, shard := m.peerShardLocked(peer)
+	return shard.RetainNewSession(candidate, peer, now)
+}
+
 func (m *RatchetManager) Stats() RatchetStats {
 	var stats RatchetStats
 	if m == nil {

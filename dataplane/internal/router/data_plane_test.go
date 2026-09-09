@@ -640,6 +640,7 @@ func TestGarlicReceiverDeliversConcurrentNewSessionPayloads(t *testing.T) {
 		if err = receiver.HandleGarlic(message); err != nil {
 			t.Fatal(err)
 		}
+		admitReply = false
 	}
 	if len(delivered) != 2 || delivered[0] != 1 || delivered[1] != 3 {
 		t.Fatalf("delivered Data IDs = %v, want [1 3]", delivered)
@@ -869,36 +870,13 @@ func TestGarlicReceiverUnregisterWaitsForInflightAndReleasesStaticKey(t *testing
 	receiver.destinationsMu.RLock()
 	state := receiver.destinations[local.Hash()]
 	receiver.destinationsMu.RUnlock()
-	heldScratch := make([]*garlicReceiveScratch, 0, cap(state.scratch))
-	for range cap(state.scratch) {
-		heldScratch = append(heldScratch, <-state.scratch)
-	}
-	payload := make([]byte, 4+64)
-	binary.BigEndian.PutUint32(payload[:4], 64)
-	handleDone := make(chan struct{})
-	go func() {
-		_ = receiver.HandleGarlic(foundation.I2NPMessage{Header: foundation.I2NPHeader{Type: foundation.I2NPGarlic}, Payload: payload})
-		close(handleDone)
-	}()
-	deadline := time.NewTimer(time.Second)
-	ticker := time.NewTicker(time.Millisecond)
-	defer deadline.Stop()
-	defer ticker.Stop()
-	for {
-		state.inFlightMu.Lock()
-		inFlight := state.inFlight
-		state.inFlightMu.Unlock()
-		if inFlight == 1 {
-			break
-		}
-		select {
-		case <-deadline.C:
-			for _, scratch := range heldScratch {
-				state.scratch <- scratch
-			}
-			t.Fatal("garlic handler never acquired its destination snapshot")
-		case <-ticker.C:
-		}
+	// Hold the destination in-flight directly through acquire/done, the same
+	// bookkeeping HandleGarlicFrom uses around its whole receive. This
+	// exercises retireAndWait's wait-for-in-flight guarantee without relying
+	// on scratch-buffer exhaustion, which no longer blocks now that scratch
+	// buffers come from a lazily-allocating sync.Pool.
+	if !state.acquire() {
+		t.Fatal("destination unexpectedly retired before in-flight receive started")
 	}
 	removeDone := make(chan struct{})
 	go func() {
@@ -907,20 +885,10 @@ func TestGarlicReceiverUnregisterWaitsForInflightAndReleasesStaticKey(t *testing
 	}()
 	select {
 	case <-removeDone:
-		for _, scratch := range heldScratch {
-			state.scratch <- scratch
-		}
 		t.Fatal("destination unregister returned during in-flight receive")
 	case <-time.After(20 * time.Millisecond):
 	}
-	for _, scratch := range heldScratch {
-		state.scratch <- scratch
-	}
-	select {
-	case <-handleDone:
-	case <-time.After(time.Second):
-		t.Fatal("garlic receive did not finish")
-	}
+	state.done()
 	select {
 	case <-removeDone:
 	case <-time.After(time.Second):
@@ -930,5 +898,91 @@ func TestGarlicReceiverUnregisterWaitsForInflightAndReleasesStaticKey(t *testing
 	receiver.ReleaseSensitive()
 	if !receiver.released || receiver.hasStatic || receiver.staticPrivate != ([32]byte{}) || len(receiver.destinations) != 0 {
 		t.Fatal("garlic receiver retained sensitive static or destination state")
+	}
+}
+
+func TestGarlicReceiverClearsExpiredRatchetPlaintext(t *testing.T) {
+	const sentAt = uint64(1_000_000)
+	initiator, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(initiator.ReleaseSensitive)
+	responder, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(responder.ReleaseSensitive)
+	sender, err := dataplanegarlic.NewRatchetManager(initiator, dataplanegarlic.RatchetConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sender.ReleaseSensitive)
+	recipient, err := dataplanegarlic.NewRatchetManager(responder, dataplanegarlic.RatchetConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(recipient.ReleaseSensitive)
+	public := responder.X25519Public()
+	packet, err := sender.Encrypt(make([]byte, 2048), responder.Hash(), public[:], uint16(foundation.CryptoX25519), []byte("expired private payload"), sentAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRejectedGarlicScratchCleared(t, GarlicDestination{Ratchet: recipient}, packet, sentAt+301_000)
+}
+
+func TestGarlicReceiverClearsRejectedLegacyPlaintext(t *testing.T) {
+	tag, key := make([]byte, 32), make([]byte, 32)
+	tag[0], key[0] = 7, 8
+	sessions := dataplanegarlic.NewSessionManager(dataplanegarlic.SessionManagerConfig{})
+	t.Cleanup(func() {
+		if err := sessions.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if !sessions.InboundTags().Put(tag, key, 10) {
+		t.Fatal("failed to install inbound session tag")
+	}
+	packet, err := dataplanegarlic.EncryptExisting(make([]byte, 128), tag, key, []byte("private legacy payload"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Flip the preceding CBC block to change the key flag at plaintext byte 38 from 0 to 2.
+	packet[32+16+6] ^= 2
+	assertRejectedGarlicScratchCleared(t, GarlicDestination{Sessions: sessions}, packet, 1)
+}
+
+func assertRejectedGarlicScratchCleared(t *testing.T, destination GarlicDestination, packet []byte, now uint64) {
+	t.Helper()
+	hash := foundation.Hash{1}
+	receiver, err := NewGarlicReceiver(GarlicReceiverConfig{
+		Service: NewService(Sinks{}), ReplyKeys: dataplanegarlic.NewReplyKeyRegistry(1),
+		Now:          func() uint64 { return now },
+		Destinations: map[foundation.Hash]GarlicDestination{hash: destination},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(receiver.ReleaseSensitive)
+	var scratch *garlicReceiveScratch
+	receiver.destinations[hash].scratch.New = func() any {
+		scratch = new(garlicReceiveScratch)
+		return scratch
+	}
+	payload := make([]byte, 4+len(packet))
+	binary.BigEndian.PutUint32(payload, uint32(len(packet)))
+	copy(payload[4:], packet)
+	err = receiver.HandleGarlic(foundation.I2NPMessage{Header: foundation.I2NPHeader{Type: foundation.I2NPGarlic}, Payload: payload})
+	if !errors.Is(err, ErrGarlicDestination) {
+		t.Fatalf("rejected garlic error = %v, want %v", err, ErrGarlicDestination)
+	}
+	if scratch == nil {
+		t.Fatal("receive did not borrow a decrypt buffer")
+	}
+	if scratch.plaintext != ([foundation.I2NPI2PDMaxPayload]byte{}) {
+		t.Error("rejected garlic retained plaintext in its returned scratch buffer")
+	}
+	if scratch.reply != ([foundation.I2NPI2PDMaxPayload]byte{}) {
+		t.Error("rejected garlic retained reply data in its returned scratch buffer")
 	}
 }

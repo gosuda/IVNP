@@ -108,9 +108,8 @@ const (
 	NewSessionReplaced
 )
 
-// NewSessionCandidate owns derived ratchet state which is not visible through
-// any session or tag map. Discard is idempotent and becomes a no-op after a
-// successful or retained CommitNewSession decision.
+// NewSessionCandidate owns derived ratchet state outside the session and tag
+// maps. Discard is idempotent and is a no-op after commit or retention.
 type NewSessionCandidate struct {
 	mu      sync.Mutex
 	owner   foundation.Hash
@@ -380,7 +379,7 @@ func (m *RatchetManager) CommitNewSession(candidate *NewSessionCandidate, peer f
 		return newSessionCommitInvalid, err
 	}
 	old := m.sessions[peer]
-	if old != nil && now >= old.created && now-old.created <= newSessionRestartAge {
+	if recentSession(old, now) {
 		releaseSession(session)
 		return NewSessionRetained, nil
 	}
@@ -393,6 +392,32 @@ func (m *RatchetManager) CommitNewSession(candidate *NewSessionCandidate, peer f
 		return NewSessionReplaced, nil
 	}
 	return NewSessionInstalled, nil
+}
+
+// RetainNewSession consumes the candidate only when a recent peer session can
+// be kept without installing keys or sending another New Session Reply.
+func (m *RatchetManager) RetainNewSession(candidate *NewSessionCandidate, peer foundation.Hash, now uint64) (bool, error) {
+	if m == nil || candidate == nil || peer == (foundation.Hash{}) {
+		return false, ErrRatchet
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.checkLocked(now); err != nil {
+		return false, err
+	}
+	if !recentSession(m.sessions[peer], now) {
+		return false, nil
+	}
+	session, err := candidate.take(m.owner)
+	if err != nil {
+		return false, err
+	}
+	releaseSession(session)
+	return true, nil
+}
+
+func recentSession(current *session, now uint64) bool {
+	return current != nil && now >= current.created && now-current.created <= newSessionRestartAge
 }
 
 // OwnsTag reports whether tag currently addresses an inbound or pending
