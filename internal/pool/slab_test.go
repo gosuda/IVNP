@@ -20,24 +20,21 @@ func TestAcquireClassSizing(t *testing.T) {
 	}
 }
 
-func TestReleaseSensitiveClearsWholeSlab(t *testing.T) {
+func TestReleaseSensitiveWipesEntireBackingStorage(t *testing.T) {
 	buf, ok := Acquire(257)
 	if !ok {
 		t.Fatal("Acquire failed")
 	}
-	for i := range buf {
-		buf[i] = 0xff
+	backing := buf[:cap(buf)]
+	for i := range backing {
+		backing[i] = 0xff
 	}
 	ReleaseSensitive(buf)
 
-	buf, ok = Acquire(512)
-	if !ok {
-		t.Fatal("Acquire failed")
-	}
-	defer Release(buf)
-	for i, value := range buf {
+	// No parallel tests or intervening acquisitions may reuse this released slab.
+	for i, value := range backing {
 		if value != 0 {
-			t.Fatalf("byte %d = %#x after sensitive release", i, value)
+			t.Fatalf("backing byte %d = %#x after sensitive release", i, value)
 		}
 	}
 }
@@ -98,32 +95,24 @@ func TestLeaseReleaseIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestLeaseReleaseSensitiveClearsWholeSlab(t *testing.T) {
+func TestLeaseReleaseSensitiveWipesEntireBackingStorage(t *testing.T) {
 	lease, ok := AcquireLease(257)
 	if !ok {
 		t.Fatal("AcquireLease failed")
 	}
-	bytes, ok := lease.Bytes(512)
+	backing, ok := lease.Bytes(cap(lease.buf))
 	if !ok {
 		t.Fatal("leased slab capacity unavailable")
 	}
-	for index := range bytes {
-		bytes[index] = 0xff
+	for index := range backing {
+		backing[index] = 0xff
 	}
 	lease.ReleaseSensitive()
 
-	reused, ok := AcquireLease(512)
-	if !ok {
-		t.Fatal("AcquireLease reuse failed")
-	}
-	defer reused.Release()
-	bytes, ok = reused.Bytes(512)
-	if !ok {
-		t.Fatal("reused leased slab unavailable")
-	}
-	for index, value := range bytes {
+	// Observe the released storage before any acquisition can reuse it.
+	for index, value := range backing {
 		if value != 0 {
-			t.Fatalf("byte %d = %#x after sensitive lease release", index, value)
+			t.Fatalf("backing byte %d = %#x after sensitive lease release", index, value)
 		}
 	}
 }

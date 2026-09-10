@@ -109,6 +109,20 @@ gojgp lint ./...
 Storage security checks run on Linux, macOS, and Windows. Windows-only checks
 stay on Windows; Windows arm64 also has a cross-build check.
 
+The HTTP proxy integration test creates its own challenge responder through SAM.
+It requires a running IVNP HTTP proxy and an I2P-connected SAM bridge on the
+same I2P network:
+
+```sh
+IVNP_EEPSITE_PROXY=http://127.0.0.1:4444 IVNP_SAM_ADDRESS=127.0.0.1:7656 \
+  go test -tags=integration -run '^TestHTTPProxyCompletesI2PChallengeRoundTrip$' \
+    -count=1 -timeout=12m .
+```
+
+The test is excluded from ordinary runs. When selected, missing configuration
+fails rather than skips. A canned HTTP 200 or echoed request cannot satisfy its
+responder-only nonce check.
+
 ## License
 
 [MIT](LICENSE)

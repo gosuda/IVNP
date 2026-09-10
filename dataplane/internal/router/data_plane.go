@@ -607,7 +607,10 @@ func (r *GarlicReceiver) HandleDestinationData(from, to foundation.Hash, message
 	if r == nil || destinations == nil || message.Header.Type != foundation.I2NPData {
 		return ErrGarlicPacket
 	}
-	if _, ok := r.destinations[to]; !ok {
+	r.destinationsMu.RLock()
+	_, registered := r.destinations[to]
+	r.destinationsMu.RUnlock()
+	if !registered {
 		return ErrGarlicDestination
 	}
 	protocol, fromPort, toPort, payload, err := parseDestinationData(message.Payload)

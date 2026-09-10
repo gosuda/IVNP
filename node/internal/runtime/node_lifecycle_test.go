@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"gosuda.org/ivnp/dataplane"
@@ -51,96 +52,152 @@ func TestStartRollsBackWhenMetricsListenerFails(t *testing.T) {
 }
 func TestWaitDoesNotRaceStartRegistration(t *testing.T) {
 	cfg := nodeTestConfig(t)
+	cfg.NTCP2.Enabled = false
 	cfg.Metrics = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 1}
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	d, err := New(cfg, Options{
-		SocketRuntime: nodeSockets{},
-		Listener: ListenerFunc(func(context.Context, string, string) (net.Listener, error) {
-			close(entered)
-			<-release
-			return net.Listen("tcp", "127.0.0.1:0")
-		}),
-	})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Wait(); err != nil {
-		t.Fatalf("Wait before Start = %v", err)
-	}
-	started := make(chan error, 1)
-	go func() { started <- d.Start(context.Background()) }()
-	<-entered
-	waited := make(chan error, 1)
-	go func() { waited <- d.Wait() }()
-	select {
-	case err := <-waited:
-		t.Fatalf("Wait returned before Start registered workers: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-	close(release)
-	if err := <-started; err != nil {
-		t.Fatal(err)
-	}
-	if err := d.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-waited; err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Error(err)
+		}
+	})
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		d, err := New(cfg, Options{
+			Transport: &idleNodeTransport{},
+			Listener: ListenerFunc(func(context.Context, string, string) (net.Listener, error) {
+				close(entered)
+				<-release
+				return listener, nil
+			}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer func() {
+			cancel()
+			select {
+			case <-release:
+			default:
+				close(release)
+			}
+			if err := d.Close(); err != nil {
+				t.Error(err)
+			}
+			if err := d.Wait(); err != nil {
+				t.Error(err)
+			}
+			synctest.Wait()
+		}()
+		if err := d.Wait(); err != nil {
+			t.Fatalf("Wait before Start = %v", err)
+		}
+		started := make(chan error, 1)
+		go func() { started <- d.Start(ctx) }()
+		<-entered
+		waited := make(chan error, 1)
+		go func() { waited <- d.Wait() }()
+		// Finish the controller so its Wait cannot mask a missing node startup barrier.
+		cancel()
+		if err := d.Controller.Wait(); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		select {
+		case err := <-waited:
+			t.Fatalf("Wait returned before Start registered workers: %v", err)
+		default:
+		}
+		close(release)
+		if err := <-started; !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Start error = %v, want closed", err)
+		}
+		if err := <-waited; err != nil {
+			t.Fatal(err)
+		}
+	})
 }
+
 func TestCloseWaitsForStartupBeforeReleasingResources(t *testing.T) {
 	cfg := nodeTestConfig(t)
+	cfg.NTCP2.Enabled = false
 	cfg.Metrics = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 1}
-	entered := make(chan struct{})
-	canceled := make(chan struct{})
-	release := make(chan struct{})
-	var returned net.Listener
-	d, err := New(cfg, Options{
-		SocketRuntime: nodeSockets{},
-		Listener: ListenerFunc(func(ctx context.Context, _, _ string) (net.Listener, error) {
-			close(entered)
-			<-ctx.Done()
-			close(canceled)
-			<-release
-			listener, err := net.Listen("tcp", "127.0.0.1:0")
-			if err == nil {
-				returned = listener
-			}
-			return listener, err
-		}),
-	})
+	returned, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	started := make(chan error, 1)
-	go func() { started <- d.Start(context.Background()) }()
-	<-entered
-	closed := make(chan error, 1)
-	go func() { closed <- d.Close() }()
-	<-canceled
-	select {
-	case err := <-closed:
-		t.Fatalf("Close returned before Start completed registration: %v", err)
-	default:
-	}
-	close(release)
-	if err := <-started; !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("Start error = %v, want closed", err)
-	}
-	if err := <-closed; err != nil {
-		t.Fatalf("Close error = %v", err)
-	}
-	if returned == nil {
-		t.Fatal("Listen did not return its tracked listener")
-	}
-	if err := returned.Close(); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("returned listener remained open: Close() = %v", err)
-	}
-	if d.Status().Running {
-		t.Fatal("canceled startup left a listener or server running")
-	}
-	second, err := New(cfg, Options{SocketRuntime: nodeSockets{}})
+	t.Cleanup(func() {
+		if err := returned.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Error(err)
+		}
+	})
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		canceled := make(chan struct{})
+		release := make(chan struct{})
+		d, err := New(cfg, Options{
+			Transport: &idleNodeTransport{},
+			Listener: ListenerFunc(func(ctx context.Context, _, _ string) (net.Listener, error) {
+				close(entered)
+				<-ctx.Done()
+				close(canceled)
+				<-release
+				return returned, nil
+			}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer func() {
+			cancel()
+			select {
+			case <-release:
+			default:
+				close(release)
+			}
+			if err := d.Close(); err != nil {
+				t.Error(err)
+			}
+			if err := d.Wait(); err != nil {
+				t.Error(err)
+			}
+			synctest.Wait()
+		}()
+		started := make(chan error, 1)
+		go func() { started <- d.Start(ctx) }()
+		<-entered
+		closed := make(chan error, 1)
+		go func() { closed <- d.Close() }()
+		<-canceled
+		if err := d.Controller.Wait(); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		select {
+		case err := <-closed:
+			t.Fatalf("Close returned before Start completed registration: %v", err)
+		default:
+		}
+		close(release)
+		if err := <-started; !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Start error = %v, want closed", err)
+		}
+		if err := <-closed; err != nil {
+			t.Fatalf("Close error = %v", err)
+		}
+		if err := returned.Close(); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("returned listener remained open: Close() = %v", err)
+		}
+		if d.Status().Running {
+			t.Fatal("canceled startup left a listener or server running")
+		}
+	})
+	second, err := New(cfg, Options{Transport: &idleNodeTransport{}})
 	if err != nil {
 		t.Fatalf("New after concurrent Close error = %v", err)
 	}

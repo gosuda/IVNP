@@ -61,6 +61,21 @@ func newTestWebUIServer(t *testing.T, config WebUIConfig) *WebUIServer {
 	return server
 }
 
+func startTestWebUIServer(t *testing.T, server *WebUIServer) string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := server.Start(ctx); err != nil {
+		t.Fatalf("start WebUI: %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := server.Close(); closeErr != nil {
+			t.Errorf("close WebUI: %v", closeErr)
+		}
+	})
+	return "http://" + server.listener.Addr().String()
+}
+
 func TestWebUIAccessPolicy(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -284,25 +299,10 @@ func TestWritePrivateFileAtomicSucceeds(t *testing.T) {
 	}
 }
 
-func TestWebUIServerEndpointsAndConfigUpdate(t *testing.T) {
-	node, configPath, level := createTestNode(t)
-	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: level}))
-	server, err := NewWebUIServer(WebUIConfig{ListenAddress: "127.0.0.1:0", ConfigPath: configPath}, node, logger, level)
-	if err != nil {
-		t.Fatalf("create WebUI: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	if err = server.Start(ctx); err != nil {
-		t.Fatalf("start WebUI: %v", err)
-	}
-	t.Cleanup(func() {
-		if closeErr := server.Close(); closeErr != nil {
-			t.Errorf("close WebUI: %v", closeErr)
-		}
-	})
+func TestWebUIServerRoutesAndMetricsEvents(t *testing.T) {
+	server := newTestWebUIServer(t, WebUIConfig{ListenAddress: "127.0.0.1:0"})
+	baseURL := startTestWebUIServer(t, server)
 	client := &http.Client{Timeout: 3 * time.Second}
-	baseURL := "http://" + server.listener.Addr().String()
 
 	for _, path := range []string{"/", "/api/status", "/api/metrics", "/api/tunnels", "/api/netdb?limit=5", "/api/destinations", "/api/config"} {
 		response, requestErr := client.Get(baseURL + path)
@@ -316,16 +316,6 @@ func TestWebUIServerEndpointsAndConfigUpdate(t *testing.T) {
 		}
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("GET %s status = %d, body %s", path, response.StatusCode, body)
-		}
-		if path == "/" {
-			scriptSources, hashErr := inlineScriptCSPHashes(body)
-			if hashErr != nil || scriptSources == "" {
-				t.Fatalf("bootstrap CSP hashes = %q, error %v", scriptSources, hashErr)
-			}
-			policy := response.Header.Get("Content-Security-Policy")
-			if !strings.Contains(policy, "script-src 'self' "+scriptSources) || strings.Contains(policy, "'unsafe-inline'") {
-				t.Fatalf("bootstrap CSP = %q", policy)
-			}
 		}
 	}
 
@@ -358,6 +348,43 @@ func TestWebUIServerEndpointsAndConfigUpdate(t *testing.T) {
 	if envelope.Type != "metrics" || envelope.Metrics.SampledAt <= 0 {
 		t.Fatalf("SSE metrics envelope = %#v", envelope)
 	}
+}
+
+func TestWebUIBootstrapEnforcesScriptCSP(t *testing.T) {
+	server := newTestWebUIServer(t, WebUIConfig{ListenAddress: "127.0.0.1:0"})
+	baseURL := startTestWebUIServer(t, server)
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Get(baseURL + "/")
+	if err != nil {
+		t.Fatalf("GET bootstrap: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read bootstrap: %v; close: %v", readErr, closeErr)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET bootstrap status = %d, body %s", response.StatusCode, body)
+	}
+	scriptSources, err := inlineScriptCSPHashes(body)
+	if err != nil || scriptSources == "" {
+		t.Fatalf("bootstrap CSP hashes = %q, error %v", scriptSources, err)
+	}
+	policy := response.Header.Get("Content-Security-Policy")
+	if !strings.Contains(policy, "script-src 'self' "+scriptSources) || strings.Contains(policy, "'unsafe-inline'") {
+		t.Fatalf("bootstrap CSP = %q", policy)
+	}
+}
+
+func TestWebUIConfigUpdatePersistsAndReportsApplyMode(t *testing.T) {
+	node, configPath, level := createTestNode(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: level}))
+	server, err := NewWebUIServer(WebUIConfig{ListenAddress: "127.0.0.1:0", ConfigPath: configPath}, node, logger, level)
+	if err != nil {
+		t.Fatalf("create WebUI: %v", err)
+	}
+	baseURL := startTestWebUIServer(t, server)
+	client := &http.Client{Timeout: 3 * time.Second}
 
 	response, err := client.Get(baseURL + "/api/config")
 	if err != nil {
@@ -369,6 +396,9 @@ func TestWebUIServerEndpointsAndConfigUpdate(t *testing.T) {
 	}
 	if err = response.Body.Close(); err != nil {
 		t.Fatalf("close config response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET config status = %d, want %d", response.StatusCode, http.StatusOK)
 	}
 	update := webUIConfigUpdateFromView(view)
 	update.Log.Level = "debug"
@@ -395,11 +425,17 @@ func TestWebUIServerEndpointsAndConfigUpdate(t *testing.T) {
 	if err = json.Unmarshal(updateBody, &result); err != nil {
 		t.Fatalf("decode update result: %v", err)
 	}
+	if result.Status != "saved" {
+		t.Errorf("update status = %q, want saved", result.Status)
+	}
 	if level.Level() != slog.LevelDebug {
 		t.Fatalf("live log level = %v, want debug", level.Level())
 	}
 	if !slices.Contains(result.Applied, "log.level") || !slices.Contains(result.RestartRequired, "tunnel.hops") {
 		t.Fatalf("update result = %#v", result)
+	}
+	if slices.Contains(result.Applied, "tunnel.hops") || slices.Contains(result.RestartRequired, "log.level") {
+		t.Errorf("update reports incorrect apply mode: %#v", result)
 	}
 	persisted, err := state.ConfigurationLoadOperating(configPath)
 	if err != nil {

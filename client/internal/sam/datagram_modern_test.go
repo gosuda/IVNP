@@ -166,7 +166,41 @@ func TestDatagramModernRoundtrip(t *testing.T) {
 	}
 }
 
-func TestDatagram2DropsForgedDatagrams(t *testing.T) {
+func TestDatagram2RejectsWrongRecipient(t *testing.T) {
+	assertDatagram2Rejects(t, func(sender *foundation.LocalDestination, recipient foundation.Hash) []byte {
+		recipient[0] ^= 1
+		return marshalTestDatagram2(t, sender, recipient, "WRONG-RECIPIENT")
+	})
+}
+
+func TestDatagram2RejectsInvalidSignature(t *testing.T) {
+	assertDatagram2Rejects(t, func(sender *foundation.LocalDestination, recipient foundation.Hash) []byte {
+		frame := marshalTestDatagram2(t, sender, recipient, "INVALID-SIGNATURE")
+		frame[len(frame)-1] ^= 1
+		return frame
+	})
+}
+
+func marshalTestDatagram2(t *testing.T, sender *foundation.LocalDestination, recipient foundation.Hash, payload string) []byte {
+	t.Helper()
+	identity, err := sender.Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signatureLen, ok := identity.SigningKeyType().SignatureLen()
+	if !ok {
+		t.Fatal("sender has unsupported signing key type")
+	}
+	frame := make([]byte, identity.EncodedLen()+2+len(payload)+signatureLen)
+	n, err := dataplane.DatagramMarshalV2To(frame, recipient, identity, 2, foundation.Mapping{}, dataplane.DatagramOfflineSignature{}, []byte(payload), sender.Sign)
+	if err != nil || n != len(frame) {
+		t.Fatalf("marshal datagram %q = %d, %v", payload, n, err)
+	}
+	return frame
+}
+
+func assertDatagram2Rejects(t *testing.T, invalidFrame func(*foundation.LocalDestination, foundation.Hash) []byte) {
+	t.Helper()
 	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
 	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, MaxSessions: 4})
 	if err != nil {
@@ -175,64 +209,65 @@ func TestDatagram2DropsForgedDatagrams(t *testing.T) {
 	if err = server.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = server.Close(); _ = server.Wait() }()
+	t.Cleanup(func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("close SAM server: %v", err)
+		}
+		if err := server.Wait(); err != nil {
+			t.Errorf("wait for SAM server: %v", err)
+		}
+	})
 	control, reader, local := createDatagramSession(t, server.Addr().String(), "dg2", "DATAGRAM2")
-	defer control.Close()
-	defer local.ReleaseSensitive()
+	t.Cleanup(func() {
+		if err := control.Close(); err != nil {
+			t.Errorf("close SAM control: %v", err)
+		}
+	})
+	t.Cleanup(local.ReleaseSensitive)
 
 	sender, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sender.ReleaseSensitive()
-	senderEndpoint, err := controller.CreateDestination(t.Context(), destination.DestinationSpec{Local: sender})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = senderEndpoint.Close() }()
+	t.Cleanup(sender.ReleaseSensitive)
 	receiverHash := local.Hash()
+	invalid := invalidFrame(sender, receiverHash)
+	const validPayload = "VALID-AFTER-REJECTION"
+	valid := marshalTestDatagram2(t, sender, receiverHash, validPayload)
 
-	craft := func(target foundation.Hash, tamper bool) []byte {
-		identity, identityErr := sender.Identity()
-		if identityErr != nil {
-			t.Fatal(identityErr)
-		}
-		overhead := identity.EncodedLen() + 2 + 64
-		frame := make([]byte, overhead+4)
-		n, marshalErr := dataplane.DatagramMarshalV2To(frame, target, identity, 2, foundation.Mapping{}, dataplane.DatagramOfflineSignature{}, []byte("DATA"), sender.Sign)
-		if marshalErr != nil || n != len(frame) {
-			t.Fatalf("marshal = %d, %v", n, marshalErr)
-		}
-		if tamper {
-			frame[len(frame)-65] ^= 0xff
-		}
-		return frame
+	controller.mu.Lock()
+	receiver := controller.endpoints[receiverHash]
+	controller.mu.Unlock()
+	if receiver == nil {
+		t.Fatal("receiver endpoint not registered")
 	}
-	deliver := func(payload []byte) {
-		if err = senderEndpoint.SendMessage(t.Context(), dataplane.StreamingTunnelDelivery{From: sender.Hash(), To: receiverHash, Protocol: dataplane.DatagramProtocolDatagram2, Payload: payload}); err != nil {
-			t.Fatal(err)
-		}
+	receiver.mu.Lock()
+	subscription := receiver.subscriptions[destination.DestinationRoute{Protocol: dataplane.DatagramProtocolDatagram2}]
+	receiver.mu.Unlock()
+	if subscription == nil {
+		t.Fatal("receiver has no Datagram2 subscription")
 	}
-
-	other, err := foundation.GenerateLocalDestination()
-	if err != nil {
-		t.Fatal(err)
+	// SendMessage starts independent goroutines, so enqueue directly to preserve
+	// order. Receiving the valid frame proves the earlier invalid frame was processed.
+	for _, frame := range [][]byte{invalid, valid} {
+		subscription.ch <- &destination.ReceivedMessage{Delivery: dataplane.StreamingTunnelDelivery{
+			From: sender.Hash(), To: receiverHash, Protocol: dataplane.DatagramProtocolDatagram2, Payload: frame,
+		}}
 	}
-	defer other.ReleaseSensitive()
-	deliver(craft(other.Hash(), false)) // valid signature bound to the wrong target hash
-	deliver(craft(receiverHash, true))  // target hash matches but signature is broken
-	deliver(craft(receiverHash, false)) // genuine datagram still arrives
 
 	if err = control.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	line := readSAMLine(t, reader)
-	if !strings.HasPrefix(line, "DATAGRAM RECEIVED DESTINATION="+string(sender.Destination())+" ") || !strings.Contains(line, "SIZE=4") {
-		t.Fatalf("datagram receive = %q", line)
+	if !strings.HasPrefix(line, "DATAGRAM RECEIVED DESTINATION="+string(sender.Destination())+" ") || !strings.Contains(line, "SIZE="+strconv.Itoa(len(validPayload))) {
+		t.Fatalf("first delivery must be the valid datagram, got header %q", line)
 	}
-	body := make([]byte, 4)
-	if _, err = io.ReadFull(reader, body); err != nil || string(body) != "DATA" {
-		t.Fatalf("datagram body = %q, %v", body, err)
+	body := make([]byte, len(validPayload))
+	if _, err = io.ReadFull(reader, body); err != nil {
+		t.Fatalf("read valid datagram payload: %v", err)
+	}
+	if string(body) != validPayload {
+		t.Fatalf("first delivered payload = %q, want %q; invalid datagram was not rejected", body, validPayload)
 	}
 }
 

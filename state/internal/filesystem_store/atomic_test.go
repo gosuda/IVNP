@@ -20,6 +20,10 @@ func TestAtomicRoundTripAndBound(t *testing.T) {
 	if err := WriteAtomic(path, []byte("oversize"), 0600, 4); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("WriteAtomic bound=%v", err)
 	}
+	data, err = ReadBounded(path, 8)
+	if err != nil || string(data) != "state" {
+		t.Fatalf("rejected replacement changed prior state: %q, error %v", data, err)
+	}
 }
 
 func TestReadBoundedRejectsSymlink(t *testing.T) {

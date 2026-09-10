@@ -2,7 +2,8 @@ package router
 
 import (
 	"context"
-	"sync/atomic"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ func TestSSU2I2NPOversizedPayloadFragments(t *testing.T) {
 	}
 }
 
-func TestSSU2LiveVectorReadAuthDispatchWriteDelivery(t *testing.T) {
+func TestSSU2DeliversExpectedMessagesIntact(t *testing.T) {
 	aliceConn := newSSU2LoopbackConn(t)
 	bobConn := newSSU2LoopbackConn(t)
 	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
@@ -57,24 +58,55 @@ func TestSSU2LiveVectorReadAuthDispatchWriteDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	var delivered atomic.Uint64
+	const initialMessages = 16
+	const messages = 64
+	expected := make(map[uint32]string, initialMessages+messages)
+	outbound := make([]foundation.I2NPMessage, initialMessages+messages)
+	for i := range outbound {
+		id := uint32(901 + i)
+		payload := fmt.Sprintf("live SSU2 message %d", id)
+		expected[id] = payload
+		outbound[i] = ssu2LiveMessage(id)
+		outbound[i].Payload = []byte(payload)
+	}
+	var deliveredMu sync.Mutex
+	delivered := make(map[uint32]bool, len(expected))
+	deliveredCount := func() int {
+		deliveredMu.Lock()
+		defer deliveredMu.Unlock()
+		return len(delivered)
+	}
 	startSSU2LiveManager(t, ctx, aliceManager, aliceConn, alice, nil)
-	startSSU2LiveManager(t, ctx, bobManager, bobConn, bob, func(foundation.I2NPMessage, uint64, bool) error {
-		delivered.Add(1)
+	startSSU2LiveManager(t, ctx, bobManager, bobConn, bob, func(message foundation.I2NPMessage, _ uint64, _ bool) error {
+		want, ok := expected[message.Header.ID]
+		if !ok {
+			t.Errorf("received unexpected message ID %d", message.Header.ID)
+			return nil
+		}
+		if string(message.Payload) != want {
+			t.Errorf("message %d payload = %q, want %q", message.Header.ID, message.Payload, want)
+			return nil
+		}
+		deliveredMu.Lock()
+		delivered[message.Header.ID] = true
+		deliveredMu.Unlock()
 		return nil
 	})
 	t.Cleanup(func() {
 		cancel()
 		closeSSU2LiveManager(t, aliceManager)
 		closeSSU2LiveManager(t, bobManager)
+		for _, message := range outbound {
+			if !delivered[message.Header.ID] {
+				t.Errorf("message %d was not delivered intact", message.Header.ID)
+			}
+		}
 	})
 
 	if err = aliceManager.EnsureSession(ctx, bob.Hash()); err != nil {
 		t.Fatal(err)
 	}
-	message := ssu2LiveMessage(900)
-	for range 16 {
-		message.Header.ID++
+	for _, message := range outbound[:initialMessages] {
 		if err = aliceManager.Send(ctx, bob.Hash(), message); err != nil {
 			t.Fatal(err)
 		}
@@ -84,26 +116,23 @@ func TestSSU2LiveVectorReadAuthDispatchWriteDelivery(t *testing.T) {
 		session := aliceManager.sessionsByPeer[bob.Hash()]
 		peerTests := len(aliceManager.peerTests)
 		aliceManager.mu.RUnlock()
-		if session == nil || peerTests != 0 || delivered.Load() < 16 {
+		if session == nil || peerTests != 0 || deliveredCount() < initialMessages {
 			return false
 		}
 		session.sendMu.Lock()
 		pending := len(session.sent)
 		session.sendMu.Unlock()
 		return pending == 0
-	}, "initial live vector/auth/dispatch/write delivery")
+	}, "initial messages and transport acknowledgments")
 
-	before := delivered.Load()
-	const messages = 64
-	for range messages {
-		message.Header.ID++
+	for _, message := range outbound[initialMessages:] {
 		if err := aliceManager.Send(ctx, bob.Hash(), message); err != nil {
 			t.Fatal(err)
 		}
 	}
 	waitForSSU2Live(t, 30*time.Second, func() bool {
-		return delivered.Load() >= before+messages
-	}, "live vector/auth/dispatch/write delivery")
+		return deliveredCount() == len(expected)
+	}, "every expected message delivered intact")
 	for name, snapshot := range map[string]observability.SSU2Snapshot{
 		"alice": aliceMetrics.Snapshot().SSU2,
 		"bob":   bobMetrics.Snapshot().SSU2,

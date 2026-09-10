@@ -146,26 +146,45 @@ func TestLoadOrCreateRejectsOldStateVersionWithoutRegeneration(t *testing.T) {
 	}
 }
 
-func TestSaveAtomicallyReplacesState(t *testing.T) {
+func TestSavePersistsUpdatedStateAcrossReopen(t *testing.T) {
 	store := testStore(t)
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	bundle, err := store.LoadOrCreate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	prior, err := os.ReadFile(store.StatePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(bundle.ReleaseSensitive)
+	identity := bundle.Router
 	bundle.NTCP2StaticIV[0] ^= 1
 	if err := store.Save(bundle); err != nil {
 		t.Fatal(err)
 	}
-	current, err := os.ReadFile(store.StatePath)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewStore(store.StatePath, store.MasterKeyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Equal(current, prior) {
-		t.Fatal("state file was overwritten rather than atomically replaced")
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	loaded, err := reopened.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(loaded.ReleaseSensitive)
+	if !bytes.Equal(loaded.NTCP2StaticIV, bundle.NTCP2StaticIV) {
+		t.Fatalf("reopened static IV = %x, want %x", loaded.NTCP2StaticIV, bundle.NTCP2StaticIV)
+	}
+	if !sameRouterAddress(loaded.Router, identity) {
+		t.Fatal("saving the updated IV changed the router identity")
 	}
 }
 

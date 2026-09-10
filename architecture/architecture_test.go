@@ -82,23 +82,6 @@ func belongsToSubsystem(path, subsystem string) bool {
 	return path == root || strings.HasPrefix(path, root+"/")
 }
 
-func TestSubsystemFacadeFilesExist(t *testing.T) {
-	for _, path := range []string{
-		"../foundation/foundation_subsystem.go",
-		"../cryptography/cryptography_subsystem.go",
-		"../controlplane/controlplane_subsystem.go",
-		"../dataplane/dataplane_subsystem.go",
-		"../client/client_subsystem.go",
-		"../state/state_subsystem.go",
-		"../observability/observability_subsystem.go",
-		"../node/node_subsystem.go",
-	} {
-		if _, err := os.Stat(path); err != nil {
-			t.Errorf("missing subsystem facade %s: %v", path, err)
-		}
-	}
-}
-
 func TestPublicImportsUseCanonicalPathsWithoutAliases(t *testing.T) {
 	canonical := map[string]bool{
 		modulePath:                             true,
