@@ -1,56 +1,51 @@
 # IVNP
 
-An I2P router for Go applications. Run it as a daemon or embed it in your app.
-Includes a SAM bridge, HTTP and SOCKS5 proxies, and an address book.
+I2P router for Go. Runs as a standalone daemon or an embedded library.
+Includes SAM v3.3, HTTP and SOCKS5 proxies, and a local address book.
 
-Requires **Go 1.27 or newer**.
+Requires Go 1.27+.
 
-## Run the router
+## Daemon
+
+### Install and Run
 
 ```sh
 go install gosuda.org/ivnp/cmd/ivnpd@latest
 ivnpd -config ivnp.conf
 ```
 
-From a source checkout, use `go run ./cmd/ivnpd -config ivnp.conf` instead.
+Or from source:
 
-- Open the router console at **http://127.0.0.1:7070**.
-- Point SAM-compatible applications at **127.0.0.1:7656**.
-- The first I2P connection may take several minutes. Keep the router running
-  while it connects to peers and prepares tunnels.
-- Press **Ctrl+C** to stop.
+```sh
+go run ./cmd/ivnpd -config ivnp.conf
+```
 
-The console and SAM bridge listen locally by default. HTTP and SOCKS5 proxies
-must be enabled in the configuration before use.
+- Web console: `http://127.0.0.1:7070`
+- SAM bridge: `127.0.0.1:7656`
 
-## Configuration and saved data
+### Configuration
 
-The daemon creates `ivnp.conf` if it does not exist. Unspecified options use defaults.
-Router data is saved in `./data`, relative to the directory where you start it.
-To choose another location:
+The daemon generates `ivnp.conf` on first start if missing.
+By default, state and router keys are stored in `./data`.
+
+To configure a custom data path:
 
 ```ini
 [paths]
 data_dir = /path/to/ivnp-data
 ```
 
-Keep configuration and saved data private. Stop the router before backing them
-up, and do not share one data directory between running instances. On Windows,
-use a local NTFS drive.
+CLI flags:
+- `-webui-listen <addr:port>`: Change web console bind address (default `127.0.0.1:7070`)
+- `-webui=false`: Disable web console
 
-Use `-webui-listen 127.0.0.1:8080` to change the console address or `-webui=false`
-to disable it. Review access controls before exposing any service beyond your
-machine.
-
-## Use in a Go application
+## Embedded Library
 
 ```sh
 go get gosuda.org/ivnp
 ```
 
-The embedding API starts in memory: it creates no config files, state directories,
-or default application identity. Create a Destination before opening streams or
-packet sockets; the Router itself has no networking methods.
+`ivnp.NewRouter` runs fully in-memory by default without creating disk files. Network traffic is routed through application-managed `Destination` instances.
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -74,28 +69,26 @@ if err != nil {
     return err
 }
 defer listener.Close()
+
 fmt.Println(net.JoinHostPort(dest.B32(), "8080"))
 ```
 
-Import `gosuda.org/ivnp` and the standard `context`, `time`, `net`, and `fmt`
-packages for this snippet. Destination construction waits for its tunnels and
-confirmed publication, so use a bounded context. Successful constructors
-transfer lifetime ownership to the returned object; later context cancellation
-does not close it.
+### Persistence and Identity
 
-To retain router state across runs, explicitly set
-`cfg.Persistence = &ivnp.PersistenceConfig{Directory: "./router-data"}` before
-`NewRouter`. This does not persist automatically generated application
-Destinations; supply an application-owned identity through
-`DestinationConfig.Identity` when a stable service address is required.
+To persist router state across restarts, set `cfg.Persistence`:
 
-Share `dest.B32()` and a port with clients. Connect through a Destination with
-`dest.DialContext(ctx, "i2p", serviceAddress)`. Human-readable `.i2p` names require
-an explicitly supplied `RouterConfig.Resolver`; B32 addresses need no resolver.
-See [the Go examples](example_test.go) and [the API contract](API.md).
+```go
+cfg.Persistence = &ivnp.PersistenceConfig{Directory: "./router-data"}
+```
 
-ECIES receive windows look ahead **512 tags** by default and retain bounded
-history for packet loss and reordering. This does not change the I2P wire format.
+Ephemeral destinations are not written to disk. For a persistent service address, supply a fixed `DestinationConfig.Identity`.
+
+### Dialing
+
+Connect to a remote service using `dest.DialContext(ctx, "i2p", addr)`.
+B32 addresses (`*.b32.i2p`) route directly without a resolver. Resolving human-readable `.i2p` hostnames requires setting `RouterConfig.Resolver`.
+
+See [examples](example_test.go) for complete usage patterns.
 
 ## Development
 
@@ -106,22 +99,15 @@ go run gosuda.org/ivnp/tools/importformatter -write
 gojgp lint ./...
 ```
 
-Storage security checks run on Linux, macOS, and Windows. Windows-only checks
-stay on Windows; Windows arm64 also has a cross-build check.
+### Integration Tests
 
-The HTTP proxy integration test creates its own challenge responder through SAM.
-It requires a running IVNP HTTP proxy and an I2P-connected SAM bridge on the
-same I2P network:
+The HTTP proxy round-trip integration test requires a running SAM bridge:
 
 ```sh
 IVNP_EEPSITE_PROXY=http://127.0.0.1:4444 IVNP_SAM_ADDRESS=127.0.0.1:7656 \
   go test -tags=integration -run '^TestHTTPProxyCompletesI2PChallengeRoundTrip$' \
-    -count=1 -timeout=12m .
+  -count=1 -timeout=12m .
 ```
-
-The test is excluded from ordinary runs. When selected, missing configuration
-fails rather than skips. A canned HTTP 200 or echoed request cannot satisfy its
-responder-only nonce check.
 
 ## License
 
