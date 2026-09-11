@@ -98,6 +98,79 @@ func TestPeerStoreAndScoring(t *testing.T) {
 	}
 }
 
+func TestProductionScoringRules(t *testing.T) {
+	now := time.Now()
+
+	// 1. Test Laplace smoothing: 1/1 probe vs 99/100 probes
+	singleProbe := &PeerRecord{
+		PublishedAt: now,
+		Stats: PeerStats{
+			TotalProbes:   1,
+			SuccessProbes: 1,
+		},
+	}
+	establishedProbe := &PeerRecord{
+		PublishedAt: now,
+		Stats: PeerStats{
+			TotalProbes:   100,
+			SuccessProbes: 99,
+		},
+	}
+	scoreSingle := calculateScore(singleProbe)
+	scoreEstablished := calculateScore(establishedProbe)
+	if scoreSingle >= scoreEstablished {
+		t.Fatalf("expected established reliable peer (score %v) to beat single-probe newcomer (score %v)",
+			scoreEstablished, scoreSingle)
+	}
+
+	// 2. Test Non-linear RTT decay beyond 300ms
+	peer350ms := &PeerRecord{
+		PublishedAt: now,
+		Stats: PeerStats{
+			IsReachable: true,
+			EWMARTT:     350 * time.Millisecond,
+		},
+	}
+	peer1500ms := &PeerRecord{
+		PublishedAt: now,
+		Stats: PeerStats{
+			IsReachable: true,
+			EWMARTT:     1500 * time.Millisecond,
+		},
+	}
+	score350 := calculateScore(peer350ms)
+	score1500 := calculateScore(peer1500ms)
+	if score350 <= score1500 {
+		t.Fatalf("expected 350ms peer (score %v) to have higher score than 1500ms peer (score %v)",
+			score350, score1500)
+	}
+
+	// 3. Test RouterInfo Recency bonus
+	freshPeer := &PeerRecord{
+		PublishedAt: now.Add(-1 * time.Hour),
+	}
+	stalePeer := &PeerRecord{
+		PublishedAt: now.Add(-22 * time.Hour),
+	}
+	if calculateScore(freshPeer) <= calculateScore(stalePeer) {
+		t.Fatalf("expected fresh peer to score higher than stale peer")
+	}
+
+	// 4. Test Dual-stack IPv4 + IPv6 bonus
+	v4Peer := &PeerRecord{
+		PublishedAt: now,
+		IPv4:        []netip.Addr{netip.MustParseAddr("1.2.3.4")},
+	}
+	dualPeer := &PeerRecord{
+		PublishedAt: now,
+		IPv4:        []netip.Addr{netip.MustParseAddr("1.2.3.4")},
+		IPv6:        []netip.Addr{netip.MustParseAddr("2001:db8::1")},
+	}
+	if calculateScore(dualPeer)-calculateScore(v4Peer) < 4.9 {
+		t.Fatalf("expected dual-stack peer to receive +5 bonus")
+	}
+}
+
 func TestProberWithRateLimiter(t *testing.T) {
 	store := NewPeerStore()
 	info, raw := createTestRouterInfo(t, "LR")

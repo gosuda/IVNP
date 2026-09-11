@@ -39,11 +39,11 @@ USER nonroot:nonroot
 WORKDIR /data
 VOLUME ["/data"]
 
-EXPOSE 8443
+EXPOSE 8080 8443
 
 # Self-contained healthcheck using binary's built-in -healthcheck flag (no shell or wget needed)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/ivnp-reseed", "-healthcheck", "http://127.0.0.1:8443/health"]
+    CMD ["/ivnp-reseed", "-healthcheck", "http://127.0.0.1:8080/health"]
 
 ENTRYPOINT ["/ivnp-reseed"]
-CMD ["-listen", ":8443", "-data-dir", "/data", "-target", "1000", "-interval", "5m"]
+CMD ["-listen", ":8080", "-data-dir", "/data", "-target", "1000", "-interval", "5m"]

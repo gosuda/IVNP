@@ -185,29 +185,39 @@ func (s *PeerStore) LoadFromFile(filePath string) error {
 }
 
 func calculateScore(rec *PeerRecord) float64 {
-	// Base uptime score (0 ~ 50 points)
-	uptimeRatio := 0.5
-	if rec.Stats.TotalProbes > 0 {
-		uptimeRatio = float64(rec.Stats.SuccessProbes) / float64(rec.Stats.TotalProbes)
-	}
-	score := uptimeRatio * 50.0
+	// 1. Bayesian / Laplace smoothed uptime score (0 ~ 40 points)
+	// Prevents single-probe cold-start 100% bias.
+	smoothedRatio := float64(rec.Stats.SuccessProbes+1) / float64(rec.Stats.TotalProbes+2)
+	score := smoothedRatio * 40.0
 
-	// Latency score (0 ~ 30 points)
+	// 2. Non-linear RTT decay score (0 ~ 25 points)
+	// Hyperbolic decay maintains discrimination across high-latency cross-continental peers (>300ms).
 	if rec.Stats.IsReachable && rec.Stats.EWMARTT > 0 {
 		rttMs := float64(rec.Stats.EWMARTT.Milliseconds())
-		latencyPts := 30.0 - (rttMs / 10.0)
-		if latencyPts < 0 {
-			latencyPts = 0
-		}
+		latencyPts := 25.0 / (1.0 + (rttMs / 200.0))
 		score += latencyPts
 	}
 
-	// Accessible Floodfill priority bonus (+30 points)
+	// 3. Accessible Floodfill priority bonus (+25 points)
 	if rec.IsFloodfill {
-		score += 30.0
+		score += 25.0
 	}
 
-	// Severe penalty for consecutive failures
+	// 4. RouterInfo Recency / Freshness bonus (0 ~ 10 points)
+	// Prefers routers whose descriptors were published within the last 24 hours.
+	if !rec.PublishedAt.IsZero() {
+		hoursOld := time.Since(rec.PublishedAt).Hours()
+		if hoursOld >= 0 && hoursOld < 24.0 {
+			score += (1.0 - (hoursOld / 24.0)) * 10.0
+		}
+	}
+
+	// 5. Dual-stack (IPv4 + IPv6) reachability bonus (+5 points)
+	if len(rec.IPv4) > 0 && len(rec.IPv6) > 0 {
+		score += 5.0
+	}
+
+	// 6. Severe penalty for consecutive failures
 	if rec.Stats.ConsecutiveFails > 0 {
 		score -= float64(rec.Stats.ConsecutiveFails) * 15.0
 	}

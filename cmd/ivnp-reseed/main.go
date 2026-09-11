@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,7 +35,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("ivnp-reseed", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
-	listenAddr := flags.String("listen", ":8443", "HTTP reseed server listen address")
+	listenAddr := flags.String("listen", ":8080", "HTTP reseed server listen address(es), comma-separated (e.g. :8080 or :8080,:8443)")
 	dataDir := flags.String("data-dir", "/data", "base persistent data directory")
 	peersFile := flags.String("peers-file", "", "path to peer cache file (default <data-dir>/reseed-peers.json)")
 	targetPeers := flags.Int("target", 1000, "target number of diverse peers in reseed archive")
@@ -206,17 +207,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	httpSrv := &http.Server{
-		Addr:    *listenAddr,
-		Handler: server,
-	}
-
-	go func() {
-		logger.Info("starting reseed HTTP server", "listen", *listenAddr)
-		if srvErr := httpSrv.ListenAndServe(); srvErr != nil && srvErr != http.ErrServerClosed {
-			logger.Error("HTTP server failed", "error", srvErr)
+	rawAddrs := strings.Split(*listenAddr, ",")
+	var httpServers []*http.Server
+	for _, raw := range rawAddrs {
+		addr := strings.TrimSpace(raw)
+		if addr == "" {
+			continue
 		}
-	}()
+		srv := &http.Server{
+			Addr:    addr,
+			Handler: server,
+		}
+		httpServers = append(httpServers, srv)
+		go func(s *http.Server) {
+			logger.Info("starting reseed HTTP server", "listen", s.Addr)
+			if srvErr := s.ListenAndServe(); srvErr != nil && srvErr != http.ErrServerClosed {
+				logger.Error("HTTP server failed", "listen", s.Addr, "error", srvErr)
+			}
+		}(srv)
+	}
 
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
@@ -226,7 +235,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		case <-ctx.Done():
 			logger.Info("shutting down reseed server...")
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = httpSrv.Shutdown(shutdownCtx)
+			for _, s := range httpServers {
+				_ = s.Shutdown(shutdownCtx)
+			}
 			shutdownCancel()
 			return 0
 		case <-ticker.C:
