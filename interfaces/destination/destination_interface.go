@@ -40,9 +40,10 @@ type TunnelDirectionConfig struct {
 }
 
 type TunnelPoolConfig struct {
-	Inbound     TunnelDirectionConfig
-	Outbound    TunnelDirectionConfig
-	RenewBefore time.Duration
+	Inbound              TunnelDirectionConfig
+	Outbound             TunnelDirectionConfig
+	RenewBefore          time.Duration
+	BuildPendingCapacity int
 }
 
 type RemoteAuthKind uint8

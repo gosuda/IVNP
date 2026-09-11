@@ -333,3 +333,44 @@ func TestPairedMaintainerRejectsBuilderWiringMismatch(t *testing.T) {
 		}
 	}
 }
+
+func TestPairedMaintainerBootstrapParallelLimit(t *testing.T) {
+	const now = uint64(1_700_000_000_000)
+	inboundSource := &pairedInboundSource{builds: []InboundBuild{
+		pairedInboundBuild(t, 101, now+10_000),
+		pairedInboundBuild(t, 102, now+10_000),
+		pairedInboundBuild(t, 103, now+10_000),
+	}}
+	outboundSource := &pairedOutboundSource{builds: []OutboundBuild{
+		rotationBuild(t, 201, now+10_000),
+		rotationBuild(t, 202, now+10_000),
+	}}
+	sender := new(buildCaptureSender)
+	runtime := dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: sender, Now: func() uint64 { return now }})
+	pool := NewPool(8)
+	manager, err := NewBuildManager(BuildManagerConfig{
+		Runtime: runtime, Pool: pool, Sender: sender, ReplyKeys: newBuildReplyRegistry(),
+		LocalRouter: foundation.Hash{1}, LocalDelivery: func(foundation.I2NPMessage) error { return nil },
+		Now: func() uint64 { return now }, Random: new(buildCounterReader),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	maintainer, err := NewPairedPoolMaintainer(PairedPoolMaintainerConfig{
+		Pool: pool, Runtime: runtime, Builder: manager, InboundSource: inboundSource, OutboundSource: outboundSource,
+		Now: func() uint64 { return now }, InboundTarget: 3, OutboundTarget: 3,
+		BootstrapParallelLimit: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Bootstrap should attempt min(inboundTarget, BootstrapParallelLimit) = min(3, 2) = 2
+	started, err := maintainer.Maintain(context.Background())
+	if err != nil || started != 2 {
+		t.Fatalf("bootstrap parallel limit started=%d err=%v, want 2", started, err)
+	}
+	if got := inboundSource.carriers; len(got) != 2 || got[0] != 0 || got[1] != 0 {
+		t.Fatalf("bootstrap parallel carriers=%v, want [0 0]", got)
+	}
+}

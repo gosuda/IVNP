@@ -351,6 +351,17 @@ func TestDaemonReplyKeyCapacityIncludesJavaBuildGrace(t *testing.T) {
 	}
 }
 
+func TestDaemonCreatorBudgetCapacity(t *testing.T) {
+	const (
+		buildPending = 32
+		destinations = 16
+	)
+	const want = (destinations + 1) * buildPending
+	if got := daemonCreatorBudgetCapacity(buildPending, destinations); got != want {
+		t.Fatalf("creator budget capacity = %d, want %d", got, want)
+	}
+}
+
 func daemonTestConfig(t *testing.T) state.ConfigurationOperating {
 	t.Helper()
 	base := t.TempDir()

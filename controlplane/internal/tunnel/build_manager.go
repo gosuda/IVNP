@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	defaultMaxPendingBuilds   = 13 // Java BuildExecutor.MAX_CONCURRENT_BUILDS
+	defaultMaxPendingBuilds   = 32 // default concurrent build limit per destination
 	shortBuildPastSkew        = 8 * 60_000
 	shortBuildFutureSkew      = 5 * 60_000
 	shortBuildReplayLifetime  = 10 * 60_000
@@ -204,6 +204,7 @@ type BuildManager struct {
 	onBuildEvent     func()
 	schedule         BuildScheduleFunc
 	creatorBudget    *CreatorBudget
+	stats            *BuildStatistics
 	creators         map[*creatorAttempt]struct{}
 	claims           map[*creatorClaim]struct{}
 
@@ -304,6 +305,7 @@ type BuildManagerConfig struct {
 	Schedule     BuildScheduleFunc
 	// CreatorBudget is shared by router owners; nil gives this manager a private budget.
 	CreatorBudget *CreatorBudget
+	Stats         *BuildStatistics
 }
 
 func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
@@ -328,6 +330,9 @@ func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
 	}
 	if config.CreatorBudget == nil {
 		config.CreatorBudget = NewCreatorBudget(config.MaxPending, 1)
+	}
+	if config.Stats == nil {
+		config.Stats = NewBuildStatistics()
 	}
 	var staticPrivateKey *ecdh.PrivateKey
 	if len(config.StaticPrivate) != 0 {
@@ -354,6 +359,7 @@ func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
 		logger: config.Logger, metrics: config.Metrics, onBuildEvent: config.OnBuildEvent, schedule: config.Schedule,
 		ctx: lifecycle, cancel: cancel,
 		creatorBudget: config.CreatorBudget, creators: make(map[*creatorAttempt]struct{}), claims: make(map[*creatorClaim]struct{}),
+		stats: config.Stats,
 	}
 	if !manager.creatorBudget.register(manager) {
 		cancel()
@@ -637,6 +643,9 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 	message := foundation.I2NPMessage{Header: foundation.I2NPHeader{Type: foundation.I2NPShortTunnelBuild, ID: messageIDs[0], Expiration: messageDeadline}, Payload: payload}
 	if err = m.sender.Send(ctx, build.Hops[0].Router, message); err != nil {
 		m.removePending(replyID)
+		if m.stats != nil {
+			m.stats.Record(Outbound, false)
+		}
 		if m.profiles != nil {
 			m.profiles.RecordTransportFailure(build.Hops[0].Router, m.now())
 		}
@@ -837,6 +846,9 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 	if build.OutboundTunnelID == 0 {
 		if err = m.sender.Send(ctx, build.Hops[0].Router, message); err != nil {
 			m.removeInboundPending(replyID)
+			if m.stats != nil {
+				m.stats.Record(Inbound, false)
+			}
 			if m.profiles != nil {
 				m.profiles.RecordTransportFailure(build.Hops[0].Router, m.now())
 			}
@@ -873,6 +885,9 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 	}
 	if err = m.runtime.SendBlockPrepared(ctx, carrier.Token, dataplane.TunnelBlock{Delivery: dataplane.TunnelDeliveryRouter, Gateway: build.Hops[0].Router, Last: true, Data: frame}); err != nil {
 		m.removeInboundPending(replyID)
+		if m.stats != nil {
+			m.stats.Record(Inbound, false)
+		}
 		m.scheduleBuildRetry()
 		return 0, err
 	}
@@ -948,8 +963,13 @@ func (m *BuildManager) handleInboundReply(message foundation.I2NPMessage) error 
 	defer pending.build.attempt.finish()
 	success := false
 	defer func() {
-		if !success && m.metrics != nil {
-			m.metrics.IncTunnelBuildFailures()
+		if !success {
+			if m.stats != nil {
+				m.stats.Record(Inbound, false)
+			}
+			if m.metrics != nil {
+				m.metrics.IncTunnelBuildFailures()
+			}
 		}
 	}()
 	defer clearBuildKeys(pending.keys)
@@ -1013,7 +1033,7 @@ func (m *BuildManager) handleInboundReply(message foundation.I2NPMessage) error 
 			return poolErr
 		}
 	}
-	m.recordBuildSuccess(pending.build.Hops, now-pending.startedAt)
+	m.recordBuildSuccess(Inbound, pending.build.Hops, now-pending.startedAt)
 	success = true
 	if m.metrics != nil {
 		m.metrics.IncTunnelBuildSuccesses()
@@ -1285,8 +1305,13 @@ func (m *BuildManager) HandleReply(message foundation.I2NPMessage) error {
 	defer clearBuildKeys(pending.keys)
 	success := false
 	defer func() {
-		if !success && m.metrics != nil {
-			m.metrics.IncTunnelBuildFailures()
+		if !success {
+			if m.stats != nil {
+				m.stats.Record(Outbound, false)
+			}
+			if m.metrics != nil {
+				m.metrics.IncTunnelBuildFailures()
+			}
 		}
 	}()
 	records, err := foundation.I2NPParseBuildRecords(message.Header.Type, message.Payload)
@@ -1338,7 +1363,7 @@ func (m *BuildManager) HandleReply(message foundation.I2NPMessage) error {
 			return poolErr
 		}
 	}
-	m.recordBuildSuccess(pending.build.Hops, now-pending.startedAt)
+	m.recordBuildSuccess(Outbound, pending.build.Hops, now-pending.startedAt)
 	success = true
 	if m.metrics != nil {
 		m.metrics.IncTunnelBuildSuccesses()
@@ -1440,6 +1465,14 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 
 	expiredCount := len(expiredOutbound) + len(expiredInbound) + len(expiredVariable)
 	if expiredCount != 0 {
+		if m.stats != nil {
+			for range len(expiredOutbound) + len(expiredVariable) {
+				m.stats.Record(Outbound, false)
+			}
+			for range len(expiredInbound) {
+				m.stats.Record(Inbound, false)
+			}
+		}
 		if m.metrics != nil {
 			for range expiredCount {
 				m.metrics.IncTunnelBuildFailures()
@@ -1734,7 +1767,10 @@ func (m *BuildManager) removeInboundPending(id uint32) {
 	}
 }
 
-func (m *BuildManager) recordBuildSuccess(hops []ShortBuildHop, latency uint64) {
+func (m *BuildManager) recordBuildSuccess(direction Direction, hops []ShortBuildHop, latency uint64) {
+	if m.stats != nil {
+		m.stats.Record(direction, true)
+	}
 	if m.profiles == nil {
 		return
 	}
@@ -1742,6 +1778,29 @@ func (m *BuildManager) recordBuildSuccess(hops []ShortBuildHop, latency uint64) 
 	for _, hop := range hops {
 		m.recordBuildPeer(hop.Router, true, latency, now)
 	}
+}
+
+// Statistics reports the atomic tunnel build statistics tracker.
+func (m *BuildManager) Statistics() *BuildStatistics {
+	if m == nil {
+		return nil
+	}
+	return m.stats
+}
+
+// ParallelLimit calculates how many parallel builds to attempt given the needed
+// deficit, taking into account empirical success rate and bounded by maxPending.
+func (m *BuildManager) ParallelLimit(direction Direction, needed int) int {
+	if m == nil {
+		return needed
+	}
+	if m.stats == nil {
+		if needed > m.maxPending {
+			return m.maxPending
+		}
+		return needed
+	}
+	return m.stats.ParallelLimit(direction, needed, m.maxPending)
 }
 
 func setEntryHops(entry *Entry, hops []ShortBuildHop) {

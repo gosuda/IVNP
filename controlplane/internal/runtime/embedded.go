@@ -30,6 +30,9 @@ func validateEmbeddedPool(pool destination.TunnelPoolConfig) error {
 	if pool.RenewBefore < time.Second || pool.RenewBefore >= 10*time.Minute {
 		return fmt.Errorf("%w: invalid embedded tunnel renewal lead time", state.ConfigurationErrInvalidOperating)
 	}
+	if pool.BuildPendingCapacity < 0 || pool.BuildPendingCapacity > 256 {
+		return fmt.Errorf("%w: invalid embedded tunnel build pending capacity", state.ConfigurationErrInvalidOperating)
+	}
 	return nil
 }
 

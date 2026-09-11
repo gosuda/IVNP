@@ -361,6 +361,7 @@ type destinationRuntimeFactory struct {
 	prepareTunnel            func(context.Context, foundation.Hash) error
 	seedRouterInfo           tunnel.RouterInfoSeeder
 	awaitControl             func(context.Context) error
+	stats                    *tunnel.BuildStatistics
 }
 
 type destinationRequestPath struct {
@@ -417,10 +418,14 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 	}
 	capacity := f.cfg.Tunnel.ClientPoolCapacity
 	lifetime := f.cfg.Tunnel.Lifetime
+	buildPending := f.cfg.Tunnel.BuildPendingCapacity
 	if requestedTunnels != nil {
 		tunnelPolicy = *requestedTunnels
 		if err := validateDestinationTunnels(tunnelPolicy); err != nil {
 			return nil, err
+		}
+		if tunnelPolicy.BuildPendingCapacity > 0 {
+			buildPending = tunnelPolicy.BuildPendingCapacity
 		}
 		capacity = 2 * (tunnelPolicy.Inbound.Count + tunnelPolicy.Inbound.Backup + tunnelPolicy.Outbound.Count + tunnelPolicy.Outbound.Backup)
 		lifetime = 10 * time.Minute
@@ -457,8 +462,8 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 			return uint32(f.cfg.Tunnel.BandwidthRateBytesPerSecond / 1024)
 		},
 		LocalDelivery: func(message foundation.I2NPMessage) error { return f.service.HandleI2NP(message, f.now(), false) },
-		Now:           f.now, MaxPending: f.cfg.Tunnel.BuildPendingCapacity, Profiles: profiles, Logger: f.logger, Metrics: f.metrics,
-		CreatorBudget: f.creatorBudget,
+		Now:           f.now, MaxPending: buildPending, Profiles: profiles, Logger: f.logger, Metrics: f.metrics,
+		CreatorBudget: f.creatorBudget, Stats: f.stats,
 		OnBuildEvent: func() {
 			if runtime != nil {
 				runtime.notifyChanged()
@@ -497,7 +502,8 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 		Pool: pool, Runtime: f.tunnels, Builder: build, InboundSource: inboundSource, OutboundSource: outboundSource,
 		Now: f.now, InboundTarget: tunnelPolicy.Inbound.Count, OutboundTarget: tunnelPolicy.Outbound.Count,
 		InboundBackup: tunnelPolicy.Inbound.Backup, OutboundBackup: tunnelPolicy.Outbound.Backup,
-		RenewBefore: uint64(tunnelPolicy.RenewBefore.Milliseconds()),
+		RenewBefore:            uint64(tunnelPolicy.RenewBefore.Milliseconds()),
+		BootstrapParallelLimit: build.ParallelLimit(tunnel.Inbound, 1),
 	})
 	if err != nil {
 		return nil, err
@@ -510,7 +516,7 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 	}()
 	health, err := tunnel.NewHealth(tunnel.HealthConfig{
 		Runtime: f.tunnels, Pool: pool, Maintainer: maintainer, Profiles: profiles, Now: f.now,
-		Timeout: daemonHealthProbeTimeoutMillis, MaxPending: f.cfg.Tunnel.BuildPendingCapacity,
+		Timeout: daemonHealthProbeTimeoutMillis, MaxPending: buildPending,
 	})
 	if err != nil {
 		return nil, err
@@ -639,6 +645,9 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 }
 
 func validateDestinationTunnels(policy destination.TunnelPoolConfig) error {
+	if policy.BuildPendingCapacity < 0 || policy.BuildPendingCapacity > 256 {
+		return tunnel.ErrPairedMaintenanceConfig
+	}
 	for _, direction := range [...]destination.TunnelDirectionConfig{policy.Inbound, policy.Outbound} {
 		if direction.Hops < 1 || direction.Hops > 7 {
 			return tunnel.ErrPairedMaintenanceConfig

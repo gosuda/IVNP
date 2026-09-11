@@ -35,43 +35,45 @@ type MaintenanceHook func(uint64)
 // PairedPoolMaintainerConfig supplies the two build sources and bounded state
 // owned by a single tunnel pool. Each direction has its own configured target.
 type PairedPoolMaintainerConfig struct {
-	Pool           *Pool
-	Runtime        dataplane.TunnelCircuitRuntime
-	Builder        *BuildManager
-	InboundSource  InboundBuildSource
-	OutboundSource PairedOutboundBuildSource
-	Now            func() uint64
-	InboundTarget  int
-	OutboundTarget int
-	InboundBackup  int
-	OutboundBackup int
-	RenewBefore    uint64
-	Hooks          []MaintenanceHook
+	Pool                   *Pool
+	Runtime                dataplane.TunnelCircuitRuntime
+	Builder                *BuildManager
+	InboundSource          InboundBuildSource
+	OutboundSource         PairedOutboundBuildSource
+	Now                    func() uint64
+	InboundTarget          int
+	OutboundTarget         int
+	InboundBackup          int
+	OutboundBackup         int
+	RenewBefore            uint64
+	BootstrapParallelLimit int
+	Hooks                  []MaintenanceHook
 }
 
 // PairedPoolMaintainer establishes and renews a bidirectional tunnel pool in
 // strict dependency order: bootstrap inbound, outbound through that inbound
 // reply route, then later inbound builds through a live outbound path.
 type PairedPoolMaintainer struct {
-	pool             *Pool
-	runtime          dataplane.TunnelCircuitRuntime
-	builder          *BuildManager
-	inboundSource    InboundBuildSource
-	outboundSource   PairedOutboundBuildSource
-	now              func() uint64
-	inboundTarget    int
-	outboundTarget   int
-	inboundBackup    int
-	outboundBackup   int
-	renewBefore      uint64
-	hooks            []MaintenanceHook
-	maintenanceMu    sync.Mutex
-	inboundSourceMu  sync.Mutex
-	outboundSourceMu sync.Mutex
-	lifecycleMu      sync.RWMutex
-	ctx              context.Context
-	cancel           context.CancelFunc
-	closed           bool
+	pool                   *Pool
+	runtime                dataplane.TunnelCircuitRuntime
+	builder                *BuildManager
+	inboundSource          InboundBuildSource
+	outboundSource         PairedOutboundBuildSource
+	now                    func() uint64
+	inboundTarget          int
+	outboundTarget         int
+	inboundBackup          int
+	outboundBackup         int
+	renewBefore            uint64
+	bootstrapParallelLimit int
+	hooks                  []MaintenanceHook
+	maintenanceMu          sync.Mutex
+	inboundSourceMu        sync.Mutex
+	outboundSourceMu       sync.Mutex
+	lifecycleMu            sync.RWMutex
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	closed                 bool
 }
 
 func NewPairedPoolMaintainer(config PairedPoolMaintainerConfig) (*PairedPoolMaintainer, error) {
@@ -89,12 +91,17 @@ func NewPairedPoolMaintainer(config PairedPoolMaintainerConfig) (*PairedPoolMain
 	config.Pool.activeOutbound = make(map[uint32]struct{}, config.OutboundTarget)
 	config.Pool.mu.Unlock()
 	lifecycle, cancel := context.WithCancel(context.Background())
+	bootstrapLimit := config.BootstrapParallelLimit
+	if bootstrapLimit <= 0 {
+		bootstrapLimit = 1
+	}
 	return &PairedPoolMaintainer{
 		pool: config.Pool, runtime: config.Runtime, builder: config.Builder,
 		inboundSource: config.InboundSource, outboundSource: config.OutboundSource,
 		now: config.Now, inboundTarget: config.InboundTarget, outboundTarget: config.OutboundTarget, renewBefore: config.RenewBefore,
 		inboundBackup: config.InboundBackup, outboundBackup: config.OutboundBackup,
-		hooks: append([]MaintenanceHook(nil), config.Hooks...), ctx: lifecycle, cancel: cancel,
+		bootstrapParallelLimit: bootstrapLimit,
+		hooks:                  append([]MaintenanceHook(nil), config.Hooks...), ctx: lifecycle, cancel: cancel,
 	}, nil
 }
 
@@ -150,10 +157,12 @@ func (m *PairedPoolMaintainer) Maintain(ctx context.Context) (int, error) {
 	}
 	switch {
 	case !haveInbound:
-		reserve(Inbound, 1, 1, now)
+		limit := m.bootstrapParallelLimit
+		reserve(Inbound, min(m.inboundTarget, limit), limit, now)
 	case !haveOutbound:
 		if inbound.Gateway != (foundation.Hash{}) && inbound.GatewayTunnelID != 0 {
-			reserve(Outbound, 1, 1, now)
+			limit := m.bootstrapParallelLimit
+			reserve(Outbound, min(m.outboundTarget, limit), limit, now)
 		}
 	default:
 		inboundTarget, outboundTarget := m.inboundTarget, m.outboundTarget
@@ -161,8 +170,22 @@ func (m *PairedPoolMaintainer) Maintain(ctx context.Context) (int, error) {
 			inboundTarget += m.inboundBackup
 			outboundTarget += m.outboundBackup
 		}
-		reserve(Inbound, inboundTarget, 2, cutoff)
-		reserve(Outbound, outboundTarget, 2, cutoff)
+		inNeeded := inboundTarget - m.pool.Count(Inbound, cutoff)
+		outNeeded := outboundTarget - m.pool.Count(Outbound, cutoff)
+		inLimit := 0
+		if inNeeded > 0 {
+			inLimit = m.builder.ParallelLimit(Inbound, inNeeded)
+		}
+		outLimit := 0
+		if outNeeded > 0 {
+			outLimit = m.builder.ParallelLimit(Outbound, outNeeded)
+		}
+		if inLimit > 0 {
+			reserve(Inbound, inboundTarget, inLimit, cutoff)
+		}
+		if outLimit > 0 {
+			reserve(Outbound, outboundTarget, outLimit, cutoff)
+		}
 	}
 	if !waiting {
 		m.builder.creatorBudget.cancelWait(m.builder)

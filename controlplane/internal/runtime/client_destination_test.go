@@ -390,3 +390,27 @@ func TestClientDestinationRejectsOfflineDatagram1(t *testing.T) {
 		t.Fatalf("offline Datagram1 = %d, %v; want invalid identity", n, err)
 	}
 }
+
+func TestValidateDestinationTunnelsBuildPendingCapacity(t *testing.T) {
+	valid := destination.TunnelPoolConfig{
+		Inbound:              destination.TunnelDirectionConfig{Hops: 3, Count: 2},
+		Outbound:             destination.TunnelDirectionConfig{Hops: 3, Count: 2},
+		RenewBefore:          time.Minute,
+		BuildPendingCapacity: 32,
+	}
+	if err := validateDestinationTunnels(valid); err != nil {
+		t.Fatalf("validate valid config: %v", err)
+	}
+
+	invalidNegative := valid
+	invalidNegative.BuildPendingCapacity = -1
+	if err := validateDestinationTunnels(invalidNegative); !errors.Is(err, tunnel.ErrPairedMaintenanceConfig) {
+		t.Fatalf("validate negative BuildPendingCapacity: want ErrPairedMaintenanceConfig, got %v", err)
+	}
+
+	invalidTooHigh := valid
+	invalidTooHigh.BuildPendingCapacity = 257
+	if err := validateDestinationTunnels(invalidTooHigh); !errors.Is(err, tunnel.ErrPairedMaintenanceConfig) {
+		t.Fatalf("validate too high BuildPendingCapacity: want ErrPairedMaintenanceConfig, got %v", err)
+	}
+}

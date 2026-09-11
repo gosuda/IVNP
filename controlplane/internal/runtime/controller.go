@@ -67,6 +67,19 @@ func daemonReplyKeyCapacity(buildPending, maxDestinations int) int {
 	return managerCount * perManager
 }
 
+func daemonCreatorBudgetCapacity(buildPending, maxDestinations int) int {
+	maxInt := int(^uint(0) >> 1)
+	if maxDestinations >= maxInt {
+		return maxInt
+	}
+	managerCount := max(1, maxDestinations+1)
+	perManager := max(1, buildPending)
+	if managerCount > maxInt/perManager {
+		return maxInt
+	}
+	return managerCount * perManager
+}
+
 // NATRuntime provides NAT-PMP and UPnP port mapping discovery interfaces.
 type NATRuntime interface {
 	NewNATPMP(netip.AddrPort) natPMPClient
@@ -849,7 +862,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		if replyErr != nil {
 			return nil, replyErr
 		}
-		creatorBudget := tunnel.NewCreatorBudget(cfg.Tunnel.BuildPendingCapacity, cfg.State.MaxDestinations+1)
+		creatorBudget := tunnel.NewCreatorBudget(daemonCreatorBudgetCapacity(cfg.Tunnel.BuildPendingCapacity, cfg.State.MaxDestinations), cfg.State.MaxDestinations+1)
 		buildManager, err = tunnel.NewBuildManager(tunnel.BuildManagerConfig{
 			Runtime: tunnels, Pool: pool, Sender: mux, ReplyKeys: replyKeys, ReplySender: replySender,
 			LocalRouter: bundle.Router.Hash, StaticPrivate: bundle.Router.X25519Private[:],
@@ -891,7 +904,8 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			Pool: pool, Runtime: tunnels, Builder: buildManager, InboundSource: inboundSource, OutboundSource: outboundSource,
 			Now: now, InboundTarget: exploratory.Inbound.Count, OutboundTarget: exploratory.Outbound.Count,
 			InboundBackup: exploratory.Inbound.Backup, OutboundBackup: exploratory.Outbound.Backup,
-			RenewBefore: uint64(exploratory.RenewBefore / time.Millisecond),
+			RenewBefore:            uint64(exploratory.RenewBefore / time.Millisecond),
+			BootstrapParallelLimit: buildManager.ParallelLimit(tunnel.Inbound, 1),
 		})
 		if err != nil {
 			return nil, err
@@ -937,8 +951,8 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		destinationFactory = &destinationRuntimeFactory{
 			cfg: cfg, database: database, service: service, tunnels: tunnels, destinations: destinations,
 			replyKeys: replyKeys, replySender: replySender, transport: mux,
-			creatorBudget: creatorBudget,
-			localRouter:   bundle.Router.Hash, staticPrivate: bundle.Router.X25519Private[:],
+			creatorBudget: creatorBudget, stats: buildManager.Statistics(),
+			localRouter: bundle.Router.Hash, staticPrivate: bundle.Router.X25519Private[:],
 			profiles: profiles, eligible: eligible, connected: connected, allowUnknownTransports: allowUnknownTransports,
 			now: now, clockNow: clock.Now, garlicReceiver: garlicReceiver, status: statusMux,
 			buildReplies: buildReplies, requests: requestHandlers, publishers: destinationPublishers,

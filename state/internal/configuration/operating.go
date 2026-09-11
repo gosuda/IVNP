@@ -397,7 +397,7 @@ func defaultOperating(base string) Operating {
 			Enabled: true, Hops: 3,
 			ExploratoryInboundTarget: 4, ExploratoryOutboundTarget: 4, ExploratoryPoolCapacity: 8,
 			ClientInboundTarget: 2, ClientOutboundTarget: 2, ClientPoolCapacity: 4,
-			BuildPendingCapacity: 13, Lifetime: 10 * time.Minute,
+			BuildPendingCapacity: 32, Lifetime: 10 * time.Minute,
 			RenewBefore: 210 * time.Second, MaintenanceInterval: time.Minute,
 			BandwidthRateBytesPerSecond: 1 << 20, BandwidthBurstBytes: 2 << 20,
 		},

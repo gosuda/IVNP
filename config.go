@@ -114,6 +114,9 @@ func validateTunnelPool(field string, pool TunnelPoolConfig) error {
 	if pool.RenewBefore < time.Second || pool.RenewBefore >= 10*time.Minute {
 		return invalidConfig(field + ".RenewBefore")
 	}
+	if pool.BuildPendingCapacity < 0 || pool.BuildPendingCapacity > 256 {
+		return invalidConfig(field + ".BuildPendingCapacity")
+	}
 	return nil
 }
 
