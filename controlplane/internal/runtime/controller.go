@@ -359,9 +359,13 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	if options.Embedded && (cfg.StatePath == "") != (cfg.KeyPath == "") {
 		return nil, fmt.Errorf("%w: both state and key paths are required", ErrStateConflict)
 	}
+	exploratoryHops := 2
+	if cfg.Tunnel.Hops > 0 {
+		exploratoryHops = min(2, cfg.Tunnel.Hops)
+	}
 	exploratory := destination.TunnelPoolConfig{
-		Inbound:     destination.TunnelDirectionConfig{Hops: cfg.Tunnel.Hops, Count: cfg.Tunnel.ExploratoryInboundTarget},
-		Outbound:    destination.TunnelDirectionConfig{Hops: cfg.Tunnel.Hops, Count: cfg.Tunnel.ExploratoryOutboundTarget},
+		Inbound:     destination.TunnelDirectionConfig{Hops: exploratoryHops, Count: cfg.Tunnel.ExploratoryInboundTarget},
+		Outbound:    destination.TunnelDirectionConfig{Hops: exploratoryHops, Count: cfg.Tunnel.ExploratoryOutboundTarget},
 		RenewBefore: cfg.Tunnel.RenewBefore,
 	}
 	if options.Exploratory != nil {
@@ -731,7 +735,8 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	}
 	routerPublisher, err := netdb.NewRouterInfoPublisher(netdb.RouterInfoPublisherConfig{
 		Local: localInfo, Database: database, Sender: muxLeaseSetSender{sender: mux},
-		ReplyPath: daemonReplyRoute{local: bundle.Router.Hash, now: now}, Registry: publicationTokens, Now: now, Random: randomNonZeroID, PreferredTargets: bootstrapPeers, Logger: logger,
+		ReplyPath: daemonReplyRoute{local: bundle.Router.Hash, now: now}, Registry: publicationTokens, Now: now, Random: randomNonZeroID, PreferredTargets: bootstrapPeers,
+		FloodfillLimit: netdb.RouterInfoPublicationFloodfillK, Logger: logger,
 	})
 	if err != nil {
 		return nil, err
@@ -872,7 +877,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			},
 			LocalDelivery: func(message foundation.I2NPMessage) error { return service.HandleI2NP(message, now(), false) },
 			Now:           now, MaxPending: cfg.Tunnel.BuildPendingCapacity, Profiles: profiles, Logger: logger, Metrics: registry,
-			CreatorBudget: creatorBudget,
+			CreatorBudget: creatorBudget, Stats: tunnel.NewBuildStatistics(),
 			OnBuildEvent: func() {
 				if d != nil {
 					d.requestExploratoryMaintenance()
@@ -905,7 +910,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			Now: now, InboundTarget: exploratory.Inbound.Count, OutboundTarget: exploratory.Outbound.Count,
 			InboundBackup: exploratory.Inbound.Backup, OutboundBackup: exploratory.Outbound.Backup,
 			RenewBefore:            uint64(exploratory.RenewBefore / time.Millisecond),
-			BootstrapParallelLimit: buildManager.ParallelLimit(tunnel.Inbound, 1),
+			BootstrapParallelLimit: buildManager.ParallelLimit(tunnel.Inbound, min(3, exploratory.Inbound.Count)),
 		})
 		if err != nil {
 			return nil, err
@@ -1598,6 +1603,7 @@ func (d *Controller) recordReseedOutcome(err error) {
 	d.registry.IncReseedAttempts()
 	if err == nil {
 		d.registry.IncReseedSuccesses()
+		d.requestAllTunnelMaintenance()
 		return
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

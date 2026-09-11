@@ -530,36 +530,48 @@ type peerSelectionPolicy struct {
 // requested path.
 func selectDiverseHops(refs []controlplanenetdb.RouterRef, profiles *PeerProfiles, local, excluded foundation.Hash, wanted int, nowMillis uint64, policy peerSelectionPolicy) []ShortBuildHop {
 	selectionKeys := newJavaPeerSelectionKeys(policy.selectionKey)
-	candidates := make([]hopCandidate, 0, len(refs))
-	for _, ref := range refs {
-		caps, allowed := tunnelPeerCapabilitiesAllowedWithDecisions(
-			ref.Info,
-			policy.exploratory,
-			policy.random.oneIn(4),
-			policy.random.oneIn(4),
-			policy.random.oneIn(4),
-		)
-		if ref.Hash == local || ref.Hash == excluded || !profiles.EligibleAt(ref.Hash, nowMillis) || controlplanenetdb.RouterInfoFresh(ref.Info, nowMillis) != nil || !allowed {
-			continue
+	collectCandidates := func(allowReseedFresh bool) []hopCandidate {
+		candidates := make([]hopCandidate, 0, len(refs))
+		for _, ref := range refs {
+			caps, allowed := tunnelPeerCapabilitiesAllowedWithDecisions(
+				ref.Info,
+				policy.exploratory,
+				policy.random.oneIn(4),
+				policy.random.oneIn(4),
+				policy.random.oneIn(4),
+			)
+			if ref.Hash == local || ref.Hash == excluded || !profiles.EligibleAt(ref.Hash, nowMillis) || !allowed {
+				continue
+			}
+			if err := controlplanenetdb.RouterInfoFresh(ref.Info, nowMillis); err != nil {
+				if !allowReseedFresh || controlplanenetdb.ReseedRouterInfoFresh(ref.Info, nowMillis) != nil {
+					continue
+				}
+			}
+			key, ok := x25519StaticKey(ref.Info)
+			if !ok {
+				continue
+			}
+			transports := tunnelPeerTransportMask(ref.Info)
+			if transports == 0 && !policy.allowUnknownTransports {
+				continue
+			}
+			family, v4, v6, ports := routerMetadata(ref.Info)
+			candidates = append(candidates, hopCandidate{
+				hop: ShortBuildHop{Router: ref.Hash, StaticKey: key}, family: family,
+				v4: v4, v6: v6, ports: ports, transports: transports,
+				order:      selectionKeys.order(ref.Hash),
+				membership: policy.random.nextUint64(),
+				tier:       profiles.selectionTier(ref.Hash, caps.highCapacity, policy.exploratory),
+				subTier:    selectionKeys.subTier(ref.Hash),
+				reachable:  caps.reachable,
+			})
 		}
-		key, ok := x25519StaticKey(ref.Info)
-		if !ok {
-			continue
-		}
-		transports := tunnelPeerTransportMask(ref.Info)
-		if transports == 0 && !policy.allowUnknownTransports {
-			continue
-		}
-		family, v4, v6, ports := routerMetadata(ref.Info)
-		candidates = append(candidates, hopCandidate{
-			hop: ShortBuildHop{Router: ref.Hash, StaticKey: key}, family: family,
-			v4: v4, v6: v6, ports: ports, transports: transports,
-			order:      selectionKeys.order(ref.Hash),
-			membership: policy.random.nextUint64(),
-			tier:       profiles.selectionTier(ref.Hash, caps.highCapacity, policy.exploratory),
-			subTier:    selectionKeys.subTier(ref.Hash),
-			reachable:  caps.reachable,
-		})
+		return candidates
+	}
+	candidates := collectCandidates(false)
+	if len(candidates) < wanted && policy.exploratory {
+		candidates = collectCandidates(true)
 	}
 	sortMembershipCandidates(candidates)
 	if policy.candidateLimit != 0 && len(candidates) > policy.candidateLimit {

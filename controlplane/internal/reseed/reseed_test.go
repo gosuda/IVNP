@@ -225,3 +225,77 @@ func TestClientImportsOnlySelectedNetwork(t *testing.T) {
 		})
 	}
 }
+
+func TestFetchAnyParallelAccumulation(t *testing.T) {
+	var archives [][]byte
+	for i := range 3 {
+		local, err := foundation.GenerateLocalAddress()
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner, err := controlplanenetdb.NewLocalRouterInfo(controlplanenetdb.LocalRouterInfoConfig{
+			Local: local,
+			Contacts: controlplanenetdb.RouterInfoContacts{Options: []foundation.MappingEntry{
+				{Key: []byte("netId"), Value: []byte("2")},
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := owner.Publish(1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		archives = append(archives, zipArchiveBytes(t, fmt.Sprintf("routerInfo-%d.dat", i), info.Bytes()))
+	}
+	var servers []*httptest.Server
+	var endpoints []string
+	for i := range 3 {
+		data := archives[i]
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write(data)
+		}))
+		defer srv.Close()
+		servers = append(servers, srv)
+		endpoints = append(endpoints, srv.URL+"?netid=2")
+	}
+
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	client := Client{
+		NetworkID:         2,
+		HTTPClient:        servers[0].Client(),
+		allowUnsignedZIP:  true,
+		TargetRouterInfos: 2,
+	}
+
+	count, err := client.FetchAny(context.Background(), endpoints, database, 1000)
+	if err != nil {
+		t.Fatalf("FetchAny() error = %v", err)
+	}
+	if count < 2 {
+		t.Fatalf("FetchAny() count = %d, want at least 2", count)
+	}
+	if database.Routers().Len() < 2 {
+		t.Fatalf("database router count = %d, want at least 2", database.Routers().Len())
+	}
+}
+
+func TestFetchAnyAllFailures(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	client := Client{
+		NetworkID:        2,
+		HTTPClient:       srv.Client(),
+		allowUnsignedZIP: true,
+	}
+
+	endpoints := []string{srv.URL + "?netid=2"}
+	_, err := client.FetchAny(context.Background(), endpoints, database, 1000)
+	if err == nil {
+		t.Fatal("FetchAny() expected error when all endpoints fail")
+	}
+}

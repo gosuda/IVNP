@@ -197,6 +197,8 @@ const (
 	NetworkDatabaseMetaLeaseSetMaxFutureMillis         = netdb.MetaLeaseSetMaxFutureMillis
 	NetworkDatabasePublicationConfirmTimeout           = netdb.PublicationConfirmTimeout
 	NetworkDatabasePublicationFloodfillK               = netdb.PublicationFloodfillK
+	NetworkDatabaseLeaseSetPublicationFloodfillK       = netdb.LeaseSetPublicationFloodfillK
+	NetworkDatabaseRouterInfoPublicationFloodfillK     = netdb.RouterInfoPublicationFloodfillK
 	NetworkDatabaseReseedRouterInfoMaxAgeMillis        = netdb.ReseedRouterInfoMaxAgeMillis
 	NetworkDatabaseRouterInfoLookup                    = netdb.RouterInfoLookup
 	NetworkDatabaseRouterInfoMaxAgeMillis              = netdb.RouterInfoMaxAgeMillis

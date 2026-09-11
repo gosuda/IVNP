@@ -27,7 +27,7 @@ var (
 )
 
 const (
-	reseedBootstrapMinimum = 50
+	reseedBootstrapMinimum = 150
 	reseedInitialBackoff   = time.Minute
 	reseedMaximumBackoff   = time.Hour
 )

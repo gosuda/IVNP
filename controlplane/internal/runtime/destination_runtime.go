@@ -503,7 +503,7 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 		Now: f.now, InboundTarget: tunnelPolicy.Inbound.Count, OutboundTarget: tunnelPolicy.Outbound.Count,
 		InboundBackup: tunnelPolicy.Inbound.Backup, OutboundBackup: tunnelPolicy.Outbound.Backup,
 		RenewBefore:            uint64(tunnelPolicy.RenewBefore.Milliseconds()),
-		BootstrapParallelLimit: build.ParallelLimit(tunnel.Inbound, 1),
+		BootstrapParallelLimit: build.ParallelLimit(tunnel.Inbound, min(2, tunnelPolicy.Inbound.Count)),
 	})
 	if err != nil {
 		return nil, err
@@ -593,7 +593,7 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 			staticKeyLookup:     tunnel.NewNetDBBuildStaticKeyLookup(f.database.Routers()),
 			seedReplyRouterInfo: f.seedRouterInfo,
 		},
-		Discovery: requests, Sign: local.Sign, Now: f.now, Random: randomNonZeroID, FloodfillLimit: netdb.PublicationFloodfillK,
+		Discovery: requests, Sign: local.Sign, Now: f.now, Random: randomNonZeroID, FloodfillLimit: netdb.LeaseSetPublicationFloodfillK,
 		RepublishBefore: uint64(tunnelPolicy.RenewBefore.Milliseconds()), Registry: f.publicationTokens,
 		ReplyPath: daemonReplyRoute{local: f.localRouter, maintainer: maintainer, now: f.now}, PreferredTargets: preferredPeers, Logger: f.logger,
 	}

@@ -285,6 +285,29 @@ func TestNetDBBuildSourceRejectsReseedFreshButTransportStalePeer(t *testing.T) {
 	}
 }
 
+func TestNetDBBuildSourceAllowsExploratoryReseedFreshPeerWhenNeeded(t *testing.T) {
+	info := verifiedX25519Router(t, 1)
+	table := controlplanenetdb.NewTable(foundation.Hash{}, 8)
+	table.StoreVerified(info, false, 1)
+	source, err := NewNetDBInboundBuildSource(NetDBInboundBuildSourceConfig{
+		Table: table, Profiles: NewPeerProfiles(PeerProfilesConfig{}), LocalRouter: foundation.Hash{8},
+		Hops: 1, Lifetime: uint64((10 * time.Minute) / time.Millisecond),
+		CircuitID: func() uint32 { return 70 }, TunnelID: func() uint32 { return 80 },
+		Exploratory: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := uint64((91 * time.Minute) / time.Millisecond)
+	build, err := source.NextInbound(context.Background(), now, 0)
+	if err != nil {
+		t.Fatalf("exploratory reseed peer selection error = %v, want nil", err)
+	}
+	if len(build.Hops) != 1 || build.Hops[0].Router != info.Hash() {
+		t.Fatalf("unexpected hops selected: %#v", build.Hops)
+	}
+}
+
 func TestNetDBBuildSourceExcludesTransportIneligiblePeer(t *testing.T) {
 	unusable := verifiedX25519Router(t, 1)
 	usable := verifiedX25519Router(t, 2)

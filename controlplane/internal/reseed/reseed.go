@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"path"
@@ -26,6 +27,9 @@ const (
 	DefaultMaxArchiveBytes     = 1 << 20
 	DefaultMaxRouterInfos      = 4_000
 	DefaultMaxTotalRouterBytes = 64 << 20
+	DefaultTargetRouterInfos   = 150
+	DefaultParallelFetches     = 3
+	DefaultMaxSuccessfulReseed = 3
 	ReseedUserAgent            = "Wget/1.11.4"
 )
 
@@ -49,6 +53,7 @@ type Client struct {
 	MaxArchiveBytes     int64
 	MaxRouterInfos      int
 	MaxTotalRouterBytes int64
+	TargetRouterInfos   int
 	SU3Signers          map[string]SU3Signer
 	Now                 func() time.Time
 	AllowHTTP           bool // only for controlled tests or explicit local deployments
@@ -67,6 +72,13 @@ func (c Client) limits() (archive int64, infos int, total int64) {
 		total = DefaultMaxTotalRouterBytes
 	}
 	return archive, infos, total
+}
+
+func (c Client) targetRouterInfos() int {
+	if c.TargetRouterInfos > 0 {
+		return c.TargetRouterInfos
+	}
+	return DefaultTargetRouterInfos
 }
 
 func validateEndpoint(endpoint *url.URL, allowHTTP bool, networkID uint8) error {
@@ -282,16 +294,19 @@ type fetchResult struct {
 }
 
 type fetchAnyState struct {
-	client    Client
-	ctx       context.Context
-	endpoints []string
-	database  *controlplanenetdb.Database
-	seenAt    uint64
-	results   chan fetchResult
-	failures  []error
-	next      int
-	active    int
-	limit     int
+	client        Client
+	ctx           context.Context
+	endpoints     []string
+	database      *controlplanenetdb.Database
+	seenAt        uint64
+	results       chan fetchResult
+	failures      []error
+	next          int
+	active        int
+	limit         int
+	target        int
+	totalAdmitted int
+	successes     int
 }
 
 func (state *fetchAnyState) launch() {
@@ -325,43 +340,65 @@ func (state *fetchAnyState) launchNext(timer *time.Timer, delay time.Duration) {
 	timer.Reset(delay)
 }
 
-// FetchAny hedges reseed requests across multiple endpoints until one succeeds.
+// FetchAny fetches reseed archives in parallel across multiple endpoints until the target
+// number of RouterInfos is accumulated or sufficient independent sources succeed.
 func (c Client) FetchAny(ctx context.Context, endpoints []string, database *controlplanenetdb.Database, seenAt uint64) (int, error) {
 	if len(endpoints) == 0 {
 		return 0, ErrNoRouterInfos
 	}
+	shuffled := append([]string(nil), endpoints...)
+	if len(shuffled) > 1 {
+		rand.Shuffle(len(shuffled), func(i, j int) {
+			shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+		})
+	}
 	child, cancel := context.WithCancel(ctx)
 	defer cancel()
+	target := c.targetRouterInfos()
+	limit := max(DefaultParallelFetches, parallelism.Workers(len(shuffled)))
 	state := fetchAnyState{
 		client:    c,
 		ctx:       child,
-		endpoints: endpoints,
+		endpoints: shuffled,
 		database:  database,
 		seenAt:    seenAt,
-		results:   make(chan fetchResult, len(endpoints)),
-		failures:  make([]error, len(endpoints)),
-		limit:     parallelism.Workers(len(endpoints)),
+		results:   make(chan fetchResult, len(shuffled)),
+		failures:  make([]error, len(shuffled)),
+		limit:     limit,
+		target:    target,
 	}
-	state.launch()
+	initialParallel := min(DefaultParallelFetches, len(shuffled))
+	for range initialParallel {
+		state.launch()
+	}
 	hedgeDelay := time.Second
 	if c.HTTPClient != nil && c.HTTPClient.Timeout > 0 {
-		hedgeDelay = max(time.Millisecond, c.HTTPClient.Timeout/time.Duration(len(endpoints)))
+		hedgeDelay = max(time.Millisecond, c.HTTPClient.Timeout/time.Duration(len(shuffled)))
 	}
 	timer := time.NewTimer(hedgeDelay)
 	defer timer.Stop()
-	for state.active != 0 || state.next < len(endpoints) {
+	for state.active != 0 || state.next < len(shuffled) {
 		select {
 		case outcome := <-state.results:
 			state.active--
 			if outcome.err == nil {
-				cancel()
-				state.drain()
-				return outcome.count, nil
+				state.totalAdmitted += outcome.count
+				state.successes++
+				targetMet := state.database != nil && state.database.Routers().Len() >= state.target
+				sourcesSufficient := state.successes >= DefaultMaxSuccessfulReseed
+				allDone := state.next >= len(state.endpoints) && state.active == 0
+				if targetMet || sourcesSufficient || allDone {
+					cancel()
+					state.drain()
+					return state.totalAdmitted, nil
+				}
+				state.launchNext(timer, hedgeDelay)
+				continue
 			}
 			state.failures[outcome.index] = outcome.err
 			state.launchNext(timer, hedgeDelay)
 		case <-timer.C:
-			if state.next < len(endpoints) && state.active < state.limit {
+			if state.next < len(shuffled) && state.active < state.limit {
 				state.launch()
 			}
 			timer.Reset(hedgeDelay)
@@ -370,6 +407,9 @@ func (c Client) FetchAny(ctx context.Context, endpoints []string, database *cont
 			state.drain()
 			return 0, ctx.Err()
 		}
+	}
+	if state.totalAdmitted > 0 {
+		return state.totalAdmitted, nil
 	}
 	compacted := state.failures[:0]
 	for _, failure := range state.failures {

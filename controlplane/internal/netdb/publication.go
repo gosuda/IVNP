@@ -173,7 +173,7 @@ func NewLeaseSetPublisher(config LeaseSetPublisherConfig) (*LeaseSetPublisher, e
 		hash:            hash,
 	}
 	if config.ReplyPath != nil {
-		publisher.confirmed = newConfirmedPublication(config.Database, config.Sender, config.ReplyPath, config.Registry, config.Now, config.Random, hash, storeType, config.PreferredTargets, config.Logger)
+		publisher.confirmed = newConfirmedPublication(config.Database, config.Sender, config.ReplyPath, config.Registry, config.Now, config.Random, hash, storeType, config.PreferredTargets, config.FloodfillLimit, config.Logger)
 	}
 	return publisher, nil
 }
@@ -289,7 +289,7 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 				if p.confirmed != nil {
 					previous := p.confirmed
 					previous.close()
-					p.confirmed = newConfirmedPublication(p.database, p.sender, previous.route, previous.registry, p.now, p.random, hash, p.storeType, previous.preferred, previous.logger)
+					p.confirmed = newConfirmedPublication(p.database, p.sender, previous.route, previous.registry, p.now, p.random, hash, p.storeType, previous.preferred, p.floodfillLimit, previous.logger)
 				}
 				p.mu.Unlock()
 			}

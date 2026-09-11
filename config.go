@@ -81,13 +81,18 @@ func DefaultRouterConfig() RouterConfig {
 	return RouterConfig{
 		NetworkID: 2, NTCP2: transport, SSU2: transport,
 		Bootstrap:   BootstrapConfig{ReseedURLs: defaults.Reseed.Endpoints, ReseedTimeout: 30 * time.Second},
-		Exploratory: defaultTunnelPool(4),
+		Exploratory: defaultExploratoryTunnelPool(4),
 		Limits:      RouterLimits{MaxDestinations: 64, PacketQueueBytes: 64 << 20, MaxPendingPacketWrites: 64},
 	}
 }
 
 func DefaultDestinationConfig() DestinationConfig {
 	return DestinationConfig{Policy: DestinationPolicy{Kind: DestinationPublicLS2}, Tunnels: defaultTunnelPool(2), PacketQueue: PacketQueueConfig{MaxPackets: 64, MaxBytes: 1 << 20}}
+}
+
+func defaultExploratoryTunnelPool(count int) TunnelPoolConfig {
+	direction := TunnelDirectionConfig{Hops: 2, Count: count}
+	return TunnelPoolConfig{Inbound: direction, Outbound: direction, RenewBefore: 210 * time.Second}
 }
 
 func defaultTunnelPool(count int) TunnelPoolConfig {

@@ -41,7 +41,7 @@ func TestConfirmedPublicationUsesDistinctTokensAndAcknowledgements(t *testing.T)
 	now := uint64(1_000)
 	sender := &publicationTestSender{}
 	registry := NewPublicationTokenRegistry(func() uint64 { return now }, func() uint32 { return 17 })
-	publication := newConfirmedPublication(database, sender, publicationTestRoute{gateway: gateway}, registry, func() uint64 { return now }, func() uint32 { return 23 }, key, foundation.I2NPStoreLeaseSet2, nil, nil)
+	publication := newConfirmedPublication(database, sender, publicationTestRoute{gateway: gateway}, registry, func() uint64 { return now }, func() uint32 { return 23 }, key, foundation.I2NPStoreLeaseSet2, nil, PublicationFloodfillK, nil)
 	publication.replace([]byte{1})
 	sent, err := publication.maintain(context.Background(), true)
 	if err != nil || sent != PublicationFloodfillK || len(sender.messages) != PublicationFloodfillK {
@@ -82,7 +82,7 @@ func TestConfirmedPublicationPrefersConfiguredVerifiedFloodfills(t *testing.T) {
 	preferred := []foundation.Hash{requestTestHash(12), requestTestHash(3)}
 	now := uint64(1_000)
 	sender := &publicationTestSender{}
-	publication := newConfirmedPublication(database, sender, publicationTestRoute{gateway: gateway}, nil, func() uint64 { return now }, func() uint32 { return 23 }, key, foundation.I2NPStoreLeaseSet2, preferred, nil)
+	publication := newConfirmedPublication(database, sender, publicationTestRoute{gateway: gateway}, nil, func() uint64 { return now }, func() uint32 { return 23 }, key, foundation.I2NPStoreLeaseSet2, preferred, PublicationFloodfillK, nil)
 	publication.replace([]byte{1})
 	if sent, err := publication.maintain(context.Background(), true); err != nil || sent != PublicationFloodfillK {
 		t.Fatalf("preferred publication = %d, %v", sent, err)
@@ -110,7 +110,7 @@ func TestForcedPublicationDiscoversTargetsDuringBackoff(t *testing.T) {
 	database := NewDatabase(foundation.Hash{1}, DefaultBucketCapacity)
 	sender := new(publicationTestSender)
 	publication := newConfirmedPublication(database, sender, publicationTestRoute{gateway: foundation.Hash{2}}, nil,
-		func() uint64 { return now }, func() uint32 { return 23 }, key, foundation.I2NPStoreLeaseSet2, nil, nil)
+		func() uint64 { return now }, func() uint32 { return 23 }, key, foundation.I2NPStoreLeaseSet2, nil, 0, nil)
 	t.Cleanup(publication.close)
 	publication.replace([]byte{1})
 	if sent, err := publication.maintain(t.Context(), false); err != nil || sent != 0 {
@@ -126,5 +126,31 @@ func TestForcedPublicationDiscoversTargetsDuringBackoff(t *testing.T) {
 	}
 	if len(sender.targets) != 1 || sender.targets[0] != target {
 		t.Fatalf("publication targets = %v, want [%x]", sender.targets, target)
+	}
+}
+
+func TestConfirmedPublicationTargetDefaults(t *testing.T) {
+	database := NewDatabase(foundation.Hash{1}, DefaultBucketCapacity)
+	for i := byte(2); i <= 15; i++ {
+		addRequestTestFloodfill(database, requestTestHash(i))
+	}
+	sender := new(publicationTestSender)
+	now := uint64(1_000)
+
+	// LeaseSet should default to LeaseSetPublicationFloodfillK (4)
+	lsPub := newConfirmedPublication(database, sender, publicationTestRoute{gateway: foundation.Hash{2}}, nil,
+		func() uint64 { return now }, func() uint32 { return 23 }, foundation.Hash{9}, foundation.I2NPStoreLeaseSet2, nil, 0, nil)
+	lsPub.replace([]byte{1})
+	if sent, err := lsPub.maintain(t.Context(), true); err != nil || sent != LeaseSetPublicationFloodfillK {
+		t.Fatalf("LeaseSet default sent = %d, want %d (err: %v)", sent, LeaseSetPublicationFloodfillK, err)
+	}
+
+	// RouterInfo should default to RouterInfoPublicationFloodfillK (5)
+	senderRouter := new(publicationTestSender)
+	riPub := newConfirmedPublication(database, senderRouter, publicationTestRoute{gateway: foundation.Hash{2}}, nil,
+		func() uint64 { return now }, func() uint32 { return 23 }, foundation.Hash{9}, foundation.I2NPStoreRouterInfo, nil, 0, nil)
+	riPub.replace([]byte{1})
+	if sent, err := riPub.maintain(t.Context(), true); err != nil || sent != RouterInfoPublicationFloodfillK {
+		t.Fatalf("RouterInfo default sent = %d, want %d (err: %v)", sent, RouterInfoPublicationFloodfillK, err)
 	}
 }

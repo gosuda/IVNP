@@ -27,6 +27,7 @@ type RouterInfoPublisherConfig struct {
 	Now              func() uint64
 	Random           func() uint32
 	PreferredTargets []foundation.Hash
+	FloodfillLimit   int
 	Logger           *slog.Logger
 }
 
@@ -44,7 +45,11 @@ func NewRouterInfoPublisher(config RouterInfoPublisherConfig) (*RouterInfoPublis
 	if newRouterInfoPublisherRejected {
 		return nil, ErrRouterInfoPublisherConfig
 	}
-	return &RouterInfoPublisher{local: config.Local, confirmed: newConfirmedPublication(config.Database, config.Sender, config.ReplyPath, config.Registry, config.Now, config.Random, config.Local.Hash(), foundation.I2NPStoreRouterInfo, config.PreferredTargets, config.Logger)}, nil
+	limit := config.FloodfillLimit
+	if limit <= 0 {
+		limit = RouterInfoPublicationFloodfillK
+	}
+	return &RouterInfoPublisher{local: config.Local, confirmed: newConfirmedPublication(config.Database, config.Sender, config.ReplyPath, config.Registry, config.Now, config.Random, config.Local.Hash(), foundation.I2NPStoreRouterInfo, config.PreferredTargets, limit, config.Logger)}, nil
 }
 
 // Maintain snapshots a pre-signed RouterInfo generation and sends/advances the

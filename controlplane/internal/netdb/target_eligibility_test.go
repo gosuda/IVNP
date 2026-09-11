@@ -57,7 +57,7 @@ func TestPublicationSkipsIneligiblePeersBeforeSnapshotLimit(t *testing.T) {
 	key := foundation.Hash{9}
 	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	sender := &selectiveRequestSender{allowed: addEligibleFloodfillBeyondNearest(database, key, now)}
-	publication := newConfirmedPublication(database, sender, publicationTestRoute{gateway: foundation.Hash{1}}, nil, func() uint64 { return now }, func() uint32 { return 23 }, key, foundation.I2NPStoreLeaseSet2, nil, nil)
+	publication := newConfirmedPublication(database, sender, publicationTestRoute{gateway: foundation.Hash{1}}, nil, func() uint64 { return now }, func() uint32 { return 23 }, key, foundation.I2NPStoreLeaseSet2, nil, 0, nil)
 	t.Cleanup(publication.close)
 	publication.replace([]byte{1})
 	if sent, err := publication.maintain(context.Background(), true); err != nil || sent != 1 {

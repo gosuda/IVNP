@@ -11,10 +11,12 @@ import (
 )
 
 const (
-	PublicationConfirmTimeout uint64 = 30_000
-	publicationRecentLifetime uint64 = 10 * 60_000
-	publicationTargetSnapshot        = 8
-	PublicationFloodfillK            = 3
+	PublicationConfirmTimeout       uint64 = 30_000
+	publicationRecentLifetime       uint64 = 10 * 60_000
+	publicationTargetSnapshot              = 12
+	PublicationFloodfillK                  = 3
+	LeaseSetPublicationFloodfillK          = 4
+	RouterInfoPublicationFloodfillK        = 5
 )
 
 var ErrPublicationTokenExhausted = errors.New("netdb: publication token space exhausted")
@@ -58,45 +60,37 @@ func (r *PublicationTokenRegistry) allocate(owner func(uint32) publicationTokenO
 	if r.closed {
 		return 0, ErrPublicationTokenExhausted
 	}
-	now := r.now()
-	r.expireLocked(now)
-	candidate := r.random() &^ (uint32(1) << 31)
-	for range 1024 {
-		if candidate != 0 {
-			if _, live := r.active[candidate]; !live {
-				if _, recent := r.recent[candidate]; !recent {
-					r.active[candidate] = owner(candidate)
-					return candidate, nil
-				}
-			}
+	base := (r.random() | 1) & 0x7fff_ffff
+	for offset := range uint32(1024) {
+		token := (base + offset) & 0x7fff_ffff
+		token = cmp.Or(token, 1)
+		if _, exists := r.active[token]; exists {
+			continue
 		}
-		candidate++
-		candidate &= ^(uint32(1) << 31)
-
-		candidate = cmp.Or(candidate,
-			1)
-
+		if _, exists := r.recent[token]; exists {
+			continue
+		}
+		r.active[token] = owner(token)
+		return token, nil
 	}
 	return 0, ErrPublicationTokenExhausted
 }
 func (r *PublicationTokenRegistry) retire(token uint32) {
-	if token == 0 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.active, token)
+	if r.closed {
 		return
 	}
-	r.mu.Lock()
-	if _, exists := r.active[token]; exists {
-		delete(r.active, token)
-		r.recent[token] = saturatingAdd(r.now(), publicationRecentLifetime)
-	}
-	r.mu.Unlock()
-}
-func (r *PublicationTokenRegistry) expireLocked(now uint64) {
-	for token, expiry := range r.recent {
-		if expiry <= now {
-			delete(r.recent, token)
+	now := r.now()
+	r.recent[token] = now
+	for candidate, retiredAt := range r.recent {
+		if now >= retiredAt && now-retiredAt >= publicationRecentLifetime {
+			delete(r.recent, candidate)
 		}
 	}
 }
+
 func (r *PublicationTokenRegistry) HandleDeliveryStatus(status foundation.I2NPDeliveryStatusMessage) bool {
 	if status.MessageID == 0 || status.MessageID&(uint32(1)<<31) != 0 {
 		return false
@@ -134,6 +128,7 @@ type confirmedPublication struct {
 	key        foundation.Hash
 	typeID     foundation.I2NPStoreType
 	preferred  []foundation.Hash
+	targetK    int
 	data       []byte
 	generation uint64
 	targets    []RouterRef
@@ -145,32 +140,38 @@ type confirmedPublication struct {
 	mu         sync.Mutex
 }
 
-func newConfirmedPublication(database *Database, sender LeaseSetPublishSender, route ReplyPathSource, registry *PublicationTokenRegistry, now func() uint64, random func() uint32, key foundation.Hash, typeID foundation.I2NPStoreType, preferred []foundation.Hash, logger *slog.Logger) *confirmedPublication {
-
+func newConfirmedPublication(database *Database, sender LeaseSetPublishSender, route ReplyPathSource, registry *PublicationTokenRegistry, now func() uint64, random func() uint32, key foundation.Hash, typeID foundation.I2NPStoreType, preferred []foundation.Hash, targetK int, logger *slog.Logger) *confirmedPublication {
 	if registry == nil {
-		registry = NewPublicationTokenRegistry(now,
-
-			random)
+		registry = NewPublicationTokenRegistry(now, random)
 	}
-	return &confirmedPublication{database: database, sender: sender, route: route, registry: registry, now: now, random: random, key: key, typeID: typeID, preferred: append([]foundation.Hash(nil), preferred...), attempts: make(map[uint32]publicationAttempt), logger: logger}
+	if targetK <= 0 {
+		switch typeID {
+		case foundation.I2NPStoreRouterInfo:
+			targetK = RouterInfoPublicationFloodfillK
+		default:
+			targetK = LeaseSetPublicationFloodfillK
+		}
+	}
+	return &confirmedPublication{database: database, sender: sender, route: route, registry: registry, now: now, random: random, key: key, typeID: typeID, preferred: append([]foundation.Hash(nil), preferred...), targetK: targetK, attempts: make(map[uint32]publicationAttempt), logger: logger}
 }
 
 func (p *confirmedPublication) replace(data []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if string(p.data) == string(data) {
-		return
-	}
 	for token := range p.attempts {
 		p.registry.retire(token)
 	}
 	clear(p.attempts)
-	p.data = append(p.data[:0], data...)
+	p.data = bytesClone(data)
 	p.generation++
 	p.targets = nil
 	p.nextTarget = 0
 	p.confirmed = 0
 	p.nextRetry = 0
+}
+
+func bytesClone(b []byte) []byte {
+	return append([]byte(nil), b...)
 }
 
 func (p *confirmedPublication) close() {
@@ -216,7 +217,7 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 		}
 	}
 	retryDue := force || p.nextRetry <= now
-	if len(p.attempts) == 0 && p.confirmed < PublicationFloodfillK && p.nextTarget >= len(p.targets) && retryDue {
+	if len(p.attempts) == 0 && p.confirmed < p.targetK && p.nextTarget >= len(p.targets) && retryDue {
 		p.targets = nil
 		p.nextTarget = 0
 	}
@@ -235,8 +236,8 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 	var first error
 	stop := false
 	for !stop {
-		batch := make([]publicationSend, 0, PublicationFloodfillK)
-		for len(batch) < PublicationFloodfillK {
+		batch := make([]publicationSend, 0, p.targetK)
+		for len(batch) < p.targetK {
 			if err := ctx.Err(); err != nil {
 				if first == nil {
 					first = err
@@ -246,7 +247,7 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 				break
 			}
 			p.mu.Lock()
-			if p.confirmed+len(p.attempts) >= PublicationFloodfillK || p.nextTarget >= len(p.targets) {
+			if p.confirmed+len(p.attempts) >= p.targetK || p.nextTarget >= len(p.targets) {
 				p.nextRetry = saturatingAdd(now, PublicationConfirmTimeout)
 				p.mu.Unlock()
 				break
