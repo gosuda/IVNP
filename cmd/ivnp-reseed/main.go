@@ -272,5 +272,12 @@ func configureActiveClientRouter(baseDir string, netID uint8) state.Configuratio
 	cfg.Metrics.Enabled = false
 	cfg.AddressBook.Enabled = false
 
+	// Scale exploratory tunnel pool and lookup capacity for active DHT crawling
+	cfg.Tunnel.ExploratoryInboundTarget = 6
+	cfg.Tunnel.ExploratoryOutboundTarget = 6
+	cfg.Tunnel.ExploratoryPoolCapacity = 16
+	cfg.Tunnel.BuildPendingCapacity = 64
+	cfg.NetDB.LookupCapacity = 64
+
 	return cfg
 }
