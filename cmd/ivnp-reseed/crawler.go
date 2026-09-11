@@ -1,66 +1,39 @@
 package main
 
 import (
-	"io/fs"
-	"os"
-	"path/filepath"
-	"strings"
-
-	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/controlplane"
+	"gosuda.org/ivnp/node"
 )
 
-// Crawler discovers and parses RouterInfos from local NetDB filesystem stores.
-type Crawler struct {
+// ActiveCrawler harvests live, verified RouterInfos directly from the embedded router's NetDB memory table.
+type ActiveCrawler struct {
 	store *PeerStore
 }
 
-func NewCrawler(store *PeerStore) *Crawler {
-	return &Crawler{store: store}
+func NewActiveCrawler(store *PeerStore) *ActiveCrawler {
+	return &ActiveCrawler{store: store}
 }
 
-// CrawlDirectory scans a directory recursively for routerInfo files and imports valid ones.
-func (c *Crawler) CrawlDirectory(dirPath string) (int, error) {
-	if _, err := os.Stat(dirPath); err != nil {
-		return 0, err
+// Harvest extracts all verified RouterInfos currently admitted in the embedded router's NetDB.
+func (c *ActiveCrawler) Harvest(subsystem *node.Subsystem) int {
+	if subsystem == nil {
+		return 0
 	}
-
-	imported := 0
-	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
-			return nil
-		}
-		name := d.Name()
-		if !strings.HasPrefix(name, "routerInfo-") && !strings.HasSuffix(name, ".dat") {
-			return nil
-		}
-
-		if c.parseAndAdmit(path) {
-			imported++
-		}
-		return nil
-	})
-
-	return imported, err
+	refs := subsystem.NetDBRoutersSnapshot()
+	return c.HarvestRefs(refs)
 }
 
-func (c *Crawler) parseAndAdmit(path string) bool {
-	data, readErr := os.ReadFile(path)
-	if readErr != nil || len(data) == 0 || len(data) > foundation.NetworkDatabaseMaxRouterInfoBytes {
-		return false
+// HarvestRefs admits a slice of RouterRefs into the store.
+func (c *ActiveCrawler) HarvestRefs(refs []controlplane.NetworkDatabaseRouterRef) int {
+	admitted := 0
+	for _, ref := range refs {
+		raw := ref.Info.Bytes()
+		if len(raw) == 0 {
+			continue
+		}
+		if _, isNew := c.store.AddOrUpdate(ref.Info, raw); isNew {
+			admitted++
+		}
 	}
-
-	info, parseErr := foundation.NetworkDatabaseParseRouterInfo(data)
-	if parseErr != nil {
-		return false
-	}
-
-	if ok, verifyErr := info.Verify(); !ok || verifyErr != nil {
-		return false
-	}
-
-	c.store.AddOrUpdate(info, data)
-	return true
+	return admitted
 }

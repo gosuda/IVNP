@@ -19,7 +19,7 @@ COPY . .
 # Build static binary
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
-    -ldflags="-s -w -X main.version=distroless" \
+    -ldflags="-s -w -X main.version=active-distroless" \
     -o /bin/ivnp-reseed \
     ./cmd/ivnp-reseed
 
@@ -46,4 +46,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/ivnp-reseed", "-healthcheck", "http://127.0.0.1:8443/health"]
 
 ENTRYPOINT ["/ivnp-reseed"]
-CMD ["-listen", ":8443", "-peers-file", "/data/reseed-peers.json", "-target", "1000", "-interval", "5m"]
+CMD ["-listen", ":8443", "-data-dir", "/data", "-target", "1000", "-interval", "5m"]

@@ -15,7 +15,7 @@ import (
 type DialFunc func(ctx context.Context, network, address string) (time.Duration, error)
 
 func defaultDialProbe(ctx context.Context, network, address string) (time.Duration, error) {
-	d := net.Dialer{Timeout: 2 * time.Second}
+	d := net.Dialer{Timeout: 1500 * time.Millisecond}
 	start := time.Now()
 	conn, err := d.DialContext(ctx, network, address)
 	if err != nil {
@@ -25,21 +25,70 @@ func defaultDialProbe(ctx context.Context, network, address string) (time.Durati
 	return time.Since(start), nil
 }
 
-// Prober runs concurrent connectivity and latency probes across known peers.
+// TokenBucketRateLimiter ensures outgoing probe rate does not trigger DDoS / flood alerts.
+type TokenBucketRateLimiter struct {
+	rate       float64
+	capacity   float64
+	tokens     float64
+	lastRefill time.Time
+	mu         sync.Mutex
+}
+
+func NewTokenBucketRateLimiter(rate, capacity float64) *TokenBucketRateLimiter {
+	return &TokenBucketRateLimiter{
+		rate:       rate,
+		capacity:   capacity,
+		tokens:     capacity,
+		lastRefill: time.Now(),
+	}
+}
+
+func (tb *TokenBucketRateLimiter) Wait(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		tb.mu.Lock()
+		now := time.Now()
+		elapsed := now.Sub(tb.lastRefill).Seconds()
+		tb.lastRefill = now
+		tb.tokens = min(tb.capacity, tb.tokens+elapsed*tb.rate)
+
+		if tb.tokens >= 1.0 {
+			tb.tokens -= 1.0
+			tb.mu.Unlock()
+			return nil
+		}
+
+		sleepNeeded := time.Duration((1.0 - tb.tokens) / tb.rate * float64(time.Second))
+		tb.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(sleepNeeded):
+		}
+	}
+}
+
+// Prober runs rate-limited, non-disruptive connectivity probes across known peers.
 type Prober struct {
 	store       *PeerStore
 	workers     int
 	probeDialer DialFunc
+	limiter     *TokenBucketRateLimiter
 }
 
 func NewProber(store *PeerStore, workers int) *Prober {
 	if workers <= 0 {
-		workers = 32
+		workers = 16 // Bounded worker count
 	}
 	return &Prober{
 		store:       store,
 		workers:     workers,
 		probeDialer: defaultDialProbe,
+		limiter:     NewTokenBucketRateLimiter(DefaultProbeRateLimit, 20.0),
 	}
 }
 
@@ -47,21 +96,34 @@ func (p *Prober) SetDialer(d DialFunc) {
 	p.probeDialer = d
 }
 
-// ProbeAll runs a probing pass against all peers currently in store.
+// ProbeAll runs a rate-limited probing pass against peers eligible for probing.
 func (p *Prober) ProbeAll(ctx context.Context) int {
 	peers := p.store.Snapshot()
 	if len(peers) == 0 {
 		return 0
 	}
 
-	jobs := make(chan PeerRecord, len(peers))
+	now := time.Now()
+	var candidates []PeerRecord
 	for _, rec := range peers {
+		// Respect per-peer cooldown to avoid nagging peers
+		if now.Sub(rec.Stats.LastProbed) >= ProbeCooldownInterval {
+			candidates = append(candidates, rec)
+		}
+	}
+
+	if len(candidates) == 0 {
+		return 0
+	}
+
+	jobs := make(chan PeerRecord, len(candidates))
+	for _, rec := range candidates {
 		jobs <- rec
 	}
 	close(jobs)
 
 	var wg sync.WaitGroup
-	workers := min(p.workers, len(peers))
+	workers := min(p.workers, len(candidates))
 	var successCount sync.Map
 
 	for range workers {
@@ -71,6 +133,12 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 			for rec := range jobs {
 				if ctx.Err() != nil {
 					return
+				}
+				// Rate limit: pause if token rate exceeded
+				if p.limiter != nil {
+					if err := p.limiter.Wait(ctx); err != nil {
+						return
+					}
 				}
 				success, rtt := p.probePeer(ctx, rec)
 				p.store.RecordProbeResult(rec.Hash, success, rtt)
@@ -91,7 +159,6 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 }
 
 func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Duration) {
-	// Candidate target endpoints (IPv4 preferred for wider compatibility)
 	var targets []string
 	addEndpoints := func(ips []netip.Addr, ports []uint16) {
 		for _, ip := range ips {
@@ -110,7 +177,6 @@ func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Dura
 		return false, 0
 	}
 
-	// Probe the first reachable target
 	for _, target := range targets {
 		if ctx.Err() != nil {
 			return false, 0

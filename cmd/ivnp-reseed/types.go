@@ -7,6 +7,17 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+const (
+	// MaxStorePeers bounds in-memory peer tracking to prevent unbounded RAM growth.
+	MaxStorePeers = 5000
+
+	// DefaultProbeRateLimit bounds outbound probes to avoid DDoS / SYN flood triggers.
+	DefaultProbeRateLimit = 15.0 // probes per second
+
+	// ProbeCooldownInterval prevents hammering the same router repeatedly.
+	ProbeCooldownInterval = 10 * time.Minute
+)
+
 // PeerStats tracks connectivity, stability, and latency observations for a router.
 type PeerStats struct {
 	TotalProbes      int64         `json:"total_probes"`

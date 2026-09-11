@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -12,13 +13,18 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
+
+	"gosuda.org/ivnp/node"
+	"gosuda.org/ivnp/state"
 )
 
-var version = "dev"
+var version = "active-dev"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -29,14 +35,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 
 	listenAddr := flags.String("listen", ":8443", "HTTP reseed server listen address")
-	netdbPath := flags.String("netdb", "", "path to NetDB directory to crawl")
-	peersFile := flags.String("peers-file", "reseed-peers.json", "path to peer cache file")
+	dataDir := flags.String("data-dir", "/data", "base persistent data directory")
+	peersFile := flags.String("peers-file", "", "path to peer cache file (default <data-dir>/reseed-peers.json)")
 	targetPeers := flags.Int("target", 1000, "target number of diverse peers in reseed archive")
-	interval := flags.Duration("interval", 5*time.Minute, "refresh interval for crawling, probing, and packaging")
+	interval := flags.Duration("interval", 5*time.Minute, "refresh interval for harvesting, probing, and packaging")
 	netID := flags.Uint("netid", 2, "I2P network ID")
 	signerID := flags.String("signer-id", "reseed@ivnp.network", "SU3 signer common name")
+	noRouter := flags.Bool("no-router", false, "disable embedded router (test/replay mode)")
 	healthCheckURL := flags.String("healthcheck", "", "check health endpoint URL and exit 0 (healthy) or 1 (unhealthy)")
-	runOnce := flags.Bool("once", false, "run one pass of crawl, probe, package and exit")
+	runOnce := flags.Bool("once", false, "run one pass and exit")
 	showVersion := flags.Bool("version", false, "show version and exit")
 
 	if err := flags.Parse(args); err != nil {
@@ -57,6 +64,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
+	cachePath := cmp.Or(*peersFile, filepath.Join(*dataDir, "reseed-peers.json"))
+
 	// Generate or load signing keys
 	rsaPrivKey, err := rsa.GenerateKey(rand.Reader, 4096)
 	if err != nil {
@@ -75,48 +84,76 @@ func run(args []string, stdout, stderr io.Writer) int {
 	)
 
 	store := NewPeerStore()
-	if *peersFile != "" {
-		if loadErr := store.LoadFromFile(*peersFile); loadErr != nil {
-			logger.Warn("failed to load peer cache file", "path", *peersFile, "error", loadErr)
+	if cachePath != "" {
+		if loadErr := store.LoadFromFile(cachePath); loadErr != nil {
+			logger.Warn("failed to load peer cache file", "path", cachePath, "error", loadErr)
 		} else {
-			logger.Info("loaded peer cache", "peers", store.Len(), "path", *peersFile)
+			logger.Info("loaded peer cache", "peers", store.Len(), "path", cachePath)
 		}
 	}
 
-	crawler := NewCrawler(store)
-	prober := NewProber(store, 32)
+	crawler := NewActiveCrawler(store)
+	prober := NewProber(store, 16)
 	server := NewReseedServer(ServerConfig{
 		NetworkID:     uint8(*netID),
 		ListenAddress: *listenAddr,
 		CacheDuration: *interval,
 	}, store)
 
-	refreshPass := func(ctx context.Context) error {
-		start := time.Now()
-		if *netdbPath != "" {
-			imported, crawlErr := crawler.CrawlDirectory(*netdbPath)
-			if crawlErr != nil {
-				logger.Warn("crawl error", "path", *netdbPath, "error", crawlErr)
-			} else {
-				logger.Info("crawl completed", "imported_or_updated", imported, "total_store", store.Len())
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	var routerSubsystem *node.Subsystem
+	if !*noRouter {
+		logger.Info("starting embedded IVNP router in client mode (no public port binding)...")
+		routerCfg := configureActiveClientRouter(*dataDir, uint8(*netID))
+		subsystem, routerErr := node.NewSubsystem(routerCfg, node.Options{Logger: logger})
+		if routerErr != nil {
+			logger.Error("failed to initialize embedded router", "error", routerErr)
+			return 1
+		}
+		defer func() {
+			if closeErr := subsystem.Close(); closeErr != nil {
+				logger.Error("embedded router cleanup failed", "error", closeErr)
 			}
+		}()
+		if startErr := subsystem.Start(ctx); startErr != nil {
+			logger.Error("failed to start embedded router", "error", startErr)
+			return 1
+		}
+		routerSubsystem = subsystem
+		logger.Info("embedded router started successfully")
+	}
+
+	refreshPass := func(refreshCtx context.Context) error {
+		start := time.Now()
+
+		// 1. Harvest live RouterInfos directly from embedded router's NetDB memory table
+		if routerSubsystem != nil {
+			harvested := crawler.Harvest(routerSubsystem)
+			logger.Info("harvested live peers from embedded NetDB",
+				"newly_admitted", harvested,
+				"total_store", store.Len(),
+			)
 		}
 
+		// 2. Rate-limited non-disruptive probing
 		if store.Len() > 0 {
-			success := prober.ProbeAll(ctx)
+			success := prober.ProbeAll(refreshCtx)
 			logger.Info("probing completed", "reachable_peers", success, "total_probed", store.Len())
 		}
 
-		if *peersFile != "" {
-			if saveErr := store.SaveToFile(*peersFile); saveErr != nil {
+		// 3. Save peer cache
+		if cachePath != "" {
+			if saveErr := store.SaveToFile(cachePath); saveErr != nil {
 				logger.Warn("failed to save peer cache", "error", saveErr)
 			}
 		}
 
-		// Select optimal diverse peers
+		// 4. Select diverse, accessible Floodfills and high-performance routers
 		selectorCfg := DefaultSelectorConfig()
 		selectorCfg.TargetCount = *targetPeers
-		selectorCfg.RequireReachable = false // fallback to viable if early cold-start
+		selectorCfg.RequireReachable = false // Allow candidates if cold-start
 		selected := SelectDiversePeers(store.Snapshot(), selectorCfg)
 
 		logger.Info("selected diverse peers",
@@ -153,9 +190,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return nil
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	if err := refreshPass(ctx); err != nil {
 		logger.Error("initial refresh pass failed", "error", err)
@@ -194,4 +228,31 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 	}
+}
+
+func configureActiveClientRouter(baseDir string, netID uint8) state.ConfigurationOperating {
+	cfg := state.ConfigurationDefaultOperating()
+	cfg.DataDir = filepath.Join(baseDir, "router")
+	cfg.StateDir = filepath.Join(cfg.DataDir, "state")
+	cfg.StatePath = filepath.Join(cfg.StateDir, "router.state")
+	cfg.KeyPath = filepath.Join(cfg.StateDir, "router.keys")
+	cfg.Network.ID = uint32(netID)
+
+	// Pure outbound client: ephemeral port 0, unadvertised, no UPnP/NAT-PMP
+	cfg.NTCP2.Enabled = false
+	cfg.SSU2.Enabled = true
+	cfg.SSU2.Bind = state.ConfigurationEndpoint{Host: "0.0.0.0", Port: 0}
+	cfg.SSU2.Advertised = state.ConfigurationEndpoint{}
+	cfg.NAT.UPnPEndpoint = ""
+	cfg.NAT.NATPMPEndpoint = netip.AddrPort{}
+
+	// Disable client-facing services to keep RAM bounded
+	cfg.SAM.Enabled = false
+	cfg.HTTPProxy.Enabled = false
+	cfg.SOCKS5.Enabled = false
+	cfg.Control.Enabled = false
+	cfg.Metrics.Enabled = false
+	cfg.AddressBook.Enabled = false
+
+	return cfg
 }

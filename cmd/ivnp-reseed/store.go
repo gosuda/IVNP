@@ -13,15 +13,17 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
-// PeerStore provides thread-safe in-memory peer indexing and snapshot persistence.
+// PeerStore provides thread-safe, memory-bounded peer indexing and snapshot persistence.
 type PeerStore struct {
-	mu    sync.RWMutex
-	peers map[foundation.Hash]*PeerRecord
+	mu       sync.RWMutex
+	peers    map[foundation.Hash]*PeerRecord
+	maxPeers int
 }
 
 func NewPeerStore() *PeerStore {
 	return &PeerStore{
-		peers: make(map[foundation.Hash]*PeerRecord),
+		peers:    make(map[foundation.Hash]*PeerRecord),
+		maxPeers: MaxStorePeers,
 	}
 }
 
@@ -38,6 +40,11 @@ func (s *PeerStore) AddOrUpdate(info foundation.NetworkDatabaseRouterInfo, raw [
 	hash := info.Hash()
 	existing, found := s.peers[hash]
 	if !found {
+		// Enforce bounded memory: prune lowest score peer if at max capacity
+		if len(s.peers) >= s.maxPeers {
+			s.evictWorstLocked()
+		}
+
 		family, v4, v6, ports := extractRouterAddresses(info)
 		rec := &PeerRecord{
 			Hash:        hash,
@@ -70,6 +77,23 @@ func (s *PeerStore) AddOrUpdate(info foundation.NetworkDatabaseRouterInfo, raw [
 	}
 	existing.Score = calculateScore(existing)
 	return existing, false
+}
+
+func (s *PeerStore) evictWorstLocked() {
+	var worstHash foundation.Hash
+	var worstScore float64 = 1e9
+	found := false
+
+	for h, p := range s.peers {
+		if !found || p.Score < worstScore {
+			worstHash = h
+			worstScore = p.Score
+			found = true
+		}
+	}
+	if found {
+		delete(s.peers, worstHash)
+	}
 }
 
 func (s *PeerStore) RecordProbeResult(hash foundation.Hash, success bool, rtt time.Duration) {
@@ -178,9 +202,9 @@ func calculateScore(rec *PeerRecord) float64 {
 		score += latencyPts
 	}
 
-	// Floodfill priority bonus (+15 points)
+	// Accessible Floodfill priority bonus (+30 points)
 	if rec.IsFloodfill {
-		score += 15.0
+		score += 30.0
 	}
 
 	// Severe penalty for consecutive failures
