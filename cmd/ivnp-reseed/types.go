@@ -46,9 +46,60 @@ type PeerRecord struct {
 
 // ReseedPackage contains pre-rendered, signed reseed archives and their metadata.
 type ReseedPackage struct {
-	GeneratedAt time.Time
-	PeerCount   int
-	SU3Data     []byte
-	IVBSData    []byte
-	ETag        string
+	GeneratedAt    time.Time
+	PeerCount      int
+	FloodfillCount int
+	SU3Data        []byte
+	IVBSData       []byte
+	ETag           string
+}
+
+type RTTStats struct {
+	MinMs int64 `json:"min_ms"`
+	AvgMs int64 `json:"avg_ms"`
+	P50Ms int64 `json:"p50_ms"`
+	P90Ms int64 `json:"p90_ms"`
+	P99Ms int64 `json:"p99_ms"`
+	MaxMs int64 `json:"max_ms"`
+}
+
+type DiversityStats struct {
+	UniqueIPv4Subnets24 int `json:"unique_ipv4_subnets_24"`
+	UniqueIPv4Count     int `json:"unique_ipv4_count"`
+	UniqueIPv6Count     int `json:"unique_ipv6_count"`
+	UniqueFamilies      int `json:"unique_families"`
+}
+
+type KBucketStats struct {
+	TotalBuckets    int      `json:"total_buckets"`
+	CoveredBuckets  int      `json:"covered_buckets"`
+	CoveragePercent float64  `json:"coverage_percent"`
+	Distribution    [256]int `json:"distribution"`
+}
+
+type PackageStats struct {
+	PeerCount       int       `json:"peer_count"`
+	FloodfillCount  int       `json:"floodfill_count"`
+	FloodfillRatio  float64   `json:"floodfill_ratio"`
+	SU3SizeBytes    int       `json:"su3_size_bytes"`
+	IVBSSizeBytes   int       `json:"ivbs_size_bytes"`
+	ETag            string    `json:"etag"`
+	LastGeneratedAt time.Time `json:"last_generated_at"`
+	NextRefreshETA  int64     `json:"next_refresh_eta_seconds"`
+}
+
+type DetailedStatsResponse struct {
+	Version         string         `json:"version"`
+	NetworkID       uint8          `json:"network_id"`
+	UptimeSeconds   int64          `json:"uptime_seconds"`
+	TotalIndexed    int            `json:"total_indexed"`
+	ReachablePeers  int            `json:"reachable_peers"`
+	FloodfillPeers  int            `json:"floodfill_peers"`
+	PublishedPeers  int            `json:"published_peers"`
+	AverageEWMARTT  time.Duration  `json:"average_ewma_rtt_ms"`
+	LastGeneratedAt time.Time      `json:"last_generated_at"`
+	RTT             RTTStats       `json:"rtt"`
+	Diversity       DiversityStats `json:"diversity"`
+	KBuckets        KBucketStats   `json:"kbuckets"`
+	Package         PackageStats   `json:"package"`
 }

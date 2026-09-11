@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -311,6 +312,51 @@ func TestReseedServer(t *testing.T) {
 	server.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/stats code = %d, want 200", rec.Code)
+	}
+
+	var stats DetailedStatsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("failed to decode /stats JSON: %v", err)
+	}
+	if stats.NetworkID != 2 {
+		t.Fatalf("stats.NetworkID = %d, want 2", stats.NetworkID)
+	}
+	if stats.KBuckets.TotalBuckets != 256 {
+		t.Fatalf("stats.KBuckets.TotalBuckets = %d, want 256", stats.KBuckets.TotalBuckets)
+	}
+	if stats.KBuckets.CoveredBuckets < 1 {
+		t.Fatalf("stats.KBuckets.CoveredBuckets = %d, want >= 1", stats.KBuckets.CoveredBuckets)
+	}
+	if stats.Package.PeerCount != 1 {
+		t.Fatalf("stats.Package.PeerCount = %d, want 1", stats.Package.PeerCount)
+	}
+	if stats.Package.SU3SizeBytes != len("mock-su3-archive") {
+		t.Fatalf("stats.Package.SU3SizeBytes = %d, want %d", stats.Package.SU3SizeBytes, len("mock-su3-archive"))
+	}
+
+	// Test Web Dashboard root endpoint
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	rec = httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / code = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Fatalf("GET / Content-Type = %q, want 'text/html; charset=utf-8'", ct)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("IVNP Reseed Indexer")) {
+		t.Fatal("GET / dashboard does not contain expected title")
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("initial-data")) {
+		t.Fatal("GET / dashboard does not contain bootstrap initial-data")
+	}
+
+	// Test 404 for unknown path
+	req = httptest.NewRequest(http.MethodGet, "/unknown/path", nil)
+	rec = httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET /unknown/path code = %d, want 404", rec.Code)
 	}
 }
 

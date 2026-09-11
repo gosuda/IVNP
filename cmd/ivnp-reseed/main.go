@@ -163,6 +163,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 		if len(selected) > 0 {
 			now := time.Now()
+			floodCount := 0
+			for _, p := range selected {
+				if p.IsFloodfill {
+					floodCount++
+				}
+			}
 			su3Bytes, su3Err := BuildSU3(selected, *signerID, rsaPrivKey, now)
 			if su3Err != nil {
 				return fmt.Errorf("build su3: %w", su3Err)
@@ -175,11 +181,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			sum := sha256.Sum256(ivbsBytes)
 			etag := `"` + hex.EncodeToString(sum[:8]) + `"`
 			server.UpdatePackage(ReseedPackage{
-				GeneratedAt: now,
-				PeerCount:   len(selected),
-				SU3Data:     su3Bytes,
-				IVBSData:    ivbsBytes,
-				ETag:        etag,
+				GeneratedAt:    now,
+				PeerCount:      len(selected),
+				FloodfillCount: floodCount,
+				SU3Data:        su3Bytes,
+				IVBSData:       ivbsBytes,
+				ETag:           etag,
 			})
 
 			logger.Info("reseed archives packaged",
