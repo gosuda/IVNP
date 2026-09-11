@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -115,6 +116,23 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 	if len(candidates) == 0 {
 		return 0
 	}
+
+	// Prioritize: unprobed newcomers first, then floodfills, then longest cooldown
+	slices.SortFunc(candidates, func(a, b PeerRecord) int {
+		if (a.Stats.TotalProbes == 0) != (b.Stats.TotalProbes == 0) {
+			if a.Stats.TotalProbes == 0 {
+				return -1
+			}
+			return 1
+		}
+		if a.IsFloodfill != b.IsFloodfill {
+			if a.IsFloodfill {
+				return -1
+			}
+			return 1
+		}
+		return a.Stats.LastProbed.Compare(b.Stats.LastProbed)
+	})
 
 	jobs := make(chan PeerRecord, len(candidates))
 	for _, rec := range candidates {

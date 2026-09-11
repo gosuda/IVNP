@@ -126,32 +126,42 @@ func run(args []string, stdout, stderr io.Writer) int {
 		logger.Info("embedded router started successfully")
 	}
 
+	activeCrawlPass := func(crawlCtx context.Context) {
+		if routerSubsystem != nil {
+			harvested := crawler.Harvest(routerSubsystem)
+			if harvested > 0 {
+				logger.Info("active crawl: harvested new peers from embedded NetDB",
+					"newly_admitted", harvested,
+					"total_store", store.Len(),
+				)
+			}
+			_ = routerSubsystem.TriggerTunnelProbe(crawlCtx)
+			if store.Len() < 50 {
+				_, _ = routerSubsystem.TriggerReseed(crawlCtx)
+			}
+		}
+
+		if store.Len() > 0 {
+			success := prober.ProbeAll(crawlCtx)
+			if success > 0 {
+				logger.Debug("active crawl: probing pass completed", "reachable_peers", success)
+			}
+		}
+	}
+
 	refreshPass := func(refreshCtx context.Context) error {
 		start := time.Now()
 
-		// 1. Harvest live RouterInfos directly from embedded router's NetDB memory table
-		if routerSubsystem != nil {
-			harvested := crawler.Harvest(routerSubsystem)
-			logger.Info("harvested live peers from embedded NetDB",
-				"newly_admitted", harvested,
-				"total_store", store.Len(),
-			)
-		}
+		activeCrawlPass(refreshCtx)
 
-		// 2. Rate-limited non-disruptive probing
-		if store.Len() > 0 {
-			success := prober.ProbeAll(refreshCtx)
-			logger.Info("probing completed", "reachable_peers", success, "total_probed", store.Len())
-		}
-
-		// 3. Save peer cache
+		// 2. Save peer cache
 		if cachePath != "" {
 			if saveErr := store.SaveToFile(cachePath); saveErr != nil {
 				logger.Warn("failed to save peer cache", "error", saveErr)
 			}
 		}
 
-		// 4. Select diverse, accessible Floodfills and high-performance routers
+		// 3. Select diverse, accessible Floodfills and high-performance routers
 		selectorCfg := DefaultSelectorConfig()
 		selectorCfg.TargetCount = *targetPeers
 		selectorCfg.RequireReachable = false // Allow candidates if cold-start
@@ -227,8 +237,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}(srv)
 	}
 
-	ticker := time.NewTicker(*interval)
-	defer ticker.Stop()
+	packageTicker := time.NewTicker(*interval)
+	defer packageTicker.Stop()
+
+	crawlTicker := time.NewTicker(25 * time.Second)
+	defer crawlTicker.Stop()
 
 	for {
 		select {
@@ -240,7 +253,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 			shutdownCancel()
 			return 0
-		case <-ticker.C:
+		case <-crawlTicker.C:
+			activeCrawlPass(ctx)
+		case <-packageTicker.C:
 			if err := refreshPass(ctx); err != nil {
 				logger.Error("periodic refresh pass failed", "error", err)
 			}
@@ -273,10 +288,14 @@ func configureActiveClientRouter(baseDir string, netID uint8) state.Configuratio
 	cfg.AddressBook.Enabled = false
 
 	// Scale exploratory tunnel pool and lookup capacity for active DHT crawling
-	cfg.Tunnel.ExploratoryInboundTarget = 6
-	cfg.Tunnel.ExploratoryOutboundTarget = 6
+	cfg.Tunnel.ExploratoryInboundTarget = 8
+	cfg.Tunnel.ExploratoryOutboundTarget = 8
 	cfg.Tunnel.ExploratoryPoolCapacity = 16
 	cfg.Tunnel.BuildPendingCapacity = 64
+	cfg.Tunnel.MaintenanceInterval = 20 * time.Second
+
+	// Expand NetDB capacity for deep network exploration
+	cfg.NetDB.BucketCapacity = 64
 	cfg.NetDB.LookupCapacity = 64
 
 	return cfg
