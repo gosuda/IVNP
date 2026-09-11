@@ -451,7 +451,7 @@ func TestNewRejectsEnabledTunnelLifetimeOutsideWireLifetime(t *testing.T) {
 }
 
 func TestNewRejectsInvalidDestinationCapacity(t *testing.T) {
-	for _, capacity := range []int{0, 257} {
+	for _, capacity := range []int{0, -1} {
 		cfg := daemonTestConfig(t)
 		cfg.State.MaxDestinations = capacity
 		if d, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets)}); !errors.Is(err, state.ConfigurationErrInvalidOperating) {

@@ -373,8 +373,8 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 		cfg.Tunnel.ExploratoryPoolCapacity = 2 * (exploratory.Inbound.Count + exploratory.Inbound.Backup + exploratory.Outbound.Count + exploratory.Outbound.Backup)
 	}
-	if cfg.State.MaxDestinations < 1 || cfg.State.MaxDestinations > daemonMaxDestinations {
-		return nil, fmt.Errorf("%w: state max_destinations must be between 1 and %d", state.ConfigurationErrInvalidOperating, daemonMaxDestinations)
+	if cfg.State.MaxDestinations < 1 {
+		return nil, fmt.Errorf("%w: state max_destinations must be at least 1", state.ConfigurationErrInvalidOperating)
 	}
 	if cfg.Network.ID > 255 {
 		return nil, fmt.Errorf("daemon: network id %d cannot be used by native transports", cfg.Network.ID)

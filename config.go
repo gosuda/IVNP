@@ -166,7 +166,7 @@ func routerSettings(cfg RouterConfig) (state.ConfigurationOperating, controlplan
 	if err := validateTunnelPool("Exploratory", cfg.Exploratory); err != nil {
 		return empty, options, err
 	}
-	if cfg.Limits.MaxDestinations < 1 || cfg.Limits.MaxDestinations > 256 {
+	if cfg.Limits.MaxDestinations < 1 {
 		return empty, options, invalidConfig("Limits.MaxDestinations")
 	}
 	if cfg.Limits.PacketQueueBytes <= 0 {
