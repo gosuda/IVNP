@@ -83,13 +83,13 @@ type Prober struct {
 
 func NewProber(store *PeerStore, workers int) *Prober {
 	if workers <= 0 {
-		workers = 16 // Bounded worker count
+		workers = 48 // Loosened bounded worker count
 	}
 	return &Prober{
 		store:       store,
 		workers:     workers,
 		probeDialer: defaultDialProbe,
-		limiter:     NewTokenBucketRateLimiter(DefaultProbeRateLimit, 20.0),
+		limiter:     NewTokenBucketRateLimiter(DefaultProbeRateLimit, DefaultProbeBurst),
 	}
 }
 
@@ -107,8 +107,13 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 	now := time.Now()
 	var candidates []PeerRecord
 	for _, rec := range peers {
-		// Respect per-peer cooldown to avoid nagging peers
-		if now.Sub(rec.Stats.LastProbed) >= ProbeCooldownInterval {
+		cooldown := ProbeCooldownReachable
+		if rec.Stats.TotalProbes == 0 {
+			cooldown = 0
+		} else if rec.Stats.ConsecutiveFails > 0 {
+			cooldown = ProbeCooldownFailed
+		}
+		if now.Sub(rec.Stats.LastProbed) >= cooldown {
 			candidates = append(candidates, rec)
 		}
 	}
@@ -177,6 +182,12 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 }
 
 func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Duration) {
+	// If the peer has TCP ports (NTCP/NTCP2), or fallback to general Ports if unclassified:
+	tcpPorts := rec.TCPPorts
+	if len(tcpPorts) == 0 && len(rec.UDPPorts) == 0 {
+		tcpPorts = rec.Ports
+	}
+
 	var targets []string
 	addEndpoints := func(ips []netip.Addr, ports []uint16) {
 		for _, ip := range ips {
@@ -186,21 +197,30 @@ func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Dura
 		}
 	}
 
-	addEndpoints(rec.IPv4, rec.Ports)
-	if len(targets) == 0 {
-		addEndpoints(rec.IPv6, rec.Ports)
-	}
-
-	if len(targets) == 0 {
-		return false, 0
-	}
-
-	for _, target := range targets {
-		if ctx.Err() != nil {
-			return false, 0
+	if len(tcpPorts) > 0 {
+		addEndpoints(rec.IPv4, tcpPorts)
+		if len(targets) == 0 {
+			addEndpoints(rec.IPv6, tcpPorts)
 		}
-		rtt, err := p.probeDialer(ctx, "tcp", target)
-		if err == nil {
+		for _, target := range targets {
+			if ctx.Err() != nil {
+				return false, 0
+			}
+			rtt, err := p.probeDialer(ctx, "tcp", target)
+			if err == nil {
+				return true, rtt
+			}
+		}
+	}
+
+	// For peers with only UDP (SSU2) endpoints: do not fail them with TCP.
+	// If the router recently received or admitted them, they are reachable.
+	if len(rec.TCPPorts) == 0 && len(rec.UDPPorts) > 0 {
+		if time.Since(rec.Stats.LastSeen) < 2*time.Hour {
+			rtt := rec.Stats.EWMARTT
+			if rtt <= 0 {
+				rtt = 50 * time.Millisecond
+			}
 			return true, rtt
 		}
 	}

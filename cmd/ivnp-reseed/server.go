@@ -42,7 +42,6 @@ func NewReseedServer(cfg ServerConfig, store *PeerStore) *ReseedServer {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRoot)
 	mux.HandleFunc("/i2pseeds.su3", s.handleSU3)
-	mux.HandleFunc("/ivnpseeds.bin", s.handleIVBS)
 	mux.HandleFunc("/stats", s.handleStats)
 	mux.HandleFunc("/health", s.handleHealth)
 	s.handler = mux
@@ -93,32 +92,6 @@ func (s *ReseedServer) handleSU3(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Length", strconv.Itoa(len(pkg.SU3Data)))
 	_, _ = w.Write(pkg.SU3Data)
-}
-
-func (s *ReseedServer) handleIVBS(w http.ResponseWriter, r *http.Request) {
-	if !s.validateNetID(w, r) {
-		return
-	}
-	s.mu.RLock()
-	pkg := s.pkg
-	s.mu.RUnlock()
-
-	if len(pkg.IVBSData) == 0 {
-		http.Error(w, "ivnp archive not ready", http.StatusServiceUnavailable)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(s.cfg.CacheDuration.Seconds())))
-	w.Header().Set("ETag", pkg.ETag+"-ivbs")
-
-	if match := r.Header.Get("If-None-Match"); match != "" && match == pkg.ETag+"-ivbs" {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-
-	w.Header().Set("Content-Length", strconv.Itoa(len(pkg.IVBSData)))
-	_, _ = w.Write(pkg.IVBSData)
 }
 
 func (s *ReseedServer) validateNetID(w http.ResponseWriter, r *http.Request) bool {
@@ -249,7 +222,6 @@ func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 			FloodfillCount:  pkg.FloodfillCount,
 			FloodfillRatio:  floodfillRatio,
 			SU3SizeBytes:    len(pkg.SU3Data),
-			IVBSSizeBytes:   len(pkg.IVBSData),
 			ETag:            pkg.ETag,
 			LastGeneratedAt: pkg.GeneratedAt,
 			NextRefreshETA:  nextRefreshSec,

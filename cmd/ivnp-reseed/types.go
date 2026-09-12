@@ -11,11 +11,14 @@ const (
 	// MaxStorePeers bounds in-memory peer tracking to prevent unbounded RAM growth.
 	MaxStorePeers = 5000
 
-	// DefaultProbeRateLimit bounds outbound probes to avoid DDoS / SYN flood triggers.
-	DefaultProbeRateLimit = 15.0 // probes per second
+	// DefaultProbeRateLimit bounds outbound probes to avoid flooding peers while actively verifying network state.
+	DefaultProbeRateLimit = 60.0 // probes per second (loosened from 15.0)
+	DefaultProbeBurst     = 120.0
 
-	// ProbeCooldownInterval prevents hammering the same router repeatedly.
-	ProbeCooldownInterval = 10 * time.Minute
+	// Probe cooldowns differentiated by peer state:
+	ProbeCooldownReachable = 3 * time.Minute  // loosened from 10m
+	ProbeCooldownFailed    = 90 * time.Second // recheck failed peers sooner
+	ProbeCooldownInterval  = 3 * time.Minute  // default fallback interval
 )
 
 // PeerStats tracks connectivity, stability, and latency observations for a router.
@@ -40,6 +43,8 @@ type PeerRecord struct {
 	IPv4        []netip.Addr    `json:"ipv4,omitempty"`
 	IPv6        []netip.Addr    `json:"ipv6,omitempty"`
 	Ports       []uint16        `json:"ports,omitempty"`
+	TCPPorts    []uint16        `json:"tcp_ports,omitempty"`
+	UDPPorts    []uint16        `json:"udp_ports,omitempty"`
 	Stats       PeerStats       `json:"stats"`
 	Score       float64         `json:"score"`
 }
@@ -50,7 +55,6 @@ type ReseedPackage struct {
 	PeerCount      int
 	FloodfillCount int
 	SU3Data        []byte
-	IVBSData       []byte
 	ETag           string
 }
 
@@ -82,7 +86,6 @@ type PackageStats struct {
 	FloodfillCount  int       `json:"floodfill_count"`
 	FloodfillRatio  float64   `json:"floodfill_ratio"`
 	SU3SizeBytes    int       `json:"su3_size_bytes"`
-	IVBSSizeBytes   int       `json:"ivbs_size_bytes"`
 	ETag            string    `json:"etag"`
 	LastGeneratedAt time.Time `json:"last_generated_at"`
 	NextRefreshETA  int64     `json:"next_refresh_eta_seconds"`

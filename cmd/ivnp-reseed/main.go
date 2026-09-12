@@ -3,11 +3,11 @@ package main
 import (
 	"cmp"
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -67,21 +67,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	cachePath := cmp.Or(*peersFile, filepath.Join(*dataDir, "reseed-peers.json"))
 
-	// Generate or load signing keys
+	// Generate RSA signing key for standard SU3 container
 	rsaPrivKey, err := rsa.GenerateKey(rand.Reader, 4096)
 	if err != nil {
 		logger.Error("failed to generate RSA key", "error", err)
 		return 1
 	}
-	edPubKey, edPrivKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		logger.Error("failed to generate Ed25519 key", "error", err)
-		return 1
-	}
 
 	logger.Info("initialized signing keys",
 		"su3_signer", *signerID,
-		"ed25519_pubkey", hex.EncodeToString(edPubKey),
 	)
 
 	store := NewPeerStore()
@@ -94,7 +88,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	crawler := NewActiveCrawler(store)
-	prober := NewProber(store, 16)
+	prober := NewProber(store, 48)
 	server := NewReseedServer(ServerConfig{
 		NetworkID:     uint8(*netID),
 		ListenAddress: *listenAddr,
@@ -135,8 +129,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 					"total_store", store.Len(),
 				)
 			}
+			// Active DHT tree exploration to populate empty and sparse K-Buckets
+			dispatched, exploreErr := crawler.TreeExplore(crawlCtx, routerSubsystem, 16)
+			if exploreErr != nil && !errors.Is(exploreErr, context.Canceled) {
+				logger.Debug("tree exploration notice", "error", exploreErr)
+			} else if dispatched > 0 {
+				logger.Debug("active crawl: dispatched tree exploration lookups", "dispatched", dispatched)
+			}
+
 			_ = routerSubsystem.TriggerTunnelProbe(crawlCtx)
-			if store.Len() < 50 {
+			if store.Len() < 150 {
 				_, _ = routerSubsystem.TriggerReseed(crawlCtx)
 			}
 		}
@@ -184,25 +186,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 			if su3Err != nil {
 				return fmt.Errorf("build su3: %w", su3Err)
 			}
-			ivbsBytes, ivbsErr := BuildIVBS(selected, uint8(*netID), edPrivKey, now)
-			if ivbsErr != nil {
-				return fmt.Errorf("build ivbs: %w", ivbsErr)
-			}
 
-			sum := sha256.Sum256(ivbsBytes)
+			sum := sha256.Sum256(su3Bytes)
 			etag := `"` + hex.EncodeToString(sum[:8]) + `"`
 			server.UpdatePackage(ReseedPackage{
 				GeneratedAt:    now,
 				PeerCount:      len(selected),
 				FloodfillCount: floodCount,
 				SU3Data:        su3Bytes,
-				IVBSData:       ivbsBytes,
 				ETag:           etag,
 			})
 
 			logger.Info("reseed archives packaged",
 				"su3_bytes", len(su3Bytes),
-				"ivbs_bytes", len(ivbsBytes),
 				"duration_ms", time.Since(start).Milliseconds(),
 			)
 		}
@@ -240,7 +236,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	packageTicker := time.NewTicker(*interval)
 	defer packageTicker.Stop()
 
-	crawlTicker := time.NewTicker(25 * time.Second)
+	crawlTicker := time.NewTicker(4 * time.Second)
 	defer crawlTicker.Stop()
 
 	for {
@@ -272,7 +268,9 @@ func configureActiveClientRouter(baseDir string, netID uint8) state.Configuratio
 	cfg.Network.ID = uint32(netID)
 
 	// Pure outbound client: ephemeral port 0, unadvertised, no UPnP/NAT-PMP
-	cfg.NTCP2.Enabled = false
+	cfg.NTCP2.Enabled = true
+	cfg.NTCP2.Bind = state.ConfigurationEndpoint{Host: "0.0.0.0", Port: 0}
+	cfg.NTCP2.Advertised = state.ConfigurationEndpoint{}
 	cfg.SSU2.Enabled = true
 	cfg.SSU2.Bind = state.ConfigurationEndpoint{Host: "0.0.0.0", Port: 0}
 	cfg.SSU2.Advertised = state.ConfigurationEndpoint{}
@@ -288,15 +286,15 @@ func configureActiveClientRouter(baseDir string, netID uint8) state.Configuratio
 	cfg.AddressBook.Enabled = false
 
 	// Scale exploratory tunnel pool and lookup capacity for active DHT crawling
-	cfg.Tunnel.ExploratoryInboundTarget = 8
-	cfg.Tunnel.ExploratoryOutboundTarget = 8
-	cfg.Tunnel.ExploratoryPoolCapacity = 16
-	cfg.Tunnel.BuildPendingCapacity = 64
-	cfg.Tunnel.MaintenanceInterval = 20 * time.Second
+	cfg.Tunnel.ExploratoryInboundTarget = 12
+	cfg.Tunnel.ExploratoryOutboundTarget = 12
+	cfg.Tunnel.ExploratoryPoolCapacity = 32
+	cfg.Tunnel.BuildPendingCapacity = 128
+	cfg.Tunnel.MaintenanceInterval = 10 * time.Second
 
 	// Expand NetDB capacity for deep network exploration
-	cfg.NetDB.BucketCapacity = 64
-	cfg.NetDB.LookupCapacity = 64
+	cfg.NetDB.BucketCapacity = 128
+	cfg.NetDB.LookupCapacity = 128
 
 	return cfg
 }

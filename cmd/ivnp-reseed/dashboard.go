@@ -194,7 +194,6 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       text-transform: uppercase;
     }
     .fmt-su3 { background: rgba(56, 189, 248, 0.15); color: var(--primary); border: 1px solid rgba(56, 189, 248, 0.3); }
-    .fmt-ivbs { background: rgba(168, 85, 247, 0.15); color: var(--purple); border: 1px solid rgba(168, 85, 247, 0.3); }
     .download-meta {
       font-size: 0.82rem;
       color: var(--text-muted);
@@ -383,14 +382,14 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
     Reseed Packages (5-min Cycle, Stratified DHT Distribution)
   </div>
-  <section class="downloads-grid">
+  <section class="downloads-grid" style="grid-template-columns: 1fr; max-width: 640px;">
     <div class="card download-card">
       <div>
         <div class="download-header">
           <h3>Standard I2P SU3 Archive</h3>
           <span class="fmt-pill fmt-su3">ZIP / RSA-4096</span>
         </div>
-        <p class="download-meta">Compatible with all standard I2P routers (Java I2P & i2pd). Fully signed with SHA-512 and RSA-4096.</p>
+        <p class="download-meta">Compatible with all standard I2P routers (Java I2P, i2pd &amp; IVNP). Fully signed with SHA-512 and RSA-4096.</p>
         <div style="font-size: 0.85rem; margin-bottom: 12px; color: #d1d5db;">
           Peers: <strong id="su3-peers">-</strong> | Archive Size: <strong id="su3-size">- KB</strong>
         </div>
@@ -398,23 +397,6 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       <div class="download-actions">
         <a href="/i2pseeds.su3?netid=2" id="btn-dl-su3" class="btn-dl">Download SU3</a>
         <button class="btn-copy" onclick="copyLink('/i2pseeds.su3?netid=2')">Copy URL</button>
-      </div>
-    </div>
-
-    <div class="card download-card">
-      <div>
-        <div class="download-header">
-          <h3>IVNP High-Speed Binary (IVBS)</h3>
-          <span class="fmt-pill fmt-ivbs">Zero-Alloc / Ed25519</span>
-        </div>
-        <p class="download-meta">Optimized zero-allocation wire stream designed for IVNP nodes with instant memory-mapped verification.</p>
-        <div style="font-size: 0.85rem; margin-bottom: 12px; color: #d1d5db;">
-          Peers: <strong id="ivbs-peers">-</strong> | Archive Size: <strong id="ivbs-size">- KB</strong>
-        </div>
-      </div>
-      <div class="download-actions">
-        <a href="/ivnpseeds.bin?netid=2" id="btn-dl-ivbs" class="btn-dl" style="background: #9333ea;">Download IVBS</a>
-        <button class="btn-copy" onclick="copyLink('/ivnpseeds.bin?netid=2')">Copy URL</button>
       </div>
     </div>
   </section>
@@ -541,17 +523,13 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       // Package info
       const pkgPeers = data.package ? data.package.peer_count : (data.published_peers || 0);
       document.getElementById('su3-peers').textContent = pkgPeers;
-      document.getElementById('ivbs-peers').textContent = pkgPeers;
 
       const su3Size = data.package && data.package.su3_size_bytes ? (data.package.su3_size_bytes / 1024).toFixed(1) : '0';
-      const ivbsSize = data.package && data.package.ivbs_size_bytes ? (data.package.ivbs_size_bytes / 1024).toFixed(1) : '0';
       document.getElementById('su3-size').textContent = su3Size + ' KB';
-      document.getElementById('ivbs-size').textContent = ivbsSize + ' KB';
 
       // Update download links with netid
       const netid = data.network_id || 2;
       document.getElementById('btn-dl-su3').href = '/i2pseeds.su3?netid=' + netid;
-      document.getElementById('btn-dl-ivbs').href = '/ivnpseeds.bin?netid=' + netid;
 
       // Latency table
       if (data.rtt) {

@@ -245,6 +245,7 @@ var (
 	ErrStateConflict                                         = noderuntime.ErrStateConflict
 	ErrTooManyDestinations                                   = noderuntime.ErrTooManyDestinations
 	ErrTunnelProbeUnavailable                                = noderuntime.ErrTunnelProbeUnavailable
+	ErrExplorationUnavailable                                = noderuntime.ErrExplorationUnavailable
 	NetworkAddressTranslationPortMappingErrGatewayRequired   = natpmp.ErrGatewayRequired
 	NetworkAddressTranslationPortMappingErrInvalidRequest    = natpmp.ErrInvalidRequest
 	NetworkAddressTranslationPortMappingErrMalformedResponse = natpmp.ErrMalformedResponse

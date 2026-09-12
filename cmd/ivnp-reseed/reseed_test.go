@@ -300,43 +300,42 @@ func TestPackagerSU3AndVerify(t *testing.T) {
 	}
 }
 
-func TestPackagerIVBSAndParse(t *testing.T) {
-	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
+func TestTreeExplorationTargets(t *testing.T) {
+	target0 := generatePrefixTarget(0x42, 0x00)
+	if target0[0] != 0x42 {
+		t.Fatalf("target0[0] = 0x%02x, want 0x42", target0[0])
+	}
+	if target0[1]&0x80 != 0 {
+		t.Fatalf("target0[1] bit 7 = 1, want 0 for subBranch 0x00")
 	}
 
+	target1 := generatePrefixTarget(0x42, 0x80)
+	if target1[0] != 0x42 {
+		t.Fatalf("target1[0] = 0x%02x, want 0x42", target1[0])
+	}
+	if target1[1]&0x80 == 0 {
+		t.Fatalf("target1[1] bit 7 = 0, want 1 for subBranch 0x80")
+	}
+
+	store := NewPeerStore()
 	info1, raw1 := createTestRouterInfo(t, "f")
-	info2, raw2 := createTestRouterInfo(t, "L")
-	peers := []PeerRecord{
-		{Hash: info1.Hash(), Raw: raw1},
-		{Hash: info2.Hash(), Raw: raw2},
+	store.AddOrUpdate(info1, raw1)
+
+	dist := store.BucketDistribution()
+	if dist[info1.Hash()[0]] != 1 {
+		t.Fatalf("dist[%d] = %d, want 1", info1.Hash()[0], dist[info1.Hash()[0]])
+	}
+	if store.ReachableCount() != 1 {
+		t.Fatalf("ReachableCount = %d, want 1", store.ReachableCount())
 	}
 
-	now := time.Now()
-	ivbsBytes, err := BuildIVBS(peers, 2, privKey, now)
+	crawler := NewActiveCrawler(store)
+	dispatched, err := crawler.TreeExplore(context.Background(), nil, 16)
 	if err != nil {
-		t.Fatalf("BuildIVBS: %v", err)
+		t.Fatalf("TreeExplore with nil subsystem error: %v", err)
 	}
-
-	parsed, err := ParseIVBS(ivbsBytes, pubKey)
-	if err != nil {
-		t.Fatalf("ParseIVBS: %v", err)
-	}
-	if len(parsed) != 2 {
-		t.Fatalf("parsed %d RouterInfos, want 2", len(parsed))
-	}
-	if parsed[0].Hash() != info1.Hash() {
-		t.Fatalf("parsed[0] hash mismatch")
-	}
-	if parsed[1].Hash() != info2.Hash() {
-		t.Fatalf("parsed[1] hash mismatch")
-	}
-
-	tampered := bytes.Clone(ivbsBytes)
-	tampered[len(tampered)-1] ^= 0xff
-	if _, err := ParseIVBS(tampered, pubKey); err == nil {
-		t.Fatal("expected signature verification failure on tampered data")
+	if dispatched != 0 {
+		t.Fatalf("TreeExplore with nil subsystem dispatched = %d, want 0", dispatched)
 	}
 }
 
@@ -355,7 +354,6 @@ func TestReseedServer(t *testing.T) {
 		GeneratedAt: time.Now(),
 		PeerCount:   1,
 		SU3Data:     []byte("mock-su3-archive"),
-		IVBSData:    []byte("mock-ivbs-archive"),
 		ETag:        `"mock-etag"`,
 	})
 
@@ -371,13 +369,6 @@ func TestReseedServer(t *testing.T) {
 	server.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/i2pseeds.su3 code = %d, want 200", rec.Code)
-	}
-
-	req = httptest.NewRequest(http.MethodGet, "/ivnpseeds.bin?netid=2", nil)
-	rec = httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("/ivnpseeds.bin code = %d, want 200", rec.Code)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/stats", nil)

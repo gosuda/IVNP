@@ -40,6 +40,7 @@ var (
 	ErrDuplicateDestination   = errors.New("daemon: duplicate destination identity")
 	ErrReseedUnavailable      = errors.New("daemon: reseed is unavailable")
 	ErrTunnelProbeUnavailable = errors.New("daemon: tunnel probe is unavailable")
+	ErrExplorationUnavailable = errors.New("daemon: exploration is unavailable")
 	ErrStateConflict          = errors.New("router: persistent state conflicts with embedded ownership")
 )
 
@@ -1891,6 +1892,25 @@ func (d *Controller) TriggerTunnelProbe(ctx context.Context) error {
 		return ErrTunnelProbeUnavailable
 	}
 	_, err := health.Probe(ctx, pair, foundation.Hash{})
+	return err
+}
+
+// TriggerExplore starts one bounded exploratory DHT lookup for target.
+func (d *Controller) TriggerExplore(ctx context.Context, target foundation.Hash) error {
+	if d == nil {
+		return net.ErrClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	d.mu.Lock()
+	available := d.started && !d.closed && d.requests != nil
+	requests := d.requests
+	d.mu.Unlock()
+	if !available {
+		return ErrExplorationUnavailable
+	}
+	_, err := requests.Explore(ctx, target)
 	return err
 }
 

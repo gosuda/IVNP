@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto"
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha512"
@@ -23,14 +22,11 @@ const (
 	su3MinimumVersion    = 16
 	su3FileTypeZIP       = 0
 	su3ContentTypeReseed = 3
-	ivbsMagic            = "IVBS"
-	ivbsVersion          = 1
 )
 
 var (
 	ErrInvalidPrivateKey = errors.New("packager: invalid private key")
 	ErrInvalidSignerID   = errors.New("packager: invalid signer ID length")
-	ErrMalformedIVBS     = errors.New("packager: malformed IVBS archive")
 	ErrInvalidSignature  = errors.New("packager: invalid archive signature")
 )
 
@@ -99,83 +95,4 @@ func BuildSU3(peers []PeerRecord, signerID string, privKey *rsa.PrivateKey, now 
 
 	signedPortion.Write(signature)
 	return signedPortion.Bytes(), nil
-}
-
-// BuildIVBS packages peers into IVNP's zero-allocation binary format signed with Ed25519.
-func BuildIVBS(peers []PeerRecord, networkID uint8, privKey ed25519.PrivateKey, now time.Time) ([]byte, error) {
-	if len(privKey) != ed25519.PrivateKeySize {
-		return nil, ErrInvalidPrivateKey
-	}
-
-	var buf bytes.Buffer
-	// Header: Magic(4) + Version(2) + NetworkID(1) + Flags(1) + Timestamp(8) + Count(2) = 18 bytes
-	buf.WriteString(ivbsMagic)
-	var numBuf [8]byte
-	binary.BigEndian.PutUint16(numBuf[:2], ivbsVersion)
-	buf.Write(numBuf[:2])
-	buf.WriteByte(networkID)
-	buf.WriteByte(0) // Flags: uncompressed
-	binary.BigEndian.PutUint64(numBuf[:8], uint64(now.UnixMilli()))
-	buf.Write(numBuf[:8])
-	binary.BigEndian.PutUint16(numBuf[:2], uint16(len(peers)))
-	buf.Write(numBuf[:2])
-
-	// RouterInfo entries
-	for _, p := range peers {
-		binary.BigEndian.PutUint16(numBuf[:2], uint16(len(p.Raw)))
-		buf.Write(numBuf[:2])
-		buf.Write(p.Raw)
-	}
-
-	// Sign payload with Ed25519
-	payload := buf.Bytes()
-	signature := ed25519.Sign(privKey, payload)
-	buf.Write(signature)
-
-	return buf.Bytes(), nil
-}
-
-// ParseIVBS parses and verifies an IVBS archive using the server's Ed25519 public key.
-func ParseIVBS(data []byte, pubKey ed25519.PublicKey) ([]foundation.NetworkDatabaseRouterInfo, error) {
-	const headerLen = 18
-	const sigLen = ed25519.SignatureSize
-	if len(data) < headerLen+sigLen {
-		return nil, ErrMalformedIVBS
-	}
-	if string(data[:4]) != ivbsMagic {
-		return nil, ErrMalformedIVBS
-	}
-
-	payloadLen := len(data) - sigLen
-	payload := data[:payloadLen]
-	signature := data[payloadLen:]
-
-	if !ed25519.Verify(pubKey, payload, signature) {
-		return nil, ErrInvalidSignature
-	}
-
-	count := int(binary.BigEndian.Uint16(payload[16:18]))
-	offset := headerLen
-	results := make([]foundation.NetworkDatabaseRouterInfo, 0, count)
-
-	for i := 0; i < count; i++ {
-		if offset+2 > payloadLen {
-			return nil, ErrMalformedIVBS
-		}
-		itemLen := int(binary.BigEndian.Uint16(payload[offset : offset+2]))
-		offset += 2
-		if offset+itemLen > payloadLen {
-			return nil, ErrMalformedIVBS
-		}
-		raw := payload[offset : offset+itemLen]
-		offset += itemLen
-
-		info, err := foundation.NetworkDatabaseParseRouterInfo(raw)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, info)
-	}
-
-	return results, nil
 }

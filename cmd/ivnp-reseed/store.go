@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,10 +35,23 @@ func (s *PeerStore) Len() int {
 }
 
 func (s *PeerStore) AddOrUpdate(info foundation.NetworkDatabaseRouterInfo, raw []byte) (*PeerRecord, bool) {
+	return s.AddOrUpdateWithSeen(info, raw, 0)
+}
+
+func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInfo, raw []byte, seenAt uint64) (*PeerRecord, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	hash := info.Hash()
+	now := time.Now()
+	lastSeen := now
+	if seenAt > 0 {
+		seenTime := time.UnixMilli(int64(seenAt))
+		if seenTime.After(lastSeen) {
+			lastSeen = seenTime
+		}
+	}
+
 	existing, found := s.peers[hash]
 	if !found {
 		// Enforce bounded memory: prune lowest score peer if at max capacity
@@ -45,7 +59,7 @@ func (s *PeerStore) AddOrUpdate(info foundation.NetworkDatabaseRouterInfo, raw [
 			s.evictWorstLocked()
 		}
 
-		family, v4, v6, ports := extractRouterAddresses(info)
+		family, v4, v6, ports, tcpPorts, udpPorts := extractRouterAddresses(info)
 		rec := &PeerRecord{
 			Hash:        hash,
 			Raw:         bytes.Clone(raw),
@@ -55,28 +69,64 @@ func (s *PeerStore) AddOrUpdate(info foundation.NetworkDatabaseRouterInfo, raw [
 			IPv4:        v4,
 			IPv6:        v6,
 			Ports:       ports,
+			TCPPorts:    tcpPorts,
+			UDPPorts:    udpPorts,
 			Stats: PeerStats{
-				LastSeen: time.Now(),
+				LastSeen: lastSeen,
 			},
+		}
+		if now.Sub(lastSeen) < 2*time.Hour {
+			rec.Stats.IsReachable = true
 		}
 		rec.Score = calculateScore(rec)
 		s.peers[hash] = rec
 		return rec, true
 	}
 
+	if lastSeen.After(existing.Stats.LastSeen) {
+		existing.Stats.LastSeen = lastSeen
+		if now.Sub(lastSeen) < 2*time.Hour && existing.Stats.ConsecutiveFails == 0 {
+			existing.Stats.IsReachable = true
+		}
+	}
+
 	// Update existing record if newer published date
 	if published := time.UnixMilli(int64(info.Published)); published.After(existing.PublishedAt) {
 		existing.PublishedAt = published
 		existing.Raw = bytes.Clone(raw)
-		family, v4, v6, ports := extractRouterAddresses(info)
+		family, v4, v6, ports, tcpPorts, udpPorts := extractRouterAddresses(info)
 		existing.Family = family
 		existing.IPv4 = v4
 		existing.IPv6 = v6
 		existing.Ports = ports
+		existing.TCPPorts = tcpPorts
+		existing.UDPPorts = udpPorts
 		existing.IsFloodfill = foundation.NetworkDatabaseIsFloodfill(info)
 	}
 	existing.Score = calculateScore(existing)
 	return existing, false
+}
+
+func (s *PeerStore) ReachableCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	count := 0
+	for _, rec := range s.peers {
+		if rec.Stats.IsReachable {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *PeerStore) BucketDistribution() [256]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var dist [256]int
+	for _, rec := range s.peers {
+		dist[rec.Hash[0]]++
+	}
+	return dist
 }
 
 func (s *PeerStore) evictWorstLocked() {
@@ -228,11 +278,13 @@ func calculateScore(rec *PeerRecord) float64 {
 	return score
 }
 
-func extractRouterAddresses(info foundation.NetworkDatabaseRouterInfo) (string, []netip.Addr, []netip.Addr, []uint16) {
+func extractRouterAddresses(info foundation.NetworkDatabaseRouterInfo) (string, []netip.Addr, []netip.Addr, []uint16, []uint16, []uint16) {
 	family := extractFamily(info)
 	var v4 []netip.Addr
 	var v6 []netip.Addr
 	var ports []uint16
+	var tcpPorts []uint16
+	var udpPorts []uint16
 
 	addresses := info.Addresses()
 	for {
@@ -251,9 +303,15 @@ func extractRouterAddresses(info foundation.NetworkDatabaseRouterInfo) (string, 
 		}
 		if port > 0 {
 			ports = append(ports, port)
+			style := strings.ToUpper(string(address.TransportStyle))
+			if strings.HasPrefix(style, "NTCP") {
+				tcpPorts = append(tcpPorts, port)
+			} else if strings.HasPrefix(style, "SSU") {
+				udpPorts = append(udpPorts, port)
+			}
 		}
 	}
-	return family, v4, v6, ports
+	return family, v4, v6, ports, tcpPorts, udpPorts
 }
 
 func extractFamily(info foundation.NetworkDatabaseRouterInfo) string {
