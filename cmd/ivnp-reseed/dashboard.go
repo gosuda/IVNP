@@ -22,681 +22,786 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>IVNP Reseed Indexer & Network Monitor</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IVNP Reseed</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
-    /* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5 */
+    /* Hallmark · genre: modern-minimal · macrostructure: Stat-Led · theme: Cobalt
+     * H4 knobs: number=tabular display, qualifier=below, secondary=row of four
+     * nav: N9 edge-aligned · footer: Ft2 inline · enrichment: none
+     * pre-emit critique: P5 H4 E5 S4 R5 V4 */
     :root {
-      --bg: #080c14;
-      --card-bg: #0e1422;
-      --card-border: #1b2434;
-      --card-hover: #141c2e;
-      --text-main: #f1f5f9;
-      --text-muted: #8896ab;
-      --primary: #38bdf8;
-      --accent: #10b981;
-      --warning: #f59e0b;
-      --danger: #ef4444;
-      --purple: #a855f7;
+      --color-paper: oklch(98.5% 0.004 250);
+      --color-paper-2: oklch(96% 0.007 250);
+      --color-ink: oklch(24% 0.02 258);
+      --color-ink-2: oklch(34% 0.018 257);
+      --color-muted: oklch(50% 0.014 257);
+      --color-rule: oklch(89% 0.008 254);
+      --color-rule-2: oklch(82% 0.010 254);
+      --color-accent: oklch(55% 0.20 256);
+      --color-accent-ink: oklch(99% 0.003 256);
+      --color-focus: oklch(55% 0.20 256);
+      --color-graphite: oklch(23% 0.016 260);
+      --color-graphite-2: oklch(30% 0.014 260);
+      --color-graphite-ink: oklch(93% 0.006 258);
+      --color-graphite-muted: oklch(66% 0.012 258);
+      --color-ok: oklch(58% 0.16 160);
+
+      --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+      --font-body: "Inter", ui-sans-serif, system-ui, sans-serif;
+      --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+      --space-2xs: 0.25rem;
+      --space-xs: 0.5rem;
+      --space-sm: 0.75rem;
+      --space-md: 1rem;
+      --space-lg: 1.5rem;
+      --space-xl: 2.5rem;
+      --space-2xl: 4rem;
+      --space-3xl: 6rem;
+
+      --text-xs: 0.75rem;
+      --text-sm: 0.875rem;
+      --text-base: 1rem;
+      --text-md: 1.25rem;
+      --text-lg: 1.5625rem;
+      --text-figure: clamp(3.5rem, 8vw + 1rem, 6rem);
+
+      --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+      --dur-micro: 120ms;
+      --dur-short: 220ms;
+
+      --z-tooltip: 600;
+      --z-toast: 500;
+      --z-sticky: 200;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body {
-      overflow-x: clip;
-    }
+    html, body { overflow-x: clip; }
     body {
-      background-color: var(--bg);
-      color: var(--text-main);
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--color-paper);
+      color: var(--color-ink-2);
+      font-family: var(--font-body);
+      font-weight: 400;
+      font-size: var(--text-base);
+      line-height: 1.55;
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
-      line-height: 1.5;
-      padding: 24px;
-      max-width: 1280px;
-      margin: 0 auto;
     }
-    header {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: space-between;
-      align-items: center;
-      gap: 16px;
-      margin-bottom: 28px;
-      padding-bottom: 20px;
-      border-bottom: 1px solid var(--card-border);
+    code {
+      font-family: var(--font-mono);
+      font-size: 0.82em;
+      background: var(--color-paper-2);
+      border: 1px solid var(--color-rule);
+      border-radius: 4px;
+      padding: 0.1em 0.4em;
+      color: var(--color-ink);
+      word-break: break-all;
     }
-    .header-left h1 {
-      font-size: 1.65rem;
-      font-weight: 700;
-      letter-spacing: -0.025em;
-      color: #fff;
-      display: flex;
-      align-items: center;
-      gap: 10px;
+    h1, h2, h3 {
+      font-family: var(--font-display);
+      font-weight: 600;
+      color: var(--color-ink);
+      letter-spacing: -0.02em;
+      line-height: 1.15;
       font-style: normal;
+      overflow-wrap: anywhere;
+      min-width: 0;
     }
-    .header-left p {
-      color: var(--text-muted);
-      font-size: 0.9rem;
-      margin-top: 4px;
+    .mono {
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
     }
-    .status-badges {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .badge {
+    .btn {
+      font-family: var(--font-body);
+      font-size: var(--text-sm);
+      font-weight: 500;
+      border-radius: 6px;
+      padding: 0.55rem 1rem;
+      cursor: pointer;
+      text-decoration: none;
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 6px;
-      padding: 6px 12px;
-      border-radius: 9999px;
-      font-size: 0.8rem;
-      font-weight: 600;
-      background: #151d2f;
-      color: var(--text-main);
-      border: 1px solid var(--card-border);
-      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      border: 1px solid transparent;
+      transition: background-color var(--dur-short) var(--ease-out),
+                  border-color var(--dur-short) var(--ease-out),
+                  color var(--dur-short) var(--ease-out),
+                  transform var(--dur-micro) var(--ease-out);
     }
-    .badge-live {
-      background: rgba(16, 185, 129, 0.1);
-      color: #34d399;
-      border-color: rgba(16, 185, 129, 0.25);
-    }
-    .live-pip {
-      width: 7px;
-      height: 7px;
-      background-color: #10b981;
-      border-radius: 50%;
-      display: inline-block;
-      flex-shrink: 0;
-    }
-    .btn-toggle {
-      background: #151d2f;
-      color: var(--text-main);
-      border: 1px solid var(--card-border);
-      padding: 6px 12px;
-      border-radius: 6px;
-      font-size: 0.8rem;
-      font-weight: 600;
-      cursor: pointer;
-      font-variant-numeric: tabular-nums;
-      transition: background 0.15s ease, border-color 0.15s ease;
-    }
-    .btn-toggle:hover {
-      background: #1e293b;
-      border-color: #334155;
-    }
-    .btn-toggle:focus-visible,
-    .btn-dl:focus-visible,
-    .btn-copy:focus-visible {
-      outline: 2px solid var(--primary);
+    .btn:active { transform: translateY(1px); }
+    .btn:focus-visible {
+      outline: 2px solid var(--color-focus);
       outline-offset: 2px;
     }
-    .btn-toggle:active,
-    .btn-dl:active,
-    .btn-copy:active {
-      transform: translateY(1px);
+    .btn-primary {
+      background: var(--color-accent);
+      color: var(--color-accent-ink);
+      border-color: var(--color-accent);
     }
-    .grid-kpi {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
-      gap: 16px;
-      margin-bottom: 24px;
+    .btn-primary:hover { background: oklch(50% 0.21 256); }
+    .btn-outline {
+      background: transparent;
+      color: var(--color-ink);
+      border-color: var(--color-rule-2);
     }
-    .card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 8px;
-      padding: 20px;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-      transition: border-color 0.15s ease, background 0.15s ease;
+    .btn-outline:hover { border-color: var(--color-accent); color: var(--color-accent); }
+    .btn-ghost {
+      background: transparent;
+      color: var(--color-ink-2);
+      border-color: var(--color-rule-2);
     }
-    .card:hover {
-      background: var(--card-hover);
-      border-color: #2a374e;
+    .btn-ghost:hover { background: var(--color-paper-2); color: var(--color-ink); }
+    .btn-ghost-dark {
+      background: transparent;
+      color: var(--color-graphite-ink);
+      border-color: var(--color-graphite-2);
     }
-    .card-title {
-      font-size: 0.78rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--text-muted);
-      font-weight: 600;
-      margin-bottom: 8px;
-      font-style: normal;
+    .btn-ghost-dark:hover { border-color: var(--color-graphite-muted); }
+    .btn.is-disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      pointer-events: none;
     }
-    .card-value {
-      font-size: 1.85rem;
-      font-weight: 700;
-      color: #fff;
-      line-height: 1.1;
-      font-variant-numeric: tabular-nums;
-      font-feature-settings: "tnum";
-    }
-    .card-sub {
-      margin-top: 6px;
-      font-size: 0.8rem;
-      color: var(--text-muted);
-      font-variant-numeric: tabular-nums;
-    }
-    .section-title {
-      font-size: 1.15rem;
-      font-weight: 600;
-      color: #fff;
-      margin-bottom: 14px;
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: var(--z-sticky);
       display: flex;
       align-items: center;
-      gap: 8px;
-      font-style: normal;
-    }
-    .downloads-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
-      gap: 16px;
-      margin-bottom: 28px;
-    }
-    @media (min-width: 1080px) {
-      .downloads-grid {
-        grid-template-columns: 1.85fr 1fr;
-      }
-    }
-    .download-card {
-      display: flex;
-      flex-direction: column;
       justify-content: space-between;
+      gap: var(--space-md);
+      flex-wrap: wrap;
+      padding: var(--space-md) clamp(1rem, 4vw, 3rem);
+      border-bottom: 1px solid var(--color-rule);
+      background: oklch(98.5% 0.004 250 / 0.85);
+      backdrop-filter: blur(8px);
     }
-    .su3-layout {
+    .wordmark {
+      font-family: var(--font-display);
+      font-weight: 600;
+      font-size: 1.05rem;
+      letter-spacing: -0.01em;
+      color: var(--color-ink);
+      text-decoration: none;
+    }
+    .wordmark-sep { color: var(--color-accent); margin: 0 0.3em; }
+    .topbar-status {
+      display: flex;
+      align-items: center;
+      gap: var(--space-sm);
+      flex-wrap: wrap;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--color-ink-2);
+      border: 1px solid var(--color-rule);
+      border-radius: 999px;
+      padding: 4px 10px;
+    }
+    .pip {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--color-ok);
+      flex-shrink: 0;
+    }
+    .status-pill.is-paused .pip { background: var(--color-muted); }
+    .meta-mono {
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      letter-spacing: 0.04em;
+      color: var(--color-muted);
+      font-variant-numeric: tabular-nums;
+    }
+    #btn-refresh-toggle { padding: 0.3rem 0.7rem; font-size: var(--text-xs); }
+
+    main {
+      max-width: 72rem;
+      margin: 0 auto;
+      padding: 0 clamp(1rem, 4vw, 3rem) var(--space-3xl);
+    }
+
+    .hero {
       display: grid;
       grid-template-columns: 1fr;
-      gap: 20px;
-      height: 100%;
+      gap: var(--space-xl);
+      padding: var(--space-2xl) 0 var(--space-xl);
+      align-items: end;
     }
-    @media (min-width: 680px) {
-      .su3-layout {
-        grid-template-columns: 240px 1fr;
-      }
+    @media (min-width: 60rem) {
+      .hero { grid-template-columns: 1.15fr minmax(0, 1fr); }
     }
-    .su3-left {
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
+    .hero-title {
+      font-size: var(--text-md);
+      font-weight: 500;
+      color: var(--color-muted);
+      margin-bottom: var(--space-sm);
     }
-    .su3-right {
-      border-top: 1px solid var(--card-border);
-      padding-top: 16px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    @media (min-width: 680px) {
-      .su3-right {
-        border-top: none;
-        border-left: 1px solid var(--card-border);
-        padding-top: 0;
-        padding-left: 20px;
-      }
-    }
-    .method-box {
-      background: rgba(13, 19, 31, 0.7);
-      border: 1px solid var(--card-border);
-      border-radius: 6px;
-      padding: 10px 12px;
-    }
-    .method-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      margin-bottom: 4px;
-      color: var(--primary);
+    .hero-figure {
+      font-family: var(--font-display);
       font-weight: 600;
-      font-size: 0.76rem;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
+      font-size: var(--text-figure);
+      line-height: 1;
+      letter-spacing: -0.03em;
+      color: var(--color-ink);
+      font-variant-numeric: tabular-nums;
     }
-    .method-text {
-      color: var(--text-muted);
-      line-height: 1.4;
-      font-size: 0.76rem;
+    .hero-qualifier {
+      margin-top: var(--space-sm);
+      font-size: var(--text-md);
+      color: var(--color-ink-2);
+      max-width: 34ch;
     }
-    .pkg-stats-grid {
+    .stat-strip {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr));
-      gap: 10px;
+      grid-template-columns: repeat(2, 1fr);
+      gap: var(--space-md) var(--space-lg);
+      margin-top: var(--space-xl);
+      padding-top: var(--space-lg);
+      border-top: 1px solid var(--color-rule);
     }
-    .pkg-stat-item {
-      background: rgba(21, 29, 47, 0.4);
-      border: 1px solid var(--card-border);
-      border-radius: 6px;
-      padding: 10px;
+    @media (min-width: 40rem) {
+      .stat-strip { grid-template-columns: repeat(4, 1fr); }
     }
-    .pkg-stat-label {
-      font-size: 0.7rem;
+    .stat dt {
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      letter-spacing: 0.06em;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
-      color: var(--text-muted);
-      font-weight: 600;
+      color: var(--color-muted);
       margin-bottom: 4px;
     }
-    .pkg-stat-val {
-      font-size: 1.25rem;
-      font-weight: 700;
-      color: #fff;
-      line-height: 1.1;
+    .stat dd {
+      font-family: var(--font-display);
+      font-size: var(--text-lg);
+      font-weight: 600;
+      color: var(--color-ink);
       font-variant-numeric: tabular-nums;
-      font-feature-settings: "tnum";
+      line-height: 1.2;
     }
-    .pkg-stat-sub {
-      font-size: 0.72rem;
-      color: var(--text-muted);
-      margin-top: 4px;
-      font-variant-numeric: tabular-nums;
+    .stat dd small {
+      font-family: var(--font-body);
+      font-size: var(--text-xs);
+      font-weight: 400;
+      color: var(--color-muted);
     }
-    .ip-ratio-bar {
-      height: 6px;
-      background: #1b2434;
-      border-radius: 9999px;
-      overflow: hidden;
-      display: flex;
-      margin-top: 6px;
+
+    .artifact {
+      background: var(--color-graphite);
+      color: var(--color-graphite-ink);
+      border-radius: 10px;
+      padding: var(--space-lg);
+      box-shadow: 0 1px 2px oklch(24% 0.02 258 / 0.08);
+      min-width: 0;
     }
-    .ip-ratio-bar-dual { background: #10b981; transition: width 0.3s ease; }
-    .ip-ratio-bar-v4 { background: #38bdf8; transition: width 0.3s ease; }
-    .ip-ratio-bar-v6 { background: #a855f7; transition: width 0.3s ease; }
-    .download-header {
+    .artifact-label {
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--color-graphite-muted);
+    }
+    .artifact-name {
+      font-family: var(--font-mono);
+      font-size: var(--text-md);
+      font-weight: 500;
+      color: var(--color-graphite-ink);
+      margin-top: var(--space-2xs);
+      word-break: break-all;
+    }
+    .artifact-meta {
+      margin: var(--space-md) 0;
+      border-top: 1px solid var(--color-graphite-2);
+    }
+    .artifact-meta > div {
       display: flex;
       justify-content: space-between;
-      align-items: flex-start;
-      margin-bottom: 12px;
+      align-items: baseline;
+      gap: var(--space-md);
+      padding: var(--space-xs) 0;
+      border-bottom: 1px solid var(--color-graphite-2);
     }
-    .download-header h3 {
-      font-size: 1.05rem;
-      font-weight: 600;
-      color: #fff;
-      font-style: normal;
+    .artifact-meta dt {
+      font-size: var(--text-sm);
+      color: var(--color-graphite-muted);
     }
-    .fmt-pill {
-      font-size: 0.72rem;
-      font-weight: 700;
-      padding: 3px 8px;
-      border-radius: 4px;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
+    .artifact-meta dd {
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      color: var(--color-graphite-ink);
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
-    .fmt-su3 { background: rgba(56, 189, 248, 0.12); color: var(--primary); border: 1px solid rgba(56, 189, 248, 0.25); }
-    .download-meta {
-      font-size: 0.82rem;
-      color: var(--text-muted);
-      margin-bottom: 16px;
-    }
-    .download-actions {
+    .artifact-actions {
       display: flex;
-      gap: 10px;
+      gap: var(--space-sm);
+      flex-wrap: wrap;
     }
-    .btn-dl {
-      flex: 1;
-      text-align: center;
-      background: #1d4ed8;
-      color: #fff;
-      text-decoration: none;
-      font-weight: 600;
-      font-size: 0.85rem;
-      padding: 10px 16px;
-      border-radius: 6px;
-      border: 1px solid #2563eb;
-      transition: background 0.15s ease, border-color 0.15s ease;
+    .artifact-actions .btn { flex: 1; min-width: 8rem; }
+
+    section { padding-top: var(--space-2xl); }
+    .section-title {
+      font-size: var(--text-lg);
+      margin-bottom: var(--space-sm);
+    }
+    .section-note {
+      color: var(--color-muted);
+      font-size: var(--text-sm);
+      max-width: 65ch;
+      margin-bottom: var(--space-lg);
+    }
+
+    .setup-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: var(--space-lg);
+    }
+    @media (min-width: 60rem) {
+      .setup-grid { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.4fr); }
+    }
+    .card {
+      background: var(--color-paper);
+      border: 1px solid var(--color-rule);
+      border-radius: 10px;
+      padding: var(--space-lg);
+      min-width: 0;
+    }
+    .card-label {
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--color-muted);
+    }
+    .card-value-mono {
+      display: block;
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      color: var(--color-ink);
+      margin-top: var(--space-2xs);
+      word-break: break-all;
+    }
+    .card-note {
+      font-size: var(--text-sm);
+      color: var(--color-ink-2);
+      margin: var(--space-sm) 0;
+    }
+    .cert-meta {
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      color: var(--color-muted);
+      margin-bottom: var(--space-md);
+    }
+    .card-actions {
+      display: flex;
+      gap: var(--space-sm);
+      flex-wrap: wrap;
+    }
+
+    .tabs {
       display: inline-flex;
-      justify-content: center;
-      align-items: center;
-      gap: 6px;
+      gap: 2px;
+      background: var(--color-paper-2);
+      border: 1px solid var(--color-rule);
+      border-radius: 8px;
+      padding: 3px;
+      margin-bottom: var(--space-md);
     }
-    .btn-dl:hover { background: #1e40af; border-color: #1d4ed8; }
-    .btn-copy {
-      background: #151d2f;
-      color: var(--text-main);
-      border: 1px solid var(--card-border);
-      padding: 10px 14px;
+    .tab {
+      font-family: var(--font-body);
+      font-size: var(--text-sm);
+      font-weight: 500;
+      color: var(--color-muted);
+      background: transparent;
+      border: none;
       border-radius: 6px;
-      font-size: 0.85rem;
-      font-weight: 600;
+      padding: 0.4rem 0.9rem;
       cursor: pointer;
-      transition: background 0.15s ease, border-color 0.15s ease;
+      white-space: nowrap;
+      transition: color var(--dur-short) var(--ease-out),
+                  background-color var(--dur-short) var(--ease-out);
     }
-    .btn-copy:hover { background: #1e293b; border-color: #334155; }
-    .heatmap-section {
-      margin-bottom: 28px;
+    .tab:hover { color: var(--color-ink); }
+    .tab:focus-visible {
+      outline: 2px solid var(--color-focus);
+      outline-offset: 2px;
     }
-    .heatmap-desc {
-      font-size: 0.85rem;
-      color: var(--text-muted);
-      margin-bottom: 12px;
+    .tab.is-active {
+      background: var(--color-paper);
+      color: var(--color-ink);
+      box-shadow: 0 1px 2px oklch(24% 0.02 258 / 0.08);
     }
+    .steps { display: none; }
+    .steps.is-active {
+      display: block;
+      animation: steps-in 150ms var(--ease-out);
+    }
+    @keyframes steps-in {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    .steps li {
+      font-size: var(--text-sm);
+      color: var(--color-ink-2);
+      margin-left: 1.2rem;
+      padding-left: var(--space-2xs);
+      margin-bottom: var(--space-sm);
+    }
+    .steps li::marker {
+      font-family: var(--font-mono);
+      color: var(--color-muted);
+    }
+    .url-row {
+      display: flex;
+      align-items: center;
+      gap: var(--space-sm);
+      margin-top: var(--space-md);
+      padding-top: var(--space-md);
+      border-top: 1px solid var(--color-rule);
+    }
+    .url-row .url-text {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      display: block;
+      padding: 0.45rem 0.7rem;
+    }
+    .url-row .btn { flex-shrink: 0; }
+
     .heatmap-grid {
       display: grid;
-      grid-template-columns: repeat(32, 1fr);
+      grid-template-columns: repeat(16, 1fr);
       gap: 3px;
-      background: #0d131f;
-      padding: 14px;
-      border-radius: 8px;
-      border: 1px solid var(--card-border);
+      border: 1px solid var(--color-rule);
+      border-radius: 10px;
+      padding: var(--space-md);
+      background: var(--color-paper);
+    }
+    @media (min-width: 60rem) {
+      .heatmap-grid { grid-template-columns: repeat(32, 1fr); }
     }
     .bucket-cell {
       aspect-ratio: 1;
       border-radius: 2px;
-      background: #151d2f;
-      cursor: pointer;
-      transition: transform 0.1s ease;
-      position: relative;
+      background: var(--color-paper-2);
     }
-    .bucket-cell:hover {
-      transform: scale(1.3);
-      z-index: 10;
-      outline: 1.5px solid var(--primary);
-      outline-offset: 1px;
+    @media (hover: hover) and (pointer: fine) {
+      .bucket-cell:hover {
+        outline: 1.5px solid var(--color-accent);
+        outline-offset: 1px;
+      }
     }
-    .analytics-grid {
+    .heatmap-legend {
+      display: flex;
+      align-items: center;
+      gap: var(--space-xs);
+      margin-top: var(--space-sm);
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      color: var(--color-muted);
+    }
+    .legend-chip {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+    }
+
+    .detail-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
-      gap: 16px;
-      margin-bottom: 28px;
+      grid-template-columns: 1fr;
+      column-gap: var(--space-2xl);
     }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.875rem;
+    @media (min-width: 40rem) {
+      .detail-grid { grid-template-columns: 1fr 1fr; }
     }
-    th, td {
-      padding: 10px 12px;
-      text-align: left;
-      border-bottom: 1px solid var(--card-border);
+    .detail-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: var(--space-md);
+      padding: var(--space-xs) 0;
+      border-bottom: 1px solid var(--color-rule);
     }
-    th {
-      color: var(--text-muted);
-      font-size: 0.78rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      font-style: normal;
+    .detail-row dt {
+      font-size: var(--text-sm);
+      color: var(--color-ink-2);
     }
-    td.val {
-      text-align: right;
-      font-weight: 600;
-      color: #fff;
+    .detail-row dd {
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      font-weight: 500;
+      color: var(--color-ink);
       font-variant-numeric: tabular-nums;
-      font-feature-settings: "tnum";
+      text-align: right;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
-    footer {
+
+    .footer {
+      max-width: 72rem;
+      margin: 0 auto;
+      padding: var(--space-lg) clamp(1rem, 4vw, 3rem) var(--space-xl);
+      border-top: 1px solid var(--color-rule);
       display: flex;
       flex-wrap: wrap;
       justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-      padding-top: 20px;
-      border-top: 1px solid var(--card-border);
-      font-size: 0.82rem;
-      color: var(--text-muted);
+      gap: var(--space-sm);
+      font-size: var(--text-xs);
+      color: var(--color-muted);
+      font-family: var(--font-mono);
     }
-    footer a { color: var(--primary); text-decoration: none; }
-    footer a:hover { text-decoration: underline; }
+    .footer a { color: var(--color-accent); text-decoration: none; }
+    .footer a:hover { text-decoration: underline; }
+    .footer a:focus-visible {
+      outline: 2px solid var(--color-focus);
+      outline-offset: 2px;
+    }
+
     #tooltip {
       position: fixed;
       display: none;
-      background: #0d131f;
-      color: #f1f5f9;
+      background: var(--color-graphite);
+      color: var(--color-graphite-ink);
       padding: 6px 10px;
       border-radius: 6px;
-      font-size: 0.75rem;
-      border: 1px solid var(--card-border);
-      pointer-events: none;
-      z-index: 100;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+      font-size: var(--text-xs);
+      font-family: var(--font-mono);
       font-variant-numeric: tabular-nums;
+      pointer-events: none;
+      z-index: var(--z-tooltip);
+      box-shadow: 0 4px 12px oklch(24% 0.02 258 / 0.25);
     }
     #toast {
       position: fixed;
       bottom: 24px;
       right: 24px;
-      background: #064e3b;
-      color: #34d399;
-      border: 1px solid #059669;
-      padding: 10px 18px;
+      background: var(--color-ink);
+      color: var(--color-paper);
+      padding: 10px 16px;
       border-radius: 6px;
-      font-size: 0.85rem;
-      font-weight: 600;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-      z-index: 2000;
+      font-size: var(--text-sm);
+      z-index: var(--z-toast);
       display: none;
-      transition: opacity 0.2s ease;
+      box-shadow: 0 4px 12px oklch(24% 0.02 258 / 0.25);
+    }
+
+    dialog {
+      position: fixed;
+      inset: 0;
+      margin: auto;
+      width: min(680px, calc(100% - 2rem));
+      height: fit-content;
+      max-height: min(85vh, 40rem);
+      border: 1px solid var(--color-rule);
+      border-radius: 10px;
+      padding: var(--space-lg);
+      background: var(--color-paper);
+      color: var(--color-ink-2);
+      display: flex;
+      flex-direction: column;
+    }
+    dialog:not([open]) { display: none; }
+    dialog::backdrop {
+      background: oklch(24% 0.02 258 / 0.45);
+    }
+    .modal-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: var(--space-md);
+      margin-bottom: var(--space-md);
+    }
+    .modal-head h3 { font-size: var(--text-md); }
+    #key-pem-display {
+      background: var(--color-graphite);
+      color: var(--color-graphite-ink);
+      border-radius: 8px;
+      padding: var(--space-md);
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      line-height: 1.5;
+      overflow-y: auto;
+      flex: 1;
+      min-height: 10rem;
+      white-space: pre-wrap;
+      word-break: break-all;
+      user-select: all;
+      margin: var(--space-md) 0;
+    }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: var(--space-sm);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 150ms !important;
+        transition-duration: 150ms !important;
+      }
     }
   </style>
 </head>
 <body>
 
-  <header>
-    <div class="header-left">
-      <h1>
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="10"></circle>
-          <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"></path>
-          <path d="M2 12h20"></path>
-        </svg>
-        IVNP Reseed Indexer
-      </h1>
-      <p>Continuous I2P Network DHT Crawler & Accessible Floodfill Reseed Service</p>
-    </div>
-    <div class="status-badges">
-      <span class="badge badge-live">
-        <span class="live-pip"></span>
-        ACTIVE CRAWLER
-      </span>
-      <span class="badge" id="badge-mode" style="text-transform: uppercase; color: #38bdf8;">Mode: EXPANSION</span>
-      <span class="badge" id="badge-netid">NetID: 2</span>
-      <span class="badge" id="badge-uptime">Uptime: 0s</span>
-      <button class="btn-toggle" id="btn-refresh-toggle" onclick="toggleAutoRefresh()">Auto-refresh: ON (3s)</button>
+  <header class="topbar">
+    <a class="wordmark" href="/">IVNP<span class="wordmark-sep">/</span>Reseed</a>
+    <div class="topbar-status">
+      <span class="status-pill" id="status-live"><span class="pip"></span>Live</span>
+      <span class="meta-mono" id="badge-mode">—</span>
+      <span class="meta-mono" id="badge-uptime" title="Uptime">—</span>
+      <button class="btn btn-ghost" id="btn-refresh-toggle">Pause</button>
     </div>
   </header>
 
-  <!-- Key Metrics Row -->
-  <section class="grid-kpi">
-    <div class="card">
-      <div class="card-title">Total Indexed Peers</div>
-      <div class="card-value" id="kpi-total-peers">-</div>
-      <div class="card-sub">Bounded memory store (max 5,000)</div>
-    </div>
-    <div class="card">
-      <div class="card-title">Directly Reachable</div>
-      <div class="card-value" style="color: #34d399;" id="kpi-reachable-peers">-</div>
-      <div class="card-sub" id="kpi-reachable-ratio">Health ratio: -%</div>
-    </div>
-    <div class="card">
-      <div class="card-title">Accessible Floodfills</div>
-      <div class="card-value" style="color: #38bdf8;" id="kpi-floodfill-peers">-</div>
-      <div class="card-sub" id="kpi-floodfill-ratio">Reseed quota: ≥35%</div>
-    </div>
-    <div class="card">
-      <div class="card-title">256 K-Bucket Coverage</div>
-      <div class="card-value" style="color: #a855f7;" id="kpi-bucket-coverage">-</div>
-      <div class="card-sub" id="kpi-bucket-detail">- / 256 buckets active</div>
-    </div>
-    <div class="card">
-      <div class="card-title">Median Latency (p50)</div>
-      <div class="card-value" style="color: #f59e0b;" id="kpi-p50-rtt">- ms</div>
-      <div class="card-sub" id="kpi-p90-rtt">p90: - ms | p99: - ms</div>
-    </div>
-    <div class="card">
-      <div class="card-title">Next Archive Refresh</div>
-      <div class="card-value" style="color: #60a5fa;" id="kpi-next-refresh">-</div>
-      <div class="card-sub">Periodic 10-minute cycle</div>
-    </div>
-  </section>
+  <main>
+    <section class="hero" style="padding-top: var(--space-2xl);">
+      <div class="hero-main">
+        <h1 class="hero-title">I2P reseed service</h1>
+        <div class="hero-figure" id="hero-figure" aria-live="polite">—</div>
+        <p class="hero-qualifier">peers in the current signed archive, refreshed from the live crawl.</p>
+        <dl class="stat-strip">
+          <div class="stat"><dt>Indexed</dt><dd id="stat-indexed">—</dd></div>
+          <div class="stat"><dt>Reachable</dt><dd id="stat-reachable">—</dd></div>
+          <div class="stat"><dt>Floodfills</dt><dd id="stat-floodfills">—</dd></div>
+          <div class="stat"><dt>Next rebuild</dt><dd id="stat-next">—</dd></div>
+        </dl>
+      </div>
+      <div class="artifact">
+        <span class="artifact-label">Reseed archive</span>
+        <div class="artifact-name" id="su3-name">i2pseeds.su3</div>
+        <dl class="artifact-meta">
+          <div><dt>Peers</dt><dd id="su3-peers">—</dd></div>
+          <div><dt>Size</dt><dd id="su3-size">—</dd></div>
+          <div><dt>Format</dt><dd>SU3 · ZIP · RSA-4096</dd></div>
+          <div><dt>ETag</dt><dd id="su3-etag">—</dd></div>
+        </dl>
+        <div class="artifact-actions">
+          <a class="btn btn-primary" id="btn-dl-su3" href="/i2pseeds.su3">Download archive</a>
+          <button class="btn btn-ghost-dark" id="btn-copy-su3">Copy URL</button>
+        </div>
+      </div>
+    </section>
 
-  <!-- Download Archives & Verification Keys Row -->
-  <div class="section-title">
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-    Reseed Package &amp; Signing Public Key
-  </div>
-  <section class="downloads-grid">
-    <div class="card download-card">
-      <div class="su3-layout">
-        <!-- Left: Download actions and metadata -->
-        <div class="su3-left">
+    <section class="setup">
+      <h2 class="section-title">Add this reseed to your router</h2>
+      <div class="setup-grid">
+        <div class="card cert-card">
+          <span class="card-label">Signer certificate</span>
+          <span class="card-value-mono" id="signer-id-display">—</span>
+          <p class="card-note">Clients verify the archive signature against this certificate. Install it as <code id="cert-filename">reseed.crt</code> in the client’s reseed certificate directory.</p>
+          <div class="cert-meta">X.509 · RSA-4096 · SHA-512</div>
+          <div class="card-actions">
+            <a class="btn btn-outline" href="/reseed-rsa.crt" id="btn-dl-cert" download>Download .crt</a>
+            <button class="btn btn-ghost" id="btn-copy-key">Copy PEM</button>
+            <button class="btn btn-ghost" id="btn-view-key">View</button>
+          </div>
+        </div>
+        <div class="card install-card">
+          <div class="tabs" role="tablist" aria-label="Client">
+            <button class="tab is-active" role="tab" id="tab-java" aria-selected="true" aria-controls="panel-java" data-tab="java">Java I2P</button>
+            <button class="tab" role="tab" id="tab-i2pd" aria-selected="false" aria-controls="panel-i2pd" data-tab="i2pd">i2pd</button>
+            <button class="tab" role="tab" id="tab-ivnp" aria-selected="false" aria-controls="panel-ivnp" data-tab="ivnp">IVNP</button>
+          </div>
+          <ol class="steps is-active" id="panel-java" role="tabpanel" aria-labelledby="tab-java">
+            <li>Save the certificate as <code>~/.i2p/certificates/reseed/<span class="js-cert-name">…</span></code></li>
+            <li>In the router console open <code>http://127.0.0.1:7657/configreseed</code>, add the reseed URL below, then choose <em>Save changes</em> and <em>Reseed now</em>.</li>
+          </ol>
+          <ol class="steps" id="panel-i2pd" role="tabpanel" aria-labelledby="tab-i2pd">
+            <li>Save the certificate as <code>~/.i2pd/certificates/reseed/<span class="js-cert-name">…</span></code> — system service: <code>/var/lib/i2pd/certificates/reseed/</code></li>
+            <li>Run once with <code>i2pd --reseed.urls=<span class="js-su3-url">…</span></code>, or set <code>reseed.urls</code> in <code>i2pd.conf</code>.</li>
+          </ol>
+          <ol class="steps" id="panel-ivnp" role="tabpanel" aria-labelledby="tab-ivnp">
+            <li>Add the reseed URL below to <code>reseed.endpoints</code> in the router config (web console → <em>Config → Reseed</em>).</li>
+            <li>Trusted signers ship inside IVNP’s embedded certificate bundle — no file install needed for pre-trusted signers. Trigger via <em>Actions → Reseed</em>.</li>
+          </ol>
+          <div class="url-row">
+            <code class="url-text" id="su3-url-text">—</code>
+            <button class="btn btn-ghost" id="btn-copy-url">Copy URL</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="coverage">
+      <h2 class="section-title">Keyspace coverage</h2>
+      <p class="section-note">Peers indexed per DHT bucket, prefixes <code>0x00</code>–<code>0xFF</code>. Sparse buckets get extra lookups on each pass.</p>
+      <div class="heatmap-grid" id="heatmap-grid"></div>
+      <div class="heatmap-legend">
+        <span>0</span>
+        <span class="legend-chip" style="background: oklch(92% 0.03 256);"></span>
+        <span class="legend-chip" style="background: oklch(80% 0.09 256);"></span>
+        <span class="legend-chip" style="background: oklch(68% 0.15 256);"></span>
+        <span class="legend-chip" style="background: var(--color-accent);"></span>
+        <span id="legend-max">max —</span>
+      </div>
+    </section>
+
+    <section class="detail">
+      <h2 class="section-title">Network detail</h2>
+      <div class="card">
+        <dl class="detail-grid">
           <div>
-            <div class="download-header">
-              <h3>Standard I2P SU3 Archive</h3>
-              <span class="fmt-pill fmt-su3">ZIP / RSA-4096</span>
-            </div>
-            <p class="download-meta">Compatible with all standard I2P routers (Java I2P, i2pd &amp; IVNP). Fully signed with SHA-512 and RSA-4096.</p>
-            <div style="font-size: 0.82rem; margin-bottom: 12px; color: #d1d5db; display: flex; flex-direction: column; gap: 4px;">
-              <div>Package Peers: <strong id="su3-peers" style="color: #fff;">-</strong></div>
-              <div>Archive Size: <strong id="su3-size" style="color: #fff;">- KB</strong></div>
-              <div>Archive ETag: <code id="su3-etag" style="color: #94a3b8; font-size: 0.75rem;">-</code></div>
-            </div>
+            <div class="detail-row"><dt>Reachable peers</dt><dd id="d-reachable">—</dd></div>
+            <div class="detail-row"><dt>Floodfill peers</dt><dd id="d-floodfill">—</dd></div>
+            <div class="detail-row"><dt>Median RTT (p50)</dt><dd id="d-rtt-p50">—</dd></div>
+            <div class="detail-row"><dt>p90 RTT</dt><dd id="d-rtt-p90">—</dd></div>
+            <div class="detail-row"><dt>Bucket coverage</dt><dd id="d-coverage">—</dd></div>
           </div>
-          <div class="download-actions" style="margin-top: 14px;">
-            <a href="/i2pseeds.su3?netid=2" id="btn-dl-su3" class="btn-dl">Download SU3</a>
-            <button class="btn-copy" onclick="copyLink('/i2pseeds.su3?netid=2')">Copy URL</button>
+          <div>
+            <div class="detail-row"><dt>Unique IPv4 /16 subnets</dt><dd id="d-subnets">—</dd></div>
+            <div class="detail-row"><dt>Unique IPv6 endpoints</dt><dd id="d-ipv6">—</dd></div>
+            <div class="detail-row"><dt>Router families</dt><dd id="d-families">—</dd></div>
+            <div class="detail-row"><dt>Dual-stack share</dt><dd id="d-dual">—</dd></div>
+            <div class="detail-row"><dt>Avg peer availability</dt><dd id="d-avail">—</dd></div>
           </div>
-        </div>
-
-        <!-- Right (Next to download): Package Generation Strategy & Telemetry -->
-        <div class="su3-right">
-          <!-- Generation Method & Filter Strategy -->
-          <div class="method-box">
-            <div class="method-header">
-              <span>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: -1px; margin-right: 4px;"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-                Generation Strategy
-              </span>
-              <span id="pkg-filter-badge" style="font-size: 0.68rem; padding: 2px 6px; border-radius: 4px; background: rgba(16, 185, 129, 0.15); color: #34d399; font-weight: 600; text-transform: none;">Reachable Only</span>
-            </div>
-            <div class="method-text" id="pkg-method-text">
-              256 K-Bucket Stratified Sampling &bull; Java I2P 256-node Head-Start (1 peer/bucket) &bull; /16 IPv4 Subnet Anti-Sybil (max 1/subnet) &bull; Max-5 Bucket Leveling
-            </div>
-          </div>
-
-          <!-- 4 Metrics Tiles: Floodfill Ratio, IP Stack Distribution, Availability, Latency -->
-          <div class="pkg-stats-grid">
-            <!-- 1. Floodfill Ratio -->
-            <div class="pkg-stat-item">
-              <div class="pkg-stat-label">Floodfill Ratio</div>
-              <div class="pkg-stat-val" id="pkg-metric-ff" style="color: #38bdf8;">-%</div>
-              <div class="pkg-stat-sub" id="pkg-metric-ff-sub">- floodfills</div>
-            </div>
-
-            <!-- 2. IP Stack Distribution (Dual-Stack vs IPv4 Only) -->
-            <div class="pkg-stat-item">
-              <div class="pkg-stat-label">IP Stack Ratio</div>
-              <div class="pkg-stat-val" style="font-size: 1rem; display: flex; justify-content: space-between; align-items: baseline;">
-                <span id="pkg-metric-dual" style="color: #10b981;">Dual: -%</span>
-                <span id="pkg-metric-v4" style="color: #38bdf8; font-size: 0.8rem;">IPv4: -%</span>
-              </div>
-              <div class="ip-ratio-bar">
-                <div class="ip-ratio-bar-dual" id="bar-dual" style="width: 0%;" title="Dual-Stack"></div>
-                <div class="ip-ratio-bar-v4" id="bar-v4" style="width: 0%;" title="IPv4 Only"></div>
-                <div class="ip-ratio-bar-v6" id="bar-v6" style="width: 0%;" title="IPv6 Only"></div>
-              </div>
-              <div class="pkg-stat-sub" id="pkg-metric-ip-sub">Dual: - | IPv4: -</div>
-            </div>
-
-            <!-- 3. Average Availability -->
-            <div class="pkg-stat-item">
-              <div class="pkg-stat-label">Average Availability</div>
-              <div class="pkg-stat-val" id="pkg-metric-avail" style="color: #34d399;">-%</div>
-              <div class="pkg-stat-sub" id="pkg-metric-avail-sub">Direct Reachable: -%</div>
-            </div>
-
-            <!-- 4. Package Latency -->
-            <div class="pkg-stat-item">
-              <div class="pkg-stat-label">Package Latency</div>
-              <div class="pkg-stat-val" id="pkg-metric-rtt" style="color: #f59e0b;">- ms</div>
-              <div class="pkg-stat-sub" id="pkg-metric-rtt-sub">p50: - ms | p90: - ms</div>
-            </div>
-          </div>
-        </div>
+        </dl>
       </div>
-    </div>
+    </section>
+  </main>
 
-    <div class="card download-card">
-      <div>
-        <div class="download-header">
-          <h3>Reseed RSA-4096 Public Key</h3>
-          <span class="fmt-pill" style="background: rgba(16, 185, 129, 0.15); color: var(--accent); border: 1px solid rgba(16, 185, 129, 0.3);">X.509 CRT / RSA</span>
-        </div>
-        <p class="download-meta">Required by client routers to verify SU3 signatures. Signer: <code id="signer-id-display" style="color: #38bdf8; font-family: monospace;">-</code></p>
-        <div style="font-size: 0.85rem; margin-bottom: 12px; color: #d1d5db;">
-          Certificate: <strong id="cert-filename">-</strong> | Spec: <strong>4096-bit RSA (SHA-512)</strong>
-        </div>
-      </div>
-      <div class="download-actions">
-        <a href="/reseed-rsa.crt" id="btn-dl-cert" class="btn-dl" style="background: #059669;" download>Download .crt</a>
-        <button class="btn-copy" onclick="copyPublicKey()" title="Copy RSA Public Key / Certificate PEM to Clipboard">Copy Key</button>
-        <button class="btn-copy" onclick="toggleKeyModal()" title="View Certificate and Public Key PEM">View</button>
-      </div>
-    </div>
-  </section>
-
-  <!-- 256 K-Bucket Heatmap -->
-  <section class="heatmap-section">
-    <div class="section-title">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
-      256 K-Bucket DHT Keyspace Distribution (Prefix 0x00 – 0xFF)
-    </div>
-    <div class="heatmap-desc">
-      Even distribution across all 256 DHT key-space buckets ensures newly bootstrapped routers discover floodfills across the entire keyspace and mitigates eclipse attacks.
-    </div>
-    <div class="heatmap-grid" id="heatmap-grid">
-      <!-- Generated by JS -->
-    </div>
-  </section>
-
-  <!-- Analytics & Network Diversity Row -->
-  <section class="analytics-grid">
-    <div class="card">
-      <div class="section-title" style="margin-bottom: 8px;">Latency Breakdown (EWMA RTT)</div>
-      <table>
-        <thead>
-          <tr><th>Percentile / Metric</th><th style="text-align: right;">Observed Latency</th></tr>
-        </thead>
-        <tbody>
-          <tr><td>Fastest (Min)</td><td class="val" id="rtt-min">- ms</td></tr>
-          <tr><td>50th Percentile (p50 Median)</td><td class="val" id="rtt-p50">- ms</td></tr>
-          <tr><td>90th Percentile (p90)</td><td class="val" id="rtt-p90">- ms</td></tr>
-          <tr><td>99th Percentile (p99)</td><td class="val" id="rtt-p99">- ms</td></tr>
-          <tr><td>Slowest (Max)</td><td class="val" id="rtt-max">- ms</td></tr>
-          <tr><td>Average EWMA</td><td class="val" id="rtt-avg">- ms</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <div class="card">
-      <div class="section-title" style="margin-bottom: 8px;">Network & Subnet Diversity</div>
-      <table>
-        <thead>
-          <tr><th>Diversity Dimension</th><th style="text-align: right;">Unique Count</th></tr>
-        </thead>
-        <tbody>
-          <tr><td>Unique IPv4 /16 Subnets</td><td class="val" id="div-subnets">-</td></tr>
-          <tr><td>Unique IPv4 Endpoints</td><td class="val" id="div-ipv4">-</td></tr>
-          <tr><td>Unique IPv6 Endpoints</td><td class="val" id="div-ipv6">-</td></tr>
-          <tr><td>Unique Router Families</td><td class="val" id="div-families">-</td></tr>
-          <tr><td>Package Floodfill Ratio</td><td class="val" id="pkg-floodfill-ratio">-%</td></tr>
-          <tr><td>Package Dual-Stack Ratio</td><td class="val" id="pkg-dual-ratio">-%</td></tr>
-          <tr><td>Package Average Availability</td><td class="val" id="pkg-avg-avail">-%</td></tr>
-          <tr><td>Archive ETag</td><td class="val" id="pkg-etag">-</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
-
-  <footer>
-    <div>
-      Endpoints: <a href="/stats" target="_blank">/stats (JSON)</a> &bull; <a href="/health" target="_blank">/health</a> &bull; Rate limit: 15 probes/sec &bull; Cooldown: 10m
-    </div>
-    <div>
-      Powered by <strong>IVNP</strong> &bull; Version <span id="footer-version">active-dev</span>
-    </div>
+  <footer class="footer">
+    <span>IVNP reseed · v<span id="footer-version">dev</span> · netid <span id="footer-netid">2</span></span>
+    <span><a href="/stats">/stats</a> · <a href="/health">/health</a></span>
   </footer>
 
-  <div id="tooltip"></div>
+  <dialog id="key-modal" aria-labelledby="key-modal-title">
+    <div class="modal-head">
+      <h3 id="key-modal-title">Signer certificate</h3>
+      <button class="btn btn-ghost" id="btn-modal-close">Close</button>
+    </div>
+    <div class="tabs" role="tablist" aria-label="Key material">
+      <button class="tab is-active" role="tab" id="tab-cert" aria-selected="true" data-mtab="cert">Certificate (.crt)</button>
+      <button class="tab" role="tab" id="tab-pubkey" aria-selected="false" data-mtab="pubkey">Public key (PEM)</button>
+    </div>
+    <pre id="key-pem-display">Loading…</pre>
+    <div class="modal-actions">
+      <button class="btn btn-outline" id="btn-copy-displayed">Copy to clipboard</button>
+    </div>
+  </dialog>
+
+  <div id="tooltip" role="tooltip"></div>
+  <div id="toast" role="status"></div>
 
   <script id="initial-data" type="application/json">
 {{INITIAL_DATA}}
@@ -707,6 +812,13 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
     let refreshIntervalMs = 3000;
     let timerId = null;
     let etaSeconds = 0;
+    let refreshCycleMin = 0;
+    let cachedCertPEM = '';
+    let cachedPubKeyPEM = '';
+    let certFileName = 'reseed.crt';
+    let su3URL = '';
+    let firstRender = true;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     function formatUptime(seconds) {
       if (seconds < 60) return seconds + 's';
@@ -718,194 +830,149 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
     }
 
     function formatETA(sec) {
-      if (sec <= 0) return 'Generating...';
+      if (sec <= 0) return 'building';
       const m = Math.floor(sec / 60);
       const s = sec % 60;
       return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
     }
 
+    function signerCertName(signerID) {
+      const clean = (signerID || 'reseed').replace(/@/g, '_at_').replace(/[\/\\:]/g, '_');
+      return clean + '.crt';
+    }
+
+    function countUp(el, target) {
+      if (reducedMotion || !isFinite(target)) {
+        el.textContent = Number(target || 0).toLocaleString();
+        return;
+      }
+      const dur = 900;
+      const start = performance.now();
+      function tick(now) {
+        const t = Math.min(1, (now - start) / dur);
+        const eased = 1 - Math.pow(1 - t, 3);
+        el.textContent = Math.round(target * eased).toLocaleString();
+        if (t < 1) requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }
+
     function renderStats(data) {
       if (!data) return;
-
-      document.getElementById('badge-netid').textContent = 'NetID: ' + (data.network_id || 2);
-      document.getElementById('badge-uptime').textContent = 'Uptime: ' + formatUptime(data.uptime_seconds || 0);
-      document.getElementById('footer-version').textContent = data.version || 'active-dev';
-
-      // KPI
-      document.getElementById('kpi-total-peers').textContent = (data.total_indexed || 0).toLocaleString();
-      document.getElementById('kpi-reachable-peers').textContent = (data.reachable_peers || 0).toLocaleString();
-      const reachRatio = data.total_indexed > 0 ? ((data.reachable_peers / data.total_indexed) * 100).toFixed(1) : '0';
-      document.getElementById('kpi-reachable-ratio').textContent = 'Reachability: ' + reachRatio + '%';
-
-      document.getElementById('kpi-floodfill-peers').textContent = (data.floodfill_peers || 0).toLocaleString();
-      const ffRatio = data.total_indexed > 0 ? ((data.floodfill_peers / data.total_indexed) * 100).toFixed(1) : '0';
-      document.getElementById('kpi-floodfill-ratio').textContent = 'Pool ratio: ' + ffRatio + '% (Quota ≥35%)';
-
-      const covered = data.kbuckets ? data.kbuckets.covered_buckets : 0;
-      const coveragePct = data.kbuckets ? data.kbuckets.coverage_percent.toFixed(1) : '0';
-      document.getElementById('kpi-bucket-coverage').textContent = coveragePct + '%';
-      document.getElementById('kpi-bucket-detail').textContent = covered + ' / 256 buckets active';
-
-      const p50 = data.rtt ? data.rtt.p50_ms : 0;
-      const p90 = data.rtt ? data.rtt.p90_ms : 0;
-      const p99 = data.rtt ? data.rtt.p99_ms : 0;
-      document.getElementById('kpi-p50-rtt').textContent = p50 + ' ms';
-      document.getElementById('kpi-p90-rtt').textContent = 'p90: ' + p90 + ' ms | p99: ' + p99 + ' ms';
-
-      etaSeconds = data.package ? data.package.next_refresh_eta_seconds : 0;
-      document.getElementById('kpi-next-refresh').textContent = formatETA(etaSeconds);
-
-      // Package info
-      const pkgPeers = data.package ? data.package.peer_count : (data.published_peers || 0);
-      document.getElementById('su3-peers').textContent = pkgPeers;
-
-      const su3Size = data.package && data.package.su3_size_bytes ? (data.package.su3_size_bytes / 1024).toFixed(1) : '0';
-      document.getElementById('su3-size').textContent = su3Size + ' KB';
-
-      // Update download links with netid
+      const pkg = data.package || {};
       const netid = data.network_id || 2;
-      document.getElementById('btn-dl-su3').href = '/i2pseeds.su3?netid=' + netid;
 
-      if (data.signer_id) {
-        const signerEl = document.getElementById('signer-id-display');
-        if (signerEl) signerEl.textContent = data.signer_id;
-        const certName = data.signer_id.replace(/@/g, '_at_') + '.crt';
-        const certFileEl = document.getElementById('cert-filename');
-        if (certFileEl) certFileEl.textContent = certName;
-        const dlCert = document.getElementById('btn-dl-cert');
-        if (dlCert) {
-          dlCert.setAttribute('download', certName);
-        }
-      }
-      if (data.certificate_pem) {
-        cachedCertPEM = data.certificate_pem;
-      }
-      if (data.public_key_pem) {
-        cachedPubKeyPEM = data.public_key_pem;
-      }
-
-      // Latency table
-      if (data.rtt) {
-        document.getElementById('rtt-min').textContent = data.rtt.min_ms + ' ms';
-        document.getElementById('rtt-p50').textContent = data.rtt.p50_ms + ' ms';
-        document.getElementById('rtt-p90').textContent = data.rtt.p90_ms + ' ms';
-        document.getElementById('rtt-p99').textContent = data.rtt.p99_ms + ' ms';
-        document.getElementById('rtt-max').textContent = data.rtt.max_ms + ' ms';
-        document.getElementById('rtt-avg').textContent = data.rtt.avg_ms + ' ms';
-      }
-
-      // Diversity table
-      if (data.diversity) {
-        const subnets = (data.diversity.unique_ipv4_subnets_16 !== undefined && data.diversity.unique_ipv4_subnets_16 > 0)
-          ? data.diversity.unique_ipv4_subnets_16
-          : (data.diversity.unique_ipv4_subnets_24 || 0);
-        document.getElementById('div-subnets').textContent = subnets.toLocaleString();
-        document.getElementById('div-ipv4').textContent = data.diversity.unique_ipv4_count.toLocaleString();
-        document.getElementById('div-ipv6').textContent = data.diversity.unique_ipv6_count.toLocaleString();
-        document.getElementById('div-families').textContent = data.diversity.unique_families.toLocaleString();
-      }
+      document.getElementById('badge-uptime').textContent = formatUptime(data.uptime_seconds || 0);
+      const modeEl = document.getElementById('badge-mode');
       if (data.exploration_mode) {
-        const modeBadge = document.getElementById('badge-mode');
-        if (modeBadge) {
-          modeBadge.textContent = 'Mode: ' + data.exploration_mode.toUpperCase();
-          if (data.exploration_mode === 'maintenance') {
-            modeBadge.style.color = '#34d399';
-          } else {
-            modeBadge.style.color = '#38bdf8';
-          }
-        }
+        modeEl.textContent = data.exploration_mode.toUpperCase();
       }
-      if (data.package) {
-        const pkg = data.package;
-        const ffRatio = (pkg.floodfill_ratio * 100).toFixed(1);
-        const ffEl = document.getElementById('pkg-metric-ff');
-        if (ffEl) ffEl.textContent = ffRatio + '%';
-        const ffSub = document.getElementById('pkg-metric-ff-sub');
-        if (ffSub) ffSub.textContent = (pkg.floodfill_count || 0) + ' / ' + (pkg.peer_count || 0) + ' floodfills';
+      document.getElementById('footer-version').textContent = data.version || 'dev';
+      document.getElementById('footer-netid').textContent = netid;
 
-        const dualRatio = (pkg.dual_stack_ratio * 100).toFixed(1);
-        const v4Ratio = (pkg.ipv4_only_ratio * 100).toFixed(1);
-        const dualEl = document.getElementById('pkg-metric-dual');
-        if (dualEl) dualEl.textContent = 'Dual: ' + dualRatio + '%';
-        const v4El = document.getElementById('pkg-metric-v4');
-        if (v4El) v4El.textContent = 'IPv4: ' + v4Ratio + '%';
-        const ipSub = document.getElementById('pkg-metric-ip-sub');
-        if (ipSub) {
-          let text = 'Dual: ' + (pkg.dual_stack_count || 0) + ' | IPv4: ' + (pkg.ipv4_only_count || 0);
-          if (pkg.ipv6_only_count > 0) text += ' | IPv6: ' + pkg.ipv6_only_count;
-          ipSub.textContent = text;
-        }
-        const barDual = document.getElementById('bar-dual');
-        if (barDual) barDual.style.width = (pkg.dual_stack_ratio * 100) + '%';
-        const barV4 = document.getElementById('bar-v4');
-        if (barV4) barV4.style.width = (pkg.ipv4_only_ratio * 100) + '%';
-        const barV6 = document.getElementById('bar-v6');
-        if (barV6) barV6.style.width = (pkg.ipv6_only_ratio * 100) + '%';
-
-        const availPct = (pkg.average_availability * 100).toFixed(1);
-        const availEl = document.getElementById('pkg-metric-avail');
-        if (availEl) availEl.textContent = availPct + '%';
-        const availSub = document.getElementById('pkg-metric-avail-sub');
-        if (availSub) {
-          const reachPct = (pkg.directly_reachable_ratio * 100).toFixed(1);
-          availSub.textContent = 'Reachable: ' + reachPct + '% (' + (pkg.directly_reachable_count || 0) + ')';
-        }
-
-        const pkgRTT = pkg.rtt;
-        const rttEl = document.getElementById('pkg-metric-rtt');
-        if (rttEl) {
-          const avgMs = pkgRTT ? pkgRTT.avg_ms : 0;
-          rttEl.textContent = avgMs + ' ms';
-        }
-        const rttSub = document.getElementById('pkg-metric-rtt-sub');
-        if (rttSub) {
-          const p50 = pkgRTT ? pkgRTT.p50_ms : 0;
-          const p90 = pkgRTT ? pkgRTT.p90_ms : 0;
-          rttSub.textContent = 'p50: ' + p50 + ' ms | p90: ' + p90 + ' ms';
-        }
-
-        if (pkg.generation_method) {
-          const methodEl = document.getElementById('pkg-method-text');
-          if (methodEl) methodEl.textContent = pkg.generation_method;
-        }
-        const filterBadge = document.getElementById('pkg-filter-badge');
-        if (filterBadge) {
-          filterBadge.textContent = pkg.require_reachable_filter ? 'Directly Reachable Only' : 'Bootstrap Mode';
-          if (pkg.require_reachable_filter) {
-            filterBadge.style.background = 'rgba(16, 185, 129, 0.15)';
-            filterBadge.style.color = '#34d399';
-          } else {
-            filterBadge.style.background = 'rgba(245, 158, 11, 0.15)';
-            filterBadge.style.color = '#f59e0b';
-          }
-        }
-        const etagEl = document.getElementById('su3-etag');
-        if (etagEl) etagEl.textContent = pkg.etag || 'N/A';
-
-        document.getElementById('pkg-floodfill-ratio').textContent = ffRatio + '% (' + (pkg.floodfill_count || 0) + ' nodes)';
-        const dualTableEl = document.getElementById('pkg-dual-ratio');
-        if (dualTableEl) dualTableEl.textContent = dualRatio + '% (' + (pkg.dual_stack_count || 0) + ' nodes)';
-        const availTableEl = document.getElementById('pkg-avg-avail');
-        if (availTableEl) availTableEl.textContent = availPct + '%';
-        document.getElementById('pkg-etag').textContent = pkg.etag || 'N/A';
+      // Hero figure: peers published in the current archive.
+      const published = pkg.peer_count || data.published_peers || 0;
+      const heroEl = document.getElementById('hero-figure');
+      if (firstRender) {
+        countUp(heroEl, published);
+      } else {
+        heroEl.textContent = published.toLocaleString();
       }
 
-      // Heatmap update
+      document.getElementById('stat-indexed').textContent = (data.total_indexed || 0).toLocaleString();
+      const reachRatio = data.total_indexed > 0 ? (data.reachable_peers / data.total_indexed * 100).toFixed(0) : '0';
+      document.getElementById('stat-reachable').innerHTML =
+        (data.reachable_peers || 0).toLocaleString() + ' <small>' + reachRatio + '%</small>';
+      const ffRatio = data.total_indexed > 0 ? (data.floodfill_peers / data.total_indexed * 100).toFixed(0) : '0';
+      document.getElementById('stat-floodfills').innerHTML =
+        (data.floodfill_peers || 0).toLocaleString() + ' <small>' + ffRatio + '%</small>';
+
+      etaSeconds = pkg.next_refresh_eta_seconds || 0;
+      refreshCycleMin = Math.round((pkg.refresh_interval_seconds || 0) / 60);
+      renderNextStat();
+
+      // Archive card
+      document.getElementById('su3-peers').textContent = published.toLocaleString();
+      const su3Size = pkg.su3_size_bytes ? (pkg.su3_size_bytes / 1024).toFixed(1) : null;
+      document.getElementById('su3-size').textContent = su3Size ? su3Size + ' KB' : '—';
+      document.getElementById('su3-etag').textContent = pkg.etag || '—';
+      su3URL = window.location.origin + '/i2pseeds.su3?netid=' + netid;
+      document.getElementById('btn-dl-su3').href = '/i2pseeds.su3?netid=' + netid;
+      document.getElementById('su3-url-text').textContent = su3URL;
+      document.querySelectorAll('.js-su3-url').forEach(el => { el.textContent = su3URL; });
+      const dlBtn = document.getElementById('btn-dl-su3');
+      if (!pkg.su3_size_bytes) {
+        dlBtn.classList.add('is-disabled');
+        dlBtn.setAttribute('aria-disabled', 'true');
+        dlBtn.textContent = 'Archive building…';
+      } else {
+        dlBtn.classList.remove('is-disabled');
+        dlBtn.removeAttribute('aria-disabled');
+        dlBtn.textContent = 'Download archive';
+      }
+
+      // Certificate card + per-client instructions
+      if (data.signer_id) {
+        document.getElementById('signer-id-display').textContent = data.signer_id;
+        certFileName = signerCertName(data.signer_id);
+        document.getElementById('cert-filename').textContent = certFileName;
+        document.querySelectorAll('.js-cert-name').forEach(el => { el.textContent = certFileName; });
+        document.getElementById('btn-dl-cert').setAttribute('download', certFileName);
+      }
+      if (data.certificate_pem) cachedCertPEM = data.certificate_pem;
+      if (data.public_key_pem) cachedPubKeyPEM = data.public_key_pem;
+
+      // Network detail
+      document.getElementById('d-reachable').textContent =
+        (data.reachable_peers || 0).toLocaleString() + ' of ' + (data.total_indexed || 0).toLocaleString();
+      document.getElementById('d-floodfill').textContent =
+        (data.floodfill_peers || 0).toLocaleString() + ' (' + ffRatio + '%)';
+      const rtt = data.rtt || {};
+      document.getElementById('d-rtt-p50').textContent = (rtt.p50_ms || 0) + ' ms';
+      document.getElementById('d-rtt-p90').textContent = (rtt.p90_ms || 0) + ' ms';
+      if (data.kbuckets) {
+        document.getElementById('d-coverage').textContent =
+          data.kbuckets.covered_buckets + ' / ' + data.kbuckets.total_buckets +
+          ' (' + data.kbuckets.coverage_percent.toFixed(0) + '%)';
+      }
+      if (data.diversity) {
+        const div = data.diversity;
+        const subnets = div.unique_ipv4_subnets_16 > 0 ? div.unique_ipv4_subnets_16 : (div.unique_ipv4_subnets_24 || 0);
+        document.getElementById('d-subnets').textContent = subnets.toLocaleString();
+        document.getElementById('d-ipv6').textContent = (div.unique_ipv6_count || 0).toLocaleString();
+        document.getElementById('d-families').textContent = (div.unique_families || 0).toLocaleString();
+      }
+      if (pkg.dual_stack_ratio !== undefined) {
+        document.getElementById('d-dual').textContent = (pkg.dual_stack_ratio * 100).toFixed(0) + '%';
+      }
+      if (pkg.average_availability !== undefined) {
+        document.getElementById('d-avail').textContent = (pkg.average_availability * 100).toFixed(0) + '%';
+      }
+
       renderHeatmap(data.kbuckets ? data.kbuckets.distribution : []);
+      firstRender = false;
+    }
+
+    function renderNextStat() {
+      const el = document.getElementById('stat-next');
+      const eta = formatETA(etaSeconds);
+      el.innerHTML = refreshCycleMin > 0
+        ? eta + ' <small>every ' + refreshCycleMin + 'm</small>'
+        : eta;
     }
 
     function renderHeatmap(distribution) {
       const container = document.getElementById('heatmap-grid');
       container.innerHTML = '';
+      const tooltip = document.getElementById('tooltip');
 
-      let maxCount = 1;
-      if (distribution && distribution.length > 0) {
+      let maxCount = 0;
+      if (distribution) {
         for (let i = 0; i < 256; i++) {
           if (distribution[i] > maxCount) maxCount = distribution[i];
         }
       }
-
-      const tooltip = document.getElementById('tooltip');
+      document.getElementById('legend-max').textContent = 'max ' + maxCount;
 
       for (let i = 0; i < 256; i++) {
         const cell = document.createElement('div');
@@ -913,25 +980,22 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
         const count = (distribution && distribution[i]) ? distribution[i] : 0;
         const hex = '0x' + i.toString(16).padStart(2, '0').toUpperCase();
 
-        if (count === 0) {
-          cell.style.background = '#1e293b';
+        if (count === 0 || maxCount === 0) {
+          cell.style.background = 'var(--color-paper-2)';
         } else {
-          // Gradient from teal/cyan to bright emerald
-          const ratio = Math.min(1.0, count / maxCount);
-          const r = Math.round(16 * ratio + 30 * (1 - ratio));
-          const g = Math.round(185 * ratio + 41 * (1 - ratio));
-          const b = Math.round(129 * ratio + 59 * (1 - ratio));
-          cell.style.background = 'rgb(' + r + ',' + g + ',' + b + ')';
+          const ratio = Math.min(1, count / maxCount);
+          const l = 92 - ratio * 37;
+          const c = 0.03 + ratio * 0.17;
+          cell.style.background = 'oklch(' + l.toFixed(1) + '% ' + c.toFixed(3) + ' 256)';
         }
 
         cell.onmouseenter = (e) => {
           tooltip.style.display = 'block';
-          tooltip.innerHTML = '<strong>Bucket ' + hex + ' (' + i + ')</strong><br>Peers: ' + count;
+          tooltip.textContent = 'Bucket ' + hex + ' · ' + count + ' peers';
           moveTooltip(e);
         };
         cell.onmousemove = moveTooltip;
         cell.onmouseleave = () => { tooltip.style.display = 'none'; };
-
         container.appendChild(cell);
       }
     }
@@ -942,131 +1006,126 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       tooltip.style.top = (e.clientY + 14) + 'px';
     }
 
-    let cachedCertPEM = '';
-    let cachedPubKeyPEM = '';
-    let currentKeyTab = 'cert';
-
     function showToast(msg) {
       const toast = document.getElementById('toast');
-      if (!toast) {
-        alert(msg);
-        return;
-      }
       toast.textContent = msg;
       toast.style.display = 'block';
-      toast.style.opacity = '1';
-      setTimeout(() => {
-        toast.style.opacity = '0';
-        setTimeout(() => { toast.style.display = 'none'; }, 300);
-      }, 2500);
+      setTimeout(() => { toast.style.display = 'none'; }, 4000);
     }
 
-    function copyLink(path) {
-      const url = window.location.origin + path;
-      navigator.clipboard.writeText(url).then(() => {
-        showToast('Copied URL: ' + url);
+    function flashCopied(btn, label) {
+      const original = btn.textContent;
+      btn.textContent = 'Copied';
+      setTimeout(() => { btn.textContent = original; }, 2500);
+      if (label) showToast(label);
+    }
+
+    function copyText(text, btn) {
+      navigator.clipboard.writeText(text).then(() => {
+        flashCopied(btn);
       }).catch(() => {
-        prompt('Copy this URL:', url);
+        prompt('Copy manually:', text);
       });
     }
 
+    function copyURL(url, btn) {
+      copyText(url || window.location.origin + '/i2pseeds.su3', btn);
+    }
+
     function copyPublicKey() {
-      const textToCopy = cachedCertPEM || cachedPubKeyPEM;
-      if (textToCopy) {
-        navigator.clipboard.writeText(textToCopy).then(() => {
-          showToast('Copied RSA certificate PEM to clipboard!');
-        }).catch(() => {
-          prompt('Copy RSA Certificate PEM:', textToCopy);
-        });
+      const text = cachedCertPEM || cachedPubKeyPEM;
+      if (text) {
+        copyText(text, document.getElementById('btn-copy-key'));
         return;
       }
       fetch('/reseed-rsa.crt')
         .then(r => r.text())
-        .then(txt => {
-          cachedCertPEM = txt;
-          navigator.clipboard.writeText(txt).then(() => {
-            showToast('Copied RSA certificate PEM to clipboard!');
-          }).catch(() => {
-            prompt('Copy RSA Certificate PEM:', txt);
-          });
+        .then(t => {
+          cachedCertPEM = t;
+          copyText(t, document.getElementById('btn-copy-key'));
         })
-        .catch(err => {
-          alert('Failed to load public key: ' + err);
+        .catch(() => showToast('Could not load the certificate. Try Download instead.'));
+    }
+
+    // Install-instruction tabs
+    document.querySelectorAll('.install-card .tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.install-card .tab').forEach(t => {
+          t.classList.remove('is-active');
+          t.setAttribute('aria-selected', 'false');
         });
-    }
+        tab.classList.add('is-active');
+        tab.setAttribute('aria-selected', 'true');
+        document.querySelectorAll('.steps').forEach(p => p.classList.remove('is-active'));
+        document.getElementById('panel-' + tab.dataset.tab).classList.add('is-active');
+      });
+    });
 
-    function toggleKeyModal() {
-      const modal = document.getElementById('key-modal');
-      if (!modal) return;
-      if (modal.style.display === 'flex') {
-        modal.style.display = 'none';
-      } else {
-        modal.style.display = 'flex';
-        switchKeyTab(currentKeyTab);
-      }
-    }
+    // Key material modal
+    const keyModal = document.getElementById('key-modal');
+    let currentKeyTab = 'cert';
 
-    function switchKeyTab(tab) {
+    function loadKeyTab(tab) {
       currentKeyTab = tab;
+      document.querySelectorAll('#key-modal .tab').forEach(t => {
+        const active = t.dataset.mtab === tab;
+        t.classList.toggle('is-active', active);
+        t.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
       const display = document.getElementById('key-pem-display');
-      const tabCert = document.getElementById('tab-cert');
-      const tabPub = document.getElementById('tab-pubkey');
-      if (!display || !tabCert || !tabPub) return;
-
-      if (tab === 'cert') {
-        tabCert.style.background = '#334155';
-        tabCert.style.color = '#fff';
-        tabPub.style.background = '#1e293b';
-        tabPub.style.color = 'var(--text-main)';
-        if (cachedCertPEM) {
-          display.textContent = cachedCertPEM;
-        } else {
-          display.textContent = 'Loading certificate...';
-          fetch('/reseed-rsa.crt').then(r => r.text()).then(t => {
-            cachedCertPEM = t;
-            if (currentKeyTab === 'cert') display.textContent = t;
-          }).catch(e => { display.textContent = 'Error: ' + e; });
-        }
-      } else {
-        tabPub.style.background = '#334155';
-        tabPub.style.color = '#fff';
-        tabCert.style.background = '#1e293b';
-        tabCert.style.color = 'var(--text-main)';
-        if (cachedPubKeyPEM) {
-          display.textContent = cachedPubKeyPEM;
-        } else {
-          display.textContent = 'Loading public key...';
-          fetch('/reseed-rsa.pub.pem').then(r => r.text()).then(t => {
-            cachedPubKeyPEM = t;
-            if (currentKeyTab === 'pubkey') display.textContent = t;
-          }).catch(e => { display.textContent = 'Error: ' + e; });
-        }
+      const cached = tab === 'cert' ? cachedCertPEM : cachedPubKeyPEM;
+      if (cached) {
+        display.textContent = cached;
+        return;
       }
-    }
-
-    function copyDisplayedKey() {
-      const display = document.getElementById('key-pem-display');
-      if (!display || !display.textContent) return;
-      navigator.clipboard.writeText(display.textContent).then(() => {
-        showToast('Copied key to clipboard!');
+      display.textContent = 'Loading…';
+      const url = tab === 'cert' ? '/reseed-rsa.crt' : '/reseed-rsa.pub.pem';
+      fetch(url).then(r => r.text()).then(t => {
+        if (tab === 'cert') cachedCertPEM = t; else cachedPubKeyPEM = t;
+        if (currentKeyTab === tab) display.textContent = t;
       }).catch(() => {
-        prompt('Copy key:', display.textContent);
+        display.textContent = 'Could not load key material.';
       });
     }
+
+    document.querySelectorAll('#key-modal .tab').forEach(tab => {
+      tab.addEventListener('click', () => loadKeyTab(tab.dataset.mtab));
+    });
+
+    document.getElementById('btn-view-key').addEventListener('click', () => {
+      loadKeyTab(currentKeyTab);
+      keyModal.showModal();
+    });
+    document.getElementById('btn-modal-close').addEventListener('click', () => keyModal.close());
+    keyModal.addEventListener('click', (e) => {
+      if (e.target === keyModal) keyModal.close();
+    });
+    document.getElementById('btn-copy-displayed').addEventListener('click', (e) => {
+      const display = document.getElementById('key-pem-display');
+      if (display.textContent) copyText(display.textContent, e.currentTarget);
+    });
+
+    document.getElementById('btn-copy-su3').addEventListener('click', (e) => copyURL(su3URL, e.currentTarget));
+    document.getElementById('btn-copy-url').addEventListener('click', (e) => copyURL(su3URL, e.currentTarget));
+    document.getElementById('btn-copy-key').addEventListener('click', copyPublicKey);
 
     function toggleAutoRefresh() {
       autoRefresh = !autoRefresh;
       const btn = document.getElementById('btn-refresh-toggle');
+      const pill = document.getElementById('status-live');
       if (autoRefresh) {
-        btn.textContent = 'Auto-refresh: ON (3s)';
-        btn.style.color = '#fff';
+        btn.textContent = 'Pause';
+        pill.classList.remove('is-paused');
+        pill.lastChild.textContent = 'Live';
         startPolling();
       } else {
-        btn.textContent = 'Auto-refresh: OFF';
-        btn.style.color = '#9ca3af';
+        btn.textContent = 'Resume';
+        pill.classList.add('is-paused');
+        pill.lastChild.textContent = 'Paused';
         stopPolling();
       }
     }
+    document.getElementById('btn-refresh-toggle').addEventListener('click', toggleAutoRefresh);
 
     function fetchLatest() {
       fetch('/stats')
@@ -1079,13 +1138,11 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       stopPolling();
       timerId = setInterval(fetchLatest, refreshIntervalMs);
     }
-
     function stopPolling() {
       if (timerId) clearInterval(timerId);
       timerId = null;
     }
 
-    // Initialize with embedded bootstrap JSON
     try {
       const initial = JSON.parse(document.getElementById('initial-data').textContent);
       renderStats(initial);
@@ -1093,43 +1150,16 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       console.warn('initial parse failed', e);
     }
 
-    // Start auto-refresh polling
     startPolling();
 
-    // 1-second countdown ticker for Next Archive Refresh
     setInterval(() => {
       if (etaSeconds > 0) {
         etaSeconds--;
-        document.getElementById('kpi-next-refresh').textContent = formatETA(etaSeconds);
-        if (etaSeconds === 0) {
-          fetchLatest();
-        }
+        renderNextStat();
+        if (etaSeconds === 0) fetchLatest();
       }
     }, 1000);
   </script>
-
-  <div id="key-modal" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7); z-index: 1000; align-items: center; justify-content: center; padding: 20px;">
-    <div class="card" style="max-width: 680px; width: 100%; max-height: 85vh; display: flex; flex-direction: column;">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-        <h3 style="color: #fff; font-size: 1.1rem;">RSA-4096 Reseed Signing Key &amp; Certificate</h3>
-        <button onclick="toggleKeyModal()" style="background: none; border: none; color: var(--text-muted); font-size: 1.5rem; cursor: pointer; line-height: 1;">&times;</button>
-      </div>
-      <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">
-        Save this certificate to your router's reseed certificates directory (e.g. <code>~/.i2p/certificates/reseed/</code> or <code>/var/lib/i2pd/certificates/reseed/</code>).
-      </p>
-      <div style="display: flex; gap: 8px; margin-bottom: 10px;">
-        <button id="tab-cert" class="btn-copy" style="background: #334155; color: #fff;" onclick="switchKeyTab('cert')">X.509 Certificate (.crt)</button>
-        <button id="tab-pubkey" class="btn-copy" onclick="switchKeyTab('pubkey')">RSA Public Key (PEM)</button>
-      </div>
-      <pre id="key-pem-display" style="background: #090d16; border: 1px solid var(--card-border); border-radius: 8px; padding: 12px; font-size: 0.75rem; color: #34d399; overflow-y: auto; flex: 1; font-family: monospace; user-select: all; white-space: pre-wrap; word-break: break-all;"></pre>
-      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px;">
-        <button class="btn-copy" onclick="copyDisplayedKey()">Copy to Clipboard</button>
-        <button class="btn-copy" onclick="toggleKeyModal()">Close</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="toast"></div>
 </body>
 </html>
 `

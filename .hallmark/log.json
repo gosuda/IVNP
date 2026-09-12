@@ -1,5 +1,12 @@
 [
   {
+    "date": "2026-09-12",
+    "macrostructure": "Stat-Led",
+    "theme": "Cobalt",
+    "enrichment": "none",
+    "brief": "I2P reseed service dashboard — archive download, signer cert install instructions, keyspace coverage"
+  },
+  {
     "date": "2026-09-06",
     "macrostructure": "Bento Grid",
     "theme": "Grid",
