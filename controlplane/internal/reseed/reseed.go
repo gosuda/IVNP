@@ -10,11 +10,11 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	controlplanenetdb "gosuda.org/ivnp/controlplane/internal/netdb"
@@ -197,12 +197,7 @@ func (c Client) FetchInto(ctx context.Context, endpoint string, database *contro
 		}
 		payload, err = VerifySU3(archive, signers, maxArchive)
 		if err != nil {
-			if errors.Is(err, ErrSU3Signer) && parsedURL.Scheme == "https" && isTLSTrustedReseedHost(parsedURL.Hostname()) {
-				payload, _, _, _, _, err = ExtractSU3Payload(archive, maxArchive)
-			}
-			if err != nil {
-				return 0, err
-			}
+			return 0, err
 		}
 	} else if !c.allowUnsignedZIP {
 		return 0, ErrUnsignedArchive
@@ -230,44 +225,27 @@ func (c Client) FetchInto(ctx context.Context, endpoint string, database *contro
 			return 0, ErrArchiveTooLarge
 		}
 	}
-	results := make([]bool, len(candidates))
-	jobs := make(chan int)
-	workers := parallelism.Workers(len(candidates))
-	var group sync.WaitGroup
-	group.Add(workers)
-	for range workers {
-		go func() {
-			defer group.Done()
-			for index := range jobs {
-				file := candidates[index]
-				if file.UncompressedSize64 == 0 || file.UncompressedSize64 > uint64(foundation.NetworkDatabaseMaxRouterInfoBytes) {
-					continue
-				}
-				data, lease, readErr := readRouterInfo(file)
-				if readErr != nil {
-					continue
-				}
-				info, parseErr := foundation.NetworkDatabaseParseRouterInfo(data)
-				if parseErr == nil && !routerInfoMatchesNetwork(info, c.NetworkID) {
-					parseErr = ErrNetwork
-				}
-				if parseErr == nil {
-					parseErr = database.AdmitReseedRouterInfo(info,
-						seenAt)
-				}
-
-				lease.Release()
-				results[index] = parseErr == nil
-			}
-		}()
-	}
-	for index := range candidates {
-		jobs <- index
-	}
-	close(jobs)
-	group.Wait()
+	// First-claim wins per IPv4 /16 within a single archive: bounds how many
+	// subnet-concentrated sources one reseed endpoint can inject per bootstrap.
+	guard := newSybilGuard()
 	accepted := 0
-	for _, admitted := range results {
+	for _, file := range candidates {
+		if file.UncompressedSize64 == 0 || file.UncompressedSize64 > uint64(foundation.NetworkDatabaseMaxRouterInfoBytes) {
+			continue
+		}
+		data, lease, readErr := readRouterInfo(file)
+		if readErr != nil {
+			continue
+		}
+		admitted := false
+		info, parseErr := foundation.NetworkDatabaseParseRouterInfo(data)
+		if parseErr == nil && !routerInfoMatchesNetwork(info, c.NetworkID) {
+			parseErr = ErrNetwork
+		}
+		if parseErr == nil && guard.claim(ipv4Subnet16s(info)) {
+			admitted = database.AdmitReseedRouterInfo(info, seenAt) == nil
+		}
+		lease.Release()
 		if admitted {
 			accepted++
 		}
@@ -276,6 +254,74 @@ func (c Client) FetchInto(ctx context.Context, endpoint string, database *contro
 		return 0, ErrNoRouterInfos
 	}
 	return accepted, nil
+}
+
+// sybilGuard enforces first-claim-wins on IPv4 /16 prefixes inside one reseed
+// archive. RouterInfos without any IPv4 contact share a single slot, since they
+// carry no subnet identity to deduplicate on.
+type sybilGuard struct {
+	claimed map[[2]byte]struct{}
+	noIPv4  bool
+}
+
+func newSybilGuard() *sybilGuard {
+	return &sybilGuard{claimed: make(map[[2]byte]struct{})}
+}
+
+func (g *sybilGuard) claim(subnets map[[2]byte]struct{}) bool {
+	if len(subnets) == 0 {
+		if g.noIPv4 {
+			return false
+		}
+		g.noIPv4 = true
+		return true
+	}
+	fresh := false
+	for subnet := range subnets {
+		if _, ok := g.claimed[subnet]; !ok {
+			fresh = true
+			break
+		}
+	}
+	if !fresh {
+		return false
+	}
+	for subnet := range subnets {
+		g.claimed[subnet] = struct{}{}
+	}
+	return true
+}
+
+// ipv4Subnet16s returns the distinct IPv4 /16 prefixes claimed by a
+// RouterInfo's contact addresses.
+func ipv4Subnet16s(info foundation.NetworkDatabaseRouterInfo) map[[2]byte]struct{} {
+	subnets := make(map[[2]byte]struct{}, 2)
+	addresses := info.Addresses()
+	for {
+		address, ok, err := addresses.Next()
+		if err != nil || !ok {
+			break
+		}
+		var host []byte
+		options := address.Options.Iterator()
+		for {
+			key, value, ok, err := options.Next()
+			if err != nil || !ok {
+				break
+			}
+			if bytes.Equal(key, []byte("host")) {
+				host = value
+				break
+			}
+		}
+		ip, err := netip.ParseAddr(string(host))
+		if err != nil || !ip.Is4() {
+			continue
+		}
+		octets := ip.As4()
+		subnets[[2]byte{octets[0], octets[1]}] = struct{}{}
+	}
+	return subnets
 }
 
 func routerInfoMatchesNetwork(info foundation.NetworkDatabaseRouterInfo, networkID uint8) bool {
@@ -345,7 +391,7 @@ func (state *fetchAnyState) launchNext(timer *time.Timer, delay time.Duration) {
 	timer.Reset(delay)
 }
 
-func isTLSTrustedReseedHost(host string) bool {
+func isPriorityReseedHost(host string) bool {
 	h := strings.ToLower(host)
 	return h == "hotseed.gosuda.org" || strings.HasSuffix(h, ".hotseed.gosuda.org")
 }
@@ -355,7 +401,7 @@ func isPriorityReseedEndpoint(endpoint string) bool {
 	if err != nil {
 		return false
 	}
-	return isTLSTrustedReseedHost(parsed.Hostname())
+	return isPriorityReseedHost(parsed.Hostname())
 }
 
 // FetchAny fetches reseed archives across multiple endpoints until the target

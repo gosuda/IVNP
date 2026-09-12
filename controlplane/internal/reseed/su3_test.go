@@ -98,13 +98,14 @@ func TestDefaultSU3SignersLoadExactCertificateNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(signers) != 17 {
-		t.Fatalf("default signer count = %d, want 17", len(signers))
+	if len(signers) != 18 {
+		t.Fatalf("default signer count = %d, want 18", len(signers))
 	}
 	for _, signerID := range []string{
 		"admin@likogan.dev",
 		"reseedserver@mail.i2p",
 		"reseed@diva.exchange",
+		"less@gosuda.org",
 	} {
 		signer, found := signers[signerID]
 		if !found || signer.SigningType != foundation.SigningRSASHA512_4096 || len(signer.PublicKey) != su3RSASignatureLen {

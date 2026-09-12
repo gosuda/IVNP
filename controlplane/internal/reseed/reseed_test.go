@@ -337,7 +337,7 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
-func TestTLSTrustedReseedHostAllowsUntrustedSU3Signer(t *testing.T) {
+func TestUntrustedSU3SignerRejectedOnAnyHost(t *testing.T) {
 	local, err := foundation.GenerateLocalAddress()
 	if err != nil {
 		t.Fatal(err)
@@ -373,26 +373,105 @@ func TestTLSTrustedReseedHostAllowsUntrustedSU3Signer(t *testing.T) {
 		}),
 	}
 
-	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
 	client := Client{
 		NetworkID:  2,
 		HTTPClient: httpClient,
 	}
 
-	// Hotseed over HTTPS succeeds even though reseed@ivnp.network is not in default signers
-	count, err := client.FetchInto(context.Background(), "https://hotseed.gosuda.org/i2pseeds.su3?netid=2", database, 1000)
-	if err != nil {
-		t.Fatalf("FetchInto(hotseed.gosuda.org) error = %v, want success via TLS verification", err)
+	// Archives signed by non-embedded signers are rejected everywhere, including
+	// on the prioritized hotseed host — TLS channel trust never substitutes for
+	// SU3 signature verification.
+	for _, host := range []string{"hotseed.gosuda.org", "untrusted.example.org"} {
+		database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+		_, err := client.FetchInto(context.Background(), "https://"+host+"/i2pseeds.su3?netid=2", database, 1000)
+		if !errors.Is(err, ErrSU3Signer) {
+			t.Fatalf("FetchInto(%s) error = %v, want ErrSU3Signer", host, err)
+		}
+		if database.Routers().Len() != 0 {
+			t.Fatalf("FetchInto(%s) admitted %d routers, want 0", host, database.Routers().Len())
+		}
 	}
-	if count != 1 || database.Routers().Len() != 1 {
-		t.Fatalf("admitted count = %d, database routers = %d", count, database.Routers().Len())
+}
+
+func testRouterInfoWithHost(t *testing.T, host string) []byte {
+	t.Helper()
+	local, err := foundation.GenerateLocalAddress()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := controlplanenetdb.NewLocalRouterInfo(controlplanenetdb.LocalRouterInfoConfig{
+		Local: local,
+		Contacts: controlplanenetdb.RouterInfoContacts{
+			Addresses: []controlplanenetdb.LocalRouterAddress{{
+				TransportStyle: []byte("NTCP2"),
+				Options: []foundation.MappingEntry{
+					{Key: []byte("host"), Value: []byte(host)},
+					{Key: []byte("port"), Value: []byte("12345")},
+				},
+			}},
+			Options: []foundation.MappingEntry{
+				{Key: []byte("netId"), Value: []byte("2")},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := owner.Publish(1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Bytes()
+}
+
+func zipMultiArchiveBytes(t *testing.T, payloads [][]byte) []byte {
+	t.Helper()
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	for i, payload := range payloads {
+		entry, err := writer.Create(fmt.Sprintf("routerInfo-%d.dat", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write(payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return append([]byte(nil), archive.Bytes()...)
+}
+
+func TestFetchIntoDedupesIPv4Subnet16(t *testing.T) {
+	archive := zipMultiArchiveBytes(t, [][]byte{
+		testRouterInfoWithHost(t, "10.1.2.3"),     // claims 10.1/16
+		testRouterInfoWithHost(t, "10.1.9.9"),     // duplicate 10.1/16: dropped
+		testRouterInfoWithHost(t, "10.2.0.1"),     // claims 10.2/16
+		testRouterInfoWithHost(t, "2001:db8::1"),  // IPv6-only: shared slot
+		testRouterInfoWithHost(t, "2001:db8::2"),  // IPv6-only: dropped
+		testRouterInfoWithHost(t, "192.168.50.7"), // claims 192.168/16
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	client := Client{
+		NetworkID:        2,
+		HTTPClient:       srv.Client(),
+		AllowHTTP:        true,
+		allowUnsignedZIP: true,
 	}
 
-	// Other untrusted host fails with ErrSU3Signer
-	database2 := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
-	_, err = client.FetchInto(context.Background(), "https://untrusted.example.org/i2pseeds.su3?netid=2", database2, 1000)
-	if !errors.Is(err, ErrSU3Signer) {
-		t.Fatalf("FetchInto(untrusted.example.org) error = %v, want ErrSU3Signer", err)
+	count, err := client.FetchInto(context.Background(), srv.URL+"/i2pseeds.su3?netid=2", database, 1000)
+	if err != nil {
+		t.Fatalf("FetchInto() error = %v", err)
+	}
+	if count != 4 || database.Routers().Len() != 4 {
+		t.Fatalf("admitted count = %d, database routers = %d, want 4", count, database.Routers().Len())
 	}
 }
 
