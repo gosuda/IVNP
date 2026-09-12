@@ -152,7 +152,7 @@ func CalculatePackageStats(peers []PeerRecord, su3SizeBytes int, etag string, ge
 			availSum += 1.0
 		}
 
-		if p.Stats.EWMARTT > 0 {
+		if p.Stats.EWMARTT >= 5*time.Millisecond {
 			rtts = append(rtts, p.Stats.EWMARTT)
 			totalRTT += p.Stats.EWMARTT
 		}

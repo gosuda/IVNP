@@ -36,7 +36,7 @@ type StatsResponse = DetailedStatsResponse
 
 func NewReseedServer(cfg ServerConfig, store *PeerStore) *ReseedServer {
 	if cfg.CacheDuration <= 0 {
-		cfg.CacheDuration = 5 * time.Minute
+		cfg.CacheDuration = 10 * time.Minute
 	}
 	s := &ReseedServer{
 		cfg:       cfg,
@@ -187,7 +187,7 @@ func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 		if p.IsFloodfill {
 			floodfills++
 		}
-		if p.Stats.IsReachable && p.Stats.EWMARTT > 0 {
+		if p.Stats.IsReachable && p.Stats.EWMARTT >= 5*time.Millisecond {
 			rtts = append(rtts, p.Stats.EWMARTT)
 			totalRTT += p.Stats.EWMARTT
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"time"
 
 	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/foundation"
@@ -26,18 +27,38 @@ func (c *ActiveCrawler) Harvest(subsystem *node.Subsystem) int {
 	if subsystem == nil {
 		return 0
 	}
+	localHash := subsystem.Hash()
+	c.store.SetLocalHash(localHash)
+
+	// Continuous turnover: prune stale peers when approaching capacity limit
+	if c.store.Len() >= MaxStorePeers-100 {
+		c.store.PruneStale(24 * time.Hour)
+	}
+
 	refs := subsystem.NetDBRoutersSnapshot()
-	admitted := c.HarvestRefs(refs)
+	admitted := 0
+	for _, ref := range refs {
+		if ref.Info.Hash() == localHash {
+			continue
+		}
+		raw := ref.Info.Bytes()
+		if len(raw) == 0 {
+			continue
+		}
+		if _, isNew := c.store.AddOrUpdateWithSeen(ref.Info, raw, ref.LastSeen); isNew {
+			admitted++
+		}
+	}
 
 	// Record confirmed tunnel build acceptance for hops in active tunnels
 	for _, snap := range subsystem.TunnelEntriesSnapshot() {
 		entry := snap.Entry
-		if entry.Gateway != (foundation.Hash{}) {
+		if entry.Gateway != (foundation.Hash{}) && entry.Gateway != localHash {
 			c.store.RecordTunnelBuildResult(entry.Gateway, true)
 		}
 		for i := 0; i < int(entry.HopCount) && i < len(entry.Hops); i++ {
 			hop := entry.Hops[i]
-			if hop != (foundation.Hash{}) {
+			if hop != (foundation.Hash{}) && hop != localHash {
 				c.store.RecordTunnelBuildResult(hop, true)
 			}
 		}

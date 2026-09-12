@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"net/netip"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,9 +18,10 @@ import (
 
 // PeerStore provides thread-safe, memory-bounded peer indexing and snapshot persistence.
 type PeerStore struct {
-	mu       sync.RWMutex
-	peers    map[foundation.Hash]*PeerRecord
-	maxPeers int
+	mu        sync.RWMutex
+	peers     map[foundation.Hash]*PeerRecord
+	maxPeers  int
+	localHash foundation.Hash
 }
 
 func NewPeerStore() *PeerStore {
@@ -26,6 +29,19 @@ func NewPeerStore() *PeerStore {
 		peers:    make(map[foundation.Hash]*PeerRecord),
 		maxPeers: MaxStorePeers,
 	}
+}
+
+func (s *PeerStore) SetLocalHash(h foundation.Hash) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.localHash = h
+	delete(s.peers, h)
+}
+
+func (s *PeerStore) LocalHash() foundation.Hash {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.localHash
 }
 
 func (s *PeerStore) Len() int {
@@ -43,6 +59,10 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 	defer s.mu.Unlock()
 
 	hash := info.Hash()
+	if hash == s.localHash && s.localHash != (foundation.Hash{}) {
+		return nil, false
+	}
+
 	now := time.Now()
 	lastSeen := now
 	if seenAt > 0 {
@@ -54,9 +74,11 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 
 	existing, found := s.peers[hash]
 	if !found {
-		// Enforce bounded memory: prune lowest score peer if at max capacity
+		// Enforce bounded memory: evict a batch of lowest-utility peers when reaching capacity
+		// to allow continuous turnover and admission of newly discovered DHT peers.
 		if len(s.peers) >= s.maxPeers {
-			s.evictWorstLocked()
+			batch := min(25, max(2, s.maxPeers/100))
+			s.evictBatchLocked(batch)
 		}
 
 		family, v4, v6, ports, tcpPorts, udpPorts := extractRouterAddresses(info)
@@ -64,8 +86,8 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 			Hash:        hash,
 			Raw:         bytes.Clone(raw),
 			PublishedAt: time.UnixMilli(int64(info.Published)),
-			IsFloodfill: foundation.NetworkDatabaseIsFloodfill(info),
 			Family:      family,
+			IsFloodfill: foundation.NetworkDatabaseIsFloodfill(info),
 			IPv4:        v4,
 			IPv6:        v6,
 			Ports:       ports,
@@ -157,40 +179,108 @@ func (s *PeerStore) RecordTunnelBuildResult(hash foundation.Hash, accepted bool)
 }
 
 func (s *PeerStore) evictWorstLocked() {
+	s.evictBatchLocked(1)
+}
+
+// evictBatchLocked evicts up to count lowest-utility peers to free up capacity for newly discovered nodes.
+// Candidates in sparse buckets (<= 4 peers) are protected to preserve K-Bucket diversity.
+func (s *PeerStore) evictBatchLocked(count int) int {
+	if count <= 0 || len(s.peers) == 0 {
+		return 0
+	}
+
 	var bucketCounts [256]int
 	for _, p := range s.peers {
 		bucketCounts[p.Hash[0]]++
 	}
 
-	var worstHash foundation.Hash
-	var worstScore float64 = 1e9
-	found := false
+	now := time.Now()
+	evicted := 0
 
-	// First preference: evict lowest scoring peer from crowded buckets (> 4 peers) to preserve sparse bucket diversity
-	for h, p := range s.peers {
-		if bucketCounts[p.Hash[0]] > 4 {
-			if !found || p.Score < worstScore {
-				worstHash = h
-				worstScore = p.Score
-				found = true
-			}
-		}
+	type scoredPeer struct {
+		hash  foundation.Hash
+		score float64
 	}
 
-	// Fallback: if no bucket has > 4 peers, evict lowest overall
-	if !found {
+	evictCandidates := func(minBucketCount int, filter func(p *PeerRecord) bool) {
+		if evicted >= count {
+			return
+		}
+		var candidates []scoredPeer
 		for h, p := range s.peers {
-			if !found || p.Score < worstScore {
-				worstHash = h
-				worstScore = p.Score
-				found = true
+			if bucketCounts[p.Hash[0]] > minBucketCount && (filter == nil || filter(p)) {
+				candidates = append(candidates, scoredPeer{hash: h, score: p.Score})
+			}
+		}
+		slices.SortFunc(candidates, func(a, b scoredPeer) int {
+			return cmp.Compare(a.score, b.score)
+		})
+		for _, sp := range candidates {
+			if evicted >= count {
+				break
+			}
+			if bucketCounts[sp.hash[0]] <= minBucketCount {
+				continue
+			}
+			if _, exists := s.peers[sp.hash]; exists {
+				delete(s.peers, sp.hash)
+				bucketCounts[sp.hash[0]]--
+				evicted++
 			}
 		}
 	}
 
-	if found {
-		delete(s.peers, worstHash)
+	// 1. Dead peers (consecutive failures >= 2 and not reachable) in non-sparse buckets (> 2 peers)
+	evictCandidates(2, func(p *PeerRecord) bool {
+		return !p.Stats.IsReachable && p.Stats.ConsecutiveFails >= 2
+	})
+
+	// 2. Long-stale peers (> 12h unseen) in crowded buckets (> 4 peers)
+	evictCandidates(4, func(p *PeerRecord) bool {
+		return !p.Stats.LastSeen.IsZero() && now.Sub(p.Stats.LastSeen) > 12*time.Hour
+	})
+
+	// 3. Lowest score peers in crowded buckets (> 4 peers)
+	evictCandidates(4, nil)
+
+	// 4. Fallback: lowest score peers overall if still needed
+	evictCandidates(0, nil)
+
+	return evicted
+}
+
+// PruneStale actively removes stale or repeatedly failed peers from non-sparse buckets.
+func (s *PeerStore) PruneStale(maxAge time.Duration) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pruneStaleLocked(maxAge)
+}
+
+func (s *PeerStore) pruneStaleLocked(maxAge time.Duration) int {
+	if maxAge <= 0 {
+		maxAge = 24 * time.Hour
 	}
+	now := time.Now()
+	var bucketCounts [256]int
+	for _, p := range s.peers {
+		bucketCounts[p.Hash[0]]++
+	}
+
+	pruned := 0
+	for h, p := range s.peers {
+		// Preserve sparse buckets to protect DHT keyspace diversity
+		if bucketCounts[p.Hash[0]] <= 4 {
+			continue
+		}
+		isDead := (!p.Stats.IsReachable && p.Stats.ConsecutiveFails >= 3)
+		isStale := (!p.Stats.LastSeen.IsZero() && now.Sub(p.Stats.LastSeen) > maxAge && !p.Stats.IsReachable)
+		if isDead || isStale {
+			delete(s.peers, h)
+			bucketCounts[h[0]]--
+			pruned++
+		}
+	}
+	return pruned
 }
 
 func (s *PeerStore) RecordProbeResult(hash foundation.Hash, success bool, rtt time.Duration) {
@@ -345,7 +435,7 @@ func extractRouterAddresses(info foundation.NetworkDatabaseRouterInfo) (string, 
 			break
 		}
 		ip, port := parseAddressEndpoint(address)
-		if !ip.IsValid() {
+		if !ip.IsValid() || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
 			continue
 		}
 		if ip.Is4() {

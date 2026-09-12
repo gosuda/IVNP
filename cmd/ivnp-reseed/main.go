@@ -44,7 +44,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	tempDir := flags.String("temp-dir", "", "temporary directory for tainted copy state (default os.TempDir())")
 	peersFile := flags.String("peers-file", "", "path to peer cache file (default <data-dir>/reseed-peers.json)")
 	targetPeers := flags.Int("target", 1024, "target number of diverse peers in reseed archive")
-	interval := flags.Duration("interval", 5*time.Minute, "refresh interval for harvesting, probing, and packaging")
+	interval := flags.Duration("interval", 10*time.Minute, "refresh interval for harvesting, probing, and packaging")
 	netID := flags.Uint("netid", 2, "I2P network ID")
 	signerID := flags.String("signer-id", "reseed@ivnp.network", "SU3 signer common name")
 	routerPort := flags.Int("router-port", 0, "port for embedded router NTCP2/SSU2 transports (default 0 for random/ephemeral)")

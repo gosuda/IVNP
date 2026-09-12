@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -23,6 +24,8 @@ import (
 	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/foundation"
 )
+
+var errMockDialFailed = errors.New("mock dial failed")
 
 func createTestRouterInfo(t *testing.T, caps string) (foundation.NetworkDatabaseRouterInfo, []byte) {
 	t.Helper()
@@ -180,7 +183,7 @@ func TestProberWithRateLimiter(t *testing.T) {
 	store := NewPeerStore()
 	info, raw := createTestRouterInfo(t, "LR")
 	rec, _ := store.AddOrUpdate(info, raw)
-	rec.IPv4 = []netip.Addr{netip.MustParseAddr("127.0.0.1")}
+	rec.IPv4 = []netip.Addr{netip.MustParseAddr("198.51.100.1")}
 	rec.Ports = []uint16{8080}
 
 	prober := NewProber(store, 4)
@@ -1014,5 +1017,164 @@ func TestSelectorExcludesIPv6Only(t *testing.T) {
 		if len(p.IPv4) == 0 {
 			t.Fatalf("selected peer %x has no IPv4 (IPv6 only), must be excluded", p.Hash)
 		}
+	}
+}
+
+func TestProberRejectsLocalAndFastRTT(t *testing.T) {
+	store := NewPeerStore()
+
+	// 1. Peer with only loopback / link-local addresses
+	info1, raw1 := createTestRouterInfo(t, "LR")
+	rec1, _ := store.AddOrUpdate(info1, raw1)
+	rec1.IPv4 = []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("0.0.0.0")}
+	rec1.Ports = []uint16{8080}
+	rec1.Stats.IsReachable = false
+
+	// 2. Peer with public IP, but dial returns in < 5ms (e.g. 2ms local bridge)
+	info2, raw2 := createTestRouterInfo(t, "LR")
+	rec2, _ := store.AddOrUpdate(info2, raw2)
+	rec2.IPv4 = []netip.Addr{netip.MustParseAddr("198.51.100.1")}
+	rec2.Ports = []uint16{8081}
+	rec2.Stats.IsReachable = false
+
+	// 3. Peer with public IP and normal network latency (30ms)
+	info3, raw3 := createTestRouterInfo(t, "LR")
+	rec3, _ := store.AddOrUpdate(info3, raw3)
+	rec3.IPv4 = []netip.Addr{netip.MustParseAddr("198.51.100.2")}
+	rec3.Ports = []uint16{8082}
+	rec3.Stats.IsReachable = false
+
+	prober := NewProber(store, 4)
+	prober.SetDialer(func(ctx context.Context, network, address string) (time.Duration, error) {
+		if strings.Contains(address, "198.51.100.1") {
+			return 2 * time.Millisecond, nil // too fast, local socket!
+		}
+		if strings.Contains(address, "198.51.100.2") {
+			return 30 * time.Millisecond, nil // normal Internet latency
+		}
+		t.Fatalf("unexpected dial to %s", address)
+		return 0, errMockDialFailed
+	})
+
+	success := prober.ProbeAll(context.Background())
+	if success != 1 {
+		t.Fatalf("successful probes = %d, want 1", success)
+	}
+
+	snap := store.Snapshot()
+	for _, p := range snap {
+		if p.Hash == rec1.Hash && p.Stats.IsReachable {
+			t.Fatal("loopback peer should not be marked reachable")
+		}
+		if p.Hash == rec2.Hash && p.Stats.IsReachable {
+			t.Fatal("local bridge (<5ms) peer should not be marked reachable")
+		}
+		if p.Hash == rec3.Hash && !p.Stats.IsReachable {
+			t.Fatal("normal peer should be marked reachable")
+		}
+	}
+}
+
+func TestPeerStoreLocalHashFilter(t *testing.T) {
+	store := NewPeerStore()
+	info, raw := createTestRouterInfo(t, "LR")
+	localHash := info.Hash()
+
+	rec, isNew := store.AddOrUpdate(info, raw)
+	if !isNew || rec == nil {
+		t.Fatal("initial peer should be added")
+	}
+
+	// Setting local hash removes existing entry
+	store.SetLocalHash(localHash)
+	if store.Len() != 0 {
+		t.Fatalf("store len = %d, want 0 after SetLocalHash", store.Len())
+	}
+
+	// Re-adding local hash is rejected
+	rec2, isNew2 := store.AddOrUpdate(info, raw)
+	if isNew2 || rec2 != nil {
+		t.Fatal("re-adding local hash router info must be rejected")
+	}
+}
+
+func TestPeerStoreContinuousBatchEviction(t *testing.T) {
+	store := NewPeerStore()
+	store.maxPeers = 100
+
+	// Populate 100 peers in bucket 0
+	for i := 0; i < 100; i++ {
+		var h foundation.Hash
+		h[0] = 0
+		h[1] = byte(i)
+		store.peers[h] = &PeerRecord{
+			Hash:  h,
+			Score: float64(100 + i),
+		}
+	}
+	if store.Len() != 100 {
+		t.Fatalf("store len = %d, want 100", store.Len())
+	}
+
+	// Add a new peer (which should trigger batch eviction)
+	info, raw := createTestRouterInfo(t, "LR")
+	rec, isNew := store.AddOrUpdate(info, raw)
+	if !isNew || rec == nil {
+		t.Fatal("new peer should be admitted after batch eviction")
+	}
+
+	// Store size should have dropped below maxPeers to give breathing room for discoveries
+	if store.Len() >= 100 {
+		t.Fatalf("store len = %d, want < 100 after batch eviction", store.Len())
+	}
+}
+
+func TestPeerStorePruneStale(t *testing.T) {
+	store := NewPeerStore()
+	now := time.Now()
+
+	// Crowded bucket (bucket 0) with 6 peers: 2 dead, 4 healthy
+	for i := 0; i < 6; i++ {
+		var h foundation.Hash
+		h[0] = 0
+		h[1] = byte(i)
+		fails := 0
+		reachable := true
+		if i < 2 {
+			fails = 5
+			reachable = false
+		}
+		store.peers[h] = &PeerRecord{
+			Hash:  h,
+			Score: float64(50 + i),
+			Stats: PeerStats{
+				ConsecutiveFails: fails,
+				IsReachable:      reachable,
+				LastSeen:         now,
+			},
+		}
+	}
+
+	// Sparse bucket (bucket 1) with 1 dead peer
+	var hSparse foundation.Hash
+	hSparse[0] = 1
+	store.peers[hSparse] = &PeerRecord{
+		Hash:  hSparse,
+		Score: 10,
+		Stats: PeerStats{
+			ConsecutiveFails: 10,
+			IsReachable:      false,
+			LastSeen:         now.Add(-48 * time.Hour),
+		},
+	}
+
+	pruned := store.PruneStale(24 * time.Hour)
+	if pruned != 2 {
+		t.Fatalf("pruned = %d, want 2", pruned)
+	}
+
+	// Sparse bucket peer must be preserved
+	if _, found := store.peers[hSparse]; !found {
+		t.Fatal("sparse bucket peer must be protected even if stale/dead")
 	}
 }

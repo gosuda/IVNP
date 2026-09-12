@@ -220,6 +220,9 @@ func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Dura
 	var targets []string
 	addEndpoints := func(ips []netip.Addr, ports []uint16) {
 		for _, ip := range ips {
+			if !ip.IsValid() || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
+				continue
+			}
 			for _, port := range ports {
 				targets = append(targets, net.JoinHostPort(ip.String(), strconv.Itoa(int(port))))
 			}
@@ -237,6 +240,10 @@ func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Dura
 			}
 			rtt, err := p.probeDialer(ctx, "tcp", target)
 			if err == nil {
+				// Reject localhost / host-local bridge sockets that complete in < 5ms
+				if rtt < 5*time.Millisecond {
+					continue
+				}
 				return true, rtt
 			}
 		}

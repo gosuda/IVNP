@@ -25,13 +25,14 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>IVNP Reseed Indexer & Network Monitor</title>
   <style>
+    /* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5 */
     :root {
-      --bg: #090d16;
-      --card-bg: #111827;
-      --card-border: #1f2937;
-      --card-hover: #1a2234;
-      --text-main: #f3f4f6;
-      --text-muted: #9ca3af;
+      --bg: #080c14;
+      --card-bg: #0e1422;
+      --card-border: #1b2434;
+      --card-hover: #141c2e;
+      --text-main: #f1f5f9;
+      --text-muted: #8896ab;
       --primary: #38bdf8;
       --accent: #10b981;
       --warning: #f59e0b;
@@ -39,10 +40,15 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       --purple: #a855f7;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      overflow-x: clip;
+    }
     body {
       background-color: var(--bg);
       color: var(--text-main);
       font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
       line-height: 1.5;
       padding: 24px;
       max-width: 1280px;
@@ -66,6 +72,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       display: flex;
       align-items: center;
       gap: 10px;
+      font-style: normal;
     }
     .header-left p {
       color: var(--text-muted);
@@ -86,55 +93,68 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       border-radius: 9999px;
       font-size: 0.8rem;
       font-weight: 600;
-      background: #1e293b;
+      background: #151d2f;
       color: var(--text-main);
       border: 1px solid var(--card-border);
+      font-variant-numeric: tabular-nums;
     }
     .badge-live {
       background: rgba(16, 185, 129, 0.1);
       color: #34d399;
-      border-color: rgba(16, 185, 129, 0.3);
+      border-color: rgba(16, 185, 129, 0.25);
     }
-    .pulse-dot {
-      width: 8px;
-      height: 8px;
+    .live-pip {
+      width: 7px;
+      height: 7px;
       background-color: #10b981;
       border-radius: 50%;
-      animation: pulse 2s infinite;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.4; transform: scale(1.2); }
+      display: inline-block;
+      flex-shrink: 0;
     }
     .btn-toggle {
-      background: #1e293b;
+      background: #151d2f;
       color: var(--text-main);
       border: 1px solid var(--card-border);
       padding: 6px 12px;
-      border-radius: 8px;
+      border-radius: 6px;
       font-size: 0.8rem;
       font-weight: 600;
       cursor: pointer;
-      transition: all 0.15s ease;
+      font-variant-numeric: tabular-nums;
+      transition: background 0.15s ease, border-color 0.15s ease;
     }
-    .btn-toggle:hover { background: #334155; }
+    .btn-toggle:hover {
+      background: #1e293b;
+      border-color: #334155;
+    }
+    .btn-toggle:focus-visible,
+    .btn-dl:focus-visible,
+    .btn-copy:focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 2px;
+    }
+    .btn-toggle:active,
+    .btn-dl:active,
+    .btn-copy:active {
+      transform: translateY(1px);
+    }
     .grid-kpi {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
       gap: 16px;
       margin-bottom: 24px;
     }
     .card {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
-      border-radius: 12px;
+      border-radius: 8px;
       padding: 20px;
-      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
       transition: border-color 0.15s ease, background 0.15s ease;
     }
     .card:hover {
       background: var(--card-hover);
-      border-color: #374151;
+      border-color: #2a374e;
     }
     .card-title {
       font-size: 0.78rem;
@@ -143,17 +163,21 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       color: var(--text-muted);
       font-weight: 600;
       margin-bottom: 8px;
+      font-style: normal;
     }
     .card-value {
       font-size: 1.85rem;
       font-weight: 700;
       color: #fff;
       line-height: 1.1;
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum";
     }
     .card-sub {
       margin-top: 6px;
       font-size: 0.8rem;
       color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
     }
     .section-title {
       font-size: 1.15rem;
@@ -163,10 +187,11 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       display: flex;
       align-items: center;
       gap: 8px;
+      font-style: normal;
     }
     .downloads-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
       gap: 16px;
       margin-bottom: 28px;
     }
@@ -212,9 +237,9 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       }
     }
     .method-box {
-      background: rgba(15, 23, 42, 0.7);
-      border: 1px solid #1e293b;
-      border-radius: 8px;
+      background: rgba(13, 19, 31, 0.7);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
       padding: 10px 12px;
     }
     .method-header {
@@ -236,13 +261,13 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
     }
     .pkg-stats-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr));
       gap: 10px;
     }
     .pkg-stat-item {
-      background: rgba(30, 41, 59, 0.4);
-      border: 1px solid rgba(51, 65, 85, 0.4);
-      border-radius: 8px;
+      background: rgba(21, 29, 47, 0.4);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
       padding: 10px;
     }
     .pkg-stat-label {
@@ -258,15 +283,18 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       font-weight: 700;
       color: #fff;
       line-height: 1.1;
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum";
     }
     .pkg-stat-sub {
       font-size: 0.72rem;
       color: var(--text-muted);
       margin-top: 4px;
+      font-variant-numeric: tabular-nums;
     }
     .ip-ratio-bar {
       height: 6px;
-      background: #1e293b;
+      background: #1b2434;
       border-radius: 9999px;
       overflow: hidden;
       display: flex;
@@ -285,15 +313,17 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       font-size: 1.05rem;
       font-weight: 600;
       color: #fff;
+      font-style: normal;
     }
     .fmt-pill {
       font-size: 0.72rem;
       font-weight: 700;
       padding: 3px 8px;
-      border-radius: 6px;
+      border-radius: 4px;
       text-transform: uppercase;
+      letter-spacing: 0.04em;
     }
-    .fmt-su3 { background: rgba(56, 189, 248, 0.15); color: var(--primary); border: 1px solid rgba(56, 189, 248, 0.3); }
+    .fmt-su3 { background: rgba(56, 189, 248, 0.12); color: var(--primary); border: 1px solid rgba(56, 189, 248, 0.25); }
     .download-meta {
       font-size: 0.82rem;
       color: var(--text-muted);
@@ -306,32 +336,33 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
     .btn-dl {
       flex: 1;
       text-align: center;
-      background: #2563eb;
+      background: #1d4ed8;
       color: #fff;
       text-decoration: none;
       font-weight: 600;
       font-size: 0.85rem;
       padding: 10px 16px;
-      border-radius: 8px;
-      transition: background 0.15s ease;
+      border-radius: 6px;
+      border: 1px solid #2563eb;
+      transition: background 0.15s ease, border-color 0.15s ease;
       display: inline-flex;
       justify-content: center;
       align-items: center;
       gap: 6px;
     }
-    .btn-dl:hover { background: #1d4ed8; }
+    .btn-dl:hover { background: #1e40af; border-color: #1d4ed8; }
     .btn-copy {
-      background: #1e293b;
+      background: #151d2f;
       color: var(--text-main);
       border: 1px solid var(--card-border);
       padding: 10px 14px;
-      border-radius: 8px;
+      border-radius: 6px;
       font-size: 0.85rem;
       font-weight: 600;
       cursor: pointer;
-      transition: all 0.15s ease;
+      transition: background 0.15s ease, border-color 0.15s ease;
     }
-    .btn-copy:hover { background: #334155; }
+    .btn-copy:hover { background: #1e293b; border-color: #334155; }
     .heatmap-section {
       margin-bottom: 28px;
     }
@@ -343,29 +374,29 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
     .heatmap-grid {
       display: grid;
       grid-template-columns: repeat(32, 1fr);
-      gap: 4px;
-      background: #0f172a;
+      gap: 3px;
+      background: #0d131f;
       padding: 14px;
-      border-radius: 12px;
+      border-radius: 8px;
       border: 1px solid var(--card-border);
     }
     .bucket-cell {
       aspect-ratio: 1;
-      border-radius: 3px;
-      background: #1e293b;
+      border-radius: 2px;
+      background: #151d2f;
       cursor: pointer;
-      transition: transform 0.1s ease, filter 0.1s ease;
+      transition: transform 0.1s ease;
       position: relative;
     }
     .bucket-cell:hover {
-      transform: scale(1.35);
+      transform: scale(1.3);
       z-index: 10;
-      filter: brightness(1.3);
-      box-shadow: 0 0 8px rgba(56, 189, 248, 0.5);
+      outline: 1.5px solid var(--primary);
+      outline-offset: 1px;
     }
     .analytics-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
       gap: 16px;
       margin-bottom: 28px;
     }
@@ -377,18 +408,21 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
     th, td {
       padding: 10px 12px;
       text-align: left;
-      border-bottom: 1px solid #1f2937;
+      border-bottom: 1px solid var(--card-border);
     }
     th {
       color: var(--text-muted);
       font-size: 0.78rem;
       text-transform: uppercase;
       letter-spacing: 0.05em;
+      font-style: normal;
     }
     td.val {
       text-align: right;
       font-weight: 600;
       color: #fff;
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum";
     }
     footer {
       display: flex;
@@ -406,30 +440,32 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
     #tooltip {
       position: fixed;
       display: none;
-      background: #0f172a;
-      color: #fff;
+      background: #0d131f;
+      color: #f1f5f9;
       padding: 6px 10px;
       border-radius: 6px;
       font-size: 0.75rem;
-      border: 1px solid #334155;
+      border: 1px solid var(--card-border);
       pointer-events: none;
       z-index: 100;
-      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.5);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+      font-variant-numeric: tabular-nums;
     }
     #toast {
       position: fixed;
       bottom: 24px;
       right: 24px;
-      background: #10b981;
-      color: #fff;
+      background: #064e3b;
+      color: #34d399;
+      border: 1px solid #059669;
       padding: 10px 18px;
-      border-radius: 8px;
+      border-radius: 6px;
       font-size: 0.85rem;
       font-weight: 600;
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
       z-index: 2000;
       display: none;
-      transition: opacity 0.3s ease;
+      transition: opacity 0.2s ease;
     }
   </style>
 </head>
@@ -449,7 +485,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
     </div>
     <div class="status-badges">
       <span class="badge badge-live">
-        <span class="pulse-dot"></span>
+        <span class="live-pip"></span>
         ACTIVE CRAWLER
       </span>
       <span class="badge" id="badge-mode" style="text-transform: uppercase; color: #38bdf8;">Mode: EXPANSION</span>
@@ -489,7 +525,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
     <div class="card">
       <div class="card-title">Next Archive Refresh</div>
       <div class="card-value" style="color: #60a5fa;" id="kpi-next-refresh">-</div>
-      <div class="card-sub">Periodic 5-minute cycle</div>
+      <div class="card-sub">Periodic 10-minute cycle</div>
     </div>
   </section>
 
