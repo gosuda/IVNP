@@ -18,16 +18,20 @@ import (
 
 // PeerStore provides thread-safe, memory-bounded peer indexing and snapshot persistence.
 type PeerStore struct {
-	mu        sync.RWMutex
-	peers     map[foundation.Hash]*PeerRecord
-	maxPeers  int
-	localHash foundation.Hash
+	mu         sync.RWMutex
+	peers      map[foundation.Hash]*PeerRecord
+	bySubnet16 map[[2]byte]map[foundation.Hash]struct{}
+	byFamily   map[string]map[foundation.Hash]struct{}
+	maxPeers   int
+	localHash  foundation.Hash
 }
 
 func NewPeerStore() *PeerStore {
 	return &PeerStore{
-		peers:    make(map[foundation.Hash]*PeerRecord),
-		maxPeers: MaxStorePeers,
+		peers:      make(map[foundation.Hash]*PeerRecord),
+		bySubnet16: make(map[[2]byte]map[foundation.Hash]struct{}),
+		byFamily:   make(map[string]map[foundation.Hash]struct{}),
+		maxPeers:   MaxStorePeers,
 	}
 }
 
@@ -35,7 +39,7 @@ func (s *PeerStore) SetLocalHash(h foundation.Hash) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.localHash = h
-	delete(s.peers, h)
+	s.deletePeerLocked(h)
 }
 
 func (s *PeerStore) LocalHash() foundation.Hash {
@@ -74,13 +78,6 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 
 	existing, found := s.peers[hash]
 	if !found {
-		// Enforce bounded memory: evict a batch of lowest-utility peers when reaching capacity
-		// to allow continuous turnover and admission of newly discovered DHT peers.
-		if len(s.peers) >= s.maxPeers {
-			batch := min(25, max(2, s.maxPeers/100))
-			s.evictBatchLocked(batch)
-		}
-
 		family, v4, v6, ports, tcpPorts, udpPorts := extractRouterAddresses(info)
 		rec := &PeerRecord{
 			Hash:        hash,
@@ -101,7 +98,23 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 			rec.Stats.IsReachable = true
 		}
 		rec.Score = calculateScore(rec)
+
+		// Reject peers that lose every /16 subnet and family contest they enter:
+		// a strictly better retained peer claims the group, so they can never be selected.
+		if hasGroup, tops := s.topsAnyContentionLocked(rec); hasGroup && !tops {
+			return nil, false
+		}
+
+		// Enforce bounded memory: evict a batch of lowest-utility peers when reaching capacity
+		// to allow continuous turnover and admission of newly discovered DHT peers.
+		if len(s.peers) >= s.maxPeers {
+			batch := min(25, max(2, s.maxPeers/100))
+			s.evictBatchLocked(batch)
+		}
+
 		s.peers[hash] = rec
+		s.indexPeerLocked(rec)
+		s.evictDominatedLocked(rec)
 		return rec, true
 	}
 
@@ -116,6 +129,7 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 	if published := time.UnixMilli(int64(info.Published)); published.After(existing.PublishedAt) {
 		existing.PublishedAt = published
 		existing.Raw = bytes.Clone(raw)
+		s.deindexPeerLocked(existing)
 		family, v4, v6, ports, tcpPorts, udpPorts := extractRouterAddresses(info)
 		existing.Family = family
 		existing.IPv4 = v4
@@ -124,6 +138,13 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 		existing.TCPPorts = tcpPorts
 		existing.UDPPorts = udpPorts
 		existing.IsFloodfill = foundation.NetworkDatabaseIsFloodfill(info)
+		existing.Score = calculateScore(existing)
+		s.indexPeerLocked(existing)
+		if hasGroup, tops := s.topsAnyContentionLocked(existing); hasGroup && !tops {
+			s.deletePeerLocked(existing.Hash)
+			return nil, false
+		}
+		s.evictDominatedLocked(existing)
 	}
 	existing.Score = calculateScore(existing)
 	return existing, false
@@ -223,7 +244,7 @@ func (s *PeerStore) evictBatchLocked(count int) int {
 				continue
 			}
 			if _, exists := s.peers[sp.hash]; exists {
-				delete(s.peers, sp.hash)
+				s.deletePeerLocked(sp.hash)
 				bucketCounts[sp.hash[0]]--
 				evicted++
 			}
@@ -275,12 +296,235 @@ func (s *PeerStore) pruneStaleLocked(maxAge time.Duration) int {
 		isDead := (!p.Stats.IsReachable && p.Stats.ConsecutiveFails >= 3)
 		isStale := (!p.Stats.LastSeen.IsZero() && now.Sub(p.Stats.LastSeen) > maxAge && !p.Stats.IsReachable)
 		if isDead || isStale {
-			delete(s.peers, h)
+			s.deletePeerLocked(h)
 			bucketCounts[h[0]]--
 			pruned++
 		}
 	}
 	return pruned
+}
+
+// PruneRedundant removes peers that can never win selection: every contention
+// group they join (each shared IPv4 /16 subnet and their router family)
+// already retains a strictly better member. Admission-time rejection keeps
+// redundant peers out; this sweep corrects ranking drift as probe and tunnel
+// results change member scores.
+func (s *PeerStore) PruneRedundant() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	subnets := make(map[[2]byte][]foundation.Hash)
+	families := make(map[string][]foundation.Hash)
+	for h, rec := range s.peers {
+		for _, ip := range rec.IPv4 {
+			if ip.Is4() {
+				subnet := IPv4Subnet16(ip)
+				subnets[subnet] = append(subnets[subnet], h)
+			}
+		}
+		if rec.Family != "" {
+			families[rec.Family] = append(families[rec.Family], h)
+		}
+	}
+
+	keep := make(map[foundation.Hash]struct{}, len(subnets)+len(families))
+	contested := make(map[foundation.Hash]struct{})
+	markTop := func(members []foundation.Hash) {
+		var top *PeerRecord
+		for _, h := range members {
+			contested[h] = struct{}{}
+			rec := s.peers[h]
+			if rec == nil {
+				continue
+			}
+			if top == nil || compareRetention(rec, top) < 0 {
+				top = rec
+			}
+		}
+		if top != nil {
+			keep[top.Hash] = struct{}{}
+		}
+	}
+	for _, members := range subnets {
+		markTop(members)
+	}
+	for _, members := range families {
+		markTop(members)
+	}
+
+	evicted := 0
+	for h := range contested {
+		if _, ok := keep[h]; !ok {
+			s.deletePeerLocked(h)
+			evicted++
+		}
+	}
+	return evicted
+}
+
+func (s *PeerStore) indexPeerLocked(rec *PeerRecord) {
+	for _, ip := range rec.IPv4 {
+		if !ip.Is4() {
+			continue
+		}
+		subnet := IPv4Subnet16(ip)
+		members, ok := s.bySubnet16[subnet]
+		if !ok {
+			members = make(map[foundation.Hash]struct{}, 1)
+			s.bySubnet16[subnet] = members
+		}
+		members[rec.Hash] = struct{}{}
+	}
+	if rec.Family != "" {
+		members, ok := s.byFamily[rec.Family]
+		if !ok {
+			members = make(map[foundation.Hash]struct{}, 1)
+			s.byFamily[rec.Family] = members
+		}
+		members[rec.Hash] = struct{}{}
+	}
+}
+
+func (s *PeerStore) deindexPeerLocked(rec *PeerRecord) {
+	for _, ip := range rec.IPv4 {
+		if !ip.Is4() {
+			continue
+		}
+		subnet := IPv4Subnet16(ip)
+		if members, ok := s.bySubnet16[subnet]; ok {
+			delete(members, rec.Hash)
+			if len(members) == 0 {
+				delete(s.bySubnet16, subnet)
+			}
+		}
+	}
+	if rec.Family != "" {
+		if members, ok := s.byFamily[rec.Family]; ok {
+			delete(members, rec.Hash)
+			if len(members) == 0 {
+				delete(s.byFamily, rec.Family)
+			}
+		}
+	}
+}
+
+func (s *PeerStore) deletePeerLocked(hash foundation.Hash) {
+	rec, found := s.peers[hash]
+	if !found {
+		return
+	}
+	s.deindexPeerLocked(rec)
+	delete(s.peers, hash)
+}
+
+// eachContentionGroupLocked invokes fn on every member set rec competes in:
+// one per IPv4 /16 subnet it occupies, plus its declared router family.
+func (s *PeerStore) eachContentionGroupLocked(rec *PeerRecord, fn func(members map[foundation.Hash]struct{})) {
+	for _, ip := range rec.IPv4 {
+		if ip.Is4() {
+			fn(s.bySubnet16[IPv4Subnet16(ip)])
+		}
+	}
+	if rec.Family != "" {
+		fn(s.byFamily[rec.Family])
+	}
+}
+
+// topsAnyContentionLocked reports whether rec belongs to at least one
+// contention group and whether it outranks every other member in at least one
+// of them. A peer that tops no group loses every claim during selection.
+func (s *PeerStore) topsAnyContentionLocked(rec *PeerRecord) (hasGroup, tops bool) {
+	s.eachContentionGroupLocked(rec, func(members map[foundation.Hash]struct{}) {
+		hasGroup = true
+		if tops {
+			return
+		}
+		top := true
+		for h := range members {
+			if h == rec.Hash {
+				continue
+			}
+			if other, ok := s.peers[h]; ok && compareRetention(other, rec) < 0 {
+				top = false
+				break
+			}
+		}
+		if top {
+			tops = true
+		}
+	})
+	return hasGroup, tops
+}
+
+// evictDominatedLocked drops co-members of rec's contention groups that no
+// longer top any of their own groups after rec took their claim.
+func (s *PeerStore) evictDominatedLocked(rec *PeerRecord) {
+	seen := make(map[foundation.Hash]struct{})
+	var evict []foundation.Hash
+	s.eachContentionGroupLocked(rec, func(members map[foundation.Hash]struct{}) {
+		for h := range members {
+			if h == rec.Hash {
+				continue
+			}
+			if _, dup := seen[h]; dup {
+				continue
+			}
+			seen[h] = struct{}{}
+			other, ok := s.peers[h]
+			if !ok {
+				continue
+			}
+			if hasGroup, tops := s.topsAnyContentionLocked(other); hasGroup && !tops {
+				evict = append(evict, h)
+			}
+		}
+	})
+	for _, h := range evict {
+		s.deletePeerLocked(h)
+	}
+}
+
+// compareRetention orders peers by retention priority within a contention
+// group, mirroring SelectDiversePeers: unconditionally selectable peers
+// (stored descriptor and IPv4 presence) outrank unselectable ones, reachable
+// peers outrank failing ones, then floodfill status, confirmed tunnel builds,
+// composite score, latency, and hash break ties.
+func compareRetention(a, b *PeerRecord) int {
+	aViable := len(a.Raw) > 0 && len(a.IPv4) > 0
+	bViable := len(b.Raw) > 0 && len(b.IPv4) > 0
+	if aViable != bViable {
+		if aViable {
+			return -1
+		}
+		return 1
+	}
+	aReady := a.Stats.IsReachable && a.Stats.ConsecutiveFails < 2
+	bReady := b.Stats.IsReachable && b.Stats.ConsecutiveFails < 2
+	if aReady != bReady {
+		if aReady {
+			return -1
+		}
+		return 1
+	}
+	if a.IsFloodfill != b.IsFloodfill {
+		if a.IsFloodfill {
+			return -1
+		}
+		return 1
+	}
+	if a.Stats.TunnelBuildAccepted != b.Stats.TunnelBuildAccepted {
+		if a.Stats.TunnelBuildAccepted {
+			return -1
+		}
+		return 1
+	}
+	if a.Score != b.Score {
+		return cmp.Compare(b.Score, a.Score)
+	}
+	if a.Stats.EWMARTT != b.Stats.EWMARTT {
+		return cmp.Compare(a.Stats.EWMARTT, b.Stats.EWMARTT)
+	}
+	return bytes.Compare(a.Hash[:], b.Hash[:])
 }
 
 func (s *PeerStore) RecordProbeResult(hash foundation.Hash, success bool, rtt time.Duration) {
@@ -341,12 +585,7 @@ func (s *PeerStore) SaveToFile(filePath string) error {
 	if err != nil {
 		return err
 	}
-
-	tmpPath := filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, filePath)
+	return writeFileAtomic(filePath, data, 0600)
 }
 
 func (s *PeerStore) LoadFromFile(filePath string) error {
@@ -366,7 +605,11 @@ func (s *PeerStore) LoadFromFile(filePath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, rec := range loaded {
+		if prev, found := s.peers[rec.Hash]; found {
+			s.deindexPeerLocked(prev)
+		}
 		s.peers[rec.Hash] = rec
+		s.indexPeerLocked(rec)
 	}
 	return nil
 }

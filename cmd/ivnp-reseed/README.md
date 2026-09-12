@@ -57,7 +57,7 @@ Autonomous I2P network indexer and reseed server. Actively crawls the live I2P D
    - PeerStore eviction protects sparse buckets (only evicts from buckets with > 4 peers).
    - Selector enforces strict 4-round bucket leveling ($256 \times 4 = 1024$) with a hard overflow cap of 5 peers per bucket.
 5. **Directly Reachable Package Guarantee**: When verified reachable peers exceed 256, the reseed package strictly contains only directly reachable peers (no dead/unverified node padding). If $\le 256$ (cold-start), candidate peers are admitted up to target to ensure initial network bootstrap.
-6. **Sybil & Eclipse Mitigation**: Peer selection enforces a hard limit of 1 router per IPv4 `/16` subnet and 1 router per declared `family`.
+6. **Sybil & Eclipse Mitigation**: Peer selection enforces a hard limit of 1 router per IPv4 `/16` subnet and 1 router per declared `family`. The peer store enforces the same contention bounds at admission: a router that tops none of its `/16` subnets or its family is rejected outright, a newly admitted winner evicts the dominated members it displaced, and a periodic sweep removes members whose rank drifted below their group winners.
 7. **Confirmed Tunnel Build Acceptance**: Actively monitors tunnel hops from exploratory/transit circuits and rewards verified routers with a composite score bonus (+15 pts).
 
 ---
@@ -150,7 +150,9 @@ Usage of ivnp-reseed:
   -netid uint
         I2P network ID (default 2)
   -signer-id string
-        SU3 signer common name (default "reseed@ivnp.network")
+        SU3 signer common name (default "reseed@ivnp.network", env RESEED_SIGNER_ID)
+  -seed-phrase string
+        Deterministic RSA-4096 signing key seed phrase (env RESEED_SEED_PHRASE preferred)
   -router-port int
         Port for embedded router NTCP2/SSU2 transports (default 0 for random/ephemeral)
   -no-router
@@ -162,6 +164,19 @@ Usage of ivnp-reseed:
   -version
         Show version and exit
 ```
+
+---
+
+## Signing Key & State Files
+
+| Env var | Flag | Description |
+| :--- | :--- | :--- |
+| `RESEED_SIGNER_ID` | `-signer-id` | SU3 signer common name (e.g. `reseed@ivnp.network`) |
+| `RESEED_SEED_PHRASE` | `-seed-phrase` | Seed phrase deriving the RSA-4096 signing key deterministically (HKDF-SHA512 expansion, then the c2sp.org/det-keygen procedure), like a Bitcoin seed backup. Prefer the env var so the phrase stays out of process arguments. |
+
+When a seed phrase is supplied, the same RSA-4096 key is reproduced on every restart and the phrase itself is the only backup needed — no private key is ever written to disk. Without a phrase an ephemeral random key is generated on each startup, so the signer identity changes and downstream routers must fetch the new certificate. Changing the phrase rotates the key.
+
+State files (`reseed-peers.json`, `i2pseeds.su3`, `reseed-rsa.crt`, `reseed-rsa.pub.pem`) are written through an atomic `path.tmp` + rename step so a crash never leaves a half-written file; any leftover `.tmp` files are deleted at startup before state is loaded.
 
 ---
 
@@ -185,12 +200,14 @@ Build and run using the hardened distroless image (`gcr.io/distroless/static-deb
 # Build image from git repository root
 docker build -f cmd/ivnp-reseed/Dockerfile -t ivnp-reseed .
 
-# Run container with persistent storage
+# Run container with persistent storage and a deterministic signing key
 docker run -d \
   --name ivnp-reseed \
   --restart unless-stopped \
   -p 8080:8080 \
   -v ivnp_reseed_data:/data \
+  -e RESEED_SIGNER_ID="reseed@ivnp.network" \
+  -e RESEED_SEED_PHRASE="twelve word seed phrase goes here ..." \
   ivnp-reseed
 ```
 
@@ -218,104 +235,41 @@ server {
 
 ## Key Management & Backup Guide
 
-`ivnp-reseed` signs all bootstrap SU3 packages using an RSA 4096-bit private key and SHA-512.
+`ivnp-reseed` signs all bootstrap SU3 packages using an RSA 4096-bit private key and SHA-512. The private key lives only in memory: it is derived deterministically from `RESEED_SEED_PHRASE`, or generated ephemerally when no phrase is configured. **No key file is ever read or written** — a legacy `reseed-rsa.key` in the data directory is ignored (a warning is logged at startup).
 
-### Key Files
+### Files
 
 Within `-data-dir` (default `/data`):
 
 | File | Type | Permissions | Description |
 | :--- | :--- | :--- | :--- |
-| `reseed-rsa.key` | PKCS#1 RSA Private Key | `0600` | **CRITICAL & CONFIDENTIAL**: Private key used to sign SU3 archives. |
-| `reseed-rsa.crt` | X.509 Certificate | `0644` | Public certificate (Subject CN = `-signer-id`, 10-year validity). |
+| `reseed-rsa.crt` | X.509 Certificate | `0644` | Public certificate (Subject CN = `-signer-id`, 10-year validity), regenerated on each start. |
 | `reseed-rsa.pub.pem` | PKIX RSA Public Key | `0644` | Standard PEM-encoded RSA 4096-bit public key. |
 
+Both are public artifacts written for operator convenience; deleting them is harmless since they are recreated at startup.
+
 > [!WARNING]
-> **Why Backing Up `reseed-rsa.key` is Mandatory:**
-> Client routers (Java I2P, i2pd, IVNP) trust a reseed service by pinning its X.509 certificate. If `reseed-rsa.key` is lost (e.g. recreating a Docker container without a persistent volume or host storage failure), `ivnp-reseed` will automatically generate a **new** keypair on startup. As a result, all existing downstream routers will reject the newly signed SU3 packages with `SU3 signature verification failed`.
+> **Why Backing Up `RESEED_SEED_PHRASE` is Mandatory:**
+> Client routers (Java I2P, i2pd, IVNP) trust a reseed service by pinning its X.509 certificate. If the seed phrase is lost or omitted, `ivnp-reseed` starts with a **new ephemeral keypair** and all existing downstream routers will reject the newly signed SU3 packages with `SU3 signature verification failed`.
 >
-> Always back up `reseed-rsa.key` securely offsite!
+> Store the seed phrase like a Bitcoin seed backup — it is the entire key.
 
-### Backing Up the Private Key
+### Restoring a Signer Identity
 
-#### From Docker (Running Container / Volume)
-
-1. **Direct copy from a running container:**
-   ```bash
-   # Copy private key and public certificate to current directory
-   docker cp ivnp-reseed:/data/reseed-rsa.key ./reseed-rsa.key.backup
-   docker cp ivnp-reseed:/data/reseed-rsa.crt ./reseed-rsa.crt.backup
-
-   # Protect backup permissions immediately
-   chmod 600 ./reseed-rsa.key.backup
-   ```
-
-2. **Archive directly from Docker named volume (recommended for automated cron backups):**
-   ```bash
-   docker run --rm \
-     -v ivnp_reseed_data:/data:ro \
-     -v $(pwd):/backup \
-     alpine tar czf /backup/ivnp-reseed-keys-$(date +%Y%m%d).tar.gz -C /data reseed-rsa.key reseed-rsa.crt
-
-   chmod 600 ivnp-reseed-keys-*.tar.gz
-   ```
-
-#### From Bare-Metal / Standalone Host
+Restore = set the same seed phrase again. No file copies needed:
 
 ```bash
-# If using default host directory /var/lib/ivnp-reseed
-sudo cp /var/lib/ivnp-reseed/reseed-rsa.key /secure/backup/reseed-rsa.key.backup
-sudo cp /var/lib/ivnp-reseed/reseed-rsa.crt /secure/backup/reseed-rsa.crt.backup
-sudo chmod 600 /secure/backup/reseed-rsa.key.backup
-```
-
-### Restoring the Private Key
-
-#### Into a New Docker Container / Volume
-
-```bash
-# 1. Create the Docker volume if not existing
-docker volume create ivnp_reseed_data
-
-# 2. Copy the backed up private key into the volume with nonroot ownership (UID 65532)
-docker run --rm \
-  -v ivnp_reseed_data:/data \
-  -v $(pwd):/backup \
-  alpine sh -c "cp /backup/reseed-rsa.key.backup /data/reseed-rsa.key && chown 65532:65532 /data/reseed-rsa.key && chmod 600 /data/reseed-rsa.key"
-
-# 3. Launch the container - it will detect the existing key and reuse it
 docker run -d \
   --name ivnp-reseed \
   --restart unless-stopped \
   -p 8080:8080 \
   -v ivnp_reseed_data:/data \
+  -e RESEED_SIGNER_ID="reseed@ivnp.network" \
+  -e RESEED_SEED_PHRASE="<your backed up seed phrase>" \
   ivnp-reseed
 ```
 
-#### Into Bare-Metal / Standalone Host
-
-```bash
-sudo mkdir -p /var/lib/ivnp-reseed
-sudo cp /secure/backup/reseed-rsa.key.backup /var/lib/ivnp-reseed/reseed-rsa.key
-sudo chmod 600 /var/lib/ivnp-reseed/reseed-rsa.key
-sudo chown $(whoami):$(whoami) /var/lib/ivnp-reseed/reseed-rsa.key
-```
-
-### Pre-generating Custom Keys with OpenSSL (Optional)
-
-If you prefer to generate your 4096-bit RSA signing key and self-signed certificate in advance before starting `ivnp-reseed`:
-
-```bash
-# 1. Generate 4096-bit RSA private key
-openssl genrsa -out reseed-rsa.key 4096
-chmod 600 reseed-rsa.key
-
-# 2. Generate self-signed certificate matching your signer ID (10 years)
-openssl req -new -x509 -key reseed-rsa.key -out reseed-rsa.crt -days 3650 \
-  -subj "/CN=reseed@ivnp.network/O=I2P Anonymous Network"
-
-# 3. Place both files in your -data-dir (/data)
-```
+Rotate by simply changing the phrase; the certificate is regenerated automatically.
 
 ### Installing the Reseed Certificate on Downstream Routers
 

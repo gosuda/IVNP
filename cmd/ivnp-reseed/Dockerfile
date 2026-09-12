@@ -39,6 +39,14 @@ USER nonroot:nonroot
 WORKDIR /data
 VOLUME ["/data"]
 
+# RESEED_SIGNER_ID: SU3 signer common name shown to clients.
+# RESEED_SEED_PHRASE: seed phrase deriving the RSA-4096 signing key
+# deterministically (HKDF-SHA512 → det-keygen). No key file is used; the
+# phrase is the only backup. Without it an ephemeral key is generated on each start:
+#   docker run -e RESEED_SEED_PHRASE="word1 word2 ..." ...
+# Prefer env over -seed-phrase so the phrase stays out of the command line.
+ENV RESEED_SIGNER_ID="reseed@ivnp.network"
+
 EXPOSE 8080 8443
 
 # Self-contained healthcheck using binary's built-in -healthcheck flag (no shell or wget needed)

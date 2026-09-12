@@ -6,7 +6,9 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha512"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -16,11 +18,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"filippo.io/keygen"
+	"golang.org/x/crypto/hkdf"
 	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/foundation"
 )
@@ -53,6 +58,64 @@ func createTestRouterInfo(t *testing.T, caps string) (foundation.NetworkDatabase
 
 	// unsigned: identity + 8 bytes date + 1 byte addressCount + 1 byte peerCount + options
 	unsigned := append(identity, make([]byte, 10)...)
+	unsigned = append(unsigned, options[:optionLen]...)
+	wire := append(unsigned, ed25519.Sign(private, unsigned)...)
+
+	info, err := foundation.NetworkDatabaseParseRouterInfo(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info, wire
+}
+
+func createTestRouterInfoWithEndpoint(t *testing.T, seed []byte, caps, host, port, family string, published uint64) (foundation.NetworkDatabaseRouterInfo, []byte) {
+	t.Helper()
+	public, private, err := ed25519.GenerateKey(bytes.NewReader(seed))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	identity := make([]byte, foundation.IdentityBaseLength+7)
+	copy(identity[352:384], public)
+	identity[384] = byte(foundation.CertificateKey)
+	identity[385], identity[386] = 0, 4
+	identity[387], identity[388] = 0, byte(foundation.SigningEdDSASHA512Ed25519)
+	identity[389], identity[390] = 0, byte(foundation.CryptoElGamal)
+
+	addrOptions := make([]byte, 128)
+	addrLen, err := foundation.MarshalMappingTo(addrOptions, []foundation.MappingEntry{
+		{Key: []byte("host"), Value: []byte(host)},
+		{Key: []byte("port"), Value: []byte(port)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	style := []byte("NTCP2")
+	address := make([]byte, 0, 10+len(style)+addrLen)
+	address = append(address, 4)
+	address = append(address, make([]byte, 8)...)
+	address = append(address, byte(len(style)))
+	address = append(address, style...)
+	address = append(address, addrOptions[:addrLen]...)
+
+	entries := []foundation.MappingEntry{
+		{Key: []byte("caps"), Value: []byte(caps)},
+	}
+	if family != "" {
+		entries = append(entries, foundation.MappingEntry{Key: []byte("family"), Value: []byte(family)})
+	}
+	entries = append(entries, foundation.MappingEntry{Key: []byte("netId"), Value: []byte("2")})
+	options := make([]byte, 128)
+	optionLen, err := foundation.MarshalMappingTo(options, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unsigned := append(identity, make([]byte, 8)...)
+	binary.BigEndian.PutUint64(unsigned[len(identity):], published)
+	unsigned = append(unsigned, 1)
+	unsigned = append(unsigned, address...)
+	unsigned = append(unsigned, 0)
 	unsigned = append(unsigned, options[:optionLen]...)
 	wire := append(unsigned, ed25519.Sign(private, unsigned)...)
 
@@ -722,22 +785,21 @@ func TestTargetPeersDefault1024(t *testing.T) {
 	}
 }
 
-func TestLoadOrGenerateReseedCertificate(t *testing.T) {
+func TestInitReseedMaterial(t *testing.T) {
 	tempDir := t.TempDir()
-	keyPath := filepath.Join(tempDir, "reseed-rsa.key")
 	certPath := filepath.Join(tempDir, "reseed-rsa.crt")
 	pubKeyPath := filepath.Join(tempDir, "reseed-rsa.pub.pem")
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	key, err := loadOrGenerateRSASigningKey(keyPath, logger)
+	key, err := initSigningKey("", logger)
 	if err != nil {
-		t.Fatalf("loadOrGenerateRSASigningKey failed: %v", err)
+		t.Fatalf("initSigningKey failed: %v", err)
 	}
 
 	signerID := "test-signer@ivnp.network"
-	certPEM, pubPEM, err := loadOrGenerateReseedCertificate(certPath, pubKeyPath, signerID, key, logger)
+	certPEM, pubPEM, err := initReseedMaterial(certPath, pubKeyPath, signerID, key, logger)
 	if err != nil {
-		t.Fatalf("loadOrGenerateReseedCertificate failed: %v", err)
+		t.Fatalf("initReseedMaterial failed: %v", err)
 	}
 
 	block, _ := pem.Decode(certPEM)
@@ -764,15 +826,26 @@ func TestLoadOrGenerateReseedCertificate(t *testing.T) {
 		t.Fatal("expected valid PUBLIC KEY PEM block")
 	}
 
-	reloadedCert, reloadedPub, err := loadOrGenerateReseedCertificate(certPath, pubKeyPath, signerID, key, logger)
+	// The public artifacts are persisted for operators; they wrap the same key.
+	for _, path := range []string{certPath, pubKeyPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s to be persisted: %v", path, err)
+		}
+	}
+	certPEM2, pubPEM2, err := initReseedMaterial(certPath, pubKeyPath, signerID, key, logger)
 	if err != nil {
-		t.Fatalf("reload failed: %v", err)
+		t.Fatalf("second initReseedMaterial failed: %v", err)
 	}
-	if !bytes.Equal(certPEM, reloadedCert) {
-		t.Fatal("expected reloaded certificate to match original")
+	if !bytes.Equal(pubPEM, pubPEM2) {
+		t.Fatal("public key artifact must wrap the same signing key")
 	}
-	if !bytes.Equal(pubPEM, reloadedPub) {
-		t.Fatal("expected reloaded public key to match original")
+	block2, _ := pem.Decode(certPEM2)
+	cert2, err := x509.ParseCertificate(block2.Bytes)
+	if err != nil {
+		t.Fatalf("ParseCertificate regenerated: %v", err)
+	}
+	if cert2.PublicKey.(*rsa.PublicKey).N.Cmp(key.N) != 0 {
+		t.Fatal("regenerated certificate must wrap the same signing key")
 	}
 }
 
@@ -1177,4 +1250,324 @@ func TestPeerStorePruneStale(t *testing.T) {
 	if _, found := store.peers[hSparse]; !found {
 		t.Fatal("sparse bucket peer must be protected even if stale/dead")
 	}
+}
+
+func TestPeerStoreSubnetContention(t *testing.T) {
+	store := NewPeerStore()
+
+	info1, raw1 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{1}, 32), "LR", "198.51.100.1", "1234", "", 1000)
+	rec1, isNew := store.AddOrUpdate(info1, raw1)
+	if !isNew || rec1 == nil {
+		t.Fatal("incumbent peer should be admitted")
+	}
+	store.RecordProbeResult(info1.Hash(), true, 40*time.Millisecond)
+
+	// A weaker peer in the same /16 loses its only contention group.
+	info2, raw2 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{2}, 32), "LR", "198.51.100.2", "1234", "", 1000)
+	if rec2, isNew2 := store.AddOrUpdate(info2, raw2); isNew2 || rec2 != nil {
+		t.Fatal("weaker same-/16 peer should be rejected")
+	}
+	if store.Len() != 1 {
+		t.Fatalf("store len = %d, want 1", store.Len())
+	}
+
+	// A peer on an uncontested /16 tops its own group and is admitted.
+	info3, raw3 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{3}, 32), "LR", "203.0.113.7", "1234", "", 1000)
+	if rec3, isNew3 := store.AddOrUpdate(info3, raw3); !isNew3 || rec3 == nil {
+		t.Fatal("peer on uncontested /16 should be admitted")
+	}
+	if store.Len() != 2 {
+		t.Fatalf("store len = %d, want 2", store.Len())
+	}
+}
+
+func TestPeerStoreSubnetDisplacement(t *testing.T) {
+	store := NewPeerStore()
+
+	info1, raw1 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{1}, 32), "LR", "198.51.100.1", "1234", "", 1000)
+	if _, isNew := store.AddOrUpdate(info1, raw1); !isNew {
+		t.Fatal("incumbent peer should be admitted")
+	}
+	store.RecordProbeResult(info1.Hash(), true, 40*time.Millisecond)
+
+	// A floodfill in the same /16 outranks the incumbent and displaces it.
+	info2, raw2 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{2}, 32), "f", "198.51.100.9", "1234", "", 1000)
+	rec2, isNew2 := store.AddOrUpdate(info2, raw2)
+	if !isNew2 || rec2 == nil {
+		t.Fatal("stronger floodfill peer should be admitted")
+	}
+	if store.Len() != 1 {
+		t.Fatalf("store len = %d, want 1 (incumbent evicted)", store.Len())
+	}
+	if snap := store.Snapshot(); snap[0].Hash != info2.Hash() {
+		t.Fatal("incumbent should be evicted after losing its only contention group")
+	}
+}
+
+func TestPeerStoreSubnetReadmissionAfterIncumbentFails(t *testing.T) {
+	store := NewPeerStore()
+
+	info1, raw1 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{1}, 32), "f", "198.51.100.1", "1234", "", 1000)
+	if _, isNew := store.AddOrUpdate(info1, raw1); !isNew {
+		t.Fatal("incumbent peer should be admitted")
+	}
+	store.RecordProbeResult(info1.Hash(), false, 0)
+	store.RecordProbeResult(info1.Hash(), false, 0)
+
+	// The failed incumbent no longer outranks a fresh same-/16 peer.
+	info2, raw2 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{2}, 32), "LR", "198.51.100.2", "1234", "", 1000)
+	rec2, isNew2 := store.AddOrUpdate(info2, raw2)
+	if !isNew2 || rec2 == nil {
+		t.Fatal("fresh peer should be admitted once the incumbent is failing")
+	}
+	if store.Len() != 1 {
+		t.Fatalf("store len = %d, want 1 (failed incumbent evicted)", store.Len())
+	}
+	if snap := store.Snapshot(); snap[0].Hash != info2.Hash() {
+		t.Fatal("failed incumbent should be evicted")
+	}
+}
+
+func TestPeerStoreFamilyContention(t *testing.T) {
+	store := NewPeerStore()
+
+	info1, raw1 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{1}, 32), "f", "198.51.100.1", "1234", "acme", 1000)
+	if _, isNew := store.AddOrUpdate(info1, raw1); !isNew {
+		t.Fatal("incumbent peer should be admitted")
+	}
+	store.RecordProbeResult(info1.Hash(), true, 40*time.Millisecond)
+
+	// Same family and same /16: loses every contention group.
+	info2, raw2 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{2}, 32), "LR", "198.51.100.2", "1234", "acme", 1000)
+	if rec2, isNew2 := store.AddOrUpdate(info2, raw2); isNew2 || rec2 != nil {
+		t.Fatal("family member losing all contention groups should be rejected")
+	}
+
+	// Same family but sole occupant of another /16: loses the family claim
+	// yet tops its subnet group, so it is retained.
+	info3, raw3 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{3}, 32), "LR", "203.0.113.9", "1234", "acme", 1000)
+	if rec3, isNew3 := store.AddOrUpdate(info3, raw3); !isNew3 || rec3 == nil {
+		t.Fatal("family member topping its own /16 should be admitted")
+	}
+	if store.Len() != 2 {
+		t.Fatalf("store len = %d, want 2", store.Len())
+	}
+}
+
+func TestPeerStoreUpdateEvictsOnLostContention(t *testing.T) {
+	store := NewPeerStore()
+	seed := bytes.Repeat([]byte{7}, 32)
+
+	info1, raw1 := createTestRouterInfoWithEndpoint(t, seed, "LR", "10.9.9.9", "1234", "", 1000)
+	rec1, isNew := store.AddOrUpdate(info1, raw1)
+	if !isNew || rec1 == nil {
+		t.Fatal("initial peer should be admitted")
+	}
+	store.RecordProbeResult(info1.Hash(), true, 40*time.Millisecond)
+
+	info2, raw2 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{2}, 32), "f", "198.51.100.1", "1234", "", 1000)
+	if _, isNew2 := store.AddOrUpdate(info2, raw2); !isNew2 {
+		t.Fatal("floodfill incumbent should be admitted")
+	}
+	store.RecordProbeResult(info2.Hash(), true, 30*time.Millisecond)
+
+	// Re-publishing moves the first peer into the contested /16: it loses
+	// its only group and is evicted rather than updated.
+	info3, raw3 := createTestRouterInfoWithEndpoint(t, seed, "LR", "198.51.100.9", "1234", "", 2000)
+	if rec3, isNew3 := store.AddOrUpdate(info3, raw3); isNew3 || rec3 != nil {
+		t.Fatal("re-published peer losing all groups should be evicted")
+	}
+	if store.Len() != 1 {
+		t.Fatalf("store len = %d, want 1", store.Len())
+	}
+	if snap := store.Snapshot(); snap[0].Hash != info2.Hash() {
+		t.Fatal("only the group winner should remain")
+	}
+}
+
+func TestPeerStorePruneRedundant(t *testing.T) {
+	store := NewPeerStore()
+	mkPeer := func(b0, b1 byte, ip string, family string, score float64) foundation.Hash {
+		var h foundation.Hash
+		h[0] = b0
+		h[1] = b1
+		store.peers[h] = &PeerRecord{
+			Hash:   h,
+			Raw:    []byte("raw"),
+			IPv4:   []netip.Addr{netip.MustParseAddr(ip)},
+			Family: family,
+			Stats:  PeerStats{IsReachable: true},
+			Score:  score,
+		}
+		return h
+	}
+
+	top198 := mkPeer(0, 1, "198.51.1.1", "", 90)
+	dup198 := mkPeer(0, 2, "198.51.1.2", "", 10)
+	solo203 := mkPeer(0, 3, "203.0.113.1", "", 5)
+	famA := mkPeer(0, 4, "10.1.0.1", "acme", 80)
+	famB := mkPeer(0, 5, "10.1.0.2", "acme", 70)
+	famC := mkPeer(0, 6, "10.2.0.1", "acme", 60)
+
+	// IPv6-only peer joins no contention group and is never pruned.
+	var v6h foundation.Hash
+	v6h[0] = 9
+	store.peers[v6h] = &PeerRecord{
+		Hash:  v6h,
+		Raw:   []byte("raw"),
+		IPv6:  []netip.Addr{netip.MustParseAddr("2001:db8::1")},
+		Stats: PeerStats{IsReachable: true},
+		Score: 1,
+	}
+
+	if pruned := store.PruneRedundant(); pruned != 2 {
+		t.Fatalf("pruned = %d, want 2", pruned)
+	}
+	for _, h := range []foundation.Hash{dup198, famB} {
+		if _, found := store.peers[h]; found {
+			t.Fatalf("dominated peer %x should be evicted", h[:4])
+		}
+	}
+	for _, h := range []foundation.Hash{top198, solo203, famA, famC, v6h} {
+		if _, found := store.peers[h]; !found {
+			t.Fatalf("peer %x topping a group or groupless should be kept", h[:4])
+		}
+	}
+}
+
+func TestKeygenRSADeterministic(t *testing.T) {
+	secret := func(seed string) []byte {
+		s := make([]byte, 64)
+		if _, err := io.ReadFull(hkdf.New(sha512.New, []byte(seed), []byte("ivnp-reseed"), []byte("reseed-rsa-4096")), s); err != nil {
+			t.Fatalf("hkdf expand: %v", err)
+		}
+		return s
+	}
+	key1, err := keygen.RSA(2048, secret("alpha bravo charlie"))
+	if err != nil {
+		t.Fatalf("keygen.RSA: %v", err)
+	}
+	key2, err := keygen.RSA(2048, secret("alpha bravo charlie"))
+	if err != nil {
+		t.Fatalf("keygen.RSA rerun: %v", err)
+	}
+	key3, err := keygen.RSA(2048, secret("alpha bravo delta"))
+	if err != nil {
+		t.Fatalf("keygen.RSA other seed: %v", err)
+	}
+
+	if key1.N.Cmp(key2.N) != 0 || key1.D.Cmp(key2.D) != 0 {
+		t.Fatal("same secret must derive the same key")
+	}
+	if key1.N.Cmp(key3.N) == 0 {
+		t.Fatal("different secrets must derive different keys")
+	}
+	if err := key1.Validate(); err != nil {
+		t.Fatalf("derived key must validate: %v", err)
+	}
+	if key1.N.BitLen() != 2048 {
+		t.Fatalf("derived key size = %d bits, want 2048", key1.N.BitLen())
+	}
+}
+
+func TestNormalizeSeedPhrase(t *testing.T) {
+	got, err := normalizeSeedPhrase("  alpha   bravo\tcharlie\ndelta  ")
+	if err != nil {
+		t.Fatalf("normalizeSeedPhrase: %v", err)
+	}
+	if got != "alpha bravo charlie delta" {
+		t.Fatalf("normalized phrase = %q", got)
+	}
+	if _, err := normalizeSeedPhrase("  \t \n "); err == nil {
+		t.Fatal("whitespace-only seed phrase must fail")
+	}
+}
+
+func TestSeedPhraseKeyDerivationAndCert(t *testing.T) {
+	tempDir := t.TempDir()
+	keyPath := filepath.Join(tempDir, "reseed-rsa.key")
+	certPath := filepath.Join(tempDir, "reseed-rsa.crt")
+	pubKeyPath := filepath.Join(tempDir, "reseed-rsa.pub.pem")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	phrase := "legal winner thank year wave sausage worth useful legal winner thank yellow"
+	key, err := initSigningKey(phrase, logger)
+	if err != nil {
+		t.Fatalf("initSigningKey with phrase: %v", err)
+	}
+	if key.N.BitLen() != 4096 {
+		t.Fatalf("derived key size = %d bits, want 4096", key.N.BitLen())
+	}
+
+	// The same phrase always reproduces the same key without any key file.
+	reloaded, err := initSigningKey(phrase, logger)
+	if err != nil {
+		t.Fatalf("initSigningKey rerun: %v", err)
+	}
+	if reloaded.N.Cmp(key.N) != 0 || reloaded.D.Cmp(key.D) != 0 {
+		t.Fatal("same phrase must derive the same key")
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("key file must never be read or written")
+	}
+
+	rotated, err := initSigningKey("other seed phrase entirely", logger)
+	if err != nil {
+		t.Fatalf("initSigningKey rotated: %v", err)
+	}
+	if rotated.N.Cmp(key.N) == 0 {
+		t.Fatal("different phrase must produce a different key")
+	}
+
+	certPEM, _, err := initReseedMaterial(certPath, pubKeyPath, "reseed@test.network", key, logger)
+	if err != nil {
+		t.Fatalf("initReseedMaterial: %v", err)
+	}
+	block, _ := pem.Decode(certPEM)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	rsaPub, ok := cert.PublicKey.(*rsa.PublicKey)
+	if !ok || rsaPub.N.Cmp(key.N) != 0 {
+		t.Fatal("certificate public key must match derived key")
+	}
+}
+
+func TestAtomicStateFileWrites(t *testing.T) {
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "state.json")
+
+	if err := writeFileAtomic(path, []byte(`{"v":1}`), 0600); err != nil {
+		t.Fatalf("writeFileAtomic: %v", err)
+	}
+	if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("temporary file must not remain after atomic rename")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != `{"v":1}` {
+		t.Fatalf("file content = %q", data)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("file mode = %v, want 0600", info.Mode().Perm())
+	}
+
+	// A stale .tmp left by an interrupted write is removed at startup.
+	stale := filepath.Join(tempDir, "stale.json")
+	if err := os.WriteFile(stale+".tmp", []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	removeStaleTempFile(stale, logger)
+	if _, err := os.Stat(stale + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("stale temporary file should be removed")
+	}
+	removeStaleTempFile(stale, logger) // no leftover: must not error or log
 }

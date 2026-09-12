@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -25,11 +26,22 @@ import (
 	"syscall"
 	"time"
 
+	"filippo.io/keygen"
+	"golang.org/x/crypto/hkdf"
 	"gosuda.org/ivnp/node"
 	"gosuda.org/ivnp/state"
 )
 
 var version = "active-dev"
+
+var errEmptySeedPhrase = errors.New("seed phrase is empty after normalization")
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -46,7 +58,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	targetPeers := flags.Int("target", 1024, "target number of diverse peers in reseed archive")
 	interval := flags.Duration("interval", 10*time.Minute, "refresh interval for harvesting, probing, and packaging")
 	netID := flags.Uint("netid", 2, "I2P network ID")
-	signerID := flags.String("signer-id", "reseed@ivnp.network", "SU3 signer common name")
+	signerID := flags.String("signer-id", envOr("RESEED_SIGNER_ID", "reseed@ivnp.network"), "SU3 signer common name (env RESEED_SIGNER_ID)")
+	seedPhrase := flags.String("seed-phrase", envOr("RESEED_SEED_PHRASE", ""), "deterministic RSA-4096 signing key seed phrase; prefer env RESEED_SEED_PHRASE so the phrase stays out of process arguments")
 	routerPort := flags.Int("router-port", 0, "port for embedded router NTCP2/SSU2 transports (default 0 for random/ephemeral)")
 	noRouter := flags.Bool("no-router", false, "disable embedded router (test/replay mode)")
 	healthCheckURL := flags.String("healthcheck", "", "check health endpoint URL and exit 0 (healthy) or 1 (unhealthy)")
@@ -77,13 +90,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 	certPath := filepath.Join(*dataDir, "reseed-rsa.crt")
 	pubKeyPath := filepath.Join(*dataDir, "reseed-rsa.pub.pem")
 
-	rsaPrivKey, err := loadOrGenerateRSASigningKey(keyPath, logger)
+	// Drop partial state left by interrupted atomic writes before loading.
+	for _, statePath := range []string{cachePath, su3Path, keyPath, certPath, pubKeyPath} {
+		removeStaleTempFile(statePath, logger)
+	}
+	if _, statErr := os.Stat(keyPath); statErr == nil {
+		logger.Warn("ignoring legacy reseed-rsa.key file; file-based keys are no longer used", "path", keyPath)
+	}
+
+	rsaPrivKey, err := initSigningKey(*seedPhrase, logger)
 	if err != nil {
 		logger.Error("failed to initialize RSA signing key", "error", err)
 		return 1
 	}
 
-	certPEM, pubKeyPEM, err := loadOrGenerateReseedCertificate(certPath, pubKeyPath, *signerID, rsaPrivKey, logger)
+	certPEM, pubKeyPEM, err := initReseedMaterial(certPath, pubKeyPath, *signerID, rsaPrivKey, logger)
 	if err != nil {
 		logger.Error("failed to initialize reseed certificate", "error", err)
 		return 1
@@ -196,6 +217,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 		activeCrawlPass(refreshCtx)
 
+		if evicted := store.PruneRedundant(); evicted > 0 {
+			logger.Info("evicted redundant peers dominated in subnet/family contests",
+				"evicted", evicted,
+				"store_total", store.Len(),
+			)
+		}
+
 		// 2. Save peer cache
 		if cachePath != "" {
 			if saveErr := store.SaveToFile(cachePath); saveErr != nil {
@@ -233,7 +261,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				return fmt.Errorf("build su3: %w", su3Err)
 			}
 
-			if writeErr := os.WriteFile(su3Path, su3Bytes, 0644); writeErr != nil {
+			if writeErr := writeFileAtomic(su3Path, su3Bytes, 0644); writeErr != nil {
 				logger.Warn("failed to persist SU3 archive", "path", su3Path, "error", writeErr)
 			}
 
@@ -367,62 +395,46 @@ func configureActiveClientRouter(baseDir, tempDir string, netID uint8, routerPor
 	return cfg
 }
 
-func loadRSASigningKey(path string, logger *slog.Logger) (*rsa.PrivateKey, error) {
-	if path == "" {
-		return nil, nil
+func normalizeSeedPhrase(phrase string) (string, error) {
+	normalized := strings.Join(strings.Fields(phrase), " ")
+	if normalized == "" {
+		return "", errEmptySeedPhrase
 	}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	block, _ := pem.Decode(data)
-	if block == nil || (block.Type != "RSA PRIVATE KEY" && block.Type != "PRIVATE KEY") {
-		logger.Warn("invalid existing RSA key file, regenerating", "path", path)
-		return nil, nil
-	}
-	if priv, parseErr := x509.ParsePKCS1PrivateKey(block.Bytes); parseErr == nil {
-		logger.Info("loaded persistent RSA signing key", "path", path)
-		return priv, nil
-	}
-	if privKey, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes); parseErr == nil {
-		if rsaPriv, ok := privKey.(*rsa.PrivateKey); ok {
-			logger.Info("loaded persistent RSA signing key (PKCS#8)", "path", path)
-			return rsaPriv, nil
-		}
-	}
-	logger.Warn("invalid existing RSA key file, regenerating", "path", path)
-	return nil, nil
+	return normalized, nil
 }
 
-func loadOrGenerateRSASigningKey(path string, logger *slog.Logger) (*rsa.PrivateKey, error) {
-	existing, err := loadRSASigningKey(path, logger)
+// deriveSigningKeyFromSeedPhrase turns a seed phrase into a deterministic
+// RSA-4096 key: HKDF-SHA512 expands the phrase into the key-generation
+// secret, then keygen.RSA runs the c2sp.org/det-keygen procedure (internal
+// HMAC_DRBG per NIST SP 800-90A), so the same phrase always reproduces the
+// same key. rsa.GenerateKey cannot be used: since Go 1.26 it ignores custom
+// readers and always uses crypto/rand.
+func deriveSigningKeyFromSeedPhrase(phrase string) (*rsa.PrivateKey, error) {
+	normalized, err := normalizeSeedPhrase(phrase)
 	if err != nil {
 		return nil, err
 	}
-	if existing != nil {
-		return existing, nil
+	secret := make([]byte, 64)
+	if _, err := io.ReadFull(hkdf.New(sha512.New, []byte(normalized), []byte("ivnp-reseed"), []byte("reseed-rsa-4096")), secret); err != nil {
+		return nil, fmt.Errorf("expand seed phrase: %w", err)
 	}
-
-	key, err := rsa.GenerateKey(rand.Reader, 4096)
+	defer clear(secret)
+	key, err := keygen.RSA(4096, secret)
 	if err != nil {
-		return nil, err
-	}
-	if path != "" {
-		keyBytes := x509.MarshalPKCS1PrivateKey(key)
-		pemData := pem.EncodeToMemory(&pem.Block{
-			Type:  "RSA PRIVATE KEY",
-			Bytes: keyBytes,
-		})
-		if err := os.WriteFile(path, pemData, 0600); err != nil {
-			logger.Warn("failed to persist RSA signing key", "path", path, "error", err)
-		} else {
-			logger.Info("saved persistent RSA signing key", "path", path)
-		}
+		return nil, fmt.Errorf("derive key from seed phrase: %w", err)
 	}
 	return key, nil
+}
+
+// initSigningKey derives the RSA-4096 signing key from the seed phrase, or
+// generates an ephemeral one when no phrase is configured. Key files are
+// never read or written: the seed phrase is the only backup.
+func initSigningKey(seedPhrase string, logger *slog.Logger) (*rsa.PrivateKey, error) {
+	if seedPhrase != "" {
+		return deriveSigningKeyFromSeedPhrase(seedPhrase)
+	}
+	logger.Warn("RESEED_SEED_PHRASE not set; generating ephemeral signing key that changes on restart")
+	return rsa.GenerateKey(rand.Reader, 4096)
 }
 
 func generateSelfSignedCertificate(signerID string, privKey *rsa.PrivateKey) ([]byte, error) {
@@ -458,53 +470,18 @@ func generateSelfSignedCertificate(signerID string, privKey *rsa.PrivateKey) ([]
 	return certPEM, nil
 }
 
-func loadExistingReseedCertificate(certPath string, privKey *rsa.PrivateKey, logger *slog.Logger) ([]byte, error) {
-	if certPath == "" {
-		return nil, nil
-	}
-	data, err := os.ReadFile(certPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+// initReseedMaterial generates a fresh self-signed certificate for the
+// in-memory signing key and publishes the public artifacts for operators.
+// Certificates are never loaded back: the seed phrase (or ephemeral key)
+// fully determines the signer identity.
+func initReseedMaterial(certPath string, pubKeyPath string, signerID string, privKey *rsa.PrivateKey, logger *slog.Logger) ([]byte, []byte, error) {
+	certPEM, err := generateSelfSignedCertificate(signerID, privKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("generate reseed certificate: %w", err)
 	}
-	block, _ := pem.Decode(data)
-	if block == nil || block.Type != "CERTIFICATE" {
-		logger.Warn("invalid existing reseed certificate, regenerating", "path", certPath)
-		return nil, nil
-	}
-	cert, parseErr := x509.ParseCertificate(block.Bytes)
-	if parseErr != nil {
-		logger.Warn("failed to parse existing reseed certificate, regenerating", "path", certPath, "error", parseErr)
-		return nil, nil
-	}
-	rsaPub, ok := cert.PublicKey.(*rsa.PublicKey)
-	if !ok || rsaPub.N.Cmp(privKey.N) != 0 {
-		logger.Warn("existing reseed certificate public key does not match signing key, regenerating", "path", certPath)
-		return nil, nil
-	}
-	logger.Info("loaded persistent reseed certificate", "path", certPath, "cn", cert.Subject.CommonName)
-	return data, nil
-}
-
-func loadOrGenerateReseedCertificate(certPath string, pubKeyPath string, signerID string, privKey *rsa.PrivateKey, logger *slog.Logger) ([]byte, []byte, error) {
-	certPEM, err := loadExistingReseedCertificate(certPath, privKey, logger)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(certPEM) == 0 {
-		var err error
-		certPEM, err = generateSelfSignedCertificate(signerID, privKey)
-		if err != nil {
-			return nil, nil, fmt.Errorf("generate reseed certificate: %w", err)
-		}
-		if certPath != "" {
-			if writeErr := os.WriteFile(certPath, certPEM, 0644); writeErr != nil {
-				logger.Warn("failed to persist reseed certificate", "path", certPath, "error", writeErr)
-			} else {
-				logger.Info("saved persistent reseed certificate", "path", certPath)
-			}
+	if certPath != "" {
+		if writeErr := writeFileAtomic(certPath, certPEM, 0644); writeErr != nil {
+			logger.Warn("failed to persist reseed certificate", "path", certPath, "error", writeErr)
 		}
 	}
 
@@ -517,12 +494,31 @@ func loadOrGenerateReseedCertificate(certPath string, pubKeyPath string, signerI
 		Bytes: pubDER,
 	})
 	if pubKeyPath != "" {
-		if writeErr := os.WriteFile(pubKeyPath, pubKeyPEM, 0644); writeErr != nil {
+		if writeErr := writeFileAtomic(pubKeyPath, pubKeyPEM, 0644); writeErr != nil {
 			logger.Warn("failed to persist reseed public key", "path", pubKeyPath, "error", writeErr)
-		} else {
-			logger.Info("saved persistent reseed public key", "path", pubKeyPath)
 		}
 	}
 
 	return certPEM, pubKeyPEM, nil
+}
+
+// writeFileAtomic stages data under "<path>.tmp" then renames it over path so
+// readers never observe a partially written state file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+// removeStaleTempFile deletes a leftover "<statePath>.tmp" from a write
+// interrupted before its rename completed.
+func removeStaleTempFile(statePath string, logger *slog.Logger) {
+	tmpPath := statePath + ".tmp"
+	if err := os.Remove(tmpPath); err == nil {
+		logger.Warn("removed stale temporary state file left by interrupted write", "path", tmpPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		logger.Warn("failed to remove stale temporary state file", "path", tmpPath, "error", err)
+	}
 }
