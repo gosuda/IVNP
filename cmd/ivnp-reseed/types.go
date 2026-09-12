@@ -115,6 +115,7 @@ type PackageStats struct {
 	ETag                     string    `json:"etag"`
 	LastGeneratedAt          time.Time `json:"last_generated_at"`
 	NextRefreshETA           int64     `json:"next_refresh_eta_seconds"`
+	RefreshIntervalSeconds   int64     `json:"refresh_interval_seconds"`
 }
 
 type DetailedStatsResponse struct {

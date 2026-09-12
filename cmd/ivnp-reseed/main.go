@@ -98,23 +98,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		logger.Warn("ignoring legacy reseed-rsa.key file; file-based keys are no longer used", "path", keyPath)
 	}
 
-	rsaPrivKey, err := initSigningKey(*seedPhrase, logger)
-	if err != nil {
-		logger.Error("failed to initialize RSA signing key", "error", err)
-		return 1
-	}
-
-	certPEM, pubKeyPEM, err := initReseedMaterial(certPath, pubKeyPath, *signerID, rsaPrivKey, logger)
-	if err != nil {
-		logger.Error("failed to initialize reseed certificate", "error", err)
-		return 1
-	}
-
-	logger.Info("initialized signing keys",
-		"su3_signer", *signerID,
-		"cert_path", certPath,
-	)
-
 	store := NewPeerStore()
 	if cachePath != "" {
 		if loadErr := store.LoadFromFile(cachePath); loadErr != nil {
@@ -131,8 +114,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		ListenAddress: *listenAddr,
 		CacheDuration: *interval,
 		SignerID:      *signerID,
-		CertPEM:       certPEM,
-		PubKeyPEM:     pubKeyPEM,
 	}, store)
 
 	// Load persistent SU3 archive if present for immediate availability across restarts
@@ -153,6 +134,47 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// Bind the HTTP listeners before RSA keygen, router bootstrap, and the
+	// initial crawl pass so /health answers while startup work is running.
+	var httpServers []*http.Server
+	if !*runOnce {
+		for _, raw := range strings.Split(*listenAddr, ",") {
+			addr := strings.TrimSpace(raw)
+			if addr == "" {
+				continue
+			}
+			srv := &http.Server{
+				Addr:    addr,
+				Handler: server,
+			}
+			httpServers = append(httpServers, srv)
+			go func(s *http.Server) {
+				logger.Info("starting reseed HTTP server", "listen", s.Addr)
+				if srvErr := s.ListenAndServe(); srvErr != nil && srvErr != http.ErrServerClosed {
+					logger.Error("HTTP server failed", "listen", s.Addr, "error", srvErr)
+				}
+			}(srv)
+		}
+	}
+
+	rsaPrivKey, err := initSigningKey(*seedPhrase, logger)
+	if err != nil {
+		logger.Error("failed to initialize RSA signing key", "error", err)
+		return 1
+	}
+
+	certPEM, pubKeyPEM, err := initReseedMaterial(certPath, pubKeyPath, *signerID, rsaPrivKey, logger)
+	if err != nil {
+		logger.Error("failed to initialize reseed certificate", "error", err)
+		return 1
+	}
+	server.SetSigningMaterial(certPEM, pubKeyPEM)
+
+	logger.Info("initialized signing keys",
+		"su3_signer", *signerID,
+		"cert_path", certPath,
+	)
 
 	var routerSubsystem *node.Subsystem
 	if !*noRouter {
@@ -298,26 +320,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	if *runOnce {
 		return 0
-	}
-
-	rawAddrs := strings.Split(*listenAddr, ",")
-	var httpServers []*http.Server
-	for _, raw := range rawAddrs {
-		addr := strings.TrimSpace(raw)
-		if addr == "" {
-			continue
-		}
-		srv := &http.Server{
-			Addr:    addr,
-			Handler: server,
-		}
-		httpServers = append(httpServers, srv)
-		go func(s *http.Server) {
-			logger.Info("starting reseed HTTP server", "listen", s.Addr)
-			if srvErr := s.ListenAndServe(); srvErr != nil && srvErr != http.ErrServerClosed {
-				logger.Error("HTTP server failed", "listen", s.Addr, "error", srvErr)
-			}
-		}(srv)
 	}
 
 	packageTicker := time.NewTicker(*interval)

@@ -18,8 +18,6 @@ type ServerConfig struct {
 	ListenAddress string
 	CacheDuration time.Duration
 	SignerID      string
-	CertPEM       []byte
-	PubKeyPEM     []byte
 }
 
 type ReseedServer struct {
@@ -27,9 +25,11 @@ type ReseedServer struct {
 	store     *PeerStore
 	startedAt time.Time
 
-	mu      sync.RWMutex
-	pkg     ReseedPackage
-	handler http.Handler
+	mu        sync.RWMutex
+	pkg       ReseedPackage
+	certPEM   []byte
+	pubKeyPEM []byte
+	handler   http.Handler
 }
 
 type StatsResponse = DetailedStatsResponse
@@ -61,6 +61,15 @@ func (s *ReseedServer) UpdatePackage(pkg ReseedPackage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pkg = pkg
+}
+
+// SetSigningMaterial installs the reseed certificate and public key after
+// key initialization completes; endpoints report them unavailable until then.
+func (s *ReseedServer) SetSigningMaterial(certPEM, pubKeyPEM []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.certPEM = certPEM
+	s.pubKeyPEM = pubKeyPEM
 }
 
 func (s *ReseedServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -133,30 +142,38 @@ func certFileName(signerID string) string {
 }
 
 func (s *ReseedServer) handleCert(w http.ResponseWriter, _ *http.Request) {
-	if len(s.cfg.CertPEM) == 0 {
+	s.mu.RLock()
+	certPEM := s.certPEM
+	s.mu.RUnlock()
+	if len(certPEM) == 0 {
 		http.Error(w, "reseed certificate not available", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-x509-ca-cert")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", certFileName(s.cfg.SignerID)))
 	w.Header().Set("Cache-Control", "public, max-age=86400")
-	_, _ = w.Write(s.cfg.CertPEM)
+	_, _ = w.Write(certPEM)
 }
 
 func (s *ReseedServer) handlePubKey(w http.ResponseWriter, _ *http.Request) {
-	if len(s.cfg.PubKeyPEM) == 0 {
+	s.mu.RLock()
+	pubKeyPEM := s.pubKeyPEM
+	s.mu.RUnlock()
+	if len(pubKeyPEM) == 0 {
 		http.Error(w, "reseed public key not available", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="reseed-rsa.pub.pem"`)
 	w.Header().Set("Cache-Control", "public, max-age=86400")
-	_, _ = w.Write(s.cfg.PubKeyPEM)
+	_, _ = w.Write(pubKeyPEM)
 }
 
 func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 	s.mu.RLock()
 	pkg := s.pkg
+	certPEM := s.certPEM
+	pubKeyPEM := s.pubKeyPEM
 	s.mu.RUnlock()
 
 	peers := s.store.Snapshot()
@@ -254,6 +271,7 @@ func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 		packageStats.GenerationMethod = "256 K-Bucket Stratified (Java I2P 256-node Head-Start) + /16 Subnet Filter + Max-5 Bucket Leveling"
 	}
 	packageStats.NextRefreshETA = nextRefreshSec
+	packageStats.RefreshIntervalSeconds = int64(s.cfg.CacheDuration.Seconds())
 
 	return DetailedStatsResponse{
 		Version:         version,
@@ -267,8 +285,8 @@ func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 		AverageEWMARTT:  avgRTT / time.Millisecond,
 		LastGeneratedAt: pkg.GeneratedAt,
 		SignerID:        s.cfg.SignerID,
-		CertificatePEM:  string(s.cfg.CertPEM),
-		PublicKeyPEM:    string(s.cfg.PubKeyPEM),
+		CertificatePEM:  string(certPEM),
+		PublicKeyPEM:    string(pubKeyPEM),
 		RTT:             rttStats,
 		Diversity: DiversityStats{
 			UniqueIPv4Subnets16: len(seenSubnets16),

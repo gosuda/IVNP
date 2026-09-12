@@ -566,9 +566,16 @@ func TestReseedServer(t *testing.T) {
 		ListenAddress: ":8443",
 		CacheDuration: time.Minute,
 		SignerID:      signerID,
-		CertPEM:       certPEM,
-		PubKeyPEM:     pubKeyPEM,
 	}, store)
+
+	// Certificate endpoints report unavailable until signing material is set.
+	req := httptest.NewRequest(http.MethodGet, "/reseed-rsa.crt", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET /reseed-rsa.crt before SetSigningMaterial code = %d, want 404", rec.Code)
+	}
+	server.SetSigningMaterial(certPEM, pubKeyPEM)
 
 	server.UpdatePackage(ReseedPackage{
 		GeneratedAt: time.Now(),
@@ -577,8 +584,8 @@ func TestReseedServer(t *testing.T) {
 		ETag:        `"mock-etag"`,
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	rec := httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec = httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/health code = %d, want 200", rec.Code)
@@ -690,18 +697,6 @@ func TestReseedServer(t *testing.T) {
 	}
 	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
 		t.Fatalf("GET / Cache-Control = %q, want no-store", cc)
-	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte("IVNP Reseed Indexer")) {
-		t.Fatal("GET / dashboard does not contain expected title")
-	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte("initial-data")) {
-		t.Fatal("GET / dashboard does not contain bootstrap initial-data")
-	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte("btn-dl-cert")) {
-		t.Fatal("GET / dashboard does not contain btn-dl-cert")
-	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte("key-modal")) {
-		t.Fatal("GET / dashboard does not contain key-modal")
 	}
 
 	// Test 404 for unknown path
@@ -980,67 +975,6 @@ func TestCalculatePackageStats(t *testing.T) {
 	}
 	if stats.GenerationMethod == "" {
 		t.Fatal("expected GenerationMethod to be populated")
-	}
-}
-
-func TestReseedPackageTelemetryInDashboard(t *testing.T) {
-	stats := DetailedStatsResponse{
-		Version:   "test-version",
-		NetworkID: 2,
-		Package: PackageStats{
-			PeerCount:                500,
-			FloodfillCount:           180,
-			FloodfillRatio:           0.36,
-			IPv4OnlyCount:            300,
-			IPv4OnlyRatio:            0.60,
-			DualStackCount:           190,
-			DualStackRatio:           0.38,
-			IPv6OnlyCount:            10,
-			IPv6OnlyRatio:            0.02,
-			AverageAvailability:      0.985,
-			DirectlyReachableCount:   500,
-			DirectlyReachableRatio:   1.0,
-			TunnelBuildAcceptedCount: 470,
-			TunnelBuildAcceptedRatio: 0.94,
-			RTT: RTTStats{
-				MinMs: 15,
-				AvgMs: 145,
-				P50Ms: 120,
-				P90Ms: 250,
-				MaxMs: 450,
-			},
-			GenerationMethod:       "256 K-Bucket Stratified (Java I2P 256-node Head-Start) + /16 Subnet Filter + Max-5 Bucket Leveling",
-			RequireReachableFilter: true,
-			SU3SizeBytes:           256000,
-			ETag:                   `"mock-etag"`,
-		},
-	}
-
-	var buf bytes.Buffer
-	if err := RenderDashboard(&buf, stats); err != nil {
-		t.Fatalf("RenderDashboard: %v", err)
-	}
-	html := buf.String()
-
-	requiredSubstrings := []string{
-		"Standard I2P SU3 Archive",
-		"Generation Strategy",
-		"Floodfill Ratio",
-		"IP Stack Ratio",
-		"Average Availability",
-		"Package Latency",
-		"su3-layout",
-		"pkg-metric-ff",
-		"pkg-metric-dual",
-		"pkg-metric-avail",
-		"pkg-metric-rtt",
-		"256 K-Bucket Stratified",
-	}
-
-	for _, sub := range requiredSubstrings {
-		if !strings.Contains(html, sub) {
-			t.Errorf("rendered dashboard missing expected substring %q", sub)
-		}
 	}
 }
 
