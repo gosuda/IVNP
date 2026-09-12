@@ -469,3 +469,75 @@ func TestFetchAnyPrioritizesHotseedWithHeadStart(t *testing.T) {
 		t.Fatalf("requestOrder = %v, want only [hotseed] (fallback should not be queried when hotseed succeeds)", requestOrder)
 	}
 }
+
+func TestFetchAnyPriorityFailureFallsBack(t *testing.T) {
+	var requested []string
+	var mu sync.Mutex
+
+	hotseedSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requested = append(requested, "hotseed")
+		mu.Unlock()
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer hotseedSrv.Close()
+
+	fallbackSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requested = append(requested, "fallback")
+		mu.Unlock()
+		local, _ := foundation.GenerateLocalAddress()
+		owner, _ := controlplanenetdb.NewLocalRouterInfo(controlplanenetdb.LocalRouterInfoConfig{
+			Local: local,
+			Contacts: controlplanenetdb.RouterInfoContacts{Options: []foundation.MappingEntry{
+				{Key: []byte("netId"), Value: []byte("2")},
+			}},
+		})
+		info, _ := owner.Publish(1000)
+		_, _ = w.Write(zipArchiveBytes(t, "routerInfo-fallback.dat", info.Bytes()))
+	}))
+	defer fallbackSrv.Close()
+
+	hotseedURL, _ := url.Parse(hotseedSrv.URL)
+	fallbackURL, _ := url.Parse(fallbackSrv.URL)
+
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			clone := req.Clone(req.Context())
+			if req.URL.Hostname() == "hotseed.gosuda.org" {
+				clone.URL.Scheme = hotseedURL.Scheme
+				clone.URL.Host = hotseedURL.Host
+				return hotseedSrv.Client().Transport.RoundTrip(clone)
+			}
+			clone.URL.Scheme = fallbackURL.Scheme
+			clone.URL.Host = fallbackURL.Host
+			return fallbackSrv.Client().Transport.RoundTrip(clone)
+		}),
+	}
+
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	client := Client{
+		NetworkID:        2,
+		HTTPClient:       httpClient,
+		allowUnsignedZIP: true,
+	}
+
+	endpoints := []string{
+		"https://hotseed.gosuda.org/i2pseeds.su3?netid=2",
+		"https://fallback.example.org/i2pseeds.su3?netid=2",
+	}
+
+	count, err := client.FetchAny(context.Background(), endpoints, database, 1000)
+	if err != nil {
+		t.Fatalf("FetchAny() error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("FetchAny() count = %d, want 1", count)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requested) != 2 || requested[0] != "hotseed" || requested[1] != "fallback" {
+		t.Fatalf("requested = %v, want [hotseed, fallback]", requested)
+	}
+}

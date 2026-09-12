@@ -17,6 +17,7 @@ import (
 var _ stream.StreamNetwork = (*Router)(nil)
 
 var errUnexpectedSocketDial = errors.New("unexpected dial")
+var errPriorityUnavailable = errors.New("priority server unavailable")
 
 type eventLog struct {
 	mu     sync.Mutex
@@ -171,6 +172,7 @@ type fakeReseed struct {
 	release   <-chan struct{}
 	completed chan struct{}
 	err       error
+	fn        func(context.Context, []string, *controlplanenetdb.Database, uint64) (int, error)
 
 	mu        sync.Mutex
 	context   context.Context
@@ -196,6 +198,9 @@ func (r *fakeReseed) FetchAny(ctx context.Context, endpoints []string, database 
 	}
 	if r.called != nil {
 		r.called <- struct{}{}
+	}
+	if r.fn != nil {
+		return r.fn(ctx, endpoints, database, seenAt)
 	}
 	if r.release != nil {
 		select {
@@ -636,6 +641,113 @@ func TestRouterReseedPropagatesRuntimeDependencies(t *testing.T) {
 	}
 	if err := router.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRouterPriorityReseedSuccessSkipsSubsequentReseeds(t *testing.T) {
+	log := new(eventLog)
+	priorityURLs := []string{"https://hotseed.gosuda.org/i2pseeds.su3?netid=2"}
+	fallbackURLs := []string{"https://fallback.example/i2pseeds.su3?netid=2"}
+
+	var calls [][]string
+	var mu sync.Mutex
+	reseed := &fakeReseed{
+		log: log,
+		fn: func(ctx context.Context, endpoints []string, db *controlplanenetdb.Database, seenAt uint64) (int, error) {
+			mu.Lock()
+			calls = append(calls, append([]string(nil), endpoints...))
+			mu.Unlock()
+			return 10, nil
+		},
+	}
+	router, _, _ := newReseedRuntimeForTest(t, Config{
+		PriorityReseedEndpoints: priorityURLs,
+		ReseedEndpoints:         fallbackURLs,
+		RequireReseed:           true,
+	}, log, reseed, fixedClock{now: time.Unix(1, 0)})
+
+	outcomes := make(chan error, 1)
+	router.deps.ReseedOutcome = func(err error) { outcomes <- err }
+	if err := router.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer router.Close()
+
+	select {
+	case err := <-outcomes:
+		if err != nil {
+			t.Fatalf("reseed outcome = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("successful priority reseed outcome was not reported")
+	}
+
+	mu.Lock()
+	gotCalls := calls
+	mu.Unlock()
+
+	if len(gotCalls) != 1 {
+		t.Fatalf("expected 1 reseed call, got %d: %#v", len(gotCalls), gotCalls)
+	}
+	if len(gotCalls[0]) != 1 || gotCalls[0][0] != priorityURLs[0] {
+		t.Fatalf("first reseed call = %v, want %v", gotCalls[0], priorityURLs)
+	}
+}
+
+func TestRouterPriorityReseedFailureFallsBackToSubsequentEndpoints(t *testing.T) {
+	log := new(eventLog)
+	priorityURLs := []string{"https://hotseed.gosuda.org/i2pseeds.su3?netid=2"}
+	fallbackURLs := []string{"https://fallback.example/i2pseeds.su3?netid=2"}
+
+	var calls [][]string
+	var mu sync.Mutex
+	reseed := &fakeReseed{
+		log: log,
+		fn: func(ctx context.Context, endpoints []string, db *controlplanenetdb.Database, seenAt uint64) (int, error) {
+			mu.Lock()
+			calls = append(calls, append([]string(nil), endpoints...))
+			mu.Unlock()
+			if endpoints[0] == priorityURLs[0] {
+				return 0, errPriorityUnavailable
+			}
+			return 25, nil
+		},
+	}
+	router, _, _ := newReseedRuntimeForTest(t, Config{
+		PriorityReseedEndpoints: priorityURLs,
+		PriorityReseedTimeout:   50 * time.Millisecond,
+		ReseedEndpoints:         fallbackURLs,
+		RequireReseed:           true,
+	}, log, reseed, fixedClock{now: time.Unix(1, 0)})
+
+	outcomes := make(chan error, 1)
+	router.deps.ReseedOutcome = func(err error) { outcomes <- err }
+	if err := router.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer router.Close()
+
+	select {
+	case err := <-outcomes:
+		if err != nil {
+			t.Fatalf("reseed outcome = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("successful fallback reseed outcome was not reported")
+	}
+
+	mu.Lock()
+	gotCalls := calls
+	mu.Unlock()
+
+	if len(gotCalls) != 2 {
+		t.Fatalf("expected 2 reseed calls, got %d: %#v", len(gotCalls), gotCalls)
+	}
+	if gotCalls[0][0] != priorityURLs[0] {
+		t.Fatalf("first call = %v, want %v", gotCalls[0], priorityURLs)
+	}
+	if gotCalls[1][0] != fallbackURLs[0] {
+		t.Fatalf("second call = %v, want %v", gotCalls[1], fallbackURLs)
 	}
 }
 

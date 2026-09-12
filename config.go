@@ -30,11 +30,23 @@ type RouterConfig struct {
 }
 
 type PersistenceConfig struct {
-	Directory         string
-	TempDir           string
-	TaintedCopy       bool
-	PromoteToMaster   *bool
-	LockRetryInterval time.Duration
+	Directory          string
+	TempDir            string
+	DisableTaintedCopy bool
+	TaintedCopy        bool
+	PromoteToMaster    *bool
+	LockRetryInterval  time.Duration
+}
+
+// DefaultPersistenceConfig returns persistence configuration with tmp-based
+// optimistic locking and master lock escalation enabled.
+func DefaultPersistenceConfig(directory string) *PersistenceConfig {
+	promote := true
+	return &PersistenceConfig{
+		Directory:         directory,
+		PromoteToMaster:   &promote,
+		LockRetryInterval: 15 * time.Second,
+	}
 }
 
 type TransportConfig struct {
@@ -46,9 +58,11 @@ type TransportConfig struct {
 }
 
 type BootstrapConfig struct {
-	RouterInfos   [][]byte
-	ReseedURLs    []string
-	ReseedTimeout time.Duration
+	RouterInfos           [][]byte
+	PriorityReseedURLs    []string
+	PriorityReseedTimeout time.Duration
+	ReseedURLs            []string
+	ReseedTimeout         time.Duration
 }
 
 type TunnelPoolConfig = destination.TunnelPoolConfig
@@ -86,7 +100,12 @@ func DefaultRouterConfig() RouterConfig {
 	transport := TransportConfig{Enabled: true, Bind: netip.AddrPortFrom(netip.IPv4Unspecified(), 0), MaxSessions: 256, IdleTimeout: 10 * time.Minute}
 	return RouterConfig{
 		NetworkID: 2, NTCP2: transport, SSU2: transport,
-		Bootstrap:   BootstrapConfig{ReseedURLs: defaults.Reseed.Endpoints, ReseedTimeout: 30 * time.Second},
+		Bootstrap: BootstrapConfig{
+			PriorityReseedURLs:    append([]string(nil), defaults.Reseed.PriorityEndpoints...),
+			PriorityReseedTimeout: defaults.Reseed.PriorityTimeout,
+			ReseedURLs:            append([]string(nil), defaults.Reseed.Endpoints...),
+			ReseedTimeout:         defaults.Reseed.Timeout,
+		},
 		Exploratory: defaultExploratoryTunnelPool(4),
 		Limits:      RouterLimits{MaxDestinations: 64, PacketQueueBytes: 64 << 20, MaxPendingPacketWrites: 64},
 	}
@@ -189,8 +208,14 @@ func routerSettings(cfg RouterConfig) (state.ConfigurationOperating, controlplan
 	if cfg.Bootstrap.ReseedTimeout < 0 || (len(cfg.Bootstrap.ReseedURLs) > 0 && cfg.Bootstrap.ReseedTimeout == 0) {
 		return empty, options, invalidConfig("Bootstrap.ReseedTimeout")
 	}
+	if cfg.Bootstrap.PriorityReseedTimeout < 0 || (len(cfg.Bootstrap.PriorityReseedURLs) > 0 && cfg.Bootstrap.PriorityReseedTimeout == 0) {
+		return empty, options, invalidConfig("Bootstrap.PriorityReseedTimeout")
+	}
 	if len(cfg.Bootstrap.ReseedURLs) > 32 {
 		return empty, options, invalidConfig("Bootstrap.ReseedURLs")
+	}
+	if len(cfg.Bootstrap.PriorityReseedURLs) > 32 {
+		return empty, options, invalidConfig("Bootstrap.PriorityReseedURLs")
 	}
 	requiredQuery := "netid=" + strconv.FormatUint(uint64(cfg.NetworkID), 10)
 	for i, text := range cfg.Bootstrap.ReseedURLs {
@@ -202,6 +227,17 @@ func routerSettings(cfg RouterConfig) (state.ConfigurationOperating, controlplan
 		forbiddenParts := u.User != nil || u.Fragment != "" || u.ForceQuery
 		if !validEndpoint || forbiddenParts || u.RawQuery != requiredQuery {
 			return empty, options, invalidConfig("Bootstrap.ReseedURLs[" + strconv.Itoa(i) + "]")
+		}
+	}
+	for i, text := range cfg.Bootstrap.PriorityReseedURLs {
+		u, err := url.Parse(text)
+		if err != nil {
+			return empty, options, invalidConfig("Bootstrap.PriorityReseedURLs[" + strconv.Itoa(i) + "]")
+		}
+		validEndpoint := len(text) <= 512 && u.Scheme == "https" && u.Hostname() != ""
+		forbiddenParts := u.User != nil || u.Fragment != "" || u.ForceQuery
+		if !validEndpoint || forbiddenParts || u.RawQuery != requiredQuery {
+			return empty, options, invalidConfig("Bootstrap.PriorityReseedURLs[" + strconv.Itoa(i) + "]")
 		}
 	}
 	operating := state.ConfigurationDefaultOperating()
@@ -226,16 +262,26 @@ func routerSettings(cfg RouterConfig) (state.ConfigurationOperating, controlplan
 			}
 			operating.TempDir = tempDir
 		}
-		operating.State.TaintedCopy = cfg.Persistence.TaintedCopy
+		taintedCopy := !cfg.Persistence.DisableTaintedCopy
+		if cfg.Persistence.TaintedCopy {
+			taintedCopy = true
+		}
+		operating.State.TaintedCopy = taintedCopy
 		options.TaintedCopy = cfg.Persistence.TaintedCopy
+
+		promoteToMaster := true
 		if cfg.Persistence.PromoteToMaster != nil {
-			operating.State.PromoteToMaster = *cfg.Persistence.PromoteToMaster
-			options.PromoteToMaster = cfg.Persistence.PromoteToMaster
+			promoteToMaster = *cfg.Persistence.PromoteToMaster
 		}
-		if cfg.Persistence.LockRetryInterval > 0 {
-			operating.State.LockRetryInterval = cfg.Persistence.LockRetryInterval
-			options.LockRetryInterval = cfg.Persistence.LockRetryInterval
+		operating.State.PromoteToMaster = promoteToMaster
+		options.PromoteToMaster = &promoteToMaster
+
+		lockRetry := cfg.Persistence.LockRetryInterval
+		if lockRetry <= 0 {
+			lockRetry = 15 * time.Second
 		}
+		operating.State.LockRetryInterval = lockRetry
+		options.LockRetryInterval = lockRetry
 	}
 	operating.Network = state.ConfigurationNetwork{ID: cfg.NetworkID}
 	for _, transport := range []TransportConfig{cfg.NTCP2, cfg.SSU2} {
@@ -245,8 +291,10 @@ func routerSettings(cfg RouterConfig) (state.ConfigurationOperating, controlplan
 		}
 	}
 	operating.NTCP2, operating.SSU2 = runtimeTransport(cfg.NTCP2), runtimeTransport(cfg.SSU2)
-	operating.Reseed.Enabled = len(cfg.Bootstrap.ReseedURLs) != 0
+	operating.Reseed.Enabled = len(cfg.Bootstrap.ReseedURLs) != 0 || len(cfg.Bootstrap.PriorityReseedURLs) != 0
 	operating.Reseed.Required = false
+	operating.Reseed.PriorityEndpoints = append([]string(nil), cfg.Bootstrap.PriorityReseedURLs...)
+	operating.Reseed.PriorityTimeout = cfg.Bootstrap.PriorityReseedTimeout
 	operating.Reseed.Endpoints = append([]string(nil), cfg.Bootstrap.ReseedURLs...)
 	operating.Reseed.Timeout = cfg.Bootstrap.ReseedTimeout
 	operating.NetDB.BootstrapRouterInfoPaths = nil

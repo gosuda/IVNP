@@ -239,15 +239,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 			sum := sha256.Sum256(su3Bytes)
 			etag := `"` + hex.EncodeToString(sum[:8]) + `"`
+			pkgStats := CalculatePackageStats(selected, len(su3Bytes), etag, now, selectorCfg.RequireReachable)
 			server.UpdatePackage(ReseedPackage{
 				GeneratedAt:    now,
 				PeerCount:      len(selected),
 				FloodfillCount: floodCount,
 				SU3Data:        su3Bytes,
 				ETag:           etag,
+				Stats:          pkgStats,
 			})
 
 			logger.Info("reseed archives packaged",
+				"peers", len(selected),
+				"floodfills", floodCount,
+				"floodfill_ratio", fmt.Sprintf("%.1f%%", pkgStats.FloodfillRatio*100),
+				"dual_stack", pkgStats.DualStackCount,
+				"ipv4_only", pkgStats.IPv4OnlyCount,
+				"avg_availability", fmt.Sprintf("%.1f%%", pkgStats.AverageAvailability*100),
+				"avg_rtt_ms", pkgStats.RTT.AvgMs,
 				"su3_bytes", len(su3Bytes),
 				"duration_ms", time.Since(start).Milliseconds(),
 			)

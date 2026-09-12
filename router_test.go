@@ -9,11 +9,13 @@ import (
 	"net/netip"
 	"os"
 	"testing"
+	"time"
 )
 
 func isolatedRouterConfig() RouterConfig {
 	cfg := DefaultRouterConfig()
 	cfg.Bootstrap.ReseedURLs = nil
+	cfg.Bootstrap.PriorityReseedURLs = nil
 	cfg.NTCP2.Bind = netip.MustParseAddrPort("127.0.0.1:0")
 	cfg.SSU2 = TransportConfig{}
 	cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -62,7 +64,7 @@ func TestInMemoryRouterLeavesNoStateAndDoesNotShareIdentity(t *testing.T) {
 
 func TestPersistentRouterRetainsIdentityAndReleasesExclusiveState(t *testing.T) {
 	cfg := isolatedRouterConfig()
-	cfg.Persistence = &PersistenceConfig{Directory: t.TempDir()}
+	cfg.Persistence = &PersistenceConfig{Directory: t.TempDir(), DisableTaintedCopy: true}
 	first, err := NewRouter(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +177,7 @@ func TestCorruptPersistentStateDoesNotReplaceMasterKey(t *testing.T) {
 func TestTaintedCopyPersistenceAllowsConcurrentRouters(t *testing.T) {
 	dir := t.TempDir()
 	cfg := isolatedRouterConfig()
-	cfg.Persistence = &PersistenceConfig{Directory: dir}
+	cfg.Persistence = DefaultPersistenceConfig(dir)
 	first, err := NewRouter(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -184,22 +186,23 @@ func TestTaintedCopyPersistenceAllowsConcurrentRouters(t *testing.T) {
 		_ = first.Close()
 	}()
 
-	// Normal second router fails because dir is locked
-	_, err = NewRouter(t.Context(), cfg)
+	// Second router with DisableTaintedCopy fails because dir is locked
+	exclusiveCfg := isolatedRouterConfig()
+	exclusiveCfg.Persistence = &PersistenceConfig{
+		Directory:          dir,
+		DisableTaintedCopy: true,
+	}
+	_, err = NewRouter(t.Context(), exclusiveCfg)
 	if err == nil {
 		t.Fatal("expected locked state conflict, got nil")
 	}
 
-	// Tainted copy second router succeeds
-	taintedCfg := isolatedRouterConfig()
-	taintedCfg.Persistence = &PersistenceConfig{
-		Directory:   dir,
-		TempDir:     t.TempDir(),
-		TaintedCopy: true,
-	}
-	second, err := NewRouter(t.Context(), taintedCfg)
+	// Concurrent second router with default persistence succeeds via tainted copy
+	secondCfg := isolatedRouterConfig()
+	secondCfg.Persistence = &PersistenceConfig{Directory: dir}
+	second, err := NewRouter(t.Context(), secondCfg)
 	if err != nil {
-		t.Fatalf("tainted router failed to start: %v", err)
+		t.Fatalf("concurrent second router failed to start: %v", err)
 	}
 	defer func() {
 		_ = second.Close()
@@ -207,5 +210,35 @@ func TestTaintedCopyPersistenceAllowsConcurrentRouters(t *testing.T) {
 
 	if second.Hash() != first.Hash() {
 		t.Fatalf("expected tainted router to inherit identity %x, got %x", first.Hash(), second.Hash())
+	}
+}
+
+func TestDefaultRouterConfigPriorityReseed(t *testing.T) {
+	cfg := DefaultRouterConfig()
+	if len(cfg.Bootstrap.PriorityReseedURLs) != 1 || cfg.Bootstrap.PriorityReseedURLs[0] != "https://hotseed.gosuda.org/i2pseeds.su3?netid=2" {
+		t.Fatalf("default PriorityReseedURLs = %v", cfg.Bootstrap.PriorityReseedURLs)
+	}
+	if cfg.Bootstrap.PriorityReseedTimeout != 2*time.Second {
+		t.Fatalf("default PriorityReseedTimeout = %v, want 2s", cfg.Bootstrap.PriorityReseedTimeout)
+	}
+}
+
+func TestRouterConfigPriorityReseedValidation(t *testing.T) {
+	cfg := DefaultRouterConfig()
+	cfg.Bootstrap.PriorityReseedTimeout = -time.Second
+	if _, _, err := routerSettings(cfg); err == nil {
+		t.Fatal("negative PriorityReseedTimeout was accepted")
+	}
+
+	cfg = DefaultRouterConfig()
+	cfg.Bootstrap.PriorityReseedURLs = []string{"http://insecure.example/i2p?netid=2"}
+	if _, _, err := routerSettings(cfg); err == nil {
+		t.Fatal("insecure HTTP PriorityReseedURL was accepted")
+	}
+
+	cfg = DefaultRouterConfig()
+	cfg.Bootstrap.PriorityReseedURLs = []string{"https://hotseed.gosuda.org/i2pseeds.su3?netid=999"}
+	if _, _, err := routerSettings(cfg); err == nil {
+		t.Fatal("PriorityReseedURL with wrong netid was accepted")
 	}
 }

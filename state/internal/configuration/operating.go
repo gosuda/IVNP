@@ -140,13 +140,15 @@ type NAT struct {
 
 // Reseed configures SU3 reseed server URLs and limits.
 type Reseed struct {
-	Enabled         bool
-	Required        bool
-	Endpoints       []string
-	Timeout         time.Duration
-	MaxArchiveBytes int64
-	MaxRouterInfos  int
-	MaxTotalBytes   int64
+	Enabled           bool
+	Required          bool
+	PriorityEndpoints []string
+	PriorityTimeout   time.Duration
+	Endpoints         []string
+	Timeout           time.Duration
+	MaxArchiveBytes   int64
+	MaxRouterInfos    int
+	MaxTotalBytes     int64
 }
 
 // Listener configures a local RPC, proxy, or SAM listener.
@@ -355,8 +357,11 @@ func ParseOperating(text, path string) (Operating, error) {
 	return operating, nil
 }
 
-var defaultReseedEndpoints = []string{
+var defaultReseedPriorityEndpoints = []string{
 	"https://hotseed.gosuda.org/i2pseeds.su3?netid=2",
+}
+
+var defaultReseedEndpoints = []string{
 	"https://waw01.i2p-reseed.hosted-by.skhron.eu/i2pseeds.su3?netid=2",
 	"https://sto01.i2p-reseed.hosted-by.skhron.eu/i2pseeds.su3?netid=2",
 	"https://i2p.ntp.poweredbyberlin.de/i2pseeds.su3?netid=2",
@@ -409,7 +414,7 @@ func defaultOperating(base string) Operating {
 		},
 		NTCP2:  defaultTransport(),
 		SSU2:   defaultTransport(),
-		Reseed: Reseed{Enabled: true, Endpoints: append([]string(nil), defaultReseedEndpoints...), Timeout: 30 * time.Second, MaxArchiveBytes: 1 << 20, MaxRouterInfos: 4_000, MaxTotalBytes: 64 << 20},
+		Reseed: Reseed{Enabled: true, PriorityEndpoints: append([]string(nil), defaultReseedPriorityEndpoints...), PriorityTimeout: 2 * time.Second, Endpoints: append([]string(nil), defaultReseedEndpoints...), Timeout: 30 * time.Second, MaxArchiveBytes: 1 << 20, MaxRouterInfos: 4_000, MaxTotalBytes: 64 << 20},
 		SAM: Listener{
 			Enabled: true, Address: Endpoint{Host: "127.0.0.1", Port: 7656}, UDPAddress: Endpoint{Host: "127.0.0.1", Port: 7655},
 			MaxConnections: 128, ReadinessTimeout: 2 * time.Minute, SessionQueue: 64, MaxSessionQueueBytes: 4 << 20, MaxServerQueueBytes: 64 << 20,
@@ -761,6 +766,22 @@ func applyReseed(operating *Operating, values map[entryKey]string) error {
 		}
 		reseed.Required = parsed
 	}
+	priorityEndpointsSpecified := false
+	if value, ok := valueOf(values, "reseed", "priority_endpoints"); ok {
+		priorityEndpointsSpecified = true
+		endpoints, err := parseReseedEndpoints(value)
+		if err != nil {
+			return invalid("reseed", "priority_endpoints")
+		}
+		reseed.PriorityEndpoints = endpoints
+	}
+	if value, ok := valueOf(values, "reseed", "priority_timeout"); ok {
+		parsed, err := parseDuration(value, 100*time.Millisecond, 10*time.Minute)
+		if err != nil {
+			return invalid("reseed", "priority_timeout")
+		}
+		reseed.PriorityTimeout = parsed
+	}
 	if value, ok := valueOf(values, "reseed", "endpoints"); ok {
 		endpoints, err := parseReseedEndpoints(value)
 		if err != nil {
@@ -802,10 +823,13 @@ func applyReseed(operating *Operating, values map[entryKey]string) error {
 	if reseed.Required && !reseed.Enabled {
 		return invalid("reseed", "required")
 	}
+	if !reseed.Enabled && !priorityEndpointsSpecified {
+		reseed.PriorityEndpoints = nil
+	}
 	if reseed.Enabled && len(reseed.Endpoints) == 0 {
 		return invalid("reseed", "endpoints")
 	}
-	if !reseed.Enabled && len(reseed.Endpoints) != 0 {
+	if !reseed.Enabled && (len(reseed.Endpoints) != 0 || len(reseed.PriorityEndpoints) != 0) {
 		return invalid("reseed", "endpoints")
 	}
 	return nil
@@ -1261,7 +1285,7 @@ var operatingKeys = map[string]map[string]bool{
 	"ntcp2":       {"enabled": true, "bind_host": true, "bind_port": true, "advertise_host": true, "advertise_port": true, "max_sessions": true, "idle_timeout": true},
 	"ssu2":        {"enabled": true, "bind_host": true, "bind_port": true, "advertise_host": true, "advertise_port": true, "max_sessions": true, "idle_timeout": true},
 	"nat":         {"natpmp_endpoint": true, "upnp_endpoint": true},
-	"reseed":      {"enabled": true, "required": true, "endpoints": true, "timeout": true, "max_archive_bytes": true, "max_router_infos": true, "max_total_bytes": true},
+	"reseed":      {"enabled": true, "required": true, "priority_endpoints": true, "priority_timeout": true, "endpoints": true, "timeout": true, "max_archive_bytes": true, "max_router_infos": true, "max_total_bytes": true},
 	"control":     {"enabled": true, "listen_host": true, "listen_port": true, "bearer_token": true, "max_connections": true},
 	"http_proxy":  {"enabled": true, "listen_host": true, "listen_port": true, "bearer_token": true, "max_connections": true, "outproxies": true},
 	"socks5":      {"enabled": true, "listen_host": true, "listen_port": true, "bearer_token": true, "max_connections": true},

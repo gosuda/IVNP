@@ -830,3 +830,189 @@ func TestEvictionDiversityProtection(t *testing.T) {
 		t.Fatal("expected lowest peer from crowded bucket 0 to be evicted")
 	}
 }
+
+func TestCalculatePackageStats(t *testing.T) {
+	now := time.Now()
+	v4Addr := netip.MustParseAddr("198.51.100.1")
+	v6Addr := netip.MustParseAddr("2001:db8::1")
+
+	peers := []PeerRecord{
+		{
+			Hash:        foundation.Hash{1},
+			IsFloodfill: true,
+			IPv4:        []netip.Addr{v4Addr},
+			Stats: PeerStats{
+				IsReachable:         true,
+				TotalProbes:         10,
+				SuccessProbes:       10,
+				TunnelBuildAccepted: true,
+				EWMARTT:             40 * time.Millisecond,
+			},
+		},
+		{
+			Hash:        foundation.Hash{2},
+			IsFloodfill: false,
+			IPv4:        []netip.Addr{v4Addr},
+			IPv6:        []netip.Addr{v6Addr},
+			Stats: PeerStats{
+				IsReachable:         true,
+				TotalProbes:         10,
+				SuccessProbes:       8,
+				TunnelBuildAccepted: false,
+				EWMARTT:             80 * time.Millisecond,
+			},
+		},
+		{
+			Hash:        foundation.Hash{3},
+			IsFloodfill: false,
+			IPv6:        []netip.Addr{v6Addr},
+			Stats: PeerStats{
+				IsReachable:         false,
+				TotalProbes:         5,
+				SuccessProbes:       0,
+				TunnelBuildAccepted: false,
+			},
+		},
+	}
+
+	stats := CalculatePackageStats(peers, 4096, `"test-etag"`, now, true)
+
+	if stats.PeerCount != 3 {
+		t.Fatalf("PeerCount = %d, want 3", stats.PeerCount)
+	}
+	if stats.FloodfillCount != 1 || stats.FloodfillRatio != 1.0/3.0 {
+		t.Fatalf("FloodfillCount = %d, ratio = %f", stats.FloodfillCount, stats.FloodfillRatio)
+	}
+	if stats.IPv4OnlyCount != 1 || stats.DualStackCount != 1 || stats.IPv6OnlyCount != 1 {
+		t.Fatalf("IP stack counts: v4=%d, dual=%d, v6=%d", stats.IPv4OnlyCount, stats.DualStackCount, stats.IPv6OnlyCount)
+	}
+	if stats.DirectlyReachableCount != 2 || stats.DirectlyReachableRatio != 2.0/3.0 {
+		t.Fatalf("DirectlyReachable: count=%d, ratio=%f", stats.DirectlyReachableCount, stats.DirectlyReachableRatio)
+	}
+	if stats.TunnelBuildAcceptedCount != 1 || stats.TunnelBuildAcceptedRatio != 1.0/3.0 {
+		t.Fatalf("TunnelBuildAccepted: count=%d, ratio=%f", stats.TunnelBuildAcceptedCount, stats.TunnelBuildAcceptedRatio)
+	}
+	expectedAvail := (1.0 + 0.8 + 0.0) / 3.0
+	if diff := stats.AverageAvailability - expectedAvail; diff > 0.001 || diff < -0.001 {
+		t.Fatalf("AverageAvailability = %f, want %f", stats.AverageAvailability, expectedAvail)
+	}
+	if stats.RTT.MinMs != 40 || stats.RTT.MaxMs != 80 || stats.RTT.AvgMs != 60 {
+		t.Fatalf("RTT stats: min=%d, max=%d, avg=%d", stats.RTT.MinMs, stats.RTT.MaxMs, stats.RTT.AvgMs)
+	}
+	if !stats.RequireReachableFilter {
+		t.Fatal("expected RequireReachableFilter = true")
+	}
+	if stats.GenerationMethod == "" {
+		t.Fatal("expected GenerationMethod to be populated")
+	}
+}
+
+func TestReseedPackageTelemetryInDashboard(t *testing.T) {
+	stats := DetailedStatsResponse{
+		Version:   "test-version",
+		NetworkID: 2,
+		Package: PackageStats{
+			PeerCount:                500,
+			FloodfillCount:           180,
+			FloodfillRatio:           0.36,
+			IPv4OnlyCount:            300,
+			IPv4OnlyRatio:            0.60,
+			DualStackCount:           190,
+			DualStackRatio:           0.38,
+			IPv6OnlyCount:            10,
+			IPv6OnlyRatio:            0.02,
+			AverageAvailability:      0.985,
+			DirectlyReachableCount:   500,
+			DirectlyReachableRatio:   1.0,
+			TunnelBuildAcceptedCount: 470,
+			TunnelBuildAcceptedRatio: 0.94,
+			RTT: RTTStats{
+				MinMs: 15,
+				AvgMs: 145,
+				P50Ms: 120,
+				P90Ms: 250,
+				MaxMs: 450,
+			},
+			GenerationMethod:       "256 K-Bucket Stratified (Java I2P 256-node Head-Start) + /16 Subnet Filter + Max-5 Bucket Leveling",
+			RequireReachableFilter: true,
+			SU3SizeBytes:           256000,
+			ETag:                   `"mock-etag"`,
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := RenderDashboard(&buf, stats); err != nil {
+		t.Fatalf("RenderDashboard: %v", err)
+	}
+	html := buf.String()
+
+	requiredSubstrings := []string{
+		"Standard I2P SU3 Archive",
+		"Generation Strategy",
+		"Floodfill Ratio",
+		"IP Stack Ratio",
+		"Average Availability",
+		"Package Latency",
+		"su3-layout",
+		"pkg-metric-ff",
+		"pkg-metric-dual",
+		"pkg-metric-avail",
+		"pkg-metric-rtt",
+		"256 K-Bucket Stratified",
+	}
+
+	for _, sub := range requiredSubstrings {
+		if !strings.Contains(html, sub) {
+			t.Errorf("rendered dashboard missing expected substring %q", sub)
+		}
+	}
+}
+
+func TestSelectorExcludesIPv6Only(t *testing.T) {
+	v4Addr := netip.MustParseAddr("198.51.100.1")
+	v6Addr := netip.MustParseAddr("2001:db8::1")
+
+	peers := []PeerRecord{
+		{
+			Hash: foundation.Hash{1},
+			Raw:  []byte("raw-dual"),
+			IPv4: []netip.Addr{v4Addr},
+			IPv6: []netip.Addr{v6Addr},
+			Stats: PeerStats{
+				IsReachable: true,
+			},
+			Score: 100,
+		},
+		{
+			Hash: foundation.Hash{2},
+			Raw:  []byte("raw-v4only"),
+			IPv4: []netip.Addr{v4Addr},
+			Stats: PeerStats{
+				IsReachable: true,
+			},
+			Score: 90,
+		},
+		{
+			Hash: foundation.Hash{3},
+			Raw:  []byte("raw-v6only"),
+			IPv6: []netip.Addr{v6Addr},
+			Stats: PeerStats{
+				IsReachable: true,
+			},
+			Score: 95,
+		},
+	}
+
+	cfg := DefaultSelectorConfig()
+	cfg.TargetCount = 10
+	selected := SelectDiversePeers(peers, cfg)
+
+	if len(selected) != 2 {
+		t.Fatalf("selected = %d, want 2", len(selected))
+	}
+	for _, p := range selected {
+		if len(p.IPv4) == 0 {
+			t.Fatalf("selected peer %x has no IPv4 (IPv6 only), must be excluded", p.Hash)
+		}
+	}
+}

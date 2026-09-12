@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
@@ -95,4 +96,92 @@ func BuildSU3(peers []PeerRecord, signerID string, privKey *rsa.PrivateKey, now 
 
 	signedPortion.Write(signature)
 	return signedPortion.Bytes(), nil
+}
+
+// CalculatePackageStats computes distribution, reachability, dual-stack, availability,
+// latency, and generation telemetry for the selected peers in a reseed package.
+func CalculatePackageStats(peers []PeerRecord, su3SizeBytes int, etag string, generatedAt time.Time, requireReachable bool) PackageStats {
+	stats := PackageStats{
+		PeerCount:              len(peers),
+		SU3SizeBytes:           su3SizeBytes,
+		ETag:                   etag,
+		LastGeneratedAt:        generatedAt,
+		RequireReachableFilter: requireReachable,
+		GenerationMethod:       "256 K-Bucket Stratified (Java I2P 256-node Head-Start) + /16 Subnet Filter + Max-5 Bucket Leveling",
+	}
+	if len(peers) == 0 {
+		return stats
+	}
+
+	var (
+		floodCount  int
+		v4OnlyCount int
+		v6OnlyCount int
+		dualCount   int
+		reachCount  int
+		tunnelCount int
+		availSum    float64
+		rtts        []time.Duration
+		totalRTT    time.Duration
+	)
+
+	for _, p := range peers {
+		if p.IsFloodfill {
+			floodCount++
+		}
+		hasV4 := len(p.IPv4) > 0
+		hasV6 := len(p.IPv6) > 0
+		if hasV4 && hasV6 {
+			dualCount++
+		} else if hasV4 {
+			v4OnlyCount++
+		} else if hasV6 {
+			v6OnlyCount++
+		}
+
+		if p.Stats.IsReachable {
+			reachCount++
+		}
+		if p.Stats.TunnelBuildAccepted {
+			tunnelCount++
+		}
+
+		if p.Stats.TotalProbes > 0 {
+			availSum += float64(p.Stats.SuccessProbes) / float64(p.Stats.TotalProbes)
+		} else if p.Stats.IsReachable {
+			availSum += 1.0
+		}
+
+		if p.Stats.EWMARTT > 0 {
+			rtts = append(rtts, p.Stats.EWMARTT)
+			totalRTT += p.Stats.EWMARTT
+		}
+	}
+
+	total := float64(len(peers))
+	stats.FloodfillCount = floodCount
+	stats.FloodfillRatio = float64(floodCount) / total
+	stats.IPv4OnlyCount = v4OnlyCount
+	stats.IPv4OnlyRatio = float64(v4OnlyCount) / total
+	stats.DualStackCount = dualCount
+	stats.DualStackRatio = float64(dualCount) / total
+	stats.IPv6OnlyCount = v6OnlyCount
+	stats.IPv6OnlyRatio = float64(v6OnlyCount) / total
+	stats.DirectlyReachableCount = reachCount
+	stats.DirectlyReachableRatio = float64(reachCount) / total
+	stats.TunnelBuildAcceptedCount = tunnelCount
+	stats.TunnelBuildAcceptedRatio = float64(tunnelCount) / total
+	stats.AverageAvailability = availSum / total
+
+	if len(rtts) > 0 {
+		slices.Sort(rtts)
+		stats.RTT.MinMs = rtts[0].Milliseconds()
+		stats.RTT.MaxMs = rtts[len(rtts)-1].Milliseconds()
+		stats.RTT.P50Ms = rtts[len(rtts)*50/100].Milliseconds()
+		stats.RTT.P90Ms = rtts[len(rtts)*90/100].Milliseconds()
+		stats.RTT.P99Ms = rtts[len(rtts)*99/100].Milliseconds()
+		stats.RTT.AvgMs = (totalRTT / time.Duration(len(rtts))).Milliseconds()
+	}
+
+	return stats
 }

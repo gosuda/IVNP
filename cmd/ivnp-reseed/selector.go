@@ -12,6 +12,7 @@ type SelectorConfig struct {
 	MaxPerFamily         int
 	RequireReachable     bool
 	PreferFloodfillRatio float64 // target ratio for floodfills, e.g. 0.35 (35%)
+	ExcludeIPv6Only      bool
 }
 
 func DefaultSelectorConfig() SelectorConfig {
@@ -21,11 +22,13 @@ func DefaultSelectorConfig() SelectorConfig {
 		MaxPerFamily:         1,
 		RequireReachable:     true,
 		PreferFloodfillRatio: 0.35,
+		ExcludeIPv6Only:      true,
 	}
 }
 
 // SelectDiversePeers performs K-Bucket stratified sampling prioritizing accessible Floodfill routers
 // with strict bucket leveling to eliminate slot imbalances and Sybil /16 subnet filtering.
+// IPv6-only peers are completely excluded so all reseed entries are accessible by IPv4 and dual-stack clients.
 func SelectDiversePeers(peers []PeerRecord, cfg SelectorConfig) []PeerRecord {
 	if cfg.TargetCount <= 0 {
 		cfg.TargetCount = 1024
@@ -40,13 +43,17 @@ func SelectDiversePeers(peers []PeerRecord, cfg SelectorConfig) []PeerRecord {
 		cfg.PreferFloodfillRatio = 0.35
 	}
 
-	// Filter viable candidates: if RequireReachable is set, must be verified directly reachable
+	// Filter viable candidates: if RequireReachable is set, must be verified directly reachable.
+	// IPv6-only peers (no IPv4 address) are strictly excluded from reseed packages.
 	var candidates []PeerRecord
 	for _, p := range peers {
 		if cfg.RequireReachable && (!p.Stats.IsReachable || p.Stats.ConsecutiveFails >= 2) {
 			continue
 		}
 		if len(p.Raw) == 0 {
+			continue
+		}
+		if len(p.IPv4) == 0 {
 			continue
 		}
 		candidates = append(candidates, p)

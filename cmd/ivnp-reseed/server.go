@@ -243,6 +243,18 @@ func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 		mode = ExplorationModeMaintenance
 	}
 
+	packageStats := pkg.Stats
+	if packageStats.PeerCount == 0 && pkg.PeerCount > 0 {
+		packageStats.PeerCount = pkg.PeerCount
+		packageStats.FloodfillCount = pkg.FloodfillCount
+		packageStats.FloodfillRatio = floodfillRatio
+		packageStats.SU3SizeBytes = len(pkg.SU3Data)
+		packageStats.ETag = pkg.ETag
+		packageStats.LastGeneratedAt = pkg.GeneratedAt
+		packageStats.GenerationMethod = "256 K-Bucket Stratified (Java I2P 256-node Head-Start) + /16 Subnet Filter + Max-5 Bucket Leveling"
+	}
+	packageStats.NextRefreshETA = nextRefreshSec
+
 	return DetailedStatsResponse{
 		Version:         version,
 		NetworkID:       s.cfg.NetworkID,
@@ -271,15 +283,7 @@ func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 			CoveragePercent: coveragePct,
 			Distribution:    distribution,
 		},
-		Package: PackageStats{
-			PeerCount:       pkg.PeerCount,
-			FloodfillCount:  pkg.FloodfillCount,
-			FloodfillRatio:  floodfillRatio,
-			SU3SizeBytes:    len(pkg.SU3Data),
-			ETag:            pkg.ETag,
-			LastGeneratedAt: pkg.GeneratedAt,
-			NextRefreshETA:  nextRefreshSec,
-		},
+		Package: packageStats,
 	}
 }
 

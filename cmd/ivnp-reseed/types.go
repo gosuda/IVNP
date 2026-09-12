@@ -66,6 +66,7 @@ type ReseedPackage struct {
 	FloodfillCount int
 	SU3Data        []byte
 	ETag           string
+	Stats          PackageStats
 }
 
 type RTTStats struct {
@@ -93,13 +94,27 @@ type KBucketStats struct {
 }
 
 type PackageStats struct {
-	PeerCount       int       `json:"peer_count"`
-	FloodfillCount  int       `json:"floodfill_count"`
-	FloodfillRatio  float64   `json:"floodfill_ratio"`
-	SU3SizeBytes    int       `json:"su3_size_bytes"`
-	ETag            string    `json:"etag"`
-	LastGeneratedAt time.Time `json:"last_generated_at"`
-	NextRefreshETA  int64     `json:"next_refresh_eta_seconds"`
+	PeerCount                int       `json:"peer_count"`
+	FloodfillCount           int       `json:"floodfill_count"`
+	FloodfillRatio           float64   `json:"floodfill_ratio"`
+	IPv4OnlyCount            int       `json:"ipv4_only_count"`
+	IPv4OnlyRatio            float64   `json:"ipv4_only_ratio"`
+	DualStackCount           int       `json:"dual_stack_count"`
+	DualStackRatio           float64   `json:"dual_stack_ratio"`
+	IPv6OnlyCount            int       `json:"ipv6_only_count"`
+	IPv6OnlyRatio            float64   `json:"ipv6_only_ratio"`
+	AverageAvailability      float64   `json:"average_availability"`
+	DirectlyReachableCount   int       `json:"directly_reachable_count"`
+	DirectlyReachableRatio   float64   `json:"directly_reachable_ratio"`
+	TunnelBuildAcceptedCount int       `json:"tunnel_build_accepted_count"`
+	TunnelBuildAcceptedRatio float64   `json:"tunnel_build_accepted_ratio"`
+	RTT                      RTTStats  `json:"rtt"`
+	GenerationMethod         string    `json:"generation_method"`
+	RequireReachableFilter   bool      `json:"require_reachable_filter"`
+	SU3SizeBytes             int       `json:"su3_size_bytes"`
+	ETag                     string    `json:"etag"`
+	LastGeneratedAt          time.Time `json:"last_generated_at"`
+	NextRefreshETA           int64     `json:"next_refresh_eta_seconds"`
 }
 
 type DetailedStatsResponse struct {

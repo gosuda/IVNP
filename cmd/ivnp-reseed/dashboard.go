@@ -170,11 +170,111 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       gap: 16px;
       margin-bottom: 28px;
     }
+    @media (min-width: 1080px) {
+      .downloads-grid {
+        grid-template-columns: 1.85fr 1fr;
+      }
+    }
     .download-card {
       display: flex;
       flex-direction: column;
       justify-content: space-between;
     }
+    .su3-layout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 20px;
+      height: 100%;
+    }
+    @media (min-width: 680px) {
+      .su3-layout {
+        grid-template-columns: 240px 1fr;
+      }
+    }
+    .su3-left {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .su3-right {
+      border-top: 1px solid var(--card-border);
+      padding-top: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    @media (min-width: 680px) {
+      .su3-right {
+        border-top: none;
+        border-left: 1px solid var(--card-border);
+        padding-top: 0;
+        padding-left: 20px;
+      }
+    }
+    .method-box {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .method-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 4px;
+      color: var(--primary);
+      font-weight: 600;
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .method-text {
+      color: var(--text-muted);
+      line-height: 1.4;
+      font-size: 0.76rem;
+    }
+    .pkg-stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 10px;
+    }
+    .pkg-stat-item {
+      background: rgba(30, 41, 59, 0.4);
+      border: 1px solid rgba(51, 65, 85, 0.4);
+      border-radius: 8px;
+      padding: 10px;
+    }
+    .pkg-stat-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .pkg-stat-val {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #fff;
+      line-height: 1.1;
+    }
+    .pkg-stat-sub {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+    .ip-ratio-bar {
+      height: 6px;
+      background: #1e293b;
+      border-radius: 9999px;
+      overflow: hidden;
+      display: flex;
+      margin-top: 6px;
+    }
+    .ip-ratio-bar-dual { background: #10b981; transition: width 0.3s ease; }
+    .ip-ratio-bar-v4 { background: #38bdf8; transition: width 0.3s ease; }
+    .ip-ratio-bar-v6 { background: #a855f7; transition: width 0.3s ease; }
     .download-header {
       display: flex;
       justify-content: space-between;
@@ -400,19 +500,82 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
   </div>
   <section class="downloads-grid">
     <div class="card download-card">
-      <div>
-        <div class="download-header">
-          <h3>Standard I2P SU3 Archive</h3>
-          <span class="fmt-pill fmt-su3">ZIP / RSA-4096</span>
+      <div class="su3-layout">
+        <!-- Left: Download actions and metadata -->
+        <div class="su3-left">
+          <div>
+            <div class="download-header">
+              <h3>Standard I2P SU3 Archive</h3>
+              <span class="fmt-pill fmt-su3">ZIP / RSA-4096</span>
+            </div>
+            <p class="download-meta">Compatible with all standard I2P routers (Java I2P, i2pd &amp; IVNP). Fully signed with SHA-512 and RSA-4096.</p>
+            <div style="font-size: 0.82rem; margin-bottom: 12px; color: #d1d5db; display: flex; flex-direction: column; gap: 4px;">
+              <div>Package Peers: <strong id="su3-peers" style="color: #fff;">-</strong></div>
+              <div>Archive Size: <strong id="su3-size" style="color: #fff;">- KB</strong></div>
+              <div>Archive ETag: <code id="su3-etag" style="color: #94a3b8; font-size: 0.75rem;">-</code></div>
+            </div>
+          </div>
+          <div class="download-actions" style="margin-top: 14px;">
+            <a href="/i2pseeds.su3?netid=2" id="btn-dl-su3" class="btn-dl">Download SU3</a>
+            <button class="btn-copy" onclick="copyLink('/i2pseeds.su3?netid=2')">Copy URL</button>
+          </div>
         </div>
-        <p class="download-meta">Compatible with all standard I2P routers (Java I2P, i2pd &amp; IVNP). Fully signed with SHA-512 and RSA-4096.</p>
-        <div style="font-size: 0.85rem; margin-bottom: 12px; color: #d1d5db;">
-          Peers: <strong id="su3-peers">-</strong> | Archive Size: <strong id="su3-size">- KB</strong>
+
+        <!-- Right (Next to download): Package Generation Strategy & Telemetry -->
+        <div class="su3-right">
+          <!-- Generation Method & Filter Strategy -->
+          <div class="method-box">
+            <div class="method-header">
+              <span>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: -1px; margin-right: 4px;"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+                Generation Strategy
+              </span>
+              <span id="pkg-filter-badge" style="font-size: 0.68rem; padding: 2px 6px; border-radius: 4px; background: rgba(16, 185, 129, 0.15); color: #34d399; font-weight: 600; text-transform: none;">Reachable Only</span>
+            </div>
+            <div class="method-text" id="pkg-method-text">
+              256 K-Bucket Stratified Sampling &bull; Java I2P 256-node Head-Start (1 peer/bucket) &bull; /16 IPv4 Subnet Anti-Sybil (max 1/subnet) &bull; Max-5 Bucket Leveling
+            </div>
+          </div>
+
+          <!-- 4 Metrics Tiles: Floodfill Ratio, IP Stack Distribution, Availability, Latency -->
+          <div class="pkg-stats-grid">
+            <!-- 1. Floodfill Ratio -->
+            <div class="pkg-stat-item">
+              <div class="pkg-stat-label">Floodfill Ratio</div>
+              <div class="pkg-stat-val" id="pkg-metric-ff" style="color: #38bdf8;">-%</div>
+              <div class="pkg-stat-sub" id="pkg-metric-ff-sub">- floodfills</div>
+            </div>
+
+            <!-- 2. IP Stack Distribution (Dual-Stack vs IPv4 Only) -->
+            <div class="pkg-stat-item">
+              <div class="pkg-stat-label">IP Stack Ratio</div>
+              <div class="pkg-stat-val" style="font-size: 1rem; display: flex; justify-content: space-between; align-items: baseline;">
+                <span id="pkg-metric-dual" style="color: #10b981;">Dual: -%</span>
+                <span id="pkg-metric-v4" style="color: #38bdf8; font-size: 0.8rem;">IPv4: -%</span>
+              </div>
+              <div class="ip-ratio-bar">
+                <div class="ip-ratio-bar-dual" id="bar-dual" style="width: 0%;" title="Dual-Stack"></div>
+                <div class="ip-ratio-bar-v4" id="bar-v4" style="width: 0%;" title="IPv4 Only"></div>
+                <div class="ip-ratio-bar-v6" id="bar-v6" style="width: 0%;" title="IPv6 Only"></div>
+              </div>
+              <div class="pkg-stat-sub" id="pkg-metric-ip-sub">Dual: - | IPv4: -</div>
+            </div>
+
+            <!-- 3. Average Availability -->
+            <div class="pkg-stat-item">
+              <div class="pkg-stat-label">Average Availability</div>
+              <div class="pkg-stat-val" id="pkg-metric-avail" style="color: #34d399;">-%</div>
+              <div class="pkg-stat-sub" id="pkg-metric-avail-sub">Direct Reachable: -%</div>
+            </div>
+
+            <!-- 4. Package Latency -->
+            <div class="pkg-stat-item">
+              <div class="pkg-stat-label">Package Latency</div>
+              <div class="pkg-stat-val" id="pkg-metric-rtt" style="color: #f59e0b;">- ms</div>
+              <div class="pkg-stat-sub" id="pkg-metric-rtt-sub">p50: - ms | p90: - ms</div>
+            </div>
+          </div>
         </div>
-      </div>
-      <div class="download-actions">
-        <a href="/i2pseeds.su3?netid=2" id="btn-dl-su3" class="btn-dl">Download SU3</a>
-        <button class="btn-copy" onclick="copyLink('/i2pseeds.su3?netid=2')">Copy URL</button>
       </div>
     </div>
 
@@ -480,6 +643,8 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
           <tr><td>Unique IPv6 Endpoints</td><td class="val" id="div-ipv6">-</td></tr>
           <tr><td>Unique Router Families</td><td class="val" id="div-families">-</td></tr>
           <tr><td>Package Floodfill Ratio</td><td class="val" id="pkg-floodfill-ratio">-%</td></tr>
+          <tr><td>Package Dual-Stack Ratio</td><td class="val" id="pkg-dual-ratio">-%</td></tr>
+          <tr><td>Package Average Availability</td><td class="val" id="pkg-avg-avail">-%</td></tr>
           <tr><td>Archive ETag</td><td class="val" id="pkg-etag">-</td></tr>
         </tbody>
       </table>
@@ -615,9 +780,78 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
         }
       }
       if (data.package) {
-        const pkgFFRatio = (data.package.floodfill_ratio * 100).toFixed(1);
-        document.getElementById('pkg-floodfill-ratio').textContent = pkgFFRatio + '% (' + data.package.floodfill_count + ' nodes)';
-        document.getElementById('pkg-etag').textContent = data.package.etag || 'N/A';
+        const pkg = data.package;
+        const ffRatio = (pkg.floodfill_ratio * 100).toFixed(1);
+        const ffEl = document.getElementById('pkg-metric-ff');
+        if (ffEl) ffEl.textContent = ffRatio + '%';
+        const ffSub = document.getElementById('pkg-metric-ff-sub');
+        if (ffSub) ffSub.textContent = (pkg.floodfill_count || 0) + ' / ' + (pkg.peer_count || 0) + ' floodfills';
+
+        const dualRatio = (pkg.dual_stack_ratio * 100).toFixed(1);
+        const v4Ratio = (pkg.ipv4_only_ratio * 100).toFixed(1);
+        const dualEl = document.getElementById('pkg-metric-dual');
+        if (dualEl) dualEl.textContent = 'Dual: ' + dualRatio + '%';
+        const v4El = document.getElementById('pkg-metric-v4');
+        if (v4El) v4El.textContent = 'IPv4: ' + v4Ratio + '%';
+        const ipSub = document.getElementById('pkg-metric-ip-sub');
+        if (ipSub) {
+          let text = 'Dual: ' + (pkg.dual_stack_count || 0) + ' | IPv4: ' + (pkg.ipv4_only_count || 0);
+          if (pkg.ipv6_only_count > 0) text += ' | IPv6: ' + pkg.ipv6_only_count;
+          ipSub.textContent = text;
+        }
+        const barDual = document.getElementById('bar-dual');
+        if (barDual) barDual.style.width = (pkg.dual_stack_ratio * 100) + '%';
+        const barV4 = document.getElementById('bar-v4');
+        if (barV4) barV4.style.width = (pkg.ipv4_only_ratio * 100) + '%';
+        const barV6 = document.getElementById('bar-v6');
+        if (barV6) barV6.style.width = (pkg.ipv6_only_ratio * 100) + '%';
+
+        const availPct = (pkg.average_availability * 100).toFixed(1);
+        const availEl = document.getElementById('pkg-metric-avail');
+        if (availEl) availEl.textContent = availPct + '%';
+        const availSub = document.getElementById('pkg-metric-avail-sub');
+        if (availSub) {
+          const reachPct = (pkg.directly_reachable_ratio * 100).toFixed(1);
+          availSub.textContent = 'Reachable: ' + reachPct + '% (' + (pkg.directly_reachable_count || 0) + ')';
+        }
+
+        const pkgRTT = pkg.rtt;
+        const rttEl = document.getElementById('pkg-metric-rtt');
+        if (rttEl) {
+          const avgMs = pkgRTT ? pkgRTT.avg_ms : 0;
+          rttEl.textContent = avgMs + ' ms';
+        }
+        const rttSub = document.getElementById('pkg-metric-rtt-sub');
+        if (rttSub) {
+          const p50 = pkgRTT ? pkgRTT.p50_ms : 0;
+          const p90 = pkgRTT ? pkgRTT.p90_ms : 0;
+          rttSub.textContent = 'p50: ' + p50 + ' ms | p90: ' + p90 + ' ms';
+        }
+
+        if (pkg.generation_method) {
+          const methodEl = document.getElementById('pkg-method-text');
+          if (methodEl) methodEl.textContent = pkg.generation_method;
+        }
+        const filterBadge = document.getElementById('pkg-filter-badge');
+        if (filterBadge) {
+          filterBadge.textContent = pkg.require_reachable_filter ? 'Directly Reachable Only' : 'Bootstrap Mode';
+          if (pkg.require_reachable_filter) {
+            filterBadge.style.background = 'rgba(16, 185, 129, 0.15)';
+            filterBadge.style.color = '#34d399';
+          } else {
+            filterBadge.style.background = 'rgba(245, 158, 11, 0.15)';
+            filterBadge.style.color = '#f59e0b';
+          }
+        }
+        const etagEl = document.getElementById('su3-etag');
+        if (etagEl) etagEl.textContent = pkg.etag || 'N/A';
+
+        document.getElementById('pkg-floodfill-ratio').textContent = ffRatio + '% (' + (pkg.floodfill_count || 0) + ' nodes)';
+        const dualTableEl = document.getElementById('pkg-dual-ratio');
+        if (dualTableEl) dualTableEl.textContent = dualRatio + '% (' + (pkg.dual_stack_count || 0) + ' nodes)';
+        const availTableEl = document.getElementById('pkg-avg-avail');
+        if (availTableEl) availTableEl.textContent = availPct + '%';
+        document.getElementById('pkg-etag').textContent = pkg.etag || 'N/A';
       }
 
       // Heatmap update

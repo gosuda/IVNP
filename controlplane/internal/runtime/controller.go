@@ -452,45 +452,52 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		lockRetryInterval = 15 * time.Second
 	}
 
-	if (options.TaintedCopy || cfg.State.TaintedCopy) && cfg.StatePath != "" {
+	createTainted := func() error {
 		tempBase := cmp.Or(cfg.TempDir, os.TempDir())
-		if err := os.MkdirAll(tempBase, 0o700); err != nil {
-			return nil, fmt.Errorf("daemon: failed to create temp directory base: %w", err)
+		if mkErr := os.MkdirAll(tempBase, 0o700); mkErr != nil {
+			return fmt.Errorf("daemon: failed to create temp directory base: %w", mkErr)
 		}
-		td, err := os.MkdirTemp(tempBase, "ivnp-tainted-*")
-		if err != nil {
-			return nil, fmt.Errorf("daemon: failed to create tainted state directory: %w", err)
+		td, mkErr := os.MkdirTemp(tempBase, "ivnp-tainted-*")
+		if mkErr != nil {
+			return fmt.Errorf("daemon: failed to create tainted state directory: %w", mkErr)
 		}
 		_ = os.Chmod(td, 0o700)
 		taintedDir = td
-		defer func() {
-			if !keepTaintedDir && taintedDir != "" {
-				_ = os.RemoveAll(taintedDir)
-			}
-		}()
 
-		stateBase := filepath.Base(cfg.StatePath)
+		stateBase := filepath.Base(masterStatePath)
 		workingStatePath = filepath.Join(taintedDir, stateBase)
-		if err := copyFileIfExists(cfg.StatePath, workingStatePath); err != nil {
-			return nil, fmt.Errorf("daemon: failed to copy state file for tainted mode: %w", err)
+		if cpErr := copyFileIfExists(masterStatePath, workingStatePath); cpErr != nil {
+			return fmt.Errorf("daemon: failed to copy state file for tainted mode: %w", cpErr)
 		}
 
-		if cfg.KeyPath != "" {
-			keyBase := filepath.Base(cfg.KeyPath)
+		if masterKeyPath != "" {
+			keyBase := filepath.Base(masterKeyPath)
 			workingKeyPath = filepath.Join(taintedDir, keyBase)
-			if err := copyFileIfExists(cfg.KeyPath, workingKeyPath); err != nil {
-				return nil, fmt.Errorf("daemon: failed to copy keys file for tainted mode: %w", err)
+			if cpErr := copyFileIfExists(masterKeyPath, workingKeyPath); cpErr != nil {
+				return fmt.Errorf("daemon: failed to copy keys file for tainted mode: %w", cpErr)
 			}
 		}
 
-		if workingNetdbDir != "" {
-			_ = copyFileIfExists(filepath.Join(workingNetdbDir, "netdb.routers"), filepath.Join(taintedDir, "netdb.routers"))
-			_ = copyFileIfExists(filepath.Join(workingNetdbDir, "netdb.responders"), filepath.Join(taintedDir, "netdb.responders"))
+		if masterNetdbDir != "" {
+			_ = copyFileIfExists(filepath.Join(masterNetdbDir, "netdb.routers"), filepath.Join(taintedDir, "netdb.routers"))
+			_ = copyFileIfExists(filepath.Join(masterNetdbDir, "netdb.responders"), filepath.Join(taintedDir, "netdb.responders"))
 		}
 		if cfg.AddressBook.StatePath != "" {
 			_ = copyFileIfExists(cfg.AddressBook.StatePath, filepath.Join(taintedDir, filepath.Base(cfg.AddressBook.StatePath)))
 		}
 		workingNetdbDir = taintedDir
+		return nil
+	}
+	defer func() {
+		if !keepTaintedDir && taintedDir != "" {
+			_ = os.RemoveAll(taintedDir)
+		}
+	}()
+
+	if options.TaintedCopy && masterStatePath != "" {
+		if err := createTainted(); err != nil {
+			return nil, err
+		}
 	}
 
 	if options.Embedded && workingStatePath == "" {
@@ -518,16 +525,36 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	store.MaxNameBytes = cfg.State.MaxNameBytes
 	keepStore := false
 	defer func() {
-		if !keepStore {
+		if !keepStore && store != nil {
 			resultErr = errors.Join(resultErr, store.Close())
 		}
 	}()
 	stateLock, err := store.AcquireLock()
 	if err != nil {
-		if options.Embedded && workingStatePath != "" {
-			return nil, errors.Join(ErrStateConflict, err)
+		if errors.Is(err, state.SecureStateErrStateLocked) && cfg.State.TaintedCopy && masterStatePath != "" && taintedDir == "" {
+			_ = store.Close()
+			store = nil
+			if mkErr := createTainted(); mkErr != nil {
+				return nil, mkErr
+			}
+			store, err = state.SecureStateNewStore(workingStatePath, workingKeyPath)
+			if err != nil {
+				if options.Embedded && workingStatePath != "" {
+					return nil, errors.Join(ErrStateConflict, err)
+				}
+				return nil, err
+			}
+			store.MaxStateBytes = int(cfg.State.MaxBytes)
+			store.MaxDestinations = cfg.State.MaxDestinations
+			store.MaxNameBytes = cfg.State.MaxNameBytes
+			stateLock, err = store.AcquireLock()
 		}
-		return nil, err
+		if err != nil {
+			if options.Embedded && workingStatePath != "" {
+				return nil, errors.Join(ErrStateConflict, err)
+			}
+			return nil, err
+		}
 	}
 	keepStateLock := false
 	defer func() {
@@ -1092,7 +1119,9 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	}
 	runtime, err := router.New(router.Config{
 		NTCP2: ntcp2Endpoint(cfg.NTCP2), SSU2: transportEndpoint(cfg.SSU2, "udp"),
-		ReseedEndpoints: append([]string(nil), cfg.Reseed.Endpoints...), RequireReseed: cfg.Reseed.Required,
+		PriorityReseedEndpoints: append([]string(nil), cfg.Reseed.PriorityEndpoints...),
+		PriorityReseedTimeout:   cfg.Reseed.PriorityTimeout,
+		ReseedEndpoints:         append([]string(nil), cfg.Reseed.Endpoints...), RequireReseed: cfg.Reseed.Required,
 	}, router.Dependencies{
 		Database: database, Service: service, LocalInfo: localInfo, Transport: mux, Sockets: sockets, Addresses: addresses, Reseed: reseedRunner, Clock: clock,
 		ReseedOutcome: func(err error) { d.recordReseedOutcome(err) },

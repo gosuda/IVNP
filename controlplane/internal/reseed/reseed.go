@@ -361,7 +361,7 @@ func isPriorityReseedEndpoint(endpoint string) bool {
 // FetchAny fetches reseed archives across multiple endpoints until the target
 // number of RouterInfos is accumulated or sufficient independent sources succeed.
 // Prioritized endpoints (such as hotseed.gosuda.org) are queried exclusively first
-// with a 1-second head start before hedging against the remaining random endpoints.
+// with a 2-second head start before hedging against the remaining random endpoints.
 func (c Client) FetchAny(ctx context.Context, endpoints []string, database *controlplanenetdb.Database, seenAt uint64) (int, error) {
 	if len(endpoints) == 0 {
 		return 0, ErrNoRouterInfos
@@ -408,7 +408,9 @@ func (c Client) FetchAny(ctx context.Context, endpoints []string, database *cont
 		state.launch()
 	}
 	hedgeDelay := time.Second
-	if !hasPriority && c.HTTPClient != nil && c.HTTPClient.Timeout > 0 {
+	if hasPriority {
+		hedgeDelay = 2 * time.Second
+	} else if c.HTTPClient != nil && c.HTTPClient.Timeout > 0 {
 		hedgeDelay = max(time.Millisecond, c.HTTPClient.Timeout/time.Duration(len(ordered)))
 	}
 	timer := time.NewTimer(hedgeDelay)
@@ -420,6 +422,11 @@ func (c Client) FetchAny(ctx context.Context, endpoints []string, database *cont
 			if outcome.err == nil {
 				state.totalAdmitted += outcome.count
 				state.successes++
+				if hasPriority && outcome.index < len(priority) && state.totalAdmitted > 0 {
+					cancel()
+					state.drain()
+					return state.totalAdmitted, nil
+				}
 				targetMet := state.database != nil && state.database.Routers().Len() >= state.target
 				sourcesSufficient := state.successes >= DefaultMaxSuccessfulReseed
 				allDone := state.next >= len(state.endpoints) && state.active == 0

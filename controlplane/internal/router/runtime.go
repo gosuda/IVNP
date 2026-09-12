@@ -112,12 +112,14 @@ type ReseedRunner interface {
 // settings. An empty Endpoint leaves that transport unbound; a partially
 // specified endpoint is invalid.
 type Config struct {
-	NTCP2                 dataplane.RouterEndpoint
-	SSU2                  dataplane.RouterEndpoint
-	ReseedEndpoints       []string
-	RequireReseed         bool
-	ControlQueue          dataplane.RouterControlQueueLimits
-	ControlHandlerTimeout time.Duration
+	NTCP2                   dataplane.RouterEndpoint
+	SSU2                    dataplane.RouterEndpoint
+	PriorityReseedEndpoints []string
+	PriorityReseedTimeout   time.Duration
+	ReseedEndpoints         []string
+	RequireReseed           bool
+	ControlQueue            dataplane.RouterControlQueueLimits
+	ControlHandlerTimeout   time.Duration
 }
 
 // TunnelBuildReplyHandler claims destination-scoped creator replies. Short
@@ -517,7 +519,7 @@ func (r *Router) usableReseedPeers(now time.Time) int {
 }
 
 func (r *Router) startReseed(ctx context.Context) <-chan struct{} {
-	if len(r.cfg.ReseedEndpoints) == 0 || r.deps.Reseed == nil {
+	if (len(r.cfg.PriorityReseedEndpoints) == 0 && len(r.cfg.ReseedEndpoints) == 0) || r.deps.Reseed == nil {
 		return nil
 	}
 	now := r.deps.Clock.Now()
@@ -541,7 +543,34 @@ func (r *Router) startReseed(ctx context.Context) <-chan struct{} {
 	r.reseedMu.Unlock()
 
 	r.wg.Go(func() {
-		_, err := r.deps.Reseed.FetchAny(ctx, r.cfg.ReseedEndpoints, r.deps.Database, uint64(now.UnixMilli()))
+		var admitted int
+		var err error
+		if len(r.cfg.PriorityReseedEndpoints) > 0 {
+			timeout := r.cfg.PriorityReseedTimeout
+			if timeout <= 0 {
+				timeout = 2 * time.Second
+			}
+			priorityCtx, cancel := context.WithTimeout(ctx, timeout)
+			admitted, err = r.deps.Reseed.FetchAny(priorityCtx, r.cfg.PriorityReseedEndpoints, r.deps.Database, uint64(now.UnixMilli()))
+			cancel()
+			if err == nil && admitted > 0 {
+				if r.deps.ReseedOutcome != nil {
+					r.deps.ReseedOutcome(nil)
+				}
+				r.reseedMu.Lock()
+				r.reseedErr = nil
+				r.reseedRunning = false
+				r.reseedBackoff = 0
+				r.reseedNext = time.Time{}
+				close(done)
+				r.reseedMu.Unlock()
+				return
+			}
+		}
+
+		if len(r.cfg.ReseedEndpoints) > 0 {
+			admitted, err = r.deps.Reseed.FetchAny(ctx, r.cfg.ReseedEndpoints, r.deps.Database, uint64(now.UnixMilli()))
+		}
 		if r.deps.ReseedOutcome != nil {
 			r.deps.ReseedOutcome(err)
 		}

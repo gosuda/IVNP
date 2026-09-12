@@ -36,6 +36,9 @@ func TestParseOperatingDefaults(t *testing.T) {
 	if !config.Reseed.Enabled || len(config.Reseed.Endpoints) == 0 || config.Reseed.Timeout != 30*time.Second || config.Log != (Log{Level: "info", Format: "text"}) {
 		t.Fatalf("defaults = %#v", config)
 	}
+	if len(config.Reseed.PriorityEndpoints) != 1 || config.Reseed.PriorityEndpoints[0] != "https://hotseed.gosuda.org/i2pseeds.su3?netid=2" || config.Reseed.PriorityTimeout != 2*time.Second {
+		t.Fatalf("priority reseed defaults = %#v", config.Reseed)
+	}
 	for _, endpoint := range config.Reseed.Endpoints {
 		if !strings.HasPrefix(endpoint, "https://") || !strings.HasSuffix(endpoint, "/i2pseeds.su3?netid=2") {
 			t.Fatalf("default reseed endpoint = %q", endpoint)
@@ -47,6 +50,16 @@ func TestParseOperatingDefaults(t *testing.T) {
 	clientDefaultsRejected := tunnel.ClientInboundTarget != 2 || tunnel.ClientOutboundTarget != 2 || tunnel.ClientPoolCapacity != 4
 	if coreDefaultsRejected || exploratoryDefaultsRejected || clientDefaultsRejected {
 		t.Fatalf("production defaults = %#v", config)
+	}
+}
+
+func TestParseOperatingPriorityReseed(t *testing.T) {
+	config, err := ParseOperating("[reseed]\npriority_endpoints = https://hotseed.gosuda.org/i2pseeds.su3?netid=2\npriority_timeout = 3s\n", "/etc/ivnp/ivnp.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Reseed.PriorityEndpoints) != 1 || config.Reseed.PriorityEndpoints[0] != "https://hotseed.gosuda.org/i2pseeds.su3?netid=2" || config.Reseed.PriorityTimeout != 3*time.Second {
+		t.Fatalf("parsed priority reseed = %#v", config.Reseed)
 	}
 }
 
