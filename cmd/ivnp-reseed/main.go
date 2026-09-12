@@ -61,6 +61,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	signerID := flags.String("signer-id", envOr("RESEED_SIGNER_ID", "reseed@ivnp.network"), "SU3 signer common name (env RESEED_SIGNER_ID)")
 	seedPhrase := flags.String("seed-phrase", envOr("RESEED_SEED_PHRASE", ""), "deterministic RSA-4096 signing key seed phrase; prefer env RESEED_SEED_PHRASE so the phrase stays out of process arguments")
 	routerPort := flags.Int("router-port", 0, "port for embedded router NTCP2/SSU2 transports (default 0 for random/ephemeral)")
+	routerAdvertiseHost := flags.String("router-advertise-host", envOr("RESEED_ROUTER_ADVERTISE_HOST", ""), "public host or IP advertised in the embedded router's info for inbound connections (requires -router-port; empty keeps the router firewalled)")
+	routerAdvertisePort := flags.Int("router-advertise-port", 0, "public port advertised when it differs from -router-port, e.g. NAT port forwarding (default: same as -router-port)")
 	noRouter := flags.Bool("no-router", false, "disable embedded router (test/replay mode)")
 	healthCheckURL := flags.String("healthcheck", "", "check health endpoint URL and exit 0 (healthy) or 1 (unhealthy)")
 	runOnce := flags.Bool("once", false, "run one pass and exit")
@@ -179,7 +181,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var routerSubsystem *node.Subsystem
 	if !*noRouter {
 		logger.Info("starting embedded IVNP router in floodfill mode (tainted state)...")
-		routerCfg := configureActiveClientRouter(*dataDir, *tempDir, uint8(*netID), *routerPort)
+		advertisedHost, advertisedPort, advErr := resolveAdvertisedEndpoint(*routerAdvertiseHost, *routerAdvertisePort, *routerPort, logger)
+		if advErr != nil {
+			logger.Error("invalid advertised endpoint", "error", advErr)
+			return 2
+		}
+		routerCfg := configureActiveClientRouter(*dataDir, *tempDir, uint8(*netID), *routerPort, advertisedHost, advertisedPort)
 		subsystem, routerErr := node.NewSubsystem(routerCfg, node.Options{Logger: logger, TaintedCopy: true})
 		if routerErr != nil {
 			logger.Error("failed to initialize embedded router", "error", routerErr)
@@ -348,7 +355,64 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-func configureActiveClientRouter(baseDir, tempDir string, netID uint8, routerPort int) state.ConfigurationOperating {
+// resolveAdvertisedEndpoint validates the router advertise flags and fills in
+// defaults: the advertised port falls back to the router port (the common 1:1 NAT
+// case), and an empty advertised host disables address advertisement entirely so
+// the router stays firewalled/automatic.
+func resolveAdvertisedEndpoint(host string, advertisedPort, routerPort int, logger *slog.Logger) (string, int, error) {
+	if host == "" {
+		if advertisedPort != 0 {
+			logger.Warn("-router-advertise-port ignored: -router-advertise-host is not set")
+		}
+		return "", 0, nil
+	}
+	if routerPort <= 0 {
+		return "", 0, errors.New("-router-advertise-host requires -router-port")
+	}
+	if err := validateAdvertisedHost(host); err != nil {
+		return "", 0, fmt.Errorf("invalid -router-advertise-host %q: %w", host, err)
+	}
+	port := routerPort
+	if advertisedPort != 0 {
+		if advertisedPort < 1 || advertisedPort > 65535 {
+			return "", 0, errors.New("-router-advertise-port must be between 1 and 65535")
+		}
+		port = advertisedPort
+	}
+	return host, port, nil
+}
+
+// validateAdvertisedHost accepts an IP address or an RFC 1123 hostname, the two
+// address forms I2P RouterInfos may publish.
+func validateAdvertisedHost(host string) error {
+	if _, err := netip.ParseAddr(host); err == nil {
+		return nil
+	}
+	if len(host) > 255 {
+		return errors.New("hostname longer than 255 characters")
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 {
+			return fmt.Errorf("invalid hostname label %q", label)
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("hostname label %q must not start or end with '-'", label)
+		}
+		for _, r := range label {
+			if !isHostnameLabelChar(r) {
+				return fmt.Errorf("hostname label %q contains invalid character %q", label, r)
+			}
+		}
+	}
+	return nil
+}
+
+// isHostnameLabelChar reports whether r is allowed in an RFC 1123 hostname label.
+func isHostnameLabelChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-'
+}
+
+func configureActiveClientRouter(baseDir, tempDir string, netID uint8, routerPort int, advertisedHost string, advertisedPort int) state.ConfigurationOperating {
 	cfg := state.ConfigurationDefaultOperating()
 	cfg.DataDir = filepath.Join(baseDir, "router")
 	cfg.StateDir = filepath.Join(cfg.DataDir, "state")
@@ -366,12 +430,22 @@ func configureActiveClientRouter(baseDir, tempDir string, netID uint8, routerPor
 		port = uint16(routerPort)
 	}
 
+	// Advertise a fixed public host/port so remote routers can establish inbound
+	// transport connections; without it the router publishes a firewalled RouterInfo
+	// with no address when UPnP/NAT-PMP are unavailable (i.e. any NAT'd host whose
+	// gateway cannot map ports automatically).
+	// The advertised port may differ from the bound port behind NAT port forwarding.
+	advertised := state.ConfigurationEndpoint{}
+	if advertisedHost != "" && port > 0 {
+		advertised = state.ConfigurationEndpoint{Host: advertisedHost, Port: uint16(advertisedPort)}
+	}
+
 	cfg.NTCP2.Enabled = true
 	cfg.NTCP2.Bind = state.ConfigurationEndpoint{Host: "0.0.0.0", Port: port}
-	cfg.NTCP2.Advertised = state.ConfigurationEndpoint{}
+	cfg.NTCP2.Advertised = advertised
 	cfg.SSU2.Enabled = true
 	cfg.SSU2.Bind = state.ConfigurationEndpoint{Host: "0.0.0.0", Port: port}
-	cfg.SSU2.Advertised = state.ConfigurationEndpoint{}
+	cfg.SSU2.Advertised = advertised
 	cfg.NAT.UPnPEndpoint = ""
 	cfg.NAT.NATPMPEndpoint = netip.AddrPort{}
 
