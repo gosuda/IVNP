@@ -21,16 +21,26 @@ const (
 	ProbeCooldownInterval  = 3 * time.Minute  // default fallback interval
 )
 
+// ExplorationMode tracks the dynamic budget allocation phase.
+type ExplorationMode string
+
+const (
+	ExplorationModeExpansion   ExplorationMode = "expansion"   // Reachable < 1024: aggressive exploration & newcomer probing
+	ExplorationModeMaintenance ExplorationMode = "maintenance" // Reachable >= 1024: targeted sparse repair & quality tracking
+)
+
 // PeerStats tracks connectivity, stability, and latency observations for a router.
 type PeerStats struct {
-	TotalProbes      int64         `json:"total_probes"`
-	SuccessProbes    int64         `json:"success_probes"`
-	ConsecutiveFails int           `json:"consecutive_fails"`
-	LastSeen         time.Time     `json:"last_seen"`
-	LastProbed       time.Time     `json:"last_probed"`
-	EWMARTT          time.Duration `json:"ewma_rtt"`
-	LastRTT          time.Duration `json:"last_rtt"`
-	IsReachable      bool          `json:"is_reachable"`
+	TotalProbes         int64         `json:"total_probes"`
+	SuccessProbes       int64         `json:"success_probes"`
+	ConsecutiveFails    int           `json:"consecutive_fails"`
+	LastSeen            time.Time     `json:"last_seen"`
+	LastProbed          time.Time     `json:"last_probed"`
+	EWMARTT             time.Duration `json:"ewma_rtt"`
+	LastRTT             time.Duration `json:"last_rtt"`
+	IsReachable         bool          `json:"is_reachable"`
+	TunnelBuildAccepted bool          `json:"tunnel_build_accepted,omitempty"`
+	LastTunnelAccepted  time.Time     `json:"last_tunnel_accepted,omitempty"`
 }
 
 // PeerRecord holds a parsed RouterInfo, its raw wire payload, and indexed network properties.
@@ -68,6 +78,7 @@ type RTTStats struct {
 }
 
 type DiversityStats struct {
+	UniqueIPv4Subnets16 int `json:"unique_ipv4_subnets_16"`
 	UniqueIPv4Subnets24 int `json:"unique_ipv4_subnets_24"`
 	UniqueIPv4Count     int `json:"unique_ipv4_count"`
 	UniqueIPv6Count     int `json:"unique_ipv6_count"`
@@ -92,17 +103,21 @@ type PackageStats struct {
 }
 
 type DetailedStatsResponse struct {
-	Version         string         `json:"version"`
-	NetworkID       uint8          `json:"network_id"`
-	UptimeSeconds   int64          `json:"uptime_seconds"`
-	TotalIndexed    int            `json:"total_indexed"`
-	ReachablePeers  int            `json:"reachable_peers"`
-	FloodfillPeers  int            `json:"floodfill_peers"`
-	PublishedPeers  int            `json:"published_peers"`
-	AverageEWMARTT  time.Duration  `json:"average_ewma_rtt_ms"`
-	LastGeneratedAt time.Time      `json:"last_generated_at"`
-	RTT             RTTStats       `json:"rtt"`
-	Diversity       DiversityStats `json:"diversity"`
-	KBuckets        KBucketStats   `json:"kbuckets"`
-	Package         PackageStats   `json:"package"`
+	Version         string          `json:"version"`
+	NetworkID       uint8           `json:"network_id"`
+	UptimeSeconds   int64           `json:"uptime_seconds"`
+	ExplorationMode ExplorationMode `json:"exploration_mode,omitempty"`
+	TotalIndexed    int             `json:"total_indexed"`
+	ReachablePeers  int             `json:"reachable_peers"`
+	FloodfillPeers  int             `json:"floodfill_peers"`
+	PublishedPeers  int             `json:"published_peers"`
+	AverageEWMARTT  time.Duration   `json:"average_ewma_rtt_ms"`
+	LastGeneratedAt time.Time       `json:"last_generated_at"`
+	SignerID        string          `json:"signer_id,omitempty"`
+	CertificatePEM  string          `json:"certificate_pem,omitempty"`
+	PublicKeyPEM    string          `json:"public_key_pem,omitempty"`
+	RTT             RTTStats        `json:"rtt"`
+	Diversity       DiversityStats  `json:"diversity"`
+	KBuckets        KBucketStats    `json:"kbuckets"`
+	Package         PackageStats    `json:"package"`
 }

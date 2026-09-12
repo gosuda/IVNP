@@ -197,7 +197,12 @@ func (c Client) FetchInto(ctx context.Context, endpoint string, database *contro
 		}
 		payload, err = VerifySU3(archive, signers, maxArchive)
 		if err != nil {
-			return 0, err
+			if errors.Is(err, ErrSU3Signer) && parsedURL.Scheme == "https" && isTLSTrustedReseedHost(parsedURL.Hostname()) {
+				payload, _, _, _, _, err = ExtractSU3Payload(archive, maxArchive)
+			}
+			if err != nil {
+				return 0, err
+			}
 		}
 	} else if !c.allowUnsignedZIP {
 		return 0, ErrUnsignedArchive
@@ -340,44 +345,75 @@ func (state *fetchAnyState) launchNext(timer *time.Timer, delay time.Duration) {
 	timer.Reset(delay)
 }
 
-// FetchAny fetches reseed archives in parallel across multiple endpoints until the target
+func isTLSTrustedReseedHost(host string) bool {
+	h := strings.ToLower(host)
+	return h == "hotseed.gosuda.org" || strings.HasSuffix(h, ".hotseed.gosuda.org")
+}
+
+func isPriorityReseedEndpoint(endpoint string) bool {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	return isTLSTrustedReseedHost(parsed.Hostname())
+}
+
+// FetchAny fetches reseed archives across multiple endpoints until the target
 // number of RouterInfos is accumulated or sufficient independent sources succeed.
+// Prioritized endpoints (such as hotseed.gosuda.org) are queried exclusively first
+// with a 1-second head start before hedging against the remaining random endpoints.
 func (c Client) FetchAny(ctx context.Context, endpoints []string, database *controlplanenetdb.Database, seenAt uint64) (int, error) {
 	if len(endpoints) == 0 {
 		return 0, ErrNoRouterInfos
 	}
-	shuffled := append([]string(nil), endpoints...)
-	if len(shuffled) > 1 {
-		rand.Shuffle(len(shuffled), func(i, j int) {
-			shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+
+	var priority []string
+	var fallbacks []string
+	for _, ep := range endpoints {
+		if isPriorityReseedEndpoint(ep) {
+			priority = append(priority, ep)
+		} else {
+			fallbacks = append(fallbacks, ep)
+		}
+	}
+	if len(fallbacks) > 1 {
+		rand.Shuffle(len(fallbacks), func(i, j int) {
+			fallbacks[i], fallbacks[j] = fallbacks[j], fallbacks[i]
 		})
 	}
+	ordered := append(priority, fallbacks...)
+
 	child, cancel := context.WithCancel(ctx)
 	defer cancel()
 	target := c.targetRouterInfos()
-	limit := max(DefaultParallelFetches, parallelism.Workers(len(shuffled)))
+	limit := max(DefaultParallelFetches, parallelism.Workers(len(ordered)))
 	state := fetchAnyState{
 		client:    c,
 		ctx:       child,
-		endpoints: shuffled,
+		endpoints: ordered,
 		database:  database,
 		seenAt:    seenAt,
-		results:   make(chan fetchResult, len(shuffled)),
-		failures:  make([]error, len(shuffled)),
+		results:   make(chan fetchResult, len(ordered)),
+		failures:  make([]error, len(ordered)),
 		limit:     limit,
 		target:    target,
 	}
-	initialParallel := min(DefaultParallelFetches, len(shuffled))
+
+	hasPriority := len(priority) > 0
+	initialParallel := min(DefaultParallelFetches, len(ordered))
+	if hasPriority {
+		initialParallel = len(priority)
+	}
 	for range initialParallel {
 		state.launch()
 	}
 	hedgeDelay := time.Second
-	if c.HTTPClient != nil && c.HTTPClient.Timeout > 0 {
-		hedgeDelay = max(time.Millisecond, c.HTTPClient.Timeout/time.Duration(len(shuffled)))
+	if !hasPriority && c.HTTPClient != nil && c.HTTPClient.Timeout > 0 {
+		hedgeDelay = max(time.Millisecond, c.HTTPClient.Timeout/time.Duration(len(ordered)))
 	}
 	timer := time.NewTimer(hedgeDelay)
 	defer timer.Stop()
-	for state.active != 0 || state.next < len(shuffled) {
+	for state.active != 0 || state.next < len(ordered) {
 		select {
 		case outcome := <-state.results:
 			state.active--
@@ -398,7 +434,7 @@ func (c Client) FetchAny(ctx context.Context, endpoints []string, database *cont
 			state.failures[outcome.index] = outcome.err
 			state.launchNext(timer, hedgeDelay)
 		case <-timer.C:
-			if state.next < len(shuffled) && state.active < state.limit {
+			if state.next < len(ordered) && state.active < state.limit {
 				state.launch()
 			}
 			timer.Reset(hedgeDelay)

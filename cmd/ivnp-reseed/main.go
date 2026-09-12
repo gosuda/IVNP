@@ -6,12 +6,16 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/netip"
 	"os"
@@ -37,11 +41,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	listenAddr := flags.String("listen", ":8080", "HTTP reseed server listen address(es), comma-separated (e.g. :8080 or :8080,:8443)")
 	dataDir := flags.String("data-dir", "/data", "base persistent data directory")
+	tempDir := flags.String("temp-dir", "", "temporary directory for tainted copy state (default os.TempDir())")
 	peersFile := flags.String("peers-file", "", "path to peer cache file (default <data-dir>/reseed-peers.json)")
-	targetPeers := flags.Int("target", 1000, "target number of diverse peers in reseed archive")
+	targetPeers := flags.Int("target", 1024, "target number of diverse peers in reseed archive")
 	interval := flags.Duration("interval", 5*time.Minute, "refresh interval for harvesting, probing, and packaging")
 	netID := flags.Uint("netid", 2, "I2P network ID")
 	signerID := flags.String("signer-id", "reseed@ivnp.network", "SU3 signer common name")
+	routerPort := flags.Int("router-port", 0, "port for embedded router NTCP2/SSU2 transports (default 0 for random/ephemeral)")
 	noRouter := flags.Bool("no-router", false, "disable embedded router (test/replay mode)")
 	healthCheckURL := flags.String("healthcheck", "", "check health endpoint URL and exit 0 (healthy) or 1 (unhealthy)")
 	runOnce := flags.Bool("once", false, "run one pass and exit")
@@ -66,16 +72,26 @@ func run(args []string, stdout, stderr io.Writer) int {
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	cachePath := cmp.Or(*peersFile, filepath.Join(*dataDir, "reseed-peers.json"))
+	su3Path := filepath.Join(*dataDir, "i2pseeds.su3")
+	keyPath := filepath.Join(*dataDir, "reseed-rsa.key")
+	certPath := filepath.Join(*dataDir, "reseed-rsa.crt")
+	pubKeyPath := filepath.Join(*dataDir, "reseed-rsa.pub.pem")
 
-	// Generate RSA signing key for standard SU3 container
-	rsaPrivKey, err := rsa.GenerateKey(rand.Reader, 4096)
+	rsaPrivKey, err := loadOrGenerateRSASigningKey(keyPath, logger)
 	if err != nil {
-		logger.Error("failed to generate RSA key", "error", err)
+		logger.Error("failed to initialize RSA signing key", "error", err)
+		return 1
+	}
+
+	certPEM, pubKeyPEM, err := loadOrGenerateReseedCertificate(certPath, pubKeyPath, *signerID, rsaPrivKey, logger)
+	if err != nil {
+		logger.Error("failed to initialize reseed certificate", "error", err)
 		return 1
 	}
 
 	logger.Info("initialized signing keys",
 		"su3_signer", *signerID,
+		"cert_path", certPath,
 	)
 
 	store := NewPeerStore()
@@ -93,16 +109,35 @@ func run(args []string, stdout, stderr io.Writer) int {
 		NetworkID:     uint8(*netID),
 		ListenAddress: *listenAddr,
 		CacheDuration: *interval,
+		SignerID:      *signerID,
+		CertPEM:       certPEM,
+		PubKeyPEM:     pubKeyPEM,
 	}, store)
+
+	// Load persistent SU3 archive if present for immediate availability across restarts
+	if su3Data, readErr := os.ReadFile(su3Path); readErr == nil && len(su3Data) > 0 {
+		sum := sha256.Sum256(su3Data)
+		etag := `"` + hex.EncodeToString(sum[:8]) + `"`
+		server.UpdatePackage(ReseedPackage{
+			GeneratedAt: time.Now(),
+			PeerCount:   store.Len(),
+			SU3Data:     su3Data,
+			ETag:        etag,
+		})
+		logger.Info("loaded persistent reseed archive for immediate serving",
+			"path", su3Path,
+			"su3_bytes", len(su3Data),
+		)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	var routerSubsystem *node.Subsystem
 	if !*noRouter {
-		logger.Info("starting embedded IVNP router in client mode (no public port binding)...")
-		routerCfg := configureActiveClientRouter(*dataDir, uint8(*netID))
-		subsystem, routerErr := node.NewSubsystem(routerCfg, node.Options{Logger: logger})
+		logger.Info("starting embedded IVNP router in floodfill mode (tainted state)...")
+		routerCfg := configureActiveClientRouter(*dataDir, *tempDir, uint8(*netID), *routerPort)
+		subsystem, routerErr := node.NewSubsystem(routerCfg, node.Options{Logger: logger, TaintedCopy: true})
 		if routerErr != nil {
 			logger.Error("failed to initialize embedded router", "error", routerErr)
 			return 1
@@ -129,12 +164,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 					"total_store", store.Len(),
 				)
 			}
+			reachable := store.ReachableCount()
+			queryBudget := 48
+			if reachable >= 1024 {
+				queryBudget = 12
+			}
 			// Active DHT tree exploration to populate empty and sparse K-Buckets
-			dispatched, exploreErr := crawler.TreeExplore(crawlCtx, routerSubsystem, 16)
+			dispatched, exploreErr := crawler.TreeExplore(crawlCtx, routerSubsystem, queryBudget)
 			if exploreErr != nil && !errors.Is(exploreErr, context.Canceled) {
 				logger.Debug("tree exploration notice", "error", exploreErr)
 			} else if dispatched > 0 {
-				logger.Debug("active crawl: dispatched tree exploration lookups", "dispatched", dispatched)
+				logger.Debug("active crawl: dispatched tree exploration lookups", "dispatched", dispatched, "budget", queryBudget)
 			}
 
 			_ = routerSubsystem.TriggerTunnelProbe(crawlCtx)
@@ -164,14 +204,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 
 		// 3. Select diverse, accessible Floodfills and high-performance routers
+		reachableCount := store.ReachableCount()
 		selectorCfg := DefaultSelectorConfig()
 		selectorCfg.TargetCount = *targetPeers
-		selectorCfg.RequireReachable = false // Allow candidates if cold-start
+		// If directly reachable peer count > 256, strictly include only directly reachable peers
+		// (no artificial padding with dead/unverified nodes up to 1024).
+		// If <= 256 (cold-start), allow candidates to bootstrap.
+		selectorCfg.RequireReachable = (reachableCount > 256)
 		selected := SelectDiversePeers(store.Snapshot(), selectorCfg)
 
 		logger.Info("selected diverse peers",
 			"target", *targetPeers,
 			"selected", len(selected),
+			"reachable_in_store", reachableCount,
+			"require_reachable", selectorCfg.RequireReachable,
 		)
 
 		if len(selected) > 0 {
@@ -185,6 +231,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 			su3Bytes, su3Err := BuildSU3(selected, *signerID, rsaPrivKey, now)
 			if su3Err != nil {
 				return fmt.Errorf("build su3: %w", su3Err)
+			}
+
+			if writeErr := os.WriteFile(su3Path, su3Bytes, 0644); writeErr != nil {
+				logger.Warn("failed to persist SU3 archive", "path", su3Path, "error", writeErr)
 			}
 
 			sum := sha256.Sum256(su3Bytes)
@@ -259,20 +309,29 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-func configureActiveClientRouter(baseDir string, netID uint8) state.ConfigurationOperating {
+func configureActiveClientRouter(baseDir, tempDir string, netID uint8, routerPort int) state.ConfigurationOperating {
 	cfg := state.ConfigurationDefaultOperating()
 	cfg.DataDir = filepath.Join(baseDir, "router")
 	cfg.StateDir = filepath.Join(cfg.DataDir, "state")
 	cfg.StatePath = filepath.Join(cfg.StateDir, "router.state")
 	cfg.KeyPath = filepath.Join(cfg.StateDir, "router.keys")
+	if tempDir != "" {
+		cfg.TempDir = tempDir
+	}
+	cfg.State.TaintedCopy = true
 	cfg.Network.ID = uint32(netID)
+	cfg.Router.Floodfill = true // Operate as Floodfill router by default to participate in NetDB replication
 
-	// Pure outbound client: ephemeral port 0, unadvertised, no UPnP/NAT-PMP
+	port := uint16(0)
+	if routerPort > 0 && routerPort <= 65535 {
+		port = uint16(routerPort)
+	}
+
 	cfg.NTCP2.Enabled = true
-	cfg.NTCP2.Bind = state.ConfigurationEndpoint{Host: "0.0.0.0", Port: 0}
+	cfg.NTCP2.Bind = state.ConfigurationEndpoint{Host: "0.0.0.0", Port: port}
 	cfg.NTCP2.Advertised = state.ConfigurationEndpoint{}
 	cfg.SSU2.Enabled = true
-	cfg.SSU2.Bind = state.ConfigurationEndpoint{Host: "0.0.0.0", Port: 0}
+	cfg.SSU2.Bind = state.ConfigurationEndpoint{Host: "0.0.0.0", Port: port}
 	cfg.SSU2.Advertised = state.ConfigurationEndpoint{}
 	cfg.NAT.UPnPEndpoint = ""
 	cfg.NAT.NATPMPEndpoint = netip.AddrPort{}
@@ -297,4 +356,164 @@ func configureActiveClientRouter(baseDir string, netID uint8) state.Configuratio
 	cfg.NetDB.LookupCapacity = 128
 
 	return cfg
+}
+
+func loadRSASigningKey(path string, logger *slog.Logger) (*rsa.PrivateKey, error) {
+	if path == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil || (block.Type != "RSA PRIVATE KEY" && block.Type != "PRIVATE KEY") {
+		logger.Warn("invalid existing RSA key file, regenerating", "path", path)
+		return nil, nil
+	}
+	if priv, parseErr := x509.ParsePKCS1PrivateKey(block.Bytes); parseErr == nil {
+		logger.Info("loaded persistent RSA signing key", "path", path)
+		return priv, nil
+	}
+	if privKey, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes); parseErr == nil {
+		if rsaPriv, ok := privKey.(*rsa.PrivateKey); ok {
+			logger.Info("loaded persistent RSA signing key (PKCS#8)", "path", path)
+			return rsaPriv, nil
+		}
+	}
+	logger.Warn("invalid existing RSA key file, regenerating", "path", path)
+	return nil, nil
+}
+
+func loadOrGenerateRSASigningKey(path string, logger *slog.Logger) (*rsa.PrivateKey, error) {
+	existing, err := loadRSASigningKey(path, logger)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return existing, nil
+	}
+
+	key, err := rsa.GenerateKey(rand.Reader, 4096)
+	if err != nil {
+		return nil, err
+	}
+	if path != "" {
+		keyBytes := x509.MarshalPKCS1PrivateKey(key)
+		pemData := pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: keyBytes,
+		})
+		if err := os.WriteFile(path, pemData, 0600); err != nil {
+			logger.Warn("failed to persist RSA signing key", "path", path, "error", err)
+		} else {
+			logger.Info("saved persistent RSA signing key", "path", path)
+		}
+	}
+	return key, nil
+}
+
+func generateSelfSignedCertificate(signerID string, privKey *rsa.PrivateKey) ([]byte, error) {
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		return nil, fmt.Errorf("generate serial: %w", err)
+	}
+
+	now := time.Now().UTC()
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName:   signerID,
+			Organization: []string{"I2P Anonymous Network"},
+		},
+		NotBefore:             now.Add(-1 * time.Hour),
+		NotAfter:              now.AddDate(10, 0, 0), // 10 years validity
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &privKey.PublicKey, privKey)
+	if err != nil {
+		return nil, fmt.Errorf("create certificate: %w", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: derBytes,
+	})
+	return certPEM, nil
+}
+
+func loadExistingReseedCertificate(certPath string, privKey *rsa.PrivateKey, logger *slog.Logger) ([]byte, error) {
+	if certPath == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(certPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		logger.Warn("invalid existing reseed certificate, regenerating", "path", certPath)
+		return nil, nil
+	}
+	cert, parseErr := x509.ParseCertificate(block.Bytes)
+	if parseErr != nil {
+		logger.Warn("failed to parse existing reseed certificate, regenerating", "path", certPath, "error", parseErr)
+		return nil, nil
+	}
+	rsaPub, ok := cert.PublicKey.(*rsa.PublicKey)
+	if !ok || rsaPub.N.Cmp(privKey.N) != 0 {
+		logger.Warn("existing reseed certificate public key does not match signing key, regenerating", "path", certPath)
+		return nil, nil
+	}
+	logger.Info("loaded persistent reseed certificate", "path", certPath, "cn", cert.Subject.CommonName)
+	return data, nil
+}
+
+func loadOrGenerateReseedCertificate(certPath string, pubKeyPath string, signerID string, privKey *rsa.PrivateKey, logger *slog.Logger) ([]byte, []byte, error) {
+	certPEM, err := loadExistingReseedCertificate(certPath, privKey, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(certPEM) == 0 {
+		var err error
+		certPEM, err = generateSelfSignedCertificate(signerID, privKey)
+		if err != nil {
+			return nil, nil, fmt.Errorf("generate reseed certificate: %w", err)
+		}
+		if certPath != "" {
+			if writeErr := os.WriteFile(certPath, certPEM, 0644); writeErr != nil {
+				logger.Warn("failed to persist reseed certificate", "path", certPath, "error", writeErr)
+			} else {
+				logger.Info("saved persistent reseed certificate", "path", certPath)
+			}
+		}
+	}
+
+	pubDER, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal public key: %w", err)
+	}
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: pubDER,
+	})
+	if pubKeyPath != "" {
+		if writeErr := os.WriteFile(pubKeyPath, pubKeyPEM, 0644); writeErr != nil {
+			logger.Warn("failed to persist reseed public key", "path", pubKeyPath, "error", writeErr)
+		} else {
+			logger.Info("saved persistent reseed public key", "path", pubKeyPath)
+		}
+	}
+
+	return certPEM, pubKeyPEM, nil
 }

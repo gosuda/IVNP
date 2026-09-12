@@ -316,6 +316,21 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       z-index: 100;
       box-shadow: 0 4px 10px rgba(0, 0, 0, 0.5);
     }
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #10b981;
+      color: #fff;
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      z-index: 2000;
+      display: none;
+      transition: opacity 0.3s ease;
+    }
   </style>
 </head>
 <body>
@@ -337,6 +352,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
         <span class="pulse-dot"></span>
         ACTIVE CRAWLER
       </span>
+      <span class="badge" id="badge-mode" style="text-transform: uppercase; color: #38bdf8;">Mode: EXPANSION</span>
       <span class="badge" id="badge-netid">NetID: 2</span>
       <span class="badge" id="badge-uptime">Uptime: 0s</span>
       <button class="btn-toggle" id="btn-refresh-toggle" onclick="toggleAutoRefresh()">Auto-refresh: ON (3s)</button>
@@ -377,12 +393,12 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
     </div>
   </section>
 
-  <!-- Download Archives Row -->
+  <!-- Download Archives & Verification Keys Row -->
   <div class="section-title">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-    Reseed Packages (5-min Cycle, Stratified DHT Distribution)
+    Reseed Package &amp; Signing Public Key
   </div>
-  <section class="downloads-grid" style="grid-template-columns: 1fr; max-width: 640px;">
+  <section class="downloads-grid">
     <div class="card download-card">
       <div>
         <div class="download-header">
@@ -397,6 +413,24 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       <div class="download-actions">
         <a href="/i2pseeds.su3?netid=2" id="btn-dl-su3" class="btn-dl">Download SU3</a>
         <button class="btn-copy" onclick="copyLink('/i2pseeds.su3?netid=2')">Copy URL</button>
+      </div>
+    </div>
+
+    <div class="card download-card">
+      <div>
+        <div class="download-header">
+          <h3>Reseed RSA-4096 Public Key</h3>
+          <span class="fmt-pill" style="background: rgba(16, 185, 129, 0.15); color: var(--accent); border: 1px solid rgba(16, 185, 129, 0.3);">X.509 CRT / RSA</span>
+        </div>
+        <p class="download-meta">Required by client routers to verify SU3 signatures. Signer: <code id="signer-id-display" style="color: #38bdf8; font-family: monospace;">-</code></p>
+        <div style="font-size: 0.85rem; margin-bottom: 12px; color: #d1d5db;">
+          Certificate: <strong id="cert-filename">-</strong> | Spec: <strong>4096-bit RSA (SHA-512)</strong>
+        </div>
+      </div>
+      <div class="download-actions">
+        <a href="/reseed-rsa.crt" id="btn-dl-cert" class="btn-dl" style="background: #059669;" download>Download .crt</a>
+        <button class="btn-copy" onclick="copyPublicKey()" title="Copy RSA Public Key / Certificate PEM to Clipboard">Copy Key</button>
+        <button class="btn-copy" onclick="toggleKeyModal()" title="View Certificate and Public Key PEM">View</button>
       </div>
     </div>
   </section>
@@ -441,7 +475,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
           <tr><th>Diversity Dimension</th><th style="text-align: right;">Unique Count</th></tr>
         </thead>
         <tbody>
-          <tr><td>Unique IPv4 /24 Subnets</td><td class="val" id="div-subnets">-</td></tr>
+          <tr><td>Unique IPv4 /16 Subnets</td><td class="val" id="div-subnets">-</td></tr>
           <tr><td>Unique IPv4 Endpoints</td><td class="val" id="div-ipv4">-</td></tr>
           <tr><td>Unique IPv6 Endpoints</td><td class="val" id="div-ipv6">-</td></tr>
           <tr><td>Unique Router Families</td><td class="val" id="div-families">-</td></tr>
@@ -531,6 +565,24 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       const netid = data.network_id || 2;
       document.getElementById('btn-dl-su3').href = '/i2pseeds.su3?netid=' + netid;
 
+      if (data.signer_id) {
+        const signerEl = document.getElementById('signer-id-display');
+        if (signerEl) signerEl.textContent = data.signer_id;
+        const certName = data.signer_id.replace(/@/g, '_at_') + '.crt';
+        const certFileEl = document.getElementById('cert-filename');
+        if (certFileEl) certFileEl.textContent = certName;
+        const dlCert = document.getElementById('btn-dl-cert');
+        if (dlCert) {
+          dlCert.setAttribute('download', certName);
+        }
+      }
+      if (data.certificate_pem) {
+        cachedCertPEM = data.certificate_pem;
+      }
+      if (data.public_key_pem) {
+        cachedPubKeyPEM = data.public_key_pem;
+      }
+
       // Latency table
       if (data.rtt) {
         document.getElementById('rtt-min').textContent = data.rtt.min_ms + ' ms';
@@ -543,10 +595,24 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
 
       // Diversity table
       if (data.diversity) {
-        document.getElementById('div-subnets').textContent = data.diversity.unique_ipv4_subnets_24.toLocaleString();
+        const subnets = (data.diversity.unique_ipv4_subnets_16 !== undefined && data.diversity.unique_ipv4_subnets_16 > 0)
+          ? data.diversity.unique_ipv4_subnets_16
+          : (data.diversity.unique_ipv4_subnets_24 || 0);
+        document.getElementById('div-subnets').textContent = subnets.toLocaleString();
         document.getElementById('div-ipv4').textContent = data.diversity.unique_ipv4_count.toLocaleString();
         document.getElementById('div-ipv6').textContent = data.diversity.unique_ipv6_count.toLocaleString();
         document.getElementById('div-families').textContent = data.diversity.unique_families.toLocaleString();
+      }
+      if (data.exploration_mode) {
+        const modeBadge = document.getElementById('badge-mode');
+        if (modeBadge) {
+          modeBadge.textContent = 'Mode: ' + data.exploration_mode.toUpperCase();
+          if (data.exploration_mode === 'maintenance') {
+            modeBadge.style.color = '#34d399';
+          } else {
+            modeBadge.style.color = '#38bdf8';
+          }
+        }
       }
       if (data.package) {
         const pkgFFRatio = (data.package.floodfill_ratio * 100).toFixed(1);
@@ -606,12 +672,115 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       tooltip.style.top = (e.clientY + 14) + 'px';
     }
 
+    let cachedCertPEM = '';
+    let cachedPubKeyPEM = '';
+    let currentKeyTab = 'cert';
+
+    function showToast(msg) {
+      const toast = document.getElementById('toast');
+      if (!toast) {
+        alert(msg);
+        return;
+      }
+      toast.textContent = msg;
+      toast.style.display = 'block';
+      toast.style.opacity = '1';
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        setTimeout(() => { toast.style.display = 'none'; }, 300);
+      }, 2500);
+    }
+
     function copyLink(path) {
       const url = window.location.origin + path;
       navigator.clipboard.writeText(url).then(() => {
-        alert('Copied URL: ' + url);
+        showToast('Copied URL: ' + url);
       }).catch(() => {
         prompt('Copy this URL:', url);
+      });
+    }
+
+    function copyPublicKey() {
+      const textToCopy = cachedCertPEM || cachedPubKeyPEM;
+      if (textToCopy) {
+        navigator.clipboard.writeText(textToCopy).then(() => {
+          showToast('Copied RSA certificate PEM to clipboard!');
+        }).catch(() => {
+          prompt('Copy RSA Certificate PEM:', textToCopy);
+        });
+        return;
+      }
+      fetch('/reseed-rsa.crt')
+        .then(r => r.text())
+        .then(txt => {
+          cachedCertPEM = txt;
+          navigator.clipboard.writeText(txt).then(() => {
+            showToast('Copied RSA certificate PEM to clipboard!');
+          }).catch(() => {
+            prompt('Copy RSA Certificate PEM:', txt);
+          });
+        })
+        .catch(err => {
+          alert('Failed to load public key: ' + err);
+        });
+    }
+
+    function toggleKeyModal() {
+      const modal = document.getElementById('key-modal');
+      if (!modal) return;
+      if (modal.style.display === 'flex') {
+        modal.style.display = 'none';
+      } else {
+        modal.style.display = 'flex';
+        switchKeyTab(currentKeyTab);
+      }
+    }
+
+    function switchKeyTab(tab) {
+      currentKeyTab = tab;
+      const display = document.getElementById('key-pem-display');
+      const tabCert = document.getElementById('tab-cert');
+      const tabPub = document.getElementById('tab-pubkey');
+      if (!display || !tabCert || !tabPub) return;
+
+      if (tab === 'cert') {
+        tabCert.style.background = '#334155';
+        tabCert.style.color = '#fff';
+        tabPub.style.background = '#1e293b';
+        tabPub.style.color = 'var(--text-main)';
+        if (cachedCertPEM) {
+          display.textContent = cachedCertPEM;
+        } else {
+          display.textContent = 'Loading certificate...';
+          fetch('/reseed-rsa.crt').then(r => r.text()).then(t => {
+            cachedCertPEM = t;
+            if (currentKeyTab === 'cert') display.textContent = t;
+          }).catch(e => { display.textContent = 'Error: ' + e; });
+        }
+      } else {
+        tabPub.style.background = '#334155';
+        tabPub.style.color = '#fff';
+        tabCert.style.background = '#1e293b';
+        tabCert.style.color = 'var(--text-main)';
+        if (cachedPubKeyPEM) {
+          display.textContent = cachedPubKeyPEM;
+        } else {
+          display.textContent = 'Loading public key...';
+          fetch('/reseed-rsa.pub.pem').then(r => r.text()).then(t => {
+            cachedPubKeyPEM = t;
+            if (currentKeyTab === 'pubkey') display.textContent = t;
+          }).catch(e => { display.textContent = 'Error: ' + e; });
+        }
+      }
+    }
+
+    function copyDisplayedKey() {
+      const display = document.getElementById('key-pem-display');
+      if (!display || !display.textContent) return;
+      navigator.clipboard.writeText(display.textContent).then(() => {
+        showToast('Copied key to clipboard!');
+      }).catch(() => {
+        prompt('Copy key:', display.textContent);
       });
     }
 
@@ -668,6 +837,29 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       }
     }, 1000);
   </script>
+
+  <div id="key-modal" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7); z-index: 1000; align-items: center; justify-content: center; padding: 20px;">
+    <div class="card" style="max-width: 680px; width: 100%; max-height: 85vh; display: flex; flex-direction: column;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <h3 style="color: #fff; font-size: 1.1rem;">RSA-4096 Reseed Signing Key &amp; Certificate</h3>
+        <button onclick="toggleKeyModal()" style="background: none; border: none; color: var(--text-muted); font-size: 1.5rem; cursor: pointer; line-height: 1;">&times;</button>
+      </div>
+      <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">
+        Save this certificate to your router's reseed certificates directory (e.g. <code>~/.i2p/certificates/reseed/</code> or <code>/var/lib/i2pd/certificates/reseed/</code>).
+      </p>
+      <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+        <button id="tab-cert" class="btn-copy" style="background: #334155; color: #fff;" onclick="switchKeyTab('cert')">X.509 Certificate (.crt)</button>
+        <button id="tab-pubkey" class="btn-copy" onclick="switchKeyTab('pubkey')">RSA Public Key (PEM)</button>
+      </div>
+      <pre id="key-pem-display" style="background: #090d16; border: 1px solid var(--card-border); border-radius: 8px; padding: 12px; font-size: 0.75rem; color: #34d399; overflow-y: auto; flex: 1; font-family: monospace; user-select: all; white-space: pre-wrap; word-break: break-all;"></pre>
+      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px;">
+        <button class="btn-copy" onclick="copyDisplayedKey()">Copy to Clipboard</button>
+        <button class="btn-copy" onclick="toggleKeyModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
 </body>
 </html>
 `

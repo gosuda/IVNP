@@ -46,4 +46,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/ivnp-reseed", "-healthcheck", "http://127.0.0.1:8080/health"]
 
 ENTRYPOINT ["/ivnp-reseed"]
-CMD ["-listen", ":8080", "-data-dir", "/data", "-target", "1000", "-interval", "5m"]
+CMD ["-listen", ":8080", "-data-dir", "/data", "-target", "1024", "-interval", "5m"]

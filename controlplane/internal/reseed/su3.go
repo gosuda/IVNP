@@ -33,18 +33,20 @@ type SU3Signer struct {
 	PublicKey   []byte
 }
 
-// VerifySU3 checks the SU3 container signature and returns the extracted payload.
-func VerifySU3(container []byte, signers map[string]SU3Signer, maxContent int64) ([]byte, error) {
+// ExtractSU3Payload parses and validates the SU3 container framing and bounds,
+// returning the inner payload along with the signer ID, signed content slice,
+// signature slice, and signing key type.
+func ExtractSU3Payload(container []byte, maxContent int64) (payload []byte, signerID string, signed []byte, signature []byte, signingType foundation.SigningKeyType, err error) {
 	if maxContent < 0 || len(container) < su3HeaderLen || !bytes.Equal(container[:6], []byte("I2Psu3")) ||
 		container[6] != 0 || container[7] != su3FileVersion {
-		return nil, ErrSU3Malformed
+		return nil, "", nil, nil, 0, ErrSU3Malformed
 	}
-	signingType := foundation.SigningKeyType(binary.BigEndian.Uint16(container[8:10]))
+	st := foundation.SigningKeyType(binary.BigEndian.Uint16(container[8:10]))
 	signatureLen := int(binary.BigEndian.Uint16(container[10:12]))
 	versionLen := int(container[13])
 	signerLen := int(container[15])
 	contentLen := binary.BigEndian.Uint64(container[16:24])
-	verifySU3Rejected := signingType != foundation.SigningRSASHA512_4096 || signatureLen != su3RSASignatureLen ||
+	verifySU3Rejected := st != foundation.SigningRSASHA512_4096 || signatureLen != su3RSASignatureLen ||
 		versionLen < su3MinimumVersion || signerLen == 0 || container[12] != 0 ||
 		container[14] != 0 || container[24] != 0 || container[25] != su3FileTypeZIP ||
 		container[26] != 0 || container[27] != su3ContentTypeReseed ||
@@ -53,25 +55,34 @@ func VerifySU3(container []byte, signers map[string]SU3Signer, maxContent int64)
 		verifySU3Rejected = contentLen > uint64(maxContent)
 	}
 	if verifySU3Rejected {
-		return nil, ErrSU3Malformed
+		return nil, "", nil, nil, 0, ErrSU3Malformed
 	}
 	contentStart := su3HeaderLen + versionLen + signerLen
 	if contentStart < su3HeaderLen || contentStart > len(container) || contentLen > uint64(len(container)-contentStart) {
-		return nil, ErrSU3Malformed
+		return nil, "", nil, nil, 0, ErrSU3Malformed
 	}
 	contentEnd := contentStart + int(contentLen)
 	if signatureLen != len(container)-contentEnd {
-		return nil, ErrSU3Malformed
+		return nil, "", nil, nil, 0, ErrSU3Malformed
 	}
-	signerID := string(container[su3HeaderLen+versionLen : contentStart])
+	sID := string(container[su3HeaderLen+versionLen : contentStart])
+	return container[contentStart:contentEnd], sID, container[:contentEnd], container[contentEnd:], st, nil
+}
+
+// VerifySU3 checks the SU3 container signature and returns the extracted payload.
+func VerifySU3(container []byte, signers map[string]SU3Signer, maxContent int64) ([]byte, error) {
+	payload, signerID, signed, signature, signingType, err := ExtractSU3Payload(container, maxContent)
+	if err != nil {
+		return nil, err
+	}
 	signer, found := signers[signerID]
 	if !found || signer.SigningType != signingType {
 		return nil, ErrSU3Signer
 	}
-	if !verifySU3Signature(signer, container[:contentEnd], container[contentEnd:]) {
+	if !verifySU3Signature(signer, signed, signature) {
 		return nil, ErrSU3Signature
 	}
-	return container[contentStart:contentEnd], nil
+	return payload, nil
 }
 
 func allZero(data []byte) bool {

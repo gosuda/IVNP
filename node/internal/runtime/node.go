@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -19,14 +20,18 @@ import (
 )
 
 type Options struct {
-	SocketRuntime dataplane.RouterSocketRuntime
-	Transport     dataplane.RouterTransportManager
-	HTTPClient    *http.Client
-	Clock         dataplane.RouterClock
-	Logger        *slog.Logger
-	Listener      Listener
-	NAT           controlplane.NATRuntime
-	PanicReporter ingress.Reporter
+	SocketRuntime     dataplane.RouterSocketRuntime
+	Transport         dataplane.RouterTransportManager
+	HTTPClient        *http.Client
+	Clock             dataplane.RouterClock
+	Logger            *slog.Logger
+	Listener          Listener
+	NAT               controlplane.NATRuntime
+	PanicReporter     ingress.Reporter
+	Embedded          bool
+	TaintedCopy       bool
+	PromoteToMaster   *bool
+	LockRetryInterval time.Duration
 }
 
 type nodeService interface {
@@ -73,6 +78,8 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 	core, err := controlplane.NewController(cfg, controlplane.ControllerOptions{
 		SocketRuntime: options.SocketRuntime, Transport: options.Transport, HTTPClient: options.HTTPClient,
 		Clock: options.Clock, Logger: options.Logger, NAT: options.NAT, PanicReporter: options.PanicReporter, Registry: registry,
+		Embedded: options.Embedded, TaintedCopy: options.TaintedCopy,
+		PromoteToMaster: options.PromoteToMaster, LockRetryInterval: options.LockRetryInterval,
 	})
 	if err != nil {
 		return nil, err
@@ -94,9 +101,13 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 	}
 	reporter := nodePanicReporter{registry: registry, logger: logger, next: options.PanicReporter}
 	if cfg.AddressBook.Enabled {
+		addressBookStatePath := cfg.AddressBook.StatePath
+		if core.TaintedDir() != "" && addressBookStatePath != "" {
+			addressBookStatePath = filepath.Join(core.TaintedDir(), filepath.Base(addressBookStatePath))
+		}
 		d.addressBook, err = client.AddressBookNewService(client.AddressBookConfig{
 			PrivateHostsPath: cfg.AddressBook.PrivateHostsPath, UserHostsPath: cfg.AddressBook.UserHostsPath,
-			HostsPath: cfg.AddressBook.HostsPath, StatePath: cfg.AddressBook.StatePath,
+			HostsPath: cfg.AddressBook.HostsPath, StatePath: addressBookStatePath,
 			Subscriptions:   append([]string(nil), cfg.AddressBook.Subscriptions...),
 			RefreshInterval: cfg.AddressBook.RefreshInterval, RetryInterval: cfg.AddressBook.RetryInterval,
 			RequestTimeout: cfg.AddressBook.RequestTimeout, MaxEntries: cfg.AddressBook.MaxEntries,

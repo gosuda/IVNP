@@ -44,6 +44,7 @@ type Operating struct {
 	StateDir  string
 	StatePath string
 	KeyPath   string
+	TempDir   string
 	Network   Network
 	Router    Router
 	State     State
@@ -106,9 +107,12 @@ type Tunnel struct {
 
 // State sets storage limits for persistent destination state.
 type State struct {
-	MaxBytes        int64
-	MaxDestinations int
-	MaxNameBytes    int
+	MaxBytes          int64
+	MaxDestinations   int
+	MaxNameBytes      int
+	TaintedCopy       bool
+	PromoteToMaster   bool
+	LockRetryInterval time.Duration
 }
 
 // Endpoint represents a host:port socket address.
@@ -352,6 +356,7 @@ func ParseOperating(text, path string) (Operating, error) {
 }
 
 var defaultReseedEndpoints = []string{
+	"https://hotseed.gosuda.org/i2pseeds.su3?netid=2",
 	"https://waw01.i2p-reseed.hosted-by.skhron.eu/i2pseeds.su3?netid=2",
 	"https://sto01.i2p-reseed.hosted-by.skhron.eu/i2pseeds.su3?netid=2",
 	"https://i2p.ntp.poweredbyberlin.de/i2pseeds.su3?netid=2",
@@ -389,9 +394,10 @@ func defaultOperating(base string) Operating {
 		StateDir:  stateDir,
 		StatePath: filepath.Join(stateDir, "router.state"),
 		KeyPath:   filepath.Join(stateDir, "router.keys"),
+		TempDir:   os.TempDir(),
 		Network:   Network{ID: 2, IPv4: true},
 		Router:    Router{IdentityType: "ed25519", Version: "0.9.70"},
-		State:     State{MaxBytes: 16 << 20, MaxDestinations: 64, MaxNameBytes: 255},
+		State:     State{MaxBytes: 16 << 20, MaxDestinations: 64, MaxNameBytes: 255, PromoteToMaster: true, LockRetryInterval: 15 * time.Second},
 		NetDB:     NetDB{BucketCapacity: 24, LookupCapacity: 32},
 		Tunnel: Tunnel{
 			Enabled: true, Hops: 3,
@@ -466,6 +472,12 @@ func applyPaths(operating *Operating, values map[entryKey]string, base string) e
 	}
 	if _, stateConfigured := valueOf(values, "paths", "state_dir"); stateConfigured || dataConfigured {
 		operating.AddressBook.StatePath = filepath.Join(operating.StateDir, "addressbook.json")
+	}
+	if value, ok := valueOf(values, "paths", "temp_dir"); ok {
+		operating.TempDir, err = resolvePath(value, base)
+		if err != nil {
+			return invalid("paths", "temp_dir")
+		}
 	}
 	return nil
 }
@@ -547,6 +559,27 @@ func applyState(operating *Operating, values map[entryKey]string) error {
 			return invalid("state", "max_name_bytes")
 		}
 		operating.State.MaxNameBytes = int(parsed)
+	}
+	if value, ok := valueOf(values, "state", "tainted_copy"); ok {
+		parsed, err := parseBool(value)
+		if err != nil {
+			return invalid("state", "tainted_copy")
+		}
+		operating.State.TaintedCopy = parsed
+	}
+	if value, ok := valueOf(values, "state", "promote_to_master"); ok {
+		parsed, err := parseBool(value)
+		if err != nil {
+			return invalid("state", "promote_to_master")
+		}
+		operating.State.PromoteToMaster = parsed
+	}
+	if value, ok := valueOf(values, "state", "lock_retry_interval"); ok {
+		parsed, err := time.ParseDuration(value)
+		if err != nil || parsed < time.Second {
+			return invalid("state", "lock_retry_interval")
+		}
+		operating.State.LockRetryInterval = parsed
 	}
 	return nil
 }
@@ -1219,10 +1252,10 @@ func knownOperatingKey(section, key string) bool {
 }
 
 var operatingKeys = map[string]map[string]bool{
-	"paths":       {"data_dir": true, "state_dir": true, "state_path": true, "key_path": true},
+	"paths":       {"data_dir": true, "state_dir": true, "state_path": true, "key_path": true, "temp_dir": true},
 	"network":     {"id": true, "ipv4": true, "ipv6": true},
 	"router":      {"identity_type": true, "floodfill": true, "family": true, "version": true},
-	"state":       {"max_bytes": true, "max_destinations": true, "max_name_bytes": true},
+	"state":       {"max_bytes": true, "max_destinations": true, "max_name_bytes": true, "tainted_copy": true, "promote_to_master": true, "lock_retry_interval": true},
 	"netdb":       {"bucket_capacity": true, "lookup_capacity": true, "bootstrap_router_info_files": true},
 	"tunnel":      {"enabled": true, "hops": true, "exploratory_inbound_target": true, "exploratory_outbound_target": true, "exploratory_pool_capacity": true, "client_inbound_target": true, "client_outbound_target": true, "client_pool_capacity": true, "build_pending_capacity": true, "lifetime": true, "renew_before": true, "maintenance_interval": true, "bandwidth_rate_bytes_per_second": true, "bandwidth_burst_bytes": true},
 	"ntcp2":       {"enabled": true, "bind_host": true, "bind_port": true, "advertise_host": true, "advertise_port": true, "max_sessions": true, "idle_timeout": true},

@@ -171,3 +171,41 @@ func TestCorruptPersistentStateDoesNotReplaceMasterKey(t *testing.T) {
 		t.Fatal("failed state load replaced the existing master key")
 	}
 }
+
+func TestTaintedCopyPersistenceAllowsConcurrentRouters(t *testing.T) {
+	dir := t.TempDir()
+	cfg := isolatedRouterConfig()
+	cfg.Persistence = &PersistenceConfig{Directory: dir}
+	first, err := NewRouter(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = first.Close()
+	}()
+
+	// Normal second router fails because dir is locked
+	_, err = NewRouter(t.Context(), cfg)
+	if err == nil {
+		t.Fatal("expected locked state conflict, got nil")
+	}
+
+	// Tainted copy second router succeeds
+	taintedCfg := isolatedRouterConfig()
+	taintedCfg.Persistence = &PersistenceConfig{
+		Directory:   dir,
+		TempDir:     t.TempDir(),
+		TaintedCopy: true,
+	}
+	second, err := NewRouter(t.Context(), taintedCfg)
+	if err != nil {
+		t.Fatalf("tainted router failed to start: %v", err)
+	}
+	defer func() {
+		_ = second.Close()
+	}()
+
+	if second.Hash() != first.Hash() {
+		t.Fatalf("expected tainted router to inherit identity %x, got %x", first.Hash(), second.Hash())
+	}
+}

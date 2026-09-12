@@ -264,3 +264,173 @@ func nodeTestConfig(t *testing.T) state.ConfigurationOperating {
 		NTCP2: state.ConfigurationTransport{Enabled: true, Bind: state.ConfigurationEndpoint{Host: "127.0.0.1", Port: 12345}, MaxSessions: 4},
 	}
 }
+
+func TestTaintedCopyAllowsConcurrentInstancesWithoutLockConflict(t *testing.T) {
+	cfg := nodeTestConfig(t)
+	primary, err := New(cfg, Options{SocketRuntime: nodeSockets{}})
+	if err != nil {
+		t.Fatalf("primary New error = %v", err)
+	}
+	defer func() {
+		_ = primary.Close()
+		_ = primary.Wait()
+	}()
+
+	// Second instance without tainted copy must fail due to locked state directory
+	_, err = New(cfg, Options{SocketRuntime: nodeSockets{}})
+	if err == nil {
+		t.Fatal("expected second instance without tainted copy to fail with lock conflict, got nil")
+	}
+
+	// Second instance with TaintedCopy = true must succeed
+	taintedCfg := cfg
+	taintedCfg.State.TaintedCopy = true
+	secondary, err := New(taintedCfg, Options{SocketRuntime: nodeSockets{}, TaintedCopy: true})
+	if err != nil {
+		t.Fatalf("secondary New with TaintedCopy error = %v", err)
+	}
+
+	taintedDir := secondary.TaintedDir()
+	if taintedDir == "" {
+		t.Fatal("expected non-empty TaintedDir")
+	}
+	if _, err := os.Stat(taintedDir); err != nil {
+		t.Fatalf("expected tainted directory to exist, err = %v", err)
+	}
+
+	if secondary.Hash() != primary.Hash() {
+		t.Fatalf("secondary router hash %x != primary router hash %x", secondary.Hash(), primary.Hash())
+	}
+
+	if err := secondary.Close(); err != nil {
+		t.Fatalf("secondary Close error = %v", err)
+	}
+	_ = secondary.Wait()
+
+	if _, err := os.Stat(taintedDir); !os.IsNotExist(err) {
+		t.Fatalf("expected tainted directory %s to be deleted after close, err = %v", taintedDir, err)
+	}
+}
+
+func TestTaintedCopyCustomTempDir(t *testing.T) {
+	cfg := nodeTestConfig(t)
+	customTemp := filepath.Join(t.TempDir(), "custom-tmp")
+	cfg.TempDir = customTemp
+	cfg.State.TaintedCopy = true
+
+	d, err := New(cfg, Options{SocketRuntime: nodeSockets{}, TaintedCopy: true})
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+	defer func() {
+		_ = d.Close()
+		_ = d.Wait()
+	}()
+
+	taintedDir := d.TaintedDir()
+	if taintedDir == "" {
+		t.Fatal("expected non-empty TaintedDir")
+	}
+	if !filepath.HasPrefix(taintedDir, customTemp) {
+		t.Fatalf("expected taintedDir %s to be inside custom temp dir %s", taintedDir, customTemp)
+	}
+}
+
+func TestTaintedCopyOpportunisticMasterPromotion(t *testing.T) {
+	cfg := nodeTestConfig(t)
+
+	// 1. Start primary daemon holding the master lock
+	primary, err := New(cfg, Options{SocketRuntime: nodeSockets{}})
+	if err != nil {
+		t.Fatalf("primary New error = %v", err)
+	}
+
+	// 2. Start secondary daemon with TaintedCopy = true and short LockRetryInterval
+	taintedCfg := cfg
+	taintedCfg.State.TaintedCopy = true
+	taintedCfg.State.PromoteToMaster = true
+	taintedCfg.State.LockRetryInterval = 50 * time.Millisecond
+
+	secondary, err := New(taintedCfg, Options{
+		SocketRuntime:     nodeSockets{},
+		TaintedCopy:       true,
+		LockRetryInterval: 50 * time.Millisecond,
+	})
+	if err != nil {
+		_ = primary.Close()
+		t.Fatalf("secondary New error = %v", err)
+	}
+	defer func() {
+		_ = secondary.Close()
+		_ = secondary.Wait()
+	}()
+
+	if err := secondary.Start(context.Background()); err != nil {
+		_ = primary.Close()
+		t.Fatalf("secondary Start error = %v", err)
+	}
+
+	taintedDir := secondary.TaintedDir()
+	if taintedDir == "" {
+		t.Fatal("expected secondary to have non-empty TaintedDir")
+	}
+	if secondary.IsPromoted() {
+		t.Fatal("secondary should not be promoted while primary is alive")
+	}
+
+	// 3. Stop primary daemon (simulating old container shutdown in rolling update)
+	if err := primary.Close(); err != nil {
+		t.Fatalf("primary Close error = %v", err)
+	}
+	_ = primary.Wait()
+
+	// 4. Secondary's background retry loop should detect primary's exit and promote itself to master!
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(3 * time.Second)
+	for !secondary.IsPromoted() {
+		select {
+		case <-ticker.C:
+		case <-timeout:
+			t.Fatal("secondary failed to promote to master within deadline")
+		}
+	}
+
+	if secondary.TaintedDir() != "" {
+		t.Fatalf("expected TaintedDir to be empty after promotion, got %s", secondary.TaintedDir())
+	}
+
+	if _, err := os.Stat(taintedDir); !os.IsNotExist(err) {
+		t.Fatalf("expected tainted dir %s to be deleted after promotion, err = %v", taintedDir, err)
+	}
+
+	// 5. Verify that secondary now holds the master lock
+	third, err := New(cfg, Options{SocketRuntime: nodeSockets{}})
+	if third != nil {
+		_ = third.Close()
+		t.Fatal("third instance should have failed to lock master")
+	}
+	if err == nil {
+		t.Fatal("third instance should have failed with lock error")
+	}
+
+	// 6. Stop secondary daemon cleanly
+	if err := secondary.Close(); err != nil {
+		t.Fatalf("secondary Close error = %v", err)
+	}
+	_ = secondary.Wait()
+
+	// 7. After secondary stops, master lock is released so a fresh daemon can open master
+	fourth, err := New(cfg, Options{SocketRuntime: nodeSockets{}})
+	if err != nil {
+		t.Fatalf("fourth instance failed to open master state: %v", err)
+	}
+	defer func() {
+		_ = fourth.Close()
+		_ = fourth.Wait()
+	}()
+
+	if fourth.Hash() != secondary.Hash() {
+		t.Fatalf("fourth router hash %x != promoted router hash %x", fourth.Hash(), secondary.Hash())
+	}
+}

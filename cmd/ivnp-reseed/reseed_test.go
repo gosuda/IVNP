@@ -6,12 +6,17 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -224,7 +229,7 @@ func TestSelectorFloodfillPriority(t *testing.T) {
 
 	cfg := DefaultSelectorConfig()
 	cfg.TargetCount = 6
-	cfg.MaxPerIPv4Subnet24 = 2
+	cfg.MaxPerIPv4Subnet16 = 2
 	cfg.PreferFloodfillRatio = 0.5 // request 50% floodfills
 	selected := SelectDiversePeers(peers, cfg)
 
@@ -240,6 +245,148 @@ func TestSelectorFloodfillPriority(t *testing.T) {
 	}
 	if floodCount == 0 {
 		t.Fatal("expected floodfills to be prioritized in selected slots")
+	}
+}
+
+func TestSelectorBucketLevelingAndCap(t *testing.T) {
+	// 15 peers in bucket 0, 15 in bucket 1, 1 in bucket 2
+	var peers []PeerRecord
+	for i := 0; i < 15; i++ {
+		var h0 [32]byte
+		h0[0] = 0
+		h0[1] = byte(i)
+		peers = append(peers, PeerRecord{
+			Hash:  h0,
+			Raw:   []byte("raw"),
+			IPv4:  []netip.Addr{netip.MustParseAddr(fmt.Sprintf("%d.%d.1.1", 10+i, i))},
+			Stats: PeerStats{IsReachable: true},
+			Score: float64(100 - i),
+		})
+
+		var h1 [32]byte
+		h1[0] = 1
+		h1[1] = byte(i)
+		peers = append(peers, PeerRecord{
+			Hash:  h1,
+			Raw:   []byte("raw"),
+			IPv4:  []netip.Addr{netip.MustParseAddr(fmt.Sprintf("%d.%d.2.2", 40+i, i))},
+			Stats: PeerStats{IsReachable: true},
+			Score: float64(100 - i),
+		})
+	}
+	var h2 [32]byte
+	h2[0] = 2
+	peers = append(peers, PeerRecord{
+		Hash:  h2,
+		Raw:   []byte("raw"),
+		IPv4:  []netip.Addr{netip.MustParseAddr("80.1.3.3")},
+		Stats: PeerStats{IsReachable: true},
+		Score: 90,
+	})
+
+	cfg := DefaultSelectorConfig()
+	cfg.TargetCount = 50 // Request more than the 31 available peers
+	selected := SelectDiversePeers(peers, cfg)
+
+	counts := make(map[byte]int)
+	for _, p := range selected {
+		counts[p.Hash[0]]++
+	}
+
+	// Verify no single bucket gets 15 peers (capped at max 5)
+	if counts[0] > 5 {
+		t.Fatalf("bucket 0 count = %d, want <= 5", counts[0])
+	}
+	if counts[1] > 5 {
+		t.Fatalf("bucket 1 count = %d, want <= 5", counts[1])
+	}
+	if counts[2] != 1 {
+		t.Fatalf("bucket 2 count = %d, want 1", counts[2])
+	}
+}
+
+func TestSelectorRequireReachable(t *testing.T) {
+	var peers []PeerRecord
+	for i := 0; i < 100; i++ {
+		var h [32]byte
+		h[0] = byte(i % 50)
+		h[1] = byte(i)
+		peers = append(peers, PeerRecord{
+			Hash:  h,
+			Raw:   []byte("raw"),
+			IPv4:  []netip.Addr{netip.MustParseAddr(fmt.Sprintf("%d.%d.1.1", 10+i, i))},
+			Stats: PeerStats{IsReachable: true},
+		})
+	}
+	for i := 100; i < 200; i++ {
+		var h [32]byte
+		h[0] = byte(i % 50)
+		h[1] = byte(i)
+		peers = append(peers, PeerRecord{
+			Hash:  h,
+			Raw:   []byte("raw"),
+			IPv4:  []netip.Addr{netip.MustParseAddr(fmt.Sprintf("%d.%d.1.1", 10+i, i))},
+			Stats: PeerStats{IsReachable: false}, // Unreachable
+		})
+	}
+
+	cfg := DefaultSelectorConfig()
+	cfg.TargetCount = 1024
+	cfg.RequireReachable = true
+	selected := SelectDiversePeers(peers, cfg)
+
+	if len(selected) > 100 {
+		t.Fatalf("selected = %d, want <= 100", len(selected))
+	}
+	for _, p := range selected {
+		if !p.Stats.IsReachable {
+			t.Fatal("selected unreachable peer when RequireReachable = true")
+		}
+	}
+}
+
+func TestSelectorIPv4Subnet16Filter(t *testing.T) {
+	var peers []PeerRecord
+	for i := 0; i < 5; i++ {
+		var h [32]byte
+		h[0] = byte(i)
+		peers = append(peers, PeerRecord{
+			Hash:  h,
+			Raw:   []byte("raw"),
+			IPv4:  []netip.Addr{netip.MustParseAddr(fmt.Sprintf("198.51.%d.%d", i+1, i+10))}, // Same /16: 198.51.0.0/16
+			Stats: PeerStats{IsReachable: true},
+			Score: float64(100 - i),
+		})
+	}
+
+	// Add an outsider peer on another /16
+	var hOther [32]byte
+	hOther[0] = 5
+	peers = append(peers, PeerRecord{
+		Hash:  hOther,
+		Raw:   []byte("raw"),
+		IPv4:  []netip.Addr{netip.MustParseAddr("203.0.113.1")},
+		Stats: PeerStats{IsReachable: true},
+		Score: 50,
+	})
+
+	cfg := DefaultSelectorConfig()
+	cfg.TargetCount = 2
+	cfg.MaxPerIPv4Subnet16 = 1
+	selected := SelectDiversePeers(peers, cfg)
+
+	if len(selected) != 2 {
+		t.Fatalf("selected = %d, want 2", len(selected))
+	}
+
+	seen198 := 0
+	for _, p := range selected {
+		if IPv4Subnet16(p.IPv4[0]) == [2]byte{198, 51} {
+			seen198++
+		}
+	}
+	if seen198 != 1 {
+		t.Fatalf("seen /16 subnet count = %d, want 1", seen198)
 	}
 }
 
@@ -344,10 +491,17 @@ func TestReseedServer(t *testing.T) {
 	info, raw := createTestRouterInfo(t, "f")
 	store.AddOrUpdate(info, raw)
 
+	certPEM := []byte("-----BEGIN CERTIFICATE-----\nMIIB...mock-cert\n-----END CERTIFICATE-----\n")
+	pubKeyPEM := []byte("-----BEGIN PUBLIC KEY-----\nMIIB...mock-pubkey\n-----END PUBLIC KEY-----\n")
+	signerID := "test-signer@ivnp.network"
+
 	server := NewReseedServer(ServerConfig{
 		NetworkID:     2,
 		ListenAddress: ":8443",
 		CacheDuration: time.Minute,
+		SignerID:      signerID,
+		CertPEM:       certPEM,
+		PubKeyPEM:     pubKeyPEM,
 	}, store)
 
 	server.UpdatePackage(ReseedPackage{
@@ -371,11 +525,62 @@ func TestReseedServer(t *testing.T) {
 		t.Fatalf("/i2pseeds.su3 code = %d, want 200", rec.Code)
 	}
 
+	// Test certificate endpoints
+	req = httptest.NewRequest(http.MethodGet, "/reseed-rsa.crt", nil)
+	rec = httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /reseed-rsa.crt code = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/x-x509-ca-cert" {
+		t.Fatalf("GET /reseed-rsa.crt Content-Type = %q, want 'application/x-x509-ca-cert'", ct)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "test-signer_at_ivnp.network.crt") {
+		t.Fatalf("GET /reseed-rsa.crt Content-Disposition = %q, want filename containing test-signer_at_ivnp.network.crt", cd)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), certPEM) {
+		t.Fatal("GET /reseed-rsa.crt body does not match expected certPEM")
+	}
+
+	// Test certificate alias /reseed.crt
+	req = httptest.NewRequest(http.MethodGet, "/reseed.crt", nil)
+	rec = httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /reseed.crt code = %d, want 200", rec.Code)
+	}
+
+	// Test public key endpoint /reseed-rsa.pub.pem
+	req = httptest.NewRequest(http.MethodGet, "/reseed-rsa.pub.pem", nil)
+	rec = httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /reseed-rsa.pub.pem code = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Fatalf("GET /reseed-rsa.pub.pem Content-Type = %q, want text/plain", ct)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), pubKeyPEM) {
+		t.Fatal("GET /reseed-rsa.pub.pem body does not match expected pubKeyPEM")
+	}
+
+	// Test public key alias /reseed.pub
+	req = httptest.NewRequest(http.MethodGet, "/reseed.pub", nil)
+	rec = httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /reseed.pub code = %d, want 200", rec.Code)
+	}
+
 	req = httptest.NewRequest(http.MethodGet, "/stats", nil)
 	rec = httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/stats code = %d, want 200", rec.Code)
+	}
+
+	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Fatalf("GET /stats Cache-Control = %q, want no-store", cc)
 	}
 
 	var stats DetailedStatsResponse
@@ -384,6 +589,15 @@ func TestReseedServer(t *testing.T) {
 	}
 	if stats.NetworkID != 2 {
 		t.Fatalf("stats.NetworkID = %d, want 2", stats.NetworkID)
+	}
+	if stats.SignerID != signerID {
+		t.Fatalf("stats.SignerID = %q, want %q", stats.SignerID, signerID)
+	}
+	if stats.CertificatePEM != string(certPEM) {
+		t.Fatalf("stats.CertificatePEM mismatch")
+	}
+	if stats.PublicKeyPEM != string(pubKeyPEM) {
+		t.Fatalf("stats.PublicKeyPEM mismatch")
 	}
 	if stats.KBuckets.TotalBuckets != 256 {
 		t.Fatalf("stats.KBuckets.TotalBuckets = %d, want 256", stats.KBuckets.TotalBuckets)
@@ -408,11 +622,20 @@ func TestReseedServer(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 		t.Fatalf("GET / Content-Type = %q, want 'text/html; charset=utf-8'", ct)
 	}
+	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Fatalf("GET / Cache-Control = %q, want no-store", cc)
+	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte("IVNP Reseed Indexer")) {
 		t.Fatal("GET / dashboard does not contain expected title")
 	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte("initial-data")) {
 		t.Fatal("GET / dashboard does not contain bootstrap initial-data")
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("btn-dl-cert")) {
+		t.Fatal("GET / dashboard does not contain btn-dl-cert")
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("key-modal")) {
+		t.Fatal("GET / dashboard does not contain key-modal")
 	}
 
 	// Test 404 for unknown path
@@ -439,5 +662,171 @@ func TestHealthCheckFlag(t *testing.T) {
 	codeFail := run([]string{"-healthcheck", "http://127.0.0.1:0/unreachable"}, &stdout, &stderr)
 	if codeFail != 1 {
 		t.Fatalf("expected healthcheck failure code 1, got %d", codeFail)
+	}
+}
+
+func TestStratifyByBucketDiversityForJavaI2P(t *testing.T) {
+	// Create 1024 peers across diverse buckets
+	var peers []PeerRecord
+	for i := 0; i < 1024; i++ {
+		var hash [32]byte
+		// Distribute across 256 buckets
+		hash[0] = byte(i % 256)
+		hash[1] = byte(i / 256)
+		isFlood := (i / 256) == 0
+		peers = append(peers, PeerRecord{
+			Hash:        hash,
+			IsFloodfill: isFlood,
+			Score:       100.0 - float64(i%10),
+			Stats: PeerStats{
+				IsReachable: true,
+			},
+		})
+	}
+
+	stratified := StratifyByBucketDiversity(peers)
+	if len(stratified) != len(peers) {
+		t.Fatalf("stratified len = %d, want %d", len(stratified), len(peers))
+	}
+
+	// Verify the first 256 entries each come from a distinct bucket
+	seenBuckets := make(map[byte]bool)
+	for i := 0; i < 256; i++ {
+		b := stratified[i].Hash[0]
+		if seenBuckets[b] {
+			t.Fatalf("duplicate bucket %d at index %d in first 256 entries", b, i)
+		}
+		seenBuckets[b] = true
+	}
+
+	// Verify that the first 200 entries (which Java I2P parses) are 200 distinct buckets
+	if len(seenBuckets) < 256 {
+		t.Fatalf("expected 256 distinct buckets in first 256 entries, got %d", len(seenBuckets))
+	}
+
+	// Verify floodfills are prioritized in front slots where available
+	for i := 0; i < 256; i++ {
+		if !stratified[i].IsFloodfill {
+			t.Fatalf("expected floodfill at front index %d", i)
+		}
+	}
+}
+
+func TestTargetPeersDefault1024(t *testing.T) {
+	cfg := DefaultSelectorConfig()
+	if cfg.TargetCount != 1024 {
+		t.Fatalf("DefaultSelectorConfig.TargetCount = %d, want 1024", cfg.TargetCount)
+	}
+}
+
+func TestLoadOrGenerateReseedCertificate(t *testing.T) {
+	tempDir := t.TempDir()
+	keyPath := filepath.Join(tempDir, "reseed-rsa.key")
+	certPath := filepath.Join(tempDir, "reseed-rsa.crt")
+	pubKeyPath := filepath.Join(tempDir, "reseed-rsa.pub.pem")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	key, err := loadOrGenerateRSASigningKey(keyPath, logger)
+	if err != nil {
+		t.Fatalf("loadOrGenerateRSASigningKey failed: %v", err)
+	}
+
+	signerID := "test-signer@ivnp.network"
+	certPEM, pubPEM, err := loadOrGenerateReseedCertificate(certPath, pubKeyPath, signerID, key, logger)
+	if err != nil {
+		t.Fatalf("loadOrGenerateReseedCertificate failed: %v", err)
+	}
+
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		t.Fatal("expected valid CERTIFICATE PEM block")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	if cert.Subject.CommonName != signerID {
+		t.Fatalf("cert CommonName = %q, want %q", cert.Subject.CommonName, signerID)
+	}
+	rsaPub, ok := cert.PublicKey.(*rsa.PublicKey)
+	if !ok || rsaPub.N.BitLen() != 4096 {
+		t.Fatal("expected 4096-bit RSA public key in certificate")
+	}
+	if cert.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		t.Fatal("expected KeyUsageDigitalSignature in certificate")
+	}
+
+	pubBlock, _ := pem.Decode(pubPEM)
+	if pubBlock == nil || pubBlock.Type != "PUBLIC KEY" {
+		t.Fatal("expected valid PUBLIC KEY PEM block")
+	}
+
+	reloadedCert, reloadedPub, err := loadOrGenerateReseedCertificate(certPath, pubKeyPath, signerID, key, logger)
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if !bytes.Equal(certPEM, reloadedCert) {
+		t.Fatal("expected reloaded certificate to match original")
+	}
+	if !bytes.Equal(pubPEM, reloadedPub) {
+		t.Fatal("expected reloaded public key to match original")
+	}
+}
+
+func TestTunnelBuildAcceptedTrackingAndScoring(t *testing.T) {
+	store := NewPeerStore()
+	info, raw := createTestRouterInfo(t, "LR")
+	rec, _ := store.AddOrUpdate(info, raw)
+
+	baseScore := rec.Score
+	store.RecordTunnelBuildResult(info.Hash(), true)
+
+	snap := store.Snapshot()
+	if !snap[0].Stats.TunnelBuildAccepted {
+		t.Fatal("expected TunnelBuildAccepted = true")
+	}
+	if snap[0].Stats.LastTunnelAccepted.IsZero() {
+		t.Fatal("expected LastTunnelAccepted to be set")
+	}
+	if snap[0].Score-baseScore < 14.9 {
+		t.Fatalf("expected +15 bonus for accepted tunnel, got diff %v", snap[0].Score-baseScore)
+	}
+}
+
+func TestEvictionDiversityProtection(t *testing.T) {
+	store := NewPeerStore()
+
+	// Fill bucket 0 with 6 peers with very low scores
+	for i := 0; i < 6; i++ {
+		var h [32]byte
+		h[0] = 0
+		h[1] = byte(i)
+		store.peers[h] = &PeerRecord{
+			Hash:  h,
+			Score: float64(10 + i), // low score
+		}
+	}
+
+	// Fill bucket 1 with 1 peer with even lower score
+	var hSparse [32]byte
+	hSparse[0] = 1
+	store.peers[hSparse] = &PeerRecord{
+		Hash:  hSparse,
+		Score: 1.0, // lowest score in entire store!
+	}
+
+	store.evictWorstLocked()
+
+	// The sparse bucket (bucket 1) should be protected despite having the lowest score!
+	if _, found := store.peers[hSparse]; !found {
+		t.Fatal("expected sparse bucket peer to be protected from eviction")
+	}
+
+	// Bucket 0 should have evicted its lowest peer
+	var hLowestBucket0 [32]byte
+	hLowestBucket0[0] = 0
+	hLowestBucket0[1] = 0
+	if _, found := store.peers[hLowestBucket0]; found {
+		t.Fatal("expected lowest peer from crowded bucket 0 to be evicted")
 	}
 }

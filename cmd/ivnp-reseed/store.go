@@ -107,18 +107,6 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 	return existing, false
 }
 
-func (s *PeerStore) ReachableCount() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	count := 0
-	for _, rec := range s.peers {
-		if rec.Stats.IsReachable {
-			count++
-		}
-	}
-	return count
-}
-
 func (s *PeerStore) BucketDistribution() [256]int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -129,18 +117,77 @@ func (s *PeerStore) BucketDistribution() [256]int {
 	return dist
 }
 
+func (s *PeerStore) ReachableCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	count := 0
+	for _, rec := range s.peers {
+		if rec.Stats.IsReachable && rec.Stats.ConsecutiveFails < 2 {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *PeerStore) ReachableBucketDistribution() [256]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var dist [256]int
+	for _, rec := range s.peers {
+		if rec.Stats.IsReachable && rec.Stats.ConsecutiveFails < 2 {
+			dist[rec.Hash[0]]++
+		}
+	}
+	return dist
+}
+
+func (s *PeerStore) RecordTunnelBuildResult(hash foundation.Hash, accepted bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, found := s.peers[hash]
+	if !found {
+		return
+	}
+	rec.Stats.TunnelBuildAccepted = accepted
+	if accepted {
+		rec.Stats.LastTunnelAccepted = time.Now()
+	}
+	rec.Score = calculateScore(rec)
+}
+
 func (s *PeerStore) evictWorstLocked() {
+	var bucketCounts [256]int
+	for _, p := range s.peers {
+		bucketCounts[p.Hash[0]]++
+	}
+
 	var worstHash foundation.Hash
 	var worstScore float64 = 1e9
 	found := false
 
+	// First preference: evict lowest scoring peer from crowded buckets (> 4 peers) to preserve sparse bucket diversity
 	for h, p := range s.peers {
-		if !found || p.Score < worstScore {
-			worstHash = h
-			worstScore = p.Score
-			found = true
+		if bucketCounts[p.Hash[0]] > 4 {
+			if !found || p.Score < worstScore {
+				worstHash = h
+				worstScore = p.Score
+				found = true
+			}
 		}
 	}
+
+	// Fallback: if no bucket has > 4 peers, evict lowest overall
+	if !found {
+		for h, p := range s.peers {
+			if !found || p.Score < worstScore {
+				worstHash = h
+				worstScore = p.Score
+				found = true
+			}
+		}
+	}
+
 	if found {
 		delete(s.peers, worstHash)
 	}
@@ -267,7 +314,12 @@ func calculateScore(rec *PeerRecord) float64 {
 		score += 5.0
 	}
 
-	// 6. Severe penalty for consecutive failures
+	// 6. Confirmed Tunnel Build Acceptance bonus (+15 points)
+	if rec.Stats.TunnelBuildAccepted {
+		score += 15.0
+	}
+
+	// 7. Severe penalty for consecutive failures
 	if rec.Stats.ConsecutiveFails > 0 {
 		score -= float64(rec.Stats.ConsecutiveFails) * 15.0
 	}

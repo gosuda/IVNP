@@ -8,7 +8,7 @@ import (
 
 type SelectorConfig struct {
 	TargetCount          int
-	MaxPerIPv4Subnet24   int
+	MaxPerIPv4Subnet16   int
 	MaxPerFamily         int
 	RequireReachable     bool
 	PreferFloodfillRatio float64 // target ratio for floodfills, e.g. 0.35 (35%)
@@ -16,21 +16,22 @@ type SelectorConfig struct {
 
 func DefaultSelectorConfig() SelectorConfig {
 	return SelectorConfig{
-		TargetCount:          1000,
-		MaxPerIPv4Subnet24:   1,
+		TargetCount:          1024,
+		MaxPerIPv4Subnet16:   1,
 		MaxPerFamily:         1,
 		RequireReachable:     true,
 		PreferFloodfillRatio: 0.35,
 	}
 }
 
-// SelectDiversePeers performs K-Bucket stratified sampling prioritizing accessible Floodfill routers.
+// SelectDiversePeers performs K-Bucket stratified sampling prioritizing accessible Floodfill routers
+// with strict bucket leveling to eliminate slot imbalances and Sybil /16 subnet filtering.
 func SelectDiversePeers(peers []PeerRecord, cfg SelectorConfig) []PeerRecord {
 	if cfg.TargetCount <= 0 {
-		cfg.TargetCount = 1000
+		cfg.TargetCount = 1024
 	}
-	if cfg.MaxPerIPv4Subnet24 <= 0 {
-		cfg.MaxPerIPv4Subnet24 = 1
+	if cfg.MaxPerIPv4Subnet16 <= 0 {
+		cfg.MaxPerIPv4Subnet16 = 1
 	}
 	if cfg.MaxPerFamily <= 0 {
 		cfg.MaxPerFamily = 1
@@ -39,7 +40,7 @@ func SelectDiversePeers(peers []PeerRecord, cfg SelectorConfig) []PeerRecord {
 		cfg.PreferFloodfillRatio = 0.35
 	}
 
-	// Filter viable candidates: must be directly reachable and not in consecutive failure
+	// Filter viable candidates: if RequireReachable is set, must be verified directly reachable
 	var candidates []PeerRecord
 	for _, p := range peers {
 		if cfg.RequireReachable && (!p.Stats.IsReachable || p.Stats.ConsecutiveFails >= 2) {
@@ -51,27 +52,37 @@ func SelectDiversePeers(peers []PeerRecord, cfg SelectorConfig) []PeerRecord {
 		candidates = append(candidates, p)
 	}
 
-	if len(candidates) <= cfg.TargetCount && !cfg.RequireReachable {
-		return candidates
+	if len(candidates) == 0 {
+		return nil
 	}
 
 	// Group into 256 uniform DHT key-space buckets by first byte of Hash
 	const numBuckets = 256
-	floodfillBuckets := make([][]PeerRecord, numBuckets)
-	standardBuckets := make([][]PeerRecord, numBuckets)
-
+	buckets := make([][]PeerRecord, numBuckets)
 	for _, p := range candidates {
 		bucketIndex := int(p.Hash[0])
-		if p.IsFloodfill {
-			floodfillBuckets[bucketIndex] = append(floodfillBuckets[bucketIndex], p)
-		} else {
-			standardBuckets[bucketIndex] = append(standardBuckets[bucketIndex], p)
-		}
+		buckets[bucketIndex] = append(buckets[bucketIndex], p)
 	}
 
-	// Sort peers in each bucket by Score (descending) then RTT (ascending)
+	// Sort peers in each bucket:
+	// 1. Accessible Floodfills first
+	// 2. Confirmed tunnel build acceptance
+	// 3. Composite score (descending)
+	// 4. EWMA RTT (ascending)
 	sortBucket := func(bucket []PeerRecord) {
 		slices.SortFunc(bucket, func(a, b PeerRecord) int {
+			if a.IsFloodfill != b.IsFloodfill {
+				if a.IsFloodfill {
+					return -1
+				}
+				return 1
+			}
+			if a.Stats.TunnelBuildAccepted != b.Stats.TunnelBuildAccepted {
+				if a.Stats.TunnelBuildAccepted {
+					return -1
+				}
+				return 1
+			}
 			if a.Score != b.Score {
 				return cmp.Compare(b.Score, a.Score)
 			}
@@ -80,14 +91,14 @@ func SelectDiversePeers(peers []PeerRecord, cfg SelectorConfig) []PeerRecord {
 	}
 
 	for i := range numBuckets {
-		sortBucket(floodfillBuckets[i])
-		sortBucket(standardBuckets[i])
+		sortBucket(buckets[i])
 	}
 
 	selected := make([]PeerRecord, 0, min(cfg.TargetCount, len(candidates)))
 	selectedHashes := make(map[[32]byte]bool)
-	seenSubnets := make(map[[3]byte]int)
+	seenSubnets := make(map[[2]byte]int)
 	seenFamilies := make(map[string]int)
+	bucketCounts := make([]int, numBuckets)
 
 	canAccept := func(p PeerRecord) bool {
 		if selectedHashes[p.Hash] {
@@ -98,8 +109,8 @@ func SelectDiversePeers(peers []PeerRecord, cfg SelectorConfig) []PeerRecord {
 		}
 		for _, ip := range p.IPv4 {
 			if ip.Is4() {
-				subnet := IPv4Subnet24(ip)
-				if seenSubnets[subnet] >= cfg.MaxPerIPv4Subnet24 {
+				subnet := IPv4Subnet16(ip)
+				if seenSubnets[subnet] >= cfg.MaxPerIPv4Subnet16 {
 					return false
 				}
 			}
@@ -110,70 +121,44 @@ func SelectDiversePeers(peers []PeerRecord, cfg SelectorConfig) []PeerRecord {
 	recordAccept := func(p PeerRecord) {
 		selected = append(selected, p)
 		selectedHashes[p.Hash] = true
+		bucketCounts[p.Hash[0]]++
 		if p.Family != "" {
 			seenFamilies[p.Family]++
 		}
 		for _, ip := range p.IPv4 {
 			if ip.Is4() {
-				subnet := IPv4Subnet24(ip)
+				subnet := IPv4Subnet16(ip)
 				seenSubnets[subnet]++
 			}
 		}
 	}
 
-	// Target floodfill slots
-	targetFloodfills := int(float64(cfg.TargetCount) * cfg.PreferFloodfillRatio)
-	floodfillPointers := make([]int, numBuckets)
-	standardPointers := make([]int, numBuckets)
+	pointers := make([]int, numBuckets)
 
-	// Pass 1: Prioritize Accessible Floodfills across all 256 K-Buckets
-	floodfillsPicked := 0
-	for round := 0; round < 4 && floodfillsPicked < targetFloodfills && len(selected) < cfg.TargetCount; round++ {
-		progress := false
-		for b := 0; b < numBuckets && floodfillsPicked < targetFloodfills && len(selected) < cfg.TargetCount; b++ {
-			for floodfillPointers[b] < len(floodfillBuckets[b]) {
-				candidate := floodfillBuckets[b][floodfillPointers[b]]
-				floodfillPointers[b]++
-				if canAccept(candidate) {
-					recordAccept(candidate)
-					floodfillsPicked++
-					progress = true
-					break
-				}
+	pickNextInBucket := func(b int) (PeerRecord, bool) {
+		for pointers[b] < len(buckets[b]) {
+			candidate := buckets[b][pointers[b]]
+			pointers[b]++
+			if canAccept(candidate) {
+				return candidate, true
 			}
 		}
-		if !progress {
-			break
-		}
+		return PeerRecord{}, false
 	}
 
-	// Pass 2: Fill general slots evenly across 256 K-Buckets
-	for round := 0; round < 4 && len(selected) < cfg.TargetCount; round++ {
+	const maxPerBucket = 5
+
+	// Leveling Pass & Soft Cap Overflow: Strict 1-peer-per-bucket rounds (up to max 5 per bucket)
+	// Eliminates slot imbalance and prevents any single bucket from hoarding slots.
+	for round := 1; round <= maxPerBucket && len(selected) < cfg.TargetCount; round++ {
 		progress := false
 		for b := 0; b < numBuckets && len(selected) < cfg.TargetCount; b++ {
-			// Try floodfills first, then standard peers
-			accepted := false
-			for floodfillPointers[b] < len(floodfillBuckets[b]) {
-				candidate := floodfillBuckets[b][floodfillPointers[b]]
-				floodfillPointers[b]++
-				if canAccept(candidate) {
-					recordAccept(candidate)
-					progress = true
-					accepted = true
-					break
-				}
-			}
-			if accepted {
+			if bucketCounts[b] >= round {
 				continue
 			}
-			for standardPointers[b] < len(standardBuckets[b]) {
-				candidate := standardBuckets[b][standardPointers[b]]
-				standardPointers[b]++
-				if canAccept(candidate) {
-					recordAccept(candidate)
-					progress = true
-					break
-				}
+			if candidate, ok := pickNextInBucket(b); ok {
+				recordAccept(candidate)
+				progress = true
 			}
 		}
 		if !progress {
@@ -181,44 +166,91 @@ func SelectDiversePeers(peers []PeerRecord, cfg SelectorConfig) []PeerRecord {
 		}
 	}
 
-	// Pass 3: Fill any remaining quota from candidates with highest scores
-	if len(selected) < cfg.TargetCount {
-		var remaining []PeerRecord
-		for b := 0; b < numBuckets; b++ {
-			for idx := floodfillPointers[b]; idx < len(floodfillBuckets[b]); idx++ {
-				remaining = append(remaining, floodfillBuckets[b][idx])
+	// Relaxed Subnet Pass: If still below target, relax subnet filter but strictly
+	// respect the maxPerBucket cap (5) and only select from viable candidates.
+	// If RequireReachable is true, this still ONLY takes from verified reachable candidates.
+	acceptRelaxedFromBucket := func(b int) {
+		for _, candidate := range buckets[b] {
+			if len(selected) >= cfg.TargetCount || bucketCounts[b] >= maxPerBucket {
+				return
 			}
-			for idx := standardPointers[b]; idx < len(standardBuckets[b]); idx++ {
-				remaining = append(remaining, standardBuckets[b][idx])
+			if !selectedHashes[candidate.Hash] {
+				recordAccept(candidate)
 			}
 		}
-		slices.SortFunc(remaining, func(a, b PeerRecord) int {
-			return cmp.Compare(b.Score, a.Score)
+	}
+	if len(selected) < cfg.TargetCount {
+		for b := 0; b < numBuckets && len(selected) < cfg.TargetCount; b++ {
+			if bucketCounts[b] < maxPerBucket {
+				acceptRelaxedFromBucket(b)
+			}
+		}
+	}
+
+	return StratifyByBucketDiversity(selected)
+}
+
+// StratifyByBucketDiversity organizes peers so that the first up to 256 entries
+// each belong to a distinct DHT key-space bucket (Hash[0]), prioritizing
+// accessible Floodfill routers with top scores.
+// This is critical for Java I2P clients that only parse the first ~200 router
+// infos from a reseed archive, ensuring they receive a uniform DHT keyspace distribution.
+func StratifyByBucketDiversity(peers []PeerRecord) []PeerRecord {
+	if len(peers) <= 1 {
+		return peers
+	}
+	const numBuckets = 256
+	buckets := make([][]PeerRecord, numBuckets)
+	for _, p := range peers {
+		bucket := int(p.Hash[0])
+		buckets[bucket] = append(buckets[bucket], p)
+	}
+
+	for i := range numBuckets {
+		slices.SortFunc(buckets[i], func(a, b PeerRecord) int {
+			if a.IsFloodfill != b.IsFloodfill {
+				if a.IsFloodfill {
+					return -1
+				}
+				return 1
+			}
+			if a.Stats.TunnelBuildAccepted != b.Stats.TunnelBuildAccepted {
+				if a.Stats.TunnelBuildAccepted {
+					return -1
+				}
+				return 1
+			}
+			if a.Score != b.Score {
+				return cmp.Compare(b.Score, a.Score)
+			}
+			return cmp.Compare(a.Stats.EWMARTT, b.Stats.EWMARTT)
 		})
-		for _, p := range remaining {
-			if len(selected) >= cfg.TargetCount {
-				break
+	}
+
+	result := make([]PeerRecord, 0, len(peers))
+	pointers := make([]int, numBuckets)
+
+	// Round-robin across all 256 buckets
+	for len(result) < len(peers) {
+		added := false
+		for b := 0; b < numBuckets; b++ {
+			if pointers[b] < len(buckets[b]) {
+				result = append(result, buckets[b][pointers[b]])
+				pointers[b]++
+				added = true
 			}
-			if canAccept(p) {
-				recordAccept(p)
-			}
+		}
+		if !added {
+			break
 		}
 	}
 
-	// Pass 4: If still below target, relax subnet filter for reachable peers
-	if len(selected) < cfg.TargetCount {
-		for _, p := range candidates {
-			if len(selected) >= cfg.TargetCount {
-				break
-			}
-			if !selectedHashes[p.Hash] {
-				selected = append(selected, p)
-				selectedHashes[p.Hash] = true
-			}
-		}
-	}
+	return result
+}
 
-	return selected
+func IPv4Subnet16(addr netip.Addr) [2]byte {
+	b := addr.As4()
+	return [2]byte{b[0], b[1]}
 }
 
 func IPv4Subnet24(addr netip.Addr) [3]byte {

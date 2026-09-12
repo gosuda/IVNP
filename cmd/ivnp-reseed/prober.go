@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"net"
 	"net/netip"
@@ -104,6 +105,14 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 		return 0
 	}
 
+	reachableCount := p.store.ReachableCount()
+	cooldownFailed := ProbeCooldownFailed
+	if reachableCount < 1024 {
+		cooldownFailed = 60 * time.Second // Rapid retry in expansion mode
+	} else {
+		cooldownFailed = 3 * time.Minute // Conservative backoff in maintenance mode
+	}
+
 	now := time.Now()
 	var candidates []PeerRecord
 	for _, rec := range peers {
@@ -111,7 +120,7 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 		if rec.Stats.TotalProbes == 0 {
 			cooldown = 0
 		} else if rec.Stats.ConsecutiveFails > 0 {
-			cooldown = ProbeCooldownFailed
+			cooldown = cooldownFailed
 		}
 		if now.Sub(rec.Stats.LastProbed) >= cooldown {
 			candidates = append(candidates, rec)
@@ -122,8 +131,28 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 		return 0
 	}
 
-	// Prioritize: unprobed newcomers first, then floodfills, then longest cooldown
+	reachableDist := p.store.ReachableBucketDistribution()
+
+	// Prioritize:
+	// 1. Sparse bucket deficit: candidate in bucket with < 4 reachable peers prioritized
+	// 2. Unprobed newcomers first
+	// 3. Floodfills first
+	// 4. Longest elapsed since last probe
 	slices.SortFunc(candidates, func(a, b PeerRecord) int {
+		aBucketCount := reachableDist[a.Hash[0]]
+		bBucketCount := reachableDist[b.Hash[0]]
+		aDeficit := aBucketCount < 4
+		bDeficit := bBucketCount < 4
+		if aDeficit != bDeficit {
+			if aDeficit {
+				return -1
+			}
+			return 1
+		}
+		if aDeficit && aBucketCount != bBucketCount {
+			return cmp.Compare(aBucketCount, bBucketCount)
+		}
+
 		if (a.Stats.TotalProbes == 0) != (b.Stats.TotalProbes == 0) {
 			if a.Stats.TotalProbes == 0 {
 				return -1

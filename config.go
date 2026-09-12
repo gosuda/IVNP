@@ -29,7 +29,13 @@ type RouterConfig struct {
 	Logger      *slog.Logger
 }
 
-type PersistenceConfig struct{ Directory string }
+type PersistenceConfig struct {
+	Directory         string
+	TempDir           string
+	TaintedCopy       bool
+	PromoteToMaster   *bool
+	LockRetryInterval time.Duration
+}
 
 type TransportConfig struct {
 	Enabled     bool
@@ -210,6 +216,26 @@ func routerSettings(cfg RouterConfig) (state.ConfigurationOperating, controlplan
 		}
 		operating.DataDir, operating.StateDir = directory, directory
 		operating.StatePath, operating.KeyPath = filepath.Join(directory, "router.state"), filepath.Join(directory, "router.keys")
+		if cfg.Persistence.TempDir != "" {
+			if strings.IndexByte(cfg.Persistence.TempDir, 0) >= 0 {
+				return empty, options, invalidConfig("Persistence.TempDir")
+			}
+			tempDir, err := filepath.Abs(cfg.Persistence.TempDir)
+			if err != nil {
+				return empty, options, &ConfigError{Field: "Persistence.TempDir", Err: err}
+			}
+			operating.TempDir = tempDir
+		}
+		operating.State.TaintedCopy = cfg.Persistence.TaintedCopy
+		options.TaintedCopy = cfg.Persistence.TaintedCopy
+		if cfg.Persistence.PromoteToMaster != nil {
+			operating.State.PromoteToMaster = *cfg.Persistence.PromoteToMaster
+			options.PromoteToMaster = cfg.Persistence.PromoteToMaster
+		}
+		if cfg.Persistence.LockRetryInterval > 0 {
+			operating.State.LockRetryInterval = cfg.Persistence.LockRetryInterval
+			options.LockRetryInterval = cfg.Persistence.LockRetryInterval
+		}
 	}
 	operating.Network = state.ConfigurationNetwork{ID: cfg.NetworkID}
 	for _, transport := range []TransportConfig{cfg.NTCP2, cfg.SSU2} {

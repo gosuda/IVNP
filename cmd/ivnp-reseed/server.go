@@ -1,12 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,6 +17,9 @@ type ServerConfig struct {
 	NetworkID     uint8
 	ListenAddress string
 	CacheDuration time.Duration
+	SignerID      string
+	CertPEM       []byte
+	PubKeyPEM     []byte
 }
 
 type ReseedServer struct {
@@ -42,6 +47,10 @@ func NewReseedServer(cfg ServerConfig, store *PeerStore) *ReseedServer {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRoot)
 	mux.HandleFunc("/i2pseeds.su3", s.handleSU3)
+	mux.HandleFunc("/reseed-rsa.crt", s.handleCert)
+	mux.HandleFunc("/reseed.crt", s.handleCert)
+	mux.HandleFunc("/reseed-rsa.pub.pem", s.handlePubKey)
+	mux.HandleFunc("/reseed.pub", s.handlePubKey)
 	mux.HandleFunc("/stats", s.handleStats)
 	mux.HandleFunc("/health", s.handleHealth)
 	s.handler = mux
@@ -65,6 +74,9 @@ func (s *ReseedServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 	stats := s.calculateStats()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	_ = RenderDashboard(w, stats)
 }
 
@@ -112,6 +124,36 @@ func (s *ReseedServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("OK\n"))
 }
 
+func certFileName(signerID string) string {
+	clean := strings.ReplaceAll(signerID, "@", "_at_")
+	clean = strings.ReplaceAll(clean, "/", "_")
+	clean = strings.ReplaceAll(clean, "\\", "_")
+	clean = strings.ReplaceAll(clean, ":", "_")
+	return cmp.Or(clean, "reseed") + ".crt"
+}
+
+func (s *ReseedServer) handleCert(w http.ResponseWriter, _ *http.Request) {
+	if len(s.cfg.CertPEM) == 0 {
+		http.Error(w, "reseed certificate not available", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-x509-ca-cert")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", certFileName(s.cfg.SignerID)))
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(s.cfg.CertPEM)
+}
+
+func (s *ReseedServer) handlePubKey(w http.ResponseWriter, _ *http.Request) {
+	if len(s.cfg.PubKeyPEM) == 0 {
+		http.Error(w, "reseed public key not available", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="reseed-rsa.pub.pem"`)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(s.cfg.PubKeyPEM)
+}
+
 func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 	s.mu.RLock()
 	pkg := s.pkg
@@ -126,7 +168,8 @@ func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 	var distribution [256]int
 	coveredBuckets := 0
 
-	seenSubnets := make(map[[3]byte]struct{})
+	seenSubnets16 := make(map[[2]byte]struct{})
+	seenSubnets24 := make(map[[3]byte]struct{})
 	seenV4 := make(map[netip.Addr]struct{})
 	seenV6 := make(map[netip.Addr]struct{})
 	seenFamilies := make(map[string]struct{})
@@ -154,7 +197,8 @@ func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 		for _, ip := range p.IPv4 {
 			if ip.Is4() {
 				seenV4[ip] = struct{}{}
-				seenSubnets[IPv4Subnet24(ip)] = struct{}{}
+				seenSubnets16[IPv4Subnet16(ip)] = struct{}{}
+				seenSubnets24[IPv4Subnet24(ip)] = struct{}{}
 			}
 		}
 		for _, ip := range p.IPv6 {
@@ -194,19 +238,29 @@ func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 
 	coveragePct := float64(coveredBuckets) / 256.0 * 100.0
 
+	mode := ExplorationModeExpansion
+	if reachable >= 1024 {
+		mode = ExplorationModeMaintenance
+	}
+
 	return DetailedStatsResponse{
 		Version:         version,
 		NetworkID:       s.cfg.NetworkID,
 		UptimeSeconds:   int64(time.Since(s.startedAt).Seconds()),
+		ExplorationMode: mode,
 		TotalIndexed:    len(peers),
 		ReachablePeers:  reachable,
 		FloodfillPeers:  floodfills,
 		PublishedPeers:  pkg.PeerCount,
 		AverageEWMARTT:  avgRTT / time.Millisecond,
 		LastGeneratedAt: pkg.GeneratedAt,
+		SignerID:        s.cfg.SignerID,
+		CertificatePEM:  string(s.cfg.CertPEM),
+		PublicKeyPEM:    string(s.cfg.PubKeyPEM),
 		RTT:             rttStats,
 		Diversity: DiversityStats{
-			UniqueIPv4Subnets24: len(seenSubnets),
+			UniqueIPv4Subnets16: len(seenSubnets16),
+			UniqueIPv4Subnets24: len(seenSubnets24),
 			UniqueIPv4Count:     len(seenV4),
 			UniqueIPv6Count:     len(seenV6),
 			UniqueFamilies:      len(seenFamilies),
@@ -232,5 +286,8 @@ func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 func (s *ReseedServer) handleStats(w http.ResponseWriter, _ *http.Request) {
 	resp := s.calculateStats()
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	_ = json.NewEncoder(w).Encode(resp)
 }

@@ -10,10 +10,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -94,6 +96,9 @@ type NATRuntime interface {
 // ControllerOptions supplies the core router's host-owned dependencies.
 type ControllerOptions struct {
 	Embedded             bool
+	TaintedCopy          bool
+	PromoteToMaster      *bool
+	LockRetryInterval    time.Duration
 	BootstrapRouterInfos [][]byte
 	Exploratory          *destination.TunnelPoolConfig
 	// SocketRuntime provides low-level network socket creation.
@@ -296,19 +301,28 @@ func (r *destinationRuntime) maintainTunnels(ctx context.Context) (int, error) {
 
 // Controller manages the lifecycle of an embedded IVNP router and its associated local services.
 type Controller struct {
-	config         state.ConfigurationOperating
-	store          *state.SecureStateStore
-	stateLock      *state.SecureStateLock
-	bundle         state.SecureStateBundle
-	database       *netdb.Database
-	netdbStore     *netdb.RouterInfoStore
-	responderStore *netdb.ResponderProfileStore
-	explorer       *netdb.Explorer
-	localInfo      *router.LocalRouterInfo
-	router         *router.Router
-	registry       *observability.Registry
-	logger         *slog.Logger
-	clock          dataplane.RouterClock
+	config            state.ConfigurationOperating
+	stateMu           sync.Mutex
+	store             *state.SecureStateStore
+	stateLock         *state.SecureStateLock
+	taintedDir        string
+	masterStatePath   string
+	masterKeyPath     string
+	masterNetdbDir    string
+	promoteToMaster   bool
+	lockRetryInterval time.Duration
+	promoted          atomic.Bool
+	bundle            state.SecureStateBundle
+	database          *netdb.Database
+	netdbStore        *netdb.RouterInfoStore
+	responderStore    *netdb.ResponderProfileStore
+	responders        *netdb.ResponderProfiles
+	explorer          *netdb.Explorer
+	localInfo         *router.LocalRouterInfo
+	router            *router.Router
+	registry          *observability.Registry
+	logger            *slog.Logger
+	clock             dataplane.RouterClock
 
 	service                *dataplane.RouterService
 	tunnels                *dataplane.TunnelRuntime
@@ -413,23 +427,88 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 
 	var store *state.SecureStateStore
 	var err error
-	if options.Embedded && cfg.StatePath == "" {
+	var taintedDir string
+	keepTaintedDir := false
+	masterStatePath := cfg.StatePath
+	masterKeyPath := cfg.KeyPath
+	masterNetdbDir := cfg.StateDir
+	if masterNetdbDir == "" && cfg.StatePath != "" {
+		masterNetdbDir = filepath.Dir(cfg.StatePath)
+	}
+
+	workingStatePath := masterStatePath
+	workingKeyPath := masterKeyPath
+	workingNetdbDir := masterNetdbDir
+
+	promoteToMaster := cfg.State.PromoteToMaster
+	if options.PromoteToMaster != nil {
+		promoteToMaster = *options.PromoteToMaster
+	}
+	lockRetryInterval := cfg.State.LockRetryInterval
+	if options.LockRetryInterval > 0 {
+		lockRetryInterval = options.LockRetryInterval
+	}
+	if lockRetryInterval <= 0 {
+		lockRetryInterval = 15 * time.Second
+	}
+
+	if (options.TaintedCopy || cfg.State.TaintedCopy) && cfg.StatePath != "" {
+		tempBase := cmp.Or(cfg.TempDir, os.TempDir())
+		if err := os.MkdirAll(tempBase, 0o700); err != nil {
+			return nil, fmt.Errorf("daemon: failed to create temp directory base: %w", err)
+		}
+		td, err := os.MkdirTemp(tempBase, "ivnp-tainted-*")
+		if err != nil {
+			return nil, fmt.Errorf("daemon: failed to create tainted state directory: %w", err)
+		}
+		_ = os.Chmod(td, 0o700)
+		taintedDir = td
+		defer func() {
+			if !keepTaintedDir && taintedDir != "" {
+				_ = os.RemoveAll(taintedDir)
+			}
+		}()
+
+		stateBase := filepath.Base(cfg.StatePath)
+		workingStatePath = filepath.Join(taintedDir, stateBase)
+		if err := copyFileIfExists(cfg.StatePath, workingStatePath); err != nil {
+			return nil, fmt.Errorf("daemon: failed to copy state file for tainted mode: %w", err)
+		}
+
+		if cfg.KeyPath != "" {
+			keyBase := filepath.Base(cfg.KeyPath)
+			workingKeyPath = filepath.Join(taintedDir, keyBase)
+			if err := copyFileIfExists(cfg.KeyPath, workingKeyPath); err != nil {
+				return nil, fmt.Errorf("daemon: failed to copy keys file for tainted mode: %w", err)
+			}
+		}
+
+		if workingNetdbDir != "" {
+			_ = copyFileIfExists(filepath.Join(workingNetdbDir, "netdb.routers"), filepath.Join(taintedDir, "netdb.routers"))
+			_ = copyFileIfExists(filepath.Join(workingNetdbDir, "netdb.responders"), filepath.Join(taintedDir, "netdb.responders"))
+		}
+		if cfg.AddressBook.StatePath != "" {
+			_ = copyFileIfExists(cfg.AddressBook.StatePath, filepath.Join(taintedDir, filepath.Base(cfg.AddressBook.StatePath)))
+		}
+		workingNetdbDir = taintedDir
+	}
+
+	if options.Embedded && workingStatePath == "" {
 		if cfg.StateDir != "" || cfg.DataDir != "" || len(cfg.NetDB.BootstrapRouterInfoPaths) != 0 {
 			return nil, fmt.Errorf("%w: memory state cannot use filesystem paths", ErrStateConflict)
 		}
 		store = state.SecureStateNewMemoryStore()
 	} else {
-		store, err = state.SecureStateNewStore(cfg.StatePath, cfg.KeyPath)
+		store, err = state.SecureStateNewStore(workingStatePath, workingKeyPath)
 	}
 	reporter := options.PanicReporter
-	if reporter ==
-		nil {
+	if reporter == nil {
 		reporter = slogPanicReporter{logger: logger}
 	}
 
 	reporter = metricPanicReporter{metrics: registry, next: reporter}
 	if err != nil {
-		if options.Embedded && cfg.StatePath != "" {
+		if options.Embedded && workingStatePath != "" {
 			return nil, errors.Join(ErrStateConflict, err)
 		}
 		return nil, err
@@ -445,7 +524,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	}()
 	stateLock, err := store.AcquireLock()
 	if err != nil {
-		if options.Embedded && cfg.StatePath != "" {
+		if options.Embedded && workingStatePath != "" {
 			return nil, errors.Join(ErrStateConflict, err)
 		}
 		return nil, err
@@ -458,7 +537,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	}()
 	bundle, err := store.LoadOrCreate()
 	if err != nil {
-		if options.Embedded && cfg.StatePath != "" {
+		if options.Embedded && workingStatePath != "" {
 			return nil, errors.Join(ErrStateConflict, err)
 		}
 		return nil, err
@@ -563,10 +642,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	registry.SetNetDBRouters(uint64(database.Routers().Len()))
 	var netdbStore *netdb.RouterInfoStore
 	var responderStore *netdb.ResponderProfileStore
-	netdbStateDir := cfg.StateDir
-	if netdbStateDir == "" && cfg.StatePath != "" {
-		netdbStateDir = filepath.Dir(cfg.StatePath)
-	}
+	netdbStateDir := workingNetdbDir
 	if netdbStateDir != "" {
 		store, err := netdb.NewRouterInfoStore(netdb.RouterInfoStoreConfig{
 			Path: filepath.Join(netdbStateDir, "netdb.routers"), Database: database, NetworkID: cfg.Network.ID,
@@ -1031,10 +1107,17 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		return nil, err
 	}
 	d = &Controller{
-		config: cfg, store: store, stateLock: stateLock, bundle: bundle, database: database, netdbStore: netdbStore, explorer: explorer, localInfo: localInfo, router: runtime, registry: registry, logger: logger, clock: clock,
+		taintedDir:        taintedDir,
+		masterStatePath:   masterStatePath,
+		masterKeyPath:     masterKeyPath,
+		masterNetdbDir:    masterNetdbDir,
+		promoteToMaster:   promoteToMaster,
+		lockRetryInterval: lockRetryInterval,
+		config:            cfg, store: store, stateLock: stateLock, bundle: bundle, database: database, netdbStore: netdbStore, explorer: explorer, localInfo: localInfo, router: runtime, registry: registry, logger: logger, clock: clock,
 		service: service, tunnels: tunnels, pool: pool, profiles: profiles, tunnelHealth: health, replyKeys: replyKeys, buildManager: buildManager, maintainer: maintainer, requests: requests, destinations: destinations, garlicSessions: garlicSessions, garlicReceiver: garlicReceiver, statusMux: statusMux, publication: publication,
 		destinationFactory: destinationFactory, buildReplies: buildReplies, requestHandlers: requestHandlers, destinationPublishers: destinationPublishers, clientRuntimes: clientRuntimes,
 		responderStore:         responderStore,
+		responders:             responders,
 		closeNativeTransports:  closeNativeTransports,
 		releaseRouterInfoSeeds: releaseRouterInfoSeeds,
 		startReady:             make(chan struct{}),
@@ -1056,6 +1139,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	keepStateLock = true
 	keepStore = true
 	keepBundle = true
+	keepTaintedDir = true
 	return d, nil
 }
 
@@ -1175,6 +1259,10 @@ func (d *Controller) startMaintenance() {
 	for _, runtime := range d.clientRuntimeSnapshot() {
 		d.requestDestinationMaintenance(runtime)
 	}
+	if d.taintedDir != "" && d.promoteToMaster && d.masterStatePath != "" {
+		d.maintenanceWG.Add(1)
+		go d.masterLockRetryLoop()
+	}
 }
 
 func (d *Controller) requestExploratoryMaintenance() {
@@ -1263,6 +1351,7 @@ func (d *Controller) netdbSaveLoop() {
 		case <-d.ctx.Done():
 			return
 		case <-d.netdbSaveWake:
+			d.stateMu.Lock()
 			if d.netdbStore != nil {
 				if err := d.netdbStore.Save(); err != nil && d.ctx.Err() == nil {
 					d.recordMaintenanceError(err)
@@ -1273,6 +1362,7 @@ func (d *Controller) netdbSaveLoop() {
 					d.recordMaintenanceError(err)
 				}
 			}
+			d.stateMu.Unlock()
 		}
 	}
 }
@@ -1691,6 +1781,7 @@ func (d *Controller) teardown() error {
 			d.releaseRouterInfoSeeds()
 			d.releaseRouterInfoSeeds = nil
 		}
+		d.stateMu.Lock()
 		if d.netdbStore != nil {
 			result = errors.Join(result, d.netdbStore.Save())
 		}
@@ -1708,6 +1799,10 @@ func (d *Controller) teardown() error {
 		if d.stateLock != nil {
 			result = errors.Join(result, d.stateLock.Close())
 		}
+		if d.taintedDir != "" {
+			_ = os.RemoveAll(d.taintedDir)
+		}
+		d.stateMu.Unlock()
 		d.registry.IncLifecycleStops()
 		d.registry.SetLifecycleRunning(0)
 		d.teardownErr = result
@@ -2022,7 +2117,10 @@ func (d *Controller) UpdateDestinationAddressPolicies(name string, policies []st
 		}
 	}
 
-	if err = d.store.Save(next); err != nil {
+	d.stateMu.Lock()
+	err = d.store.Save(next)
+	d.stateMu.Unlock()
+	if err != nil {
 		if active != nil {
 			err = errors.Join(err, active.sender.UpdateRemoteELS(previousContexts))
 		}
@@ -2578,4 +2676,185 @@ func (d *Controller) ActiveDestinationCount() int {
 	d.clientRuntimesMu.RLock()
 	defer d.clientRuntimesMu.RUnlock()
 	return len(d.clientRuntimes)
+}
+
+// TaintedDir returns the temporary directory used for tainted copy state, or empty if tainted mode is inactive or promoted.
+func (d *Controller) TaintedDir() string {
+	if d == nil {
+		return ""
+	}
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.taintedDir
+}
+
+// IsPromoted reports whether a tainted copy router has successfully acquired the master lock and promoted itself.
+func (d *Controller) IsPromoted() bool {
+	if d == nil {
+		return false
+	}
+	return d.promoted.Load()
+}
+
+// TryPromoteToMaster attempts to acquire the master state lock immediately.
+// If the lock is acquired, the router merges and promotes its working state to master ownership.
+func (d *Controller) TryPromoteToMaster() (bool, error) {
+	if d == nil {
+		return false, net.ErrClosed
+	}
+	return d.tryPromoteToMaster()
+}
+
+func (d *Controller) masterLockRetryLoop() {
+	defer d.maintenanceWG.Done()
+	interval := d.lockRetryInterval
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+			promoted, err := d.tryPromoteToMaster()
+			if err != nil && !errors.Is(err, state.SecureStateErrStateLocked) {
+				d.logger.Debug("master state lock retry", "path", d.masterStatePath, "error", err)
+			}
+			if promoted {
+				d.logger.Info("promoted router to master state ownership",
+					"state_path", d.masterStatePath,
+					"state_dir", d.masterNetdbDir,
+				)
+				return
+			}
+		}
+	}
+}
+
+func (d *Controller) tryPromoteToMaster() (bool, error) {
+	d.mu.Lock()
+	if d.closed || !d.started {
+		d.mu.Unlock()
+		return false, nil
+	}
+	d.mu.Unlock()
+
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+
+	if d.promoted.Load() || d.taintedDir == "" || d.masterStatePath == "" {
+		return false, nil
+	}
+
+	masterStore, err := state.SecureStateNewStore(d.masterStatePath, d.masterKeyPath)
+	if err != nil {
+		return false, err
+	}
+	masterStore.MaxStateBytes = int(d.config.State.MaxBytes)
+	masterStore.MaxDestinations = d.config.State.MaxDestinations
+	masterStore.MaxNameBytes = d.config.State.MaxNameBytes
+
+	masterLock, err := masterStore.AcquireLock()
+	if err != nil {
+		_ = masterStore.Close()
+		return false, err
+	}
+
+	var masterNetDBStore *netdb.RouterInfoStore
+	if d.masterNetdbDir != "" {
+		netdbPath := filepath.Join(d.masterNetdbDir, "netdb.routers")
+		store, storeErr := netdb.NewRouterInfoStore(netdb.RouterInfoStoreConfig{
+			Path: netdbPath, Database: d.database, NetworkID: d.config.Network.ID,
+		})
+		if storeErr == nil {
+			masterNetDBStore = store
+			if _, loadErr := masterNetDBStore.Load(uint64(d.clock.Now().UnixMilli())); loadErr != nil {
+				d.logger.Debug("master NetDB snapshot load during promotion", "error", loadErr)
+			}
+			if saveErr := masterNetDBStore.Save(); saveErr != nil {
+				d.logger.Warn("failed to persist NetDB snapshot during promotion", "error", saveErr)
+			}
+		}
+	}
+
+	var masterResponderStore *netdb.ResponderProfileStore
+	if d.masterNetdbDir != "" && d.responders != nil {
+		now := func() uint64 { return uint64(d.clock.Now().UnixMilli()) }
+		respPath := filepath.Join(d.masterNetdbDir, "netdb.responders")
+		store, storeErr := netdb.NewResponderProfileStore(netdb.ResponderProfileStoreConfig{
+			Path: respPath, Profiles: d.responders, Database: d.database, NetworkID: d.config.Network.ID, Now: now,
+		})
+		if storeErr == nil {
+			masterResponderStore = store
+			_ = masterResponderStore.Load()
+			_ = masterResponderStore.Save()
+		}
+	}
+
+	if err := masterStore.Save(d.bundle); err != nil {
+		_ = masterLock.Close()
+		_ = masterStore.Close()
+		return false, err
+	}
+
+	if d.config.AddressBook.StatePath != "" && d.taintedDir != "" {
+		taintedAB := filepath.Join(d.taintedDir, filepath.Base(d.config.AddressBook.StatePath))
+		_ = copyFileIfExists(taintedAB, d.config.AddressBook.StatePath)
+	}
+
+	if d.stateLock != nil {
+		_ = d.stateLock.Close()
+	}
+	d.stateLock = masterLock
+
+	if d.store != nil {
+		_ = d.store.Close()
+	}
+	d.store = masterStore
+
+	if masterNetDBStore != nil {
+		d.netdbStore = masterNetDBStore
+	}
+	if masterResponderStore != nil {
+		d.responderStore = masterResponderStore
+	}
+
+	oldTainted := d.taintedDir
+	d.taintedDir = ""
+	d.promoted.Store(true)
+
+	if oldTainted != "" {
+		_ = os.RemoveAll(oldTainted)
+	}
+
+	return true, nil
+}
+
+func copyFileIfExists(srcPath, dstPath string) (err error) {
+	src, err := os.Open(srcPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := dst.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	if _, err = io.Copy(dst, src); err != nil {
+		return err
+	}
+	return dst.Sync()
 }
