@@ -1,5 +1,7 @@
 # IVNP
 
+[![Go: Reference](https://badge-api.gosuda.org/badge.svg?label=Go&message=Reference&style=old-school&size=200&letterSpacing=0&labelColor=292724&color=007d9c&labelTextColor=ffffff&textColor=ffffff)](https://pkg.go.dev/gosuda.org/ivnp)
+
 I2P router for Go. Runs as a standalone daemon or an embedded library.
 Includes SAM v3.3, HTTP and SOCKS5 proxies, and a local address book.
 
