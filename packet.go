@@ -29,6 +29,7 @@ var _ net.PacketConn = (*PacketConn)(nil)
 
 type packetSocket struct {
 	owner                       *Destination
+	endpoint                    destination.DestinationEndpoint
 	network                     string
 	protocol                    uint8
 	local                       Addr
@@ -43,71 +44,52 @@ type packetSocket struct {
 	active                      sync.WaitGroup
 }
 
-func (d *Destination) resolvePacketProtocol(network string) (uint8, error) {
+// packetTarget splits a packet network name into a bound endpoint and a wire
+// protocol. Generic names ("udp", "packet", "datagram", "ivnp") select the
+// primary endpoint; a configured network name selects that context; the
+// "-datagram1"/"-datagram2"/"-datagram3"/"-raw" suffixes pick the datagram
+// protocol on any bound network.
+func (d *Destination) packetTarget(network string) (destination.DestinationEndpoint, uint8, error) {
+	name := network
+	protocol := uint8(19)
 	switch network {
-	case "udp", "udp4", "udp6", "packet", "datagram":
-		return 19, nil
-	case "i2p", "i2p-packet", "i2p-datagram", "i2p-datagram2":
-		return 19, nil
-	case "i2p-datagram1":
-		return 17, nil
-	case "ivnp", "ivnp-packet", "ivnp-datagram", "ivnp-datagram2":
-		return 19, nil
-	case "ivnp-datagram1":
-		return 17, nil
+	case "", "udp", "udp4", "udp6", "packet", "datagram", "ivnp":
+		name = ""
+	case "meta", "packet3", "datagram3":
+		name, protocol = "", 20
+	case "raw", "udp-raw":
+		name, protocol = "", 18
 	default:
-		target := network
-		for _, suffix := range []string{"-packet", "-datagram", "-datagram2"} {
-			if strings.HasSuffix(network, suffix) {
-				target = strings.TrimSuffix(network, suffix)
+		for _, suffix := range []struct {
+			s    string
+			code uint8
+		}{
+			{"-datagram1", 17}, {"-datagram3", 20}, {"-raw", 18},
+			{"-datagram2", 19}, {"-datagram", 19}, {"-packet", 19},
+		} {
+			if strings.HasSuffix(network, suffix.s) {
+				name, protocol = strings.TrimSuffix(network, suffix.s), suffix.code
 				break
 			}
 		}
-		if d != nil && d.owner != nil {
-			if _, ok := d.owner.fabricNames[target]; ok {
-				return 19, nil
-			}
-		}
-		return 0, ErrUnsupportedNetwork
 	}
-}
-
-func (d *Destination) resolveUnauthPacketProtocol(network string) (uint8, error) {
-	switch network {
-	case "meta", "i2p-datagram3", "ivnp-datagram3", "packet3", "datagram3":
-		return 20, nil
-	case "raw", "udp-raw", "i2p-raw", "ivnp-raw":
-		return 18, nil
-	default:
-		if strings.HasSuffix(network, "-datagram3") {
-			fabric := strings.TrimSuffix(network, "-datagram3")
-			if d != nil && d.owner != nil {
-				if _, ok := d.owner.fabricNames[fabric]; ok {
-					return 20, nil
-				}
-			}
-		}
-		if strings.HasSuffix(network, "-raw") {
-			fabric := strings.TrimSuffix(network, "-raw")
-			if d != nil && d.owner != nil {
-				if _, ok := d.owner.fabricNames[fabric]; ok {
-					return 18, nil
-				}
-			}
-		}
-		return 0, ErrUnsupportedNetwork
+	var ep destination.DestinationEndpoint
+	if name == "" || name == "ivnp" {
+		ep = d.primaryEndpoint()
+	} else {
+		ep = d.endpoints[name]
 	}
+	if ep == nil {
+		return nil, 0, ErrUnsupportedNetwork
+	}
+	return ep, protocol, nil
 }
 
 func (d *Destination) ListenPacket(network, address string) (*PacketConn, error) {
 	return d.ListenPacketContext(context.Background(), network, address)
 }
 func (d *Destination) ListenPacketContext(ctx context.Context, network, address string) (*PacketConn, error) {
-	protocol, err := d.resolvePacketProtocol(network)
-	if err != nil {
-		return nil, &net.OpError{Op: "listen", Net: network, Err: err}
-	}
-	s, err := d.listenPacket(ctx, network, address, protocol)
+	s, err := d.listenPacket(ctx, network, address)
 	if err != nil {
 		return nil, err
 	}
@@ -117,17 +99,13 @@ func (d *Destination) ListenUnauthPacket(network, address string) (*UnauthPacket
 	return d.ListenUnauthPacketContext(context.Background(), network, address)
 }
 func (d *Destination) ListenUnauthPacketContext(ctx context.Context, network, address string) (*UnauthPacketConn, error) {
-	protocol, err := d.resolveUnauthPacketProtocol(network)
-	if err != nil {
-		return nil, &net.OpError{Op: "listen", Net: network, Err: err}
-	}
-	s, err := d.listenPacket(ctx, network, address, protocol)
+	s, err := d.listenPacket(ctx, network, address)
 	if err != nil {
 		return nil, err
 	}
 	return &UnauthPacketConn{socket: s}, nil
 }
-func (d *Destination) listenPacket(ctx context.Context, network, address string, protocol uint8) (_ *packetSocket, err error) {
+func (d *Destination) listenPacket(ctx context.Context, network, address string) (_ *packetSocket, err error) {
 	if ctx == nil {
 		panic("nil context")
 	}
@@ -147,14 +125,15 @@ func (d *Destination) listenPacket(ctx context.Context, network, address string,
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
-	if protocol == 0 {
-		return nil, ErrUnsupportedNetwork
+	ep, protocol, err := d.packetTarget(network)
+	if err != nil {
+		return nil, err
 	}
 	local, err = parseBindAddress(d.hash, address)
 	if err != nil {
 		return nil, err
 	}
-	bounded, ok := d.endpoint.(destination.BoundedDestinationEndpoint)
+	bounded, ok := ep.(destination.BoundedDestinationEndpoint)
 	if !ok {
 		return nil, ErrUnsupportedIdentity
 	}
@@ -163,7 +142,7 @@ func (d *Destination) listenPacket(ctx context.Context, network, address string,
 		maxPayload -= 34
 	}
 	if protocol == 17 || protocol == 19 {
-		sizing, ok := d.endpoint.(destination.DatagramPayloadEndpoint)
+		sizing, ok := ep.(destination.DatagramPayloadEndpoint)
 		if !ok {
 			return nil, ErrUnsupportedIdentity
 		}
@@ -176,11 +155,11 @@ func (d *Destination) listenPacket(ctx context.Context, network, address string,
 		}
 	}
 	if protocol == 19 || protocol == 20 {
-		if _, ok := d.endpoint.(destination.ModernDatagramEndpoint); !ok {
+		if _, ok := ep.(destination.ModernDatagramEndpoint); !ok {
 			return nil, ErrUnsupportedIdentity
 		}
 	}
-	s := &packetSocket{owner: d, network: network, protocol: protocol, local: local, maxPayload: maxPayload, closeDone: make(chan struct{}), operations: make(map[*packetOperation]struct{})}
+	s := &packetSocket{owner: d, endpoint: ep, network: network, protocol: protocol, local: local, maxPayload: maxPayload, closeDone: make(chan struct{}), operations: make(map[*packetOperation]struct{})}
 	first, last := int(local.Port), int(local.Port)
 	if first == 0 {
 		first, last = 49152, 65535

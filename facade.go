@@ -1,16 +1,17 @@
 // Package ivnp embeds an in-memory-by-default I2P router and destination-owned
 // stream and datagram sockets. Router construction never creates a service
-// identity. RouterConfig.Networks plus Realm additionally compose overlay
-// network contexts — the official I2P netId=2 context and isolated IVNP
-// fabrics — under one membership realm.
+// identity. RouterConfig.Networks runs one independent I2P protocol context
+// per entry — the official netId=2 network and any dedicated networks — and a
+// Destination bound to several networks is reachable under one address on all
+// of them.
 package ivnp
 
 import (
 	"context"
 	"errors"
 	"io"
-	"math/rand/v2"
 	"net"
+	"strconv"
 	"sync"
 
 	"gosuda.org/ivnp/controlplane"
@@ -18,8 +19,6 @@ import (
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/node"
-	"gosuda.org/ivnp/overlay"
-	"gosuda.org/ivnp/state"
 )
 
 type (
@@ -41,25 +40,18 @@ type Router struct {
 	core             *node.EmbeddedRouter
 	resolver         NameResolver
 	defaultNetwork   string
+	networkNames     map[string]struct{}
 	packetBudget     destination.ByteBudget
 	packetWrites     chan struct{}
 	packetQueueLimit int64
 	ctx              context.Context
 	cancel           context.CancelFunc
-	// overlay, realmFabrics, fabricNames, realmPrivacy, and realmRouting are
-	// populated when RouterConfig.Realm is set; overlay is nil otherwise.
-	overlay      *node.OverlayBridge
-	realmFabrics []FabricID
-	fabricNames  map[string]FabricID
-	realmPrivacy PrivacyClass
-	realmRouting DataRouting
-	overlayPorts map[uint16]struct{}
-	mu           sync.Mutex
-	closed       bool
-	children     map[*Destination]struct{}
-	creating     sync.WaitGroup
-	closeOnce    sync.Once
-	closeErr     error
+	mu               sync.Mutex
+	closed           bool
+	children         map[*Destination]struct{}
+	creating         sync.WaitGroup
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 // NewRouter starts local infrastructure. It does not wait for tunnel readiness.
@@ -68,202 +60,60 @@ func NewRouter(ctx context.Context, cfg RouterConfig) (*Router, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	settings, options, spec, err := routerSettings(cfg)
+	specs, def, err := networkSpecs(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return newRouter(ctx, cfg, settings, options, spec)
+	return newRouter(ctx, cfg, specs, def)
 }
 
 // newRouter keeps host transport injection at the composition boundary for
 // deterministic embedding scenarios without exporting daemon options.
-func newRouter(ctx context.Context, cfg RouterConfig, settings state.ConfigurationOperating, options controlplane.ControllerOptions, spec *node.OverlaySpec) (*Router, error) {
-	core, err := node.NewEmbeddedRouterWithOverlay(ctx, settings, options, spec)
-	// The bridge keeps its own realm key copy; the spec's is dead once Open
-	// returns, success or failure.
-	if spec != nil {
-		clear(spec.Realm.PSK)
-	}
+func newRouter(ctx context.Context, cfg RouterConfig, specs []node.NetworkSpec, def string) (*Router, error) {
+	core, err := node.NewEmbeddedRouterNetworks(ctx, specs)
 	if err != nil {
 		return nil, err
 	}
 	if err = ctx.Err(); err != nil {
 		return nil, errors.Join(err, core.Close())
 	}
-	defaultNet, err := resolveDefaultNetwork(cfg)
-	if err != nil {
-		return nil, errors.Join(err, core.Close())
-	}
 	lifetime, cancel := context.WithCancel(context.Background())
-	r := &Router{
+	return &Router{
 		core: core, resolver: cfg.Resolver,
-		defaultNetwork:   defaultNet,
+		defaultNetwork:   def,
+		networkNames:     contextNames(specs),
 		packetBudget:     newPacketBudget(cfg.Limits.PacketQueueBytes),
 		packetWrites:     make(chan struct{}, cfg.Limits.MaxPendingPacketWrites),
 		packetQueueLimit: cfg.Limits.PacketQueueBytes,
 		ctx:              lifetime, cancel: cancel, children: make(map[*Destination]struct{}),
-		overlayPorts: make(map[uint16]struct{}),
+	}, nil
+}
+
+func contextNames(specs []node.NetworkSpec) map[string]struct{} {
+	names := make(map[string]struct{}, len(specs))
+	for _, spec := range specs {
+		names[spec.Name] = struct{}{}
 	}
-	if bridge := core.Overlay(); bridge != nil {
-		r.overlay = bridge
-		r.realmFabrics = bridge.RealmFabrics()
-		realm := cfg.Realm
-		if realm == nil {
-			realm = cfg.Policy
-		}
-		if realm != nil {
-			r.realmPrivacy, r.realmRouting = realm.Privacy, realm.Routing
-		}
-		r.fabricNames = make(map[string]FabricID, len(cfg.Networks)+1)
-		for i := range cfg.Networks {
-			if cfg.Networks[i].Kind == NetworkIVNPFabric && cfg.Networks[i].Fabric != nil {
-				r.fabricNames[cfg.Networks[i].Name] = cfg.Networks[i].Fabric.ID
-			}
-		}
-		// The native context resolves only when it is realm-bound; an
-		// unbound name resolving would hide a misconfiguration until dial.
-		if realm != nil && realm.IncludeNative {
-			for i := range cfg.Networks {
-				if cfg.Networks[i].Kind == NetworkNativeI2P {
-					r.fabricNames[cfg.Networks[i].Name] = overlay.NativeI2PFabricID
-					break
-				}
-			}
-			r.fabricNames[networkNativeName] = overlay.NativeI2PFabricID
-		}
-	}
-	return r, nil
+	return names
 }
 
 func (r *Router) Hash() Hash { return r.core.Hash() }
 
-// DefaultNetwork returns the default network name configured or resolved for the router
-// ("i2p", an IVNP fabric name, or "ivnp").
+// DefaultNetwork returns the network name serving unqualified operations —
+// the configured DefaultNetwork, the netId=2 entry, or the first entry.
 func (r *Router) DefaultNetwork() string {
 	if r == nil {
 		return ""
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	return r.defaultNetwork
 }
 
-// Overlay returns the composed overlay host for direct domain access, or nil
-// when RouterConfig.Realm was not set.
-func (r *Router) Overlay() *OverlayHost {
-	if r == nil || r.overlay == nil {
-		return nil
-	}
-	return r.overlay.Host()
-}
-
-func (r *Router) claimOverlayPort(port uint16) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closed {
-		return net.ErrClosed
-	}
-	if r.overlayPorts == nil {
-		r.overlayPorts = make(map[uint16]struct{})
-	}
-	if _, inUse := r.overlayPorts[port]; inUse {
-		return ErrAddressInUse
-	}
-	r.overlayPorts[port] = struct{}{}
-	return nil
-}
-
-func (r *Router) releaseOverlayPort(port uint16) {
-	if port == 0 {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.overlayPorts != nil {
-		delete(r.overlayPorts, port)
-	}
-}
-
-func (r *Router) allocateEphemeralOverlayPort() (uint16, error) {
-	const (
-		ephemeralMin = 49152
-		ephemeralMax = 65535
-		span         = ephemeralMax - ephemeralMin + 1
-	)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closed {
-		return 0, net.ErrClosed
-	}
-	if r.overlayPorts == nil {
-		r.overlayPorts = make(map[uint16]struct{})
-	}
-	offset := rand.N(uint32(span))
-	for i := uint32(0); i < span; i++ {
-		candidate := uint16(ephemeralMin + (offset+i)%span)
-		if _, inUse := r.overlayPorts[candidate]; !inUse {
-			r.overlayPorts[candidate] = struct{}{}
-			return candidate, nil
-		}
-	}
-	return 0, ErrResourceLimit
-}
-
-// OverlayRealm returns the composed realm, or nil when no realm is configured.
-func (r *Router) OverlayRealm() *OverlayRealm {
-	if r == nil || r.overlay == nil {
-		return nil
-	}
-	return r.overlay.Realm()
-}
-
-// RegisterTransport registers a custom TransportProvider on the running router.
-func (r *Router) RegisterTransport(t TransportProvider) error {
-	return r.RegisterProvider(t)
-}
-
-// RegisterProvider registers an overlay provider (e.g. TransportProvider,
-// CredentialVerifier, IdentityProvider, TrustProvider) on the running router.
-func (r *Router) RegisterProvider(p any) error {
+// Networks returns the router's network names in configuration order.
+func (r *Router) Networks() []string {
 	if r == nil {
-		return net.ErrClosed
+		return nil
 	}
-	r.mu.Lock()
-	closed := r.closed
-	bridge := r.overlay
-	r.mu.Unlock()
-	if closed {
-		return net.ErrClosed
-	}
-	if bridge == nil {
-		return &ConfigError{Field: "Overlay", Err: ErrOverlayRequired}
-	}
-	return bridge.RegisterProvider(p)
-}
-
-// resolveNetworkNames maps destination network names to fabric identities.
-// An empty selection admits every realm-bound fabric; a name resolving to a
-// fabric the realm did not bind fails here rather than at dial time.
-func (r *Router) resolveNetworkNames(names []string) (map[FabricID]struct{}, error) {
-	if len(names) == 0 {
-		return nil, nil
-	}
-	bound := make(map[FabricID]struct{}, len(r.realmFabrics))
-	for _, id := range r.realmFabrics {
-		bound[id] = struct{}{}
-	}
-	out := make(map[FabricID]struct{}, len(names))
-	for _, name := range names {
-		id, ok := r.fabricNames[name]
-		if !ok {
-			return nil, &ConfigError{Field: "Networks", Err: ErrInvalidConfig}
-		}
-		if _, ok := bound[id]; !ok {
-			return nil, &ConfigError{Field: "Networks", Err: ErrInvalidConfig}
-		}
-		out[id] = struct{}{}
-	}
-	return out, nil
+	return r.core.Networks()
 }
 
 func (r *Router) WaitReady(ctx context.Context) error {
@@ -280,7 +130,8 @@ func (r *Router) WaitReady(ctx context.Context) error {
 }
 
 // NewDestination owns its cloned keys until Close. Successful construction
-// observes a usable tunnel pair and confirmed publication, not permanent reachability.
+// observes a usable tunnel pair and confirmed publication on every bound
+// network, not permanent reachability.
 func (r *Router) NewDestination(ctx context.Context, cfg DestinationConfig) (*Destination, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -294,106 +145,78 @@ func (r *Router) NewDestination(ctx context.Context, cfg DestinationConfig) (*De
 	r.mu.Unlock()
 	defer r.creating.Done()
 
-	// An overlay service needs the destination's signing key for its contact
-	// identity; a nil identity is generated here and owned by the Destination.
-	// The generated identity is the legacy ElGamal/Ed25519 shape the I2P
-	// streaming layer requires.
-	var generated *foundation.LocalDestination
-	if cfg.Overlay != nil && len(cfg.Networks) == 0 && len(cfg.Overlay.Networks) > 0 {
-		cfg.Networks = append([]string(nil), cfg.Overlay.Networks...)
+	nets := cfg.Networks
+	if len(nets) == 0 {
+		nets = []string{r.defaultNetwork}
 	}
-	if len(cfg.Networks) > 0 && cfg.Overlay == nil {
-		return nil, &ConfigError{Field: "Networks", Err: ErrInvalidConfig}
-	}
-	if cfg.Overlay != nil {
-		if r.overlay == nil {
-			return nil, &ConfigError{Field: "Overlay", Err: ErrOverlayRequired}
+	seen := make(map[string]struct{}, len(nets))
+	for i, name := range nets {
+		if _, dup := seen[name]; dup {
+			return nil, &ConfigError{Field: "Networks[" + strconv.Itoa(i) + "]", Err: ErrInvalidConfig}
 		}
-		if cfg.Identity == nil {
-			generated, err := foundation.GenerateLegacyLocalDestination()
-			if err != nil {
-				return nil, err
-			}
-			cfg.Identity = generated
+		seen[name] = struct{}{}
+		if _, known := r.networkNames[name]; !known {
+			return nil, &ConfigError{Field: "Networks[" + strconv.Itoa(i) + "]", Err: ErrInvalidConfig}
 		}
 	}
-	defer func() {
-		if generated != nil {
-			generated.ReleaseSensitive()
-		}
-	}()
-
 	spec, err := destinationSpec(cfg)
 	if err != nil {
 		return nil, err
 	}
 	defer wipeDestinationSpec(&spec)
+	if spec.Local == nil {
+		// One identity must be shared by every bound network — letting each
+		// context generate its own would give the destination a different
+		// address per network.
+		var generated *foundation.LocalDestination
+		if spec.Policy.Encrypted {
+			generated, err = foundation.GenerateEncryptedLocalDestination()
+		} else {
+			generated, err = foundation.GenerateLegacyLocalDestination()
+		}
+		if err != nil {
+			return nil, err
+		}
+		defer generated.ReleaseSensitive()
+		spec.Local = generated
+	}
 	if cfg.PacketQueue.MaxBytes > r.packetQueueLimit {
 		return nil, &ConfigError{Field: "PacketQueue.MaxBytes", Err: ErrInvalidConfig}
 	}
 	setup, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(r.ctx, cancel)
 	defer func() { stop(); cancel() }()
-	endpoint, err := r.core.NewDestination(setup, spec)
-	if err != nil {
-		if r.ctx.Err() != nil {
-			return nil, errors.Join(net.ErrClosed, err)
+	endpoints := make(map[string]destination.DestinationEndpoint, len(nets))
+	for _, name := range nets {
+		endpoint, err := r.core.NewDestinationOn(setup, name, spec)
+		if err == nil {
+			err = setup.Err()
 		}
-		switch {
-		case errors.Is(err, controlplane.ErrTooManyDestinations):
-			err = errors.Join(ErrResourceLimit, err)
-		case errors.Is(err, dataplane.RouterErrDestinationExists), errors.Is(err, controlplane.ErrDuplicateDestination):
-			err = errors.Join(ErrIdentityInUse, err)
-		}
-		return nil, err
-	}
-	if err = setup.Err(); err != nil {
-		return nil, errors.Join(err, endpoint.Close())
-	}
-	var svc *overlay.Service
-	var fabrics map[FabricID]struct{}
-	var overlaySpec *overlay.ServiceSpec
-	var activePort uint16
-	if cfg.Overlay != nil {
-		if fabrics, err = r.resolveNetworkNames(cfg.Networks); err != nil {
-			return nil, errors.Join(err, endpoint.Close())
-		}
-		identity, err := cfg.Identity.Identity()
 		if err != nil {
-			return nil, errors.Join(err, endpoint.Close())
-		}
-		protocols := cfg.Overlay.Protocols
-		if len(protocols) == 0 {
-			protocols = []EndpointProtocol{EndpointProtocolIVNPStream, EndpointProtocolLegacyStream}
-		}
-		svcSpec := overlay.ServiceSpec{
-			Destination: identity.Bytes(), Port: cfg.Overlay.Port,
-			Protocols: protocols, Publication: cfg.Overlay.Publication,
-			Privacy:      orPrivacy(cfg.Overlay.Privacy, r.realmPrivacy),
-			Routing:      orRouting(cfg.Overlay.Routing, r.realmRouting),
-			DualPresence: cfg.Overlay.DualPresence, PublicationFloor: cfg.Overlay.Floor,
-		}
-		overlaySpec = &svcSpec
-		if cfg.Overlay.Port != 0 {
-			if err = r.claimOverlayPort(cfg.Overlay.Port); err != nil {
-				return nil, errors.Join(err, endpoint.Close())
+			for _, bound := range endpoints {
+				err = errors.Join(err, bound.Close())
 			}
-			activePort = cfg.Overlay.Port
-			if svc, err = r.overlay.OpenService(svcSpec, cfg.Identity); err != nil {
-				r.releaseOverlayPort(activePort)
-				return nil, errors.Join(err, endpoint.Close())
+			if r.ctx.Err() != nil {
+				return nil, errors.Join(net.ErrClosed, err)
 			}
+			switch {
+			case errors.Is(err, controlplane.ErrTooManyDestinations):
+				err = errors.Join(ErrResourceLimit, err)
+			case errors.Is(err, dataplane.RouterErrDestinationExists), errors.Is(err, controlplane.ErrDuplicateDestination):
+				err = errors.Join(ErrIdentityInUse, err)
+			}
+			return nil, err
 		}
+		endpoints[name] = endpoint
 	}
+	first := endpoints[nets[0]]
 	lifetime, release := context.WithCancel(r.ctx)
 	d := &Destination{
-		endpoint: endpoint, owner: r, ctx: lifetime, cancel: release,
-		hash: endpoint.Hash(), b32: endpoint.B32(), public: endpoint.Destination(),
+		endpoints: endpoints, nets: append([]string(nil), nets...), owner: r,
+		ctx: lifetime, cancel: release,
+		hash: first.Hash(), b32: first.B32(), public: first.Destination(),
 		packetQueue: cfg.PacketQueue, resources: make(map[io.Closer]struct{}),
-		service: svc, fabrics: fabrics, ownedIdentity: generated,
-		overlaySpec: overlaySpec, overlayIdent: cfg.Identity, activePort: activePort,
 	}
-	generated = nil
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -402,28 +225,6 @@ func (r *Router) NewDestination(ctx context.Context, cfg DestinationConfig) (*De
 	r.children[d] = struct{}{}
 	r.mu.Unlock()
 	return d, nil
-}
-
-// NewOverlayDestination creates a Destination configured with an overlay service
-// on the given networks. The service logical port is bound dynamically when
-// Listen is called (or an ephemeral port is assigned if ":0" is requested).
-// If networks is empty, all realm-bound networks are permitted.
-func (r *Router) NewOverlayDestination(ctx context.Context, networks ...string) (*Destination, error) {
-	return r.NewOverlayDestinationWithPort(ctx, 0, networks...)
-}
-
-// NewOverlayDestinationWithPort creates a Destination pre-configured with a specific
-// fixed overlay port.
-func (r *Router) NewOverlayDestinationWithPort(ctx context.Context, port uint16, networks ...string) (*Destination, error) {
-	cfg := DefaultDestinationConfig()
-	cfg.Networks = append([]string(nil), networks...)
-	cfg.Overlay = &ServiceProfile{
-		Port:         port,
-		Protocols:    []EndpointProtocol{EndpointProtocolIVNPStream, EndpointProtocolLegacyStream},
-		Publication:  PublicationLS2,
-		DualPresence: true,
-	}
-	return r.NewDestination(ctx, cfg)
 }
 
 func (r *Router) Close() error {
@@ -448,10 +249,12 @@ func (r *Router) Close() error {
 	return r.closeErr
 }
 
-// Destination identifies one application and owns all its network resources.
-// Public identity snapshots remain available after Close. Do not copy a Destination.
+// Destination identifies one application and owns all its network resources:
+// one endpoint per bound network, all carrying the same identity. Public
+// identity snapshots remain available after Close. Do not copy a Destination.
 type Destination struct {
-	endpoint    destination.DestinationEndpoint
+	endpoints   map[string]destination.DestinationEndpoint
+	nets        []string
 	owner       *Router
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -459,30 +262,40 @@ type Destination struct {
 	b32         string
 	public      []byte
 	packetQueue PacketQueueConfig
-	// service is the destination's overlay service; fabrics bounds its
-	// allowed networks; ownedIdentity is the facade-generated identity
-	// released at Close.
-	service       *overlay.Service
-	fabrics       map[FabricID]struct{}
-	ownedIdentity *foundation.LocalDestination
-	overlaySpec   *overlay.ServiceSpec
-	overlayIdent  *foundation.LocalDestination
-	activePort    uint16
-	mu            sync.Mutex
-	closed        bool
-	resources     map[io.Closer]struct{}
-	operations    sync.WaitGroup
-	closeOnce     sync.Once
-	closeErr      error
+	mu          sync.Mutex
+	closed      bool
+	resources   map[io.Closer]struct{}
+	operations  sync.WaitGroup
+	closeOnce   sync.Once
+	closeErr    error
 }
 
 func (d *Destination) Hash() Hash { return d.hash }
 
-// B32 is the service hostname without a port, URL scheme, or path.
+// B32 is the service hostname without a port, URL scheme, or path. The same
+// address reaches this destination on every bound network.
 func (d *Destination) B32() string { return d.b32 }
 
 // Destination returns an independent copy of the I2P-base64 public identity.
 func (d *Destination) Destination() []byte { return append([]byte(nil), d.public...) }
+
+// Networks returns the destination's bound network names in preference order —
+// the order unqualified dials race them in.
+func (d *Destination) Networks() []string {
+	if d == nil {
+		return nil
+	}
+	return append([]string(nil), d.nets...)
+}
+
+// primaryEndpoint returns the endpoint serving unqualified single-network
+// operations: the router default when bound, else the first bound network.
+func (d *Destination) primaryEndpoint() destination.DestinationEndpoint {
+	if ep := d.endpoints[d.owner.defaultNetwork]; ep != nil {
+		return ep
+	}
+	return d.endpoints[d.nets[0]]
+}
 
 func (d *Destination) checkOpen() error {
 	d.mu.Lock()
@@ -521,221 +334,6 @@ func (d *Destination) unregisterResource(resource io.Closer) {
 	d.mu.Unlock()
 }
 
-// EndpointID returns the destination's 32-byte overlay endpoint identity.
-func (d *Destination) EndpointID() EndpointID {
-	if d == nil {
-		return EndpointID{}
-	}
-	return EndpointID(d.hash)
-}
-
-// OverlayService returns the destination's realm service, or nil when
-// DestinationConfig.Overlay was not set or has not yet bound a service.
-func (d *Destination) OverlayService() *OverlayService {
-	if d == nil {
-		return nil
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.service
-}
-
-func (d *Destination) ensureOverlayService(port uint16, allocateEphemeral bool) (*overlay.Service, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.closed || d.ctx.Err() != nil {
-		return nil, net.ErrClosed
-	}
-	if d.service != nil {
-		if port != 0 && d.service.Port() != port {
-			return nil, ErrAddressInvalid
-		}
-		return d.service, nil
-	}
-	if d.overlaySpec == nil {
-		return nil, ErrOverlayRequired
-	}
-	targetPort := port
-	claimed := false
-	if targetPort == 0 {
-		if d.overlaySpec.Port != 0 {
-			targetPort = d.overlaySpec.Port
-		} else if allocateEphemeral || d.overlaySpec.DualPresence || d.overlaySpec.Publication == PublicationLS2 || d.overlaySpec.Publication == PublicationEncryptedLS2 {
-			p, err := d.owner.allocateEphemeralOverlayPort()
-			if err != nil {
-				return nil, err
-			}
-			targetPort = p
-			claimed = true
-		}
-	} else if d.overlaySpec.Port != 0 && d.overlaySpec.Port != targetPort {
-		return nil, ErrAddressInvalid
-	}
-	if !claimed && targetPort != 0 {
-		if err := d.owner.claimOverlayPort(targetPort); err != nil {
-			return nil, err
-		}
-		claimed = true
-	}
-	spec := *d.overlaySpec
-	spec.Port = targetPort
-	svc, err := d.owner.overlay.OpenService(spec, d.overlayIdent)
-	if err != nil {
-		if claimed {
-			d.owner.releaseOverlayPort(targetPort)
-		}
-		return nil, err
-	}
-	d.service = svc
-	d.activePort = targetPort
-	return svc, nil
-}
-
-// DialOverlay opens a realm connection to target. policy left empty selects
-// the destination's allowed networks — DestinationConfig.Networks, or
-// every realm-bound fabric when unset — and a non-empty set is intersected
-// with them, so a destination restricted to a private fabric can never fall
-// back to public I2P. Zero policy fields select neutral defaults:
-// RouteClasses and EndpointProtocols admit everything the service allows,
-// Privacy adds no constraint beyond the realm's, Fallback prefers IVNP, and
-// Failover reconnects rather than resuming.
-func (d *Destination) DialOverlay(ctx context.Context, target OverlayTarget, policy ...OverlayDialPolicy) (*OverlayConnection, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := d.beginOperation(); err != nil {
-		return nil, err
-	}
-	defer d.endOperation()
-	svc, err := d.ensureOverlayService(0, false)
-	if err != nil {
-		return nil, &net.OpError{Op: "dial", Net: "overlay", Err: err}
-	}
-	var p OverlayDialPolicy
-	if len(policy) > 0 {
-		p = policy[0]
-	}
-	p.Fabrics = d.allowedFabrics(p.Fabrics)
-	if len(p.Fabrics) == 0 {
-		return nil, &net.OpError{Op: "dial", Net: "overlay", Err: ErrInvalidConfig}
-	}
-	if len(p.RouteClasses) == 0 {
-		p.RouteClasses = []RouteClass{RouteNativeI2P, RouteDirect, RouteRouted}
-	}
-	if len(p.EndpointProtocols) == 0 {
-		p.EndpointProtocols = []EndpointProtocol{EndpointProtocolIVNPStream, EndpointProtocolLegacyStream}
-	}
-	if p.Privacy == 0 {
-		p.Privacy = PrivacyExplicitDirect
-	}
-	if p.Fallback == 0 {
-		p.Fallback = ProtocolIVNPPreferred
-	}
-	if p.Failover == 0 {
-		p.Failover = FailoverReconnect
-	}
-	conn, err := svc.Dial(ctx, target, p)
-	if err != nil && d.ctx.Err() != nil {
-		return nil, errors.Join(net.ErrClosed, err)
-	}
-	return conn, err
-}
-
-// DialOverlayWithPolicy opens a realm connection to target with explicit policy.
-func (d *Destination) DialOverlayWithPolicy(ctx context.Context, target OverlayTarget, policy OverlayDialPolicy) (*OverlayConnection, error) {
-	return d.DialOverlay(ctx, target, policy)
-}
-
-// DialOverlayTarget opens a realm connection to target with default neutral policies.
-func (d *Destination) DialOverlayTarget(ctx context.Context, target OverlayTarget) (*OverlayConnection, error) {
-	return d.DialOverlay(ctx, target)
-}
-
-// DialOverlayAddr opens a realm connection to an address string with default neutral policies.
-func (d *Destination) DialOverlayAddr(ctx context.Context, address string) (*OverlayConnection, error) {
-	target, err := ParseOverlayTarget(address)
-	if err != nil {
-		return nil, err
-	}
-	return d.DialOverlay(ctx, target)
-}
-
-// ListenOverlay opens the service's bounded inbound queue under policy using context.Background.
-func (d *Destination) ListenOverlay(policy OverlayListenPolicy) (*OverlayListener, error) {
-	return d.ListenOverlayContext(context.Background(), policy)
-}
-
-// ListenOverlayContext opens the service's bounded inbound queue under policy. Zero
-// fields select neutral defaults — the service's full protocol set, every
-// route class the realm routing admits, and no privacy constraint beyond the
-// service's own.
-func (d *Destination) ListenOverlayContext(ctx context.Context, policy OverlayListenPolicy) (*OverlayListener, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := d.beginOperation(); err != nil {
-		return nil, err
-	}
-	defer d.endOperation()
-	svc, err := d.ensureOverlayService(0, true)
-	if err != nil {
-		return nil, &net.OpError{Op: "listen", Net: "overlay", Err: err}
-	}
-	if len(policy.Protocols) == 0 {
-		policy.Protocols = []EndpointProtocol{EndpointProtocolIVNPStream, EndpointProtocolLegacyStream}
-	}
-	if len(policy.Classes) == 0 {
-		policy.Classes = []RouteClass{RouteNativeI2P, RouteDirect, RouteRouted}
-	}
-	if policy.Privacy == 0 {
-		policy.Privacy = PrivacyExplicitDirect
-	}
-	return svc.Listen(policy)
-}
-
-// allowedFabrics intersects a caller's requested fabric set with the
-// destination's configured networks. A nil destination set means every
-// realm-bound fabric.
-func (d *Destination) allowedFabrics(request []FabricID) []FabricID {
-	var allowed map[FabricID]struct{}
-	if d.fabrics != nil {
-		allowed = d.fabrics
-	} else {
-		allowed = make(map[FabricID]struct{}, len(d.owner.realmFabrics))
-		for _, id := range d.owner.realmFabrics {
-			allowed[id] = struct{}{}
-		}
-	}
-	if len(request) == 0 {
-		out := make([]FabricID, 0, len(allowed))
-		for id := range allowed {
-			out = append(out, id)
-		}
-		return out
-	}
-	out := make([]FabricID, 0, len(request))
-	for _, id := range request {
-		if _, ok := allowed[id]; ok {
-			out = append(out, id)
-		}
-	}
-	return out
-}
-
-func orPrivacy(v, fallback PrivacyClass) PrivacyClass {
-	if v == 0 {
-		return fallback
-	}
-	return v
-}
-
-func orRouting(v, fallback DataRouting) DataRouting {
-	if v == 0 {
-		return fallback
-	}
-	return v
-}
-
 func (d *Destination) WaitReady(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -744,18 +342,22 @@ func (d *Destination) WaitReady(ctx context.Context) error {
 		return err
 	}
 	defer d.endOperation()
-	ready, ok := d.endpoint.(destination.ReadyDestinationEndpoint)
-	if !ok {
-		return ErrUnsupportedIdentity
-	}
 	waitCtx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(d.ctx, cancel)
 	defer func() { stop(); cancel() }()
-	err := ready.WaitReady(waitCtx)
-	if d.ctx.Err() != nil {
-		return errors.Join(net.ErrClosed, err)
+	for _, name := range d.nets {
+		ready, ok := d.endpoints[name].(destination.ReadyDestinationEndpoint)
+		if !ok {
+			return ErrUnsupportedIdentity
+		}
+		if err := ready.WaitReady(waitCtx); err != nil {
+			if d.ctx.Err() != nil {
+				return errors.Join(net.ErrClosed, err)
+			}
+			return err
+		}
 	}
-	return err
+	return nil
 }
 
 func (d *Destination) ResolveAddr(ctx context.Context, address string) (Addr, error) {
@@ -792,19 +394,10 @@ func (d *Destination) Close() error {
 		for _, resource := range resources {
 			d.closeErr = errors.Join(d.closeErr, resource.Close())
 		}
-		// The overlay service closes before the native endpoint: inbound
-		// fabric channels stop first, then the I2P destination tears down.
-		if d.service != nil {
-			d.closeErr = errors.Join(d.closeErr, d.service.Close())
+		for _, name := range d.nets {
+			d.closeErr = errors.Join(d.closeErr, d.endpoints[name].Close())
 		}
-		if d.activePort != 0 {
-			d.owner.releaseOverlayPort(d.activePort)
-		}
-		d.closeErr = errors.Join(d.closeErr, d.endpoint.Close())
 		d.operations.Wait()
-		if d.ownedIdentity != nil {
-			d.ownedIdentity.ReleaseSensitive()
-		}
 		d.owner.mu.Lock()
 		delete(d.owner.children, d)
 		d.owner.mu.Unlock()

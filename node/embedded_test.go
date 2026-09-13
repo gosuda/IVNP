@@ -30,10 +30,10 @@ func TestEmbeddedRouterConstructionContextDoesNotOwnLifetime(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = router.Close() })
 	cancel()
-	if status := router.controller.Status(); !status.Running {
+	if status := router.Default().Status(); !status.Running {
 		t.Fatalf("constructor cancellation stopped router: %+v", status)
 	}
-	if destinations, err := router.controller.ListDestinations(t.Context()); err != nil || len(destinations) != 0 {
+	if destinations, err := router.Default().ListDestinations(t.Context()); err != nil || len(destinations) != 0 {
 		t.Fatalf("implicit destinations = %v, %v", destinations, err)
 	}
 	if err := router.Close(); err != nil {

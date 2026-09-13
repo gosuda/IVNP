@@ -11,7 +11,7 @@ IVNP follows a strict unidirectional layered DAG architecture. Subsystems are or
 | **L6** | Client Services | Client-facing protocols (SAM, HTTP/SOCKS5 proxies, address book services) |
 | **L5** | Control Plane (`controlplane`) | NetDB, peer and tunnel policy, destination lifecycle, publication, route preparation, and durable control state |
 | **L4** | Data Plane (`dataplane`) | Established transport I/O, installed circuit and route execution, cryptographic session state, streaming, and bounded packet queues |
-| **L3** | Domain Interfaces & State | Shared destination/stream interfaces, configuration parsing, encrypted state storage, and the `overlay` v3 object model (typed identities, realm/service policy, provider contracts, contact projection codecs) |
+| **L3** | Domain Interfaces & State | Shared destination/stream interfaces, configuration parsing, and encrypted state storage |
 | **L2** | Foundation & Observability | Domain identities, wire structures, crypto verification, metrics registry, and health reporting |
 | **L1** | Cryptography | Stateless cryptographic primitives and signature algorithms |
 | **L0** | Internal Utilities | Wire cursor/writer primitives, bounded memory pools, slabs, and buffer management |

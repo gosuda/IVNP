@@ -263,7 +263,7 @@ func (s *packetSocket) write(p []byte, target Addr) (n int, err error) {
 		return 0, s.operationError(op, op.ctx.Err())
 	}
 	if target.Hash != s.local.Hash {
-		preparing, ok := s.owner.endpoint.(destination.PreparingDestinationEndpoint)
+		preparing, ok := s.endpoint.(destination.PreparingDestinationEndpoint)
 		if !ok {
 			return 0, ErrUnsupportedIdentity
 		}
@@ -288,11 +288,11 @@ func (s *packetSocket) write(p []byte, target Addr) (n int, err error) {
 	var encoded int
 	switch s.protocol {
 	case 17:
-		encoded, err = s.owner.endpoint.MarshalDatagramV1To(buffer[:], p)
+		encoded, err = s.endpoint.MarshalDatagramV1To(buffer[:], p)
 	case 19:
-		encoded, err = s.owner.endpoint.(destination.ModernDatagramEndpoint).MarshalDatagramV2To(buffer[:], target.Hash, p)
+		encoded, err = s.endpoint.(destination.ModernDatagramEndpoint).MarshalDatagramV2To(buffer[:], target.Hash, p)
 	case 20:
-		encoded, err = s.owner.endpoint.(destination.ModernDatagramEndpoint).MarshalDatagramV3To(buffer[:], p)
+		encoded, err = s.endpoint.(destination.ModernDatagramEndpoint).MarshalDatagramV3To(buffer[:], p)
 	case 18:
 		encoded = copy(buffer[:], p)
 	}
@@ -305,7 +305,7 @@ func (s *packetSocket) write(p []byte, target Addr) (n int, err error) {
 	if op.ctx.Err() != nil {
 		return 0, s.operationError(op, op.ctx.Err())
 	}
-	err = s.owner.endpoint.SendMessage(op.ctx, destination.Delivery{From: s.local.Hash, To: target.Hash, FromPort: s.local.Port, ToPort: target.Port, Protocol: s.protocol, Payload: buffer[:encoded]})
+	err = s.endpoint.SendMessage(op.ctx, destination.Delivery{From: s.local.Hash, To: target.Hash, FromPort: s.local.Port, ToPort: target.Port, Protocol: s.protocol, Payload: buffer[:encoded]})
 	if err != nil {
 		return 0, s.operationError(op, err)
 	}

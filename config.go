@@ -5,24 +5,20 @@ import (
 	"crypto/ecdh"
 	"log/slog"
 	"net/netip"
-	"net/url"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/node"
 	"gosuda.org/ivnp/state"
 )
 
 type RouterConfig struct {
 	Persistence *PersistenceConfig
-	// NetworkID through Exploratory configure the official I2P network. When
-	// Networks is non-empty they must all be zero — the "i2p" entry carries
-	// them instead.
+	// NetworkID through Exploratory configure a single I2P context — the
+	// official network when NetworkID is 2. When Networks is non-empty they
+	// must all be zero; each entry carries them instead.
 	NetworkID   uint32
 	NTCP2       TransportConfig
 	SSU2        TransportConfig
@@ -31,22 +27,14 @@ type RouterConfig struct {
 	Limits      RouterLimits
 	Resolver    NameResolver
 	Logger      *slog.Logger
-	// DefaultNetwork specifies which network handles generic "tcp", "udp",
-	// and unqualified "stream"/"packet" operations. If empty, defaults to "i2p".
+	// DefaultNetwork names the Networks entry serving unqualified "tcp"/"udp"
+	// operations. Empty selects the netId=2 entry, or the first entry when no
+	// public context is configured.
 	DefaultNetwork string
-	// Networks is the multi-network list: exactly one NetworkNativeI2P entry
-	// named "i2p" plus any number of NetworkIVNPFabric entries. Non-empty
-	// requires Realm.
+	// Networks lists the I2P protocol contexts this router serves — one
+	// independent network (own transports, own NetDB) per entry, each scoped
+	// to its netId.
 	Networks []NetworkConfig
-	// Realm enables the overlay host over the configured networks.
-	Realm *RealmProfile
-	// Policy is an alias for Realm, configuring multi-network routing and discovery policies.
-	Policy *OverlayPolicy
-	// Transports registers custom TransportProviders with the overlay host.
-	Transports []TransportProvider
-	// CustomProviders registers custom overlay providers (e.g. CredentialVerifier,
-	// IdentityProvider, TrustProvider, etc.) with the overlay host.
-	CustomProviders []any
 }
 
 type PersistenceConfig struct {
@@ -108,12 +96,11 @@ type DestinationConfig struct {
 	Tunnels      TunnelPoolConfig
 	PacketQueue  PacketQueueConfig
 	RemoteAccess []RemoteLeaseSetAccess
-	// Networks names the RouterConfig.Networks entries this destination's
-	// overlay service may use; empty allows every realm-bound network.
+	// Networks names the RouterConfig.Networks entries this destination binds;
+	// each bound network gets its own endpoint over the same identity, so one
+	// destination address is reachable on every bound network. Empty binds the
+	// default network only. Unqualified dials race every bound network.
 	Networks []string
-	// Overlay opens a realm service for this destination. Its EndpointID is
-	// the destination hash, so b32 and ivnp:// names identify the same peer.
-	Overlay *ServiceProfile
 }
 
 type PacketQueueConfig struct {
@@ -204,148 +191,12 @@ func validateTransport(field string, transport TransportConfig) error {
 	return nil
 }
 
-func routerSettings(cfg RouterConfig) (state.ConfigurationOperating, controlplane.ControllerOptions, *node.OverlaySpec, error) {
-	var empty state.ConfigurationOperating
-	var options controlplane.ControllerOptions
-	native, spec, err := networkPlan(cfg)
+func routerSettings(cfg RouterConfig) (state.ConfigurationOperating, controlplane.ControllerOptions, error) {
+	specs, _, err := networkSpecs(cfg)
 	if err != nil {
-		return empty, options, nil, err
+		return state.ConfigurationOperating{}, controlplane.ControllerOptions{}, err
 	}
-	if native.NetworkID > 255 {
-		return empty, options, nil, invalidConfig("NetworkID")
-	}
-	if !native.NTCP2.Enabled && !native.SSU2.Enabled {
-		return empty, options, nil, invalidConfig("NTCP2.Enabled")
-	}
-	if err := validateTransport("NTCP2", native.NTCP2); err != nil {
-		return empty, options, nil, err
-	}
-	if err := validateTransport("SSU2", native.SSU2); err != nil {
-		return empty, options, nil, err
-	}
-	if err := validateTunnelPool("Exploratory", native.Exploratory); err != nil {
-		return empty, options, nil, err
-	}
-	if cfg.Limits.MaxDestinations < 1 {
-		return empty, options, nil, invalidConfig("Limits.MaxDestinations")
-	}
-	if cfg.Limits.PacketQueueBytes <= 0 {
-		return empty, options, nil, invalidConfig("Limits.PacketQueueBytes")
-	}
-	if cfg.Limits.MaxPendingPacketWrites <= 0 {
-		return empty, options, nil, invalidConfig("Limits.MaxPendingPacketWrites")
-	}
-	if native.Bootstrap.ReseedTimeout < 0 || (len(native.Bootstrap.ReseedURLs) > 0 && native.Bootstrap.ReseedTimeout == 0) {
-		return empty, options, nil, invalidConfig("Bootstrap.ReseedTimeout")
-	}
-	if native.Bootstrap.PriorityReseedTimeout < 0 || (len(native.Bootstrap.PriorityReseedURLs) > 0 && native.Bootstrap.PriorityReseedTimeout == 0) {
-		return empty, options, nil, invalidConfig("Bootstrap.PriorityReseedTimeout")
-	}
-	if len(native.Bootstrap.ReseedURLs) > 32 {
-		return empty, options, nil, invalidConfig("Bootstrap.ReseedURLs")
-	}
-	if len(native.Bootstrap.PriorityReseedURLs) > 32 {
-		return empty, options, nil, invalidConfig("Bootstrap.PriorityReseedURLs")
-	}
-	requiredQuery := "netid=" + strconv.FormatUint(uint64(native.NetworkID), 10)
-	for i, text := range native.Bootstrap.ReseedURLs {
-		u, err := url.Parse(text)
-		if err != nil {
-			return empty, options, nil, invalidConfig("Bootstrap.ReseedURLs[" + strconv.Itoa(i) + "]")
-		}
-		validEndpoint := len(text) <= 512 && u.Scheme == "https" && u.Hostname() != ""
-		forbiddenParts := u.User != nil || u.Fragment != "" || u.ForceQuery
-		if !validEndpoint || forbiddenParts || u.RawQuery != requiredQuery {
-			return empty, options, nil, invalidConfig("Bootstrap.ReseedURLs[" + strconv.Itoa(i) + "]")
-		}
-	}
-	for i, text := range native.Bootstrap.PriorityReseedURLs {
-		u, err := url.Parse(text)
-		if err != nil {
-			return empty, options, nil, invalidConfig("Bootstrap.PriorityReseedURLs[" + strconv.Itoa(i) + "]")
-		}
-		validEndpoint := len(text) <= 512 && u.Scheme == "https" && u.Hostname() != ""
-		forbiddenParts := u.User != nil || u.Fragment != "" || u.ForceQuery
-		if !validEndpoint || forbiddenParts || u.RawQuery != requiredQuery {
-			return empty, options, nil, invalidConfig("Bootstrap.PriorityReseedURLs[" + strconv.Itoa(i) + "]")
-		}
-	}
-	operating := state.ConfigurationDefaultOperating()
-	operating.DataDir, operating.StateDir, operating.StatePath, operating.KeyPath = "", "", "", ""
-	if cfg.Persistence != nil {
-		if cfg.Persistence.Directory == "" || strings.IndexByte(cfg.Persistence.Directory, 0) >= 0 {
-			return empty, options, nil, invalidConfig("Persistence.Directory")
-		}
-		directory, err := filepath.Abs(cfg.Persistence.Directory)
-		if err != nil {
-			return empty, options, nil, &ConfigError{Field: "Persistence.Directory", Err: err}
-		}
-		operating.DataDir, operating.StateDir = directory, directory
-		operating.StatePath, operating.KeyPath = filepath.Join(directory, "router.state"), filepath.Join(directory, "router.keys")
-		if cfg.Persistence.TempDir != "" {
-			if strings.IndexByte(cfg.Persistence.TempDir, 0) >= 0 {
-				return empty, options, nil, invalidConfig("Persistence.TempDir")
-			}
-			tempDir, err := filepath.Abs(cfg.Persistence.TempDir)
-			if err != nil {
-				return empty, options, nil, &ConfigError{Field: "Persistence.TempDir", Err: err}
-			}
-			operating.TempDir = tempDir
-		}
-		taintedCopy := !cfg.Persistence.DisableTaintedCopy
-		if cfg.Persistence.TaintedCopy {
-			taintedCopy = true
-		}
-		operating.State.TaintedCopy = taintedCopy
-		options.TaintedCopy = cfg.Persistence.TaintedCopy
-
-		promoteToMaster := true
-		if cfg.Persistence.PromoteToMaster != nil {
-			promoteToMaster = *cfg.Persistence.PromoteToMaster
-		}
-		operating.State.PromoteToMaster = promoteToMaster
-		options.PromoteToMaster = &promoteToMaster
-
-		lockRetry := cfg.Persistence.LockRetryInterval
-		if lockRetry <= 0 {
-			lockRetry = 15 * time.Second
-		}
-		operating.State.LockRetryInterval = lockRetry
-		options.LockRetryInterval = lockRetry
-	}
-	operating.Network = state.ConfigurationNetwork{ID: native.NetworkID}
-	for _, transport := range []TransportConfig{native.NTCP2, native.SSU2} {
-		if transport.Enabled {
-			operating.Network.IPv4 = operating.Network.IPv4 || transport.Bind.Addr().Is4()
-			operating.Network.IPv6 = operating.Network.IPv6 || transport.Bind.Addr().Is6()
-		}
-	}
-	operating.NTCP2, operating.SSU2 = runtimeTransport(native.NTCP2), runtimeTransport(native.SSU2)
-	operating.Reseed.Enabled = len(native.Bootstrap.ReseedURLs) != 0 || len(native.Bootstrap.PriorityReseedURLs) != 0
-	operating.Reseed.Required = false
-	operating.Reseed.PriorityEndpoints = append([]string(nil), native.Bootstrap.PriorityReseedURLs...)
-	operating.Reseed.PriorityTimeout = native.Bootstrap.PriorityReseedTimeout
-	operating.Reseed.Endpoints = append([]string(nil), native.Bootstrap.ReseedURLs...)
-	operating.Reseed.Timeout = native.Bootstrap.ReseedTimeout
-	operating.NetDB.BootstrapRouterInfoPaths = nil
-	operating.Control, operating.SOCKS5, operating.Metrics, operating.SAM = state.ConfigurationListener{}, state.ConfigurationListener{}, state.ConfigurationListener{}, state.ConfigurationListener{}
-	operating.HTTPProxy = state.ConfigurationHTTPProxy{}
-	operating.AddressBook = state.ConfigurationAddressBook{}
-	operating.NAT.NATPMPEndpoint, operating.NAT.UPnPEndpoint = netip.AddrPort{}, ""
-	operating.State.MaxDestinations = cfg.Limits.MaxDestinations
-	participation := nativeParticipation(native)
-	operating.Router.Transit = participation >= ParticipationWarm
-	operating.Router.Floodfill = participation == ParticipationContributor
-	pool := native.Exploratory
-	options.Embedded, options.Exploratory, options.Logger = true, &pool, cfg.Logger
-	options.BootstrapRouterInfos = make([][]byte, len(native.Bootstrap.RouterInfos))
-	for i, raw := range native.Bootstrap.RouterInfos {
-		options.BootstrapRouterInfos[i] = append([]byte(nil), raw...)
-	}
-	if spec != nil {
-		spec.NativeStateDir = operating.StateDir
-	}
-	return operating, options, spec, nil
+	return specs[0].Operating, specs[0].Options, nil
 }
 
 func runtimeTransport(cfg TransportConfig) state.ConfigurationTransport {

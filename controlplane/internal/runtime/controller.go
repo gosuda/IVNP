@@ -661,7 +661,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			}
 		}
 	}
-	database := netdb.NewDatabase(bundle.Router.Hash, cfg.NetDB.BucketCapacity)
+	database := netdb.NewDatabaseForNetwork(bundle.Router.Hash, cfg.NetDB.BucketCapacity, cfg.Network.ID)
 	if options.Embedded {
 		database.Routers().SetRouterLimit(netdb.BucketCount * cfg.NetDB.BucketCapacity)
 	}

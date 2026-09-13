@@ -1,10 +1,8 @@
 package netdb
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
-	"sort"
 	"sync"
 
 	"gosuda.org/ivnp/foundation"
@@ -23,10 +21,6 @@ type LocalLeaseSet2 struct {
 	offline  *foundation.OfflineSignature
 	mu       sync.RWMutex
 	leases   []foundation.NetworkDatabaseLease2
-	// options carries the record's netdb mapping entries — extension contracts
-	// such as x-ov.* / x-ivnp.* published verbatim alongside the leases. Empty
-	// by default — the canonical empty mapping.
-	options []foundation.MappingEntry
 }
 
 func NewLocalLeaseSet2(destination *foundation.LocalDestination) (*LocalLeaseSet2, error) {
@@ -123,7 +117,6 @@ func (s *LocalLeaseSet2) MarshalTo(dst []byte, nowMillis uint64, sign func([]byt
 	public := s.public
 	types := append([]foundation.CryptoKeyType(nil), s.types...)
 	leases := append([]foundation.NetworkDatabaseLease2(nil), s.leases...)
-	options := cloneMappingEntries(s.options)
 	offline := s.offline
 	s.mu.RUnlock()
 	if len(leases) == 0 || len(leases) > foundation.NetworkDatabaseMaxLeases {
@@ -180,11 +173,7 @@ func (s *LocalLeaseSet2) MarshalTo(dst []byte, nowMillis uint64, sign func([]byt
 	if keyCount == 0 || keyCount > 255 {
 		return 0, ErrLocalLeaseSet2
 	}
-	optionsLen, err := foundation.MappingEncodedLen(options)
-	if err != nil {
-		return 0, err
-	}
-	unsignedLen := len(identityBytes) + 8 + offlineLen + 2 + optionsLen + 1 + keyCount*(4+32) + 1 + len(leases)*40
+	unsignedLen := len(identityBytes) + 8 + offlineLen + 2 + 1 + keyCount*(4+32) + 1 + len(leases)*40
 	signatureLen, ok := signingType.SignatureLen()
 	if !ok || len(dst) < unsignedLen+signatureLen {
 		return 0, foundation.ErrDestinationSmall
@@ -203,14 +192,10 @@ func (s *LocalLeaseSet2) MarshalTo(dst []byte, nowMillis uint64, sign func([]byt
 		off += copy(dst[off:], offline.PublicKey)
 		off += copy(dst[off:], offline.Signature)
 	}
-	// Mapping entries — the canonical empty mapping by default — then every
-	// locally accepted encryption format in local preference order,
-	// independent of a resolver's parser order.
-	written, err := foundation.MarshalMappingTo(dst[off:], options)
-	if err != nil {
-		return 0, err
-	}
-	off += written
+	// Canonical empty mapping and every locally accepted encryption format in
+	// local preference order, independent of a resolver's parser order.
+	dst[off], dst[off+1] = 0, 0
+	off += 2
 	dst[off] = byte(keyCount)
 	off++
 	for _, cryptoType := range types {
@@ -237,37 +222,4 @@ func (s *LocalLeaseSet2) MarshalTo(dst []byte, nowMillis uint64, sign func([]byt
 	}
 	copy(dst[off:], signature)
 	return off + signatureLen, nil
-}
-
-// ReplaceOptions replaces the record's mapping entries atomically; a nil or
-// empty slice restores the canonical empty mapping. Entries are copied and
-// sorted by key — the wire format requires strict ascending order — so
-// callers may pass them in any order. Returns an error on oversized or
-// duplicate keys.
-func (s *LocalLeaseSet2) ReplaceOptions(entries []foundation.MappingEntry) error {
-	if s == nil {
-		return ErrLocalLeaseSet2
-	}
-	copied := cloneMappingEntries(entries)
-	sort.Slice(copied, func(i, j int) bool {
-		return bytes.Compare(copied[i].Key, copied[j].Key) < 0
-	})
-	if _, err := foundation.MappingEncodedLen(copied); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.options = copied
-	s.mu.Unlock()
-	return nil
-}
-
-// Options returns a defensive copy of the installed mapping entries in key
-// order.
-func (s *LocalLeaseSet2) Options() []foundation.MappingEntry {
-	if s == nil {
-		return nil
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return cloneMappingEntries(s.options)
 }

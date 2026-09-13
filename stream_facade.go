@@ -6,53 +6,67 @@ import (
 	"io"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gosuda.org/ivnp/interfaces/destination"
 )
+
+// dialHedgeDelay staggers each subsequent network leg of an unqualified dial.
+// The first bound network starts immediately; every further leg starts only
+// after the previous one had this much head start, so a fast dedicated network
+// wins without delaying a slow public fallback beyond one hedge interval.
+const dialHedgeDelay = 250 * time.Millisecond
+
+// namedEndpoint pairs a bound network name with its destination endpoint.
+type namedEndpoint struct {
+	name string
+	ep   destination.DestinationEndpoint
+}
+
+// dialResult is one raced leg's outcome; a non-nil conn must be either the
+// winner or closed by the caller.
+type dialResult struct {
+	conn net.Conn
+	err  error
+}
 
 type Dialer struct {
 	Destination *Destination
 	Timeout     time.Duration
 	Deadline    time.Time
 	LocalPort   uint16
-	// Policy optionally overrides overlay routing, fallback, and privacy options.
-	Policy OverlayDialPolicy
 }
 
 type ListenConfig struct {
 	Destination *Destination
-	// Policy optionally overrides overlay listener protocol, route class, and privacy options.
-	Policy OverlayListenPolicy
 }
 
-func (d *Destination) resolveStreamNetwork(network string) (targetNet string, isOverlay bool, err error) {
+// streamEndpoints resolves a stream network name to the bound endpoints it
+// addresses. "tcp"/"stream" and "ivnp" select every bound network in
+// preference order — the dial is a happy-eyeballs race. A configured network
+// name (with an optional "-stream" suffix) selects exactly that network.
+func (d *Destination) streamEndpoints(network string) ([]namedEndpoint, error) {
 	switch network {
-	case "tcp", "tcp4", "tcp6", "stream":
-		defaultNet := networkNativeName
-		if d != nil && d.owner != nil {
-			defaultNet = d.owner.DefaultNetwork()
-		}
-		if defaultNet == networkNativeName {
-			return networkNativeName, false, nil
-		}
-		return defaultNet, true, nil
-	case "i2p", "i2p-stream":
-		return networkNativeName, false, nil
-	case "ivnp", "ivnp-stream":
-		return "ivnp", true, nil
+	case "", "tcp", "tcp4", "tcp6", "stream", "ivnp", "ivnp-stream":
+		return d.allEndpoints(), nil
 	default:
-		target := strings.TrimSuffix(network, "-stream")
-		if d != nil && d.owner != nil {
-			if _, ok := d.owner.fabricNames[target]; ok {
-				return target, true, nil
-			}
+		name := strings.TrimSuffix(network, "-stream")
+		if ep := d.endpoints[name]; ep != nil {
+			return []namedEndpoint{{name: name, ep: ep}}, nil
 		}
-		return "", false, ErrUnsupportedNetwork
+		return nil, ErrUnsupportedNetwork
 	}
+}
+
+func (d *Destination) allEndpoints() []namedEndpoint {
+	eps := make([]namedEndpoint, 0, len(d.nets))
+	for _, name := range d.nets {
+		eps = append(eps, namedEndpoint{name: name, ep: d.endpoints[name]})
+	}
+	return eps
 }
 
 func (d *Destination) Dial(network, address string) (net.Conn, error) {
@@ -82,12 +96,9 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	if d.Timeout < 0 {
 		return nil, &net.OpError{Op: "dial", Net: network, Err: invalidConfig("Dialer.Timeout")}
 	}
-	targetNet, isOverlay, err := owner.resolveStreamNetwork(network)
+	eps, err := owner.streamEndpoints(network)
 	if err != nil {
 		return nil, &net.OpError{Op: "dial", Net: network, Err: err}
-	}
-	if isOverlay {
-		return d.dialOverlayNetwork(ctx, targetNet, address)
 	}
 	deadline := d.Deadline
 	if d.Timeout > 0 {
@@ -113,12 +124,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	}
 	var connection net.Conn
 	if err == nil {
-		backend, ok := owner.endpoint.(destination.StreamDestinationEndpoint)
-		if !ok {
-			err = ErrUnsupportedIdentity
-		} else {
-			connection, err = backend.DialStream(setup, target.String(), d.LocalPort)
-		}
+		connection, err = dialEndpoints(setup, eps, target.String(), d.LocalPort)
 	}
 	if err == nil {
 		err = setup.Err()
@@ -142,6 +148,75 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	return wrapped, nil
 }
 
+// dialEndpoints dials the target on every given endpoint in order, staggering
+// each leg by dialHedgeDelay. The first successful leg wins; losing legs are
+// canceled and any late-arriving connection they produced is closed.
+func dialEndpoints(setup context.Context, eps []namedEndpoint, target string, localPort uint16) (net.Conn, error) {
+	if len(eps) == 1 {
+		backend, ok := eps[0].ep.(destination.StreamDestinationEndpoint)
+		if !ok {
+			return nil, ErrUnsupportedIdentity
+		}
+		return backend.DialStream(setup, target, localPort)
+	}
+	results := make(chan dialResult, len(eps))
+	race, cancel := context.WithCancel(setup)
+	defer cancel()
+	var won atomic.Bool
+	for i := range eps {
+		go func(i int) {
+			if i > 0 {
+				timer := time.NewTimer(dialHedgeDelay * time.Duration(i))
+				select {
+				case <-timer.C:
+				case <-race.Done():
+					timer.Stop()
+					results <- dialResult{err: race.Err()}
+					return
+				}
+			}
+			backend, ok := eps[i].ep.(destination.StreamDestinationEndpoint)
+			var conn net.Conn
+			var err error
+			if !ok {
+				err = ErrUnsupportedIdentity
+			} else {
+				conn, err = backend.DialStream(race, target, localPort)
+			}
+			if err == nil && won.Load() {
+				err = conn.Close()
+				conn = nil
+			}
+			results <- dialResult{conn: conn, err: err}
+		}(i)
+	}
+	pending := len(eps)
+	var errs []error
+	for pending > 0 {
+		r := <-results
+		pending--
+		if r.err == nil && !won.Swap(true) {
+			cancel()
+			go drainDialResults(results, pending)
+			return r.conn, nil
+		}
+		if r.conn != nil {
+			_ = r.conn.Close()
+		}
+		errs = append(errs, r.err)
+	}
+	return nil, errors.Join(errs...)
+}
+
+// drainDialResults closes connections produced by legs that lost the race.
+func drainDialResults(results <-chan dialResult, n int) {
+	for i := 0; i < n; i++ {
+		if r := <-results; r.conn != nil {
+			_ = r.conn.Close()
+		}
+	}
+}
+
 func (d *Destination) Listen(network, address string) (net.Listener, error) {
 	return d.ListenContext(context.Background(), network, address)
 }
@@ -162,46 +237,61 @@ func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (ne
 		return nil, &net.OpError{Op: "listen", Net: network, Err: err}
 	}
 	defer d.endOperation()
-	targetNet, isOverlay, err := d.resolveStreamNetwork(network)
+	eps, err := d.streamEndpoints(network)
 	if err != nil {
 		return nil, &net.OpError{Op: "listen", Net: network, Err: err}
-	}
-	if isOverlay {
-		return lc.listenOverlayNetwork(ctx, targetNet, address)
 	}
 	local, err := parseBindAddress(d.hash, address)
 	if err != nil {
 		return nil, &net.OpError{Op: "listen", Net: network, Err: err}
 	}
-	backend, ok := d.endpoint.(destination.StreamDestinationEndpoint)
-	if !ok {
-		return nil, &net.OpError{Op: "listen", Net: network, Addr: local, Err: ErrUnsupportedIdentity}
-	}
 	setup, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(d.ctx, cancel)
 	defer func() { stop(); cancel() }()
-	listener, err := backend.ListenStream(setup, local.String())
-	if err == nil {
-		err = setup.Err()
+	subs := make([]*streamListener, 0, len(eps))
+	for _, ne := range eps {
+		backend, ok := ne.ep.(destination.StreamDestinationEndpoint)
+		if !ok {
+			err = ErrUnsupportedIdentity
+			break
+		}
+		var listener net.Listener
+		listener, err = backend.ListenStream(setup, local.String())
+		if err == nil {
+			err = setup.Err()
+		}
+		if err != nil {
+			break
+		}
+		bound, parseErr := ParseAddr(listener.Addr().String())
+		if parseErr != nil {
+			err = errors.Join(parseErr, listener.Close())
+			break
+		}
+		subs = append(subs, &streamListener{Listener: listener, owner: d, addr: bound, network: ne.name})
 	}
 	if err != nil {
-		if listener != nil {
-			err = errors.Join(err, listener.Close())
+		for _, sub := range subs {
+			err = errors.Join(err, sub.Listener.Close())
 		}
 		if d.ctx.Err() != nil {
 			err = errors.Join(net.ErrClosed, err)
 		}
 		return nil, &net.OpError{Op: "listen", Net: network, Addr: local, Err: err}
 	}
-	bound, err := ParseAddr(listener.Addr().String())
-	if err != nil {
-		return nil, errors.Join(err, listener.Close())
+	if len(subs) == 1 {
+		wrapped := subs[0]
+		wrapped.network = network
+		if err = d.registerResource(wrapped); err != nil {
+			return nil, errors.Join(err, wrapped.Close())
+		}
+		return wrapped, nil
 	}
-	wrapped := &streamListener{Listener: listener, owner: d, addr: bound, network: network}
-	if err = d.registerResource(wrapped); err != nil {
-		return nil, errors.Join(err, wrapped.Close())
+	merged := newMergedListener(d, subs)
+	if err = d.registerResource(merged); err != nil {
+		return nil, errors.Join(err, merged.Close())
 	}
-	return wrapped, nil
+	return merged, nil
 }
 
 func (lc *ListenConfig) ListenPacket(ctx context.Context, network, address string) (*PacketConn, error) {
@@ -304,110 +394,77 @@ func (l *streamListener) Close() error {
 	return l.err
 }
 
-func (d *Dialer) dialOverlayNetwork(ctx context.Context, network, address string) (net.Conn, error) {
-	owner := d.Destination
-	if owner.service == nil && owner.overlaySpec == nil {
-		return nil, &net.OpError{Op: "dial", Net: network, Err: ErrOverlayRequired}
-	}
-	target, err := ParseOverlayTarget(address)
-	if err != nil {
-		return nil, &net.OpError{Op: "dial", Net: network, Err: err}
-	}
-	policy := d.Policy
-	if network != "ivnp" && network != "ivnp-stream" {
-		if fabricID, ok := owner.owner.fabricNames[network]; ok {
-			policy.Fabrics = []FabricID{fabricID}
-		}
-	}
-	deadline := d.Deadline
-	if d.Timeout > 0 {
-		limit := time.Now().Add(d.Timeout)
-		if deadline.IsZero() || limit.Before(deadline) {
-			deadline = limit
-		}
-	}
-	setup, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(owner.ctx, cancel)
-	defer func() { stop(); cancel() }()
-	if parent, ok := setup.Deadline(); !deadline.IsZero() && (!ok || deadline.Before(parent)) {
-		limited, expire := context.WithDeadlineCause(setup, deadline, os.ErrDeadlineExceeded)
-		defer expire()
-		setup = limited
-	}
-	conn, err := owner.DialOverlay(setup, target, policy)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) && errors.Is(context.Cause(setup), os.ErrDeadlineExceeded) {
-			err = os.ErrDeadlineExceeded
-		}
-		if owner.ctx.Err() != nil {
-			err = errors.Join(net.ErrClosed, err)
-		}
-		return nil, &net.OpError{Op: "dial", Net: network, Addr: OverlayAddr{Endpoint: target.Endpoint.ID, Port: target.Port}, Err: err}
-	}
-	return conn, nil
-}
-
-func (lc *ListenConfig) listenOverlayNetwork(ctx context.Context, network, address string) (net.Listener, error) {
-	d := lc.Destination
-	if d.service == nil && d.overlaySpec == nil {
-		return nil, &net.OpError{Op: "listen", Net: network, Err: ErrOverlayRequired}
-	}
-	var reqPort uint16
-	if address != "" {
-		portStr := strings.TrimPrefix(address, ":")
-		if p, parseErr := strconv.ParseUint(portStr, 10, 16); parseErr == nil {
-			reqPort = uint16(p)
-		} else {
-			target, err := ParseOverlayTarget(address)
-			if err != nil {
-				return nil, &net.OpError{Op: "listen", Net: network, Err: err}
-			}
-			if target.Endpoint.ID != (EndpointID{}) && target.Endpoint.ID != d.EndpointID() {
-				return nil, &net.OpError{Op: "listen", Net: network, Addr: OverlayAddr{Endpoint: target.Endpoint.ID, Port: target.Port}, Err: ErrAddressInvalid}
-			}
-			reqPort = target.Port
-		}
-	}
-
-	svc, err := d.ensureOverlayService(reqPort, true)
-	if err != nil {
-		return nil, &net.OpError{Op: "listen", Net: network, Addr: OverlayAddr{Endpoint: d.EndpointID(), Port: reqPort}, Err: err}
-	}
-
-	policy := lc.Policy
-	listener, err := d.ListenOverlayContext(ctx, policy)
-	if err != nil {
-		return nil, &net.OpError{Op: "listen", Net: network, Addr: OverlayAddr{Endpoint: d.EndpointID(), Port: svc.Port()}, Err: err}
-	}
-
-	wrapped := &overlayNetListener{OverlayListener: listener, owner: d}
-	if err = d.registerResource(wrapped); err != nil {
-		return nil, errors.Join(err, wrapped.Close())
-	}
-	return wrapped, nil
-}
-
-type overlayNetListener struct {
-	*OverlayListener
+// mergedListener multiplexes Accept across one listener per bound network so
+// an unqualified Listen serves every network the destination is bound to.
+type mergedListener struct {
 	owner *Destination
+	subs  []*streamListener
+	addr  Addr
+	ch    chan acceptResult
+	done  chan struct{}
+	alive atomic.Int32
 	once  sync.Once
-	err   error
 }
 
-var _ net.Listener = (*overlayNetListener)(nil)
-
-func (l *overlayNetListener) Accept() (net.Conn, error) {
-	return l.OverlayListener.Accept(context.Background())
+type acceptResult struct {
+	conn net.Conn
+	err  error
 }
 
-func (l *overlayNetListener) Close() error {
+func newMergedListener(owner *Destination, subs []*streamListener) *mergedListener {
+	l := &mergedListener{
+		owner: owner, subs: subs, addr: subs[0].addr,
+		ch:   make(chan acceptResult, len(subs)),
+		done: make(chan struct{}),
+	}
+	l.alive.Store(int32(len(subs)))
+	for _, sub := range subs {
+		go l.feed(sub)
+	}
+	return l
+}
+
+func (l *mergedListener) feed(sub *streamListener) {
+	defer func() {
+		if l.alive.Add(-1) == 0 {
+			close(l.ch)
+		}
+	}()
+	for {
+		conn, err := sub.Accept()
+		if err != nil {
+			select {
+			case l.ch <- acceptResult{err: err}:
+			case <-l.done:
+			}
+			return
+		}
+		select {
+		case l.ch <- acceptResult{conn: conn}:
+		case <-l.done:
+			_ = conn.Close()
+			return
+		}
+	}
+}
+
+func (l *mergedListener) Accept() (net.Conn, error) {
+	r, ok := <-l.ch
+	if !ok {
+		return nil, net.ErrClosed
+	}
+	return r.conn, r.err
+}
+
+func (l *mergedListener) Addr() net.Addr { return l.addr }
+
+func (l *mergedListener) Close() error {
 	l.once.Do(func() {
-		l.err = l.OverlayListener.Close()
+		close(l.done)
+		for _, sub := range l.subs {
+			_ = sub.Listener.Close()
+		}
 		l.owner.unregisterResource(l)
 	})
-	return l.err
-}
-
-func (l *overlayNetListener) Addr() net.Addr {
-	return l.OverlayListener.Addr()
+	return nil
 }

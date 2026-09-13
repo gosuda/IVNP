@@ -193,6 +193,12 @@ func NetworkDatabaseIsFloodfill(r NetworkDatabaseRouterInfo) bool {
 	return netdb.IsFloodfill(r)
 }
 
+// NetworkDatabaseNetID returns the netId declared in the RouterInfo options,
+// or the public I2P netId 2 when absent.
+func NetworkDatabaseNetID(r NetworkDatabaseRouterInfo) (uint32, error) {
+	return r.NetID()
+}
+
 func NetworkDatabaseMarshalDatabaseStore(key Hash, typeID I2NPStoreType, data []byte, token uint32, gateway Hash, tunnelID uint32) ([]byte, error) {
 	return netdb.MarshalDatabaseStore(key, typeID, data, token, gateway, tunnelID)
 }

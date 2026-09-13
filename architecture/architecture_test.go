@@ -92,11 +92,9 @@ func TestPublicImportsUseCanonicalPathsWithoutAliases(t *testing.T) {
 		modulePath + "/client":                 true,
 		modulePath + "/state":                  true,
 		modulePath + "/observability":          true,
-		modulePath + "/overlay":                true,
 		modulePath + "/node":                   true,
 		modulePath + "/interfaces/stream":      true,
 		modulePath + "/interfaces/destination": true,
-		modulePath + "/authn":                  true,
 	}
 	err := filepath.Walk("..", func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
@@ -132,7 +130,7 @@ func TestPublicImportsUseCanonicalPathsWithoutAliases(t *testing.T) {
 }
 
 func subsystemInternalOwner(path string) string {
-	for _, subsystem := range []string{"cryptography", "foundation", "controlplane", "dataplane", "client", "state", "observability", "node", "authn"} {
+	for _, subsystem := range []string{"cryptography", "foundation", "controlplane", "dataplane", "client", "state", "observability", "node"} {
 		if strings.HasPrefix(path, modulePath+"/"+subsystem+"/internal/") {
 			return subsystem
 		}
@@ -164,9 +162,7 @@ func packageLayer(path string) (int, bool) {
 	case relative == "dataplane", strings.HasPrefix(relative, "dataplane/"):
 		return 4, true
 	case relative == "interfaces", strings.HasPrefix(relative, "interfaces/"),
-		relative == "state", strings.HasPrefix(relative, "state/"),
-		relative == "overlay", strings.HasPrefix(relative, "overlay/"),
-		relative == "authn", strings.HasPrefix(relative, "authn/"):
+		relative == "state", strings.HasPrefix(relative, "state/"):
 		return 3, true
 	case relative == "foundation", strings.HasPrefix(relative, "foundation/"),
 		relative == "observability", strings.HasPrefix(relative, "observability/"):

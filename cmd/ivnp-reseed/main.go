@@ -35,7 +35,12 @@ import (
 
 var version = "active-dev"
 
-var errEmptySeedPhrase = errors.New("seed phrase is empty after normalization")
+var (
+	errEmptySeedPhrase       = errors.New("seed phrase is empty after normalization")
+	errAdvertiseRequiresPort = errors.New("-router-advertise-host requires -router-port")
+	errAdvertisePortRange    = errors.New("-router-advertise-port must be between 1 and 65535")
+	errHostnameTooLong       = errors.New("hostname longer than 255 characters")
+)
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
@@ -393,7 +398,7 @@ func resolveAdvertisedEndpoint(host string, advertisedPort, routerPort int, logg
 		return "", 0, nil
 	}
 	if routerPort <= 0 {
-		return "", 0, errors.New("-router-advertise-host requires -router-port")
+		return "", 0, errAdvertiseRequiresPort
 	}
 	if err := validateAdvertisedHost(host); err != nil {
 		return "", 0, fmt.Errorf("invalid -router-advertise-host %q: %w", host, err)
@@ -401,7 +406,7 @@ func resolveAdvertisedEndpoint(host string, advertisedPort, routerPort int, logg
 	port := routerPort
 	if advertisedPort != 0 {
 		if advertisedPort < 1 || advertisedPort > 65535 {
-			return "", 0, errors.New("-router-advertise-port must be between 1 and 65535")
+			return "", 0, errAdvertisePortRange
 		}
 		port = advertisedPort
 	}
@@ -415,7 +420,7 @@ func validateAdvertisedHost(host string) error {
 		return nil
 	}
 	if len(host) > 255 {
-		return errors.New("hostname longer than 255 characters")
+		return errHostnameTooLong
 	}
 	for _, label := range strings.Split(host, ".") {
 		if label == "" || len(label) > 63 {
