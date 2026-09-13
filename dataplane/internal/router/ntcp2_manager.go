@@ -57,6 +57,9 @@ type NTCP2ManagerConfig struct {
 	PanicReporter ingress.Reporter
 	Metrics       *observability.Registry
 	Logger        *slog.Logger
+	// AdmitPeer gates transport sessions after the peer RouterInfo is verified
+	// and netId-matched. A non-nil result denies session installation.
+	AdmitPeer PeerAdmissionFunc
 }
 
 type ntcp2SessionRequestReader func(io.Reader, []byte, []byte, []byte, uint8, bool) (*dataplanentcp2.Responder, dataplanentcp2.SessionRequestOptions, error)
@@ -103,6 +106,7 @@ type NTCP2Manager struct {
 	logger             *slog.Logger
 	readSessionRequest ntcp2SessionRequestReader
 	newInitiator       ntcp2InitiatorFactory
+	admitPeer          PeerAdmissionFunc
 }
 
 func (m *NTCP2Manager) releaseSensitive() {
@@ -153,6 +157,7 @@ func NewNTCP2Manager(config NTCP2ManagerConfig) (*NTCP2Manager, error) {
 		reporter:           config.PanicReporter,
 		metrics:            config.Metrics,
 		logger:             config.Logger,
+		admitPeer:          config.AdmitPeer,
 		readSessionRequest: dataplanentcp2.ReadSessionRequest,
 		newInitiator:       dataplanentcp2.NewInitiator,
 	}
@@ -458,7 +463,7 @@ func (m *NTCP2Manager) acceptOne(conn net.Conn) {
 	}
 	peer, err := validateNTCP2HandshakePayload(payload, static)
 	nowMillis := uint64(bindings.Clock.Now().UnixMilli())
-	if err != nil || peer.Hash() == localHash || !m.admitInboundPeer(peer, static, nowMillis) {
+	if err != nil || peer.Hash() == localHash || !m.admitInboundPeer(peer, static, nowMillis, peerAddress) {
 		return
 	}
 	if conn.SetDeadline(time.Time{}) != nil {
@@ -496,6 +501,16 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer foundation.Hash) e
 	remote, err := selectNTCP2AddressForNetwork(info, ntcp2AddressSelection(bindings.NTCP2))
 	if err != nil {
 		return err
+	}
+	if m.admitPeer != nil {
+		var remoteAddr net.Addr
+		if ip := net.ParseIP(remote.host); ip != nil {
+			remoteAddr = &net.TCPAddr{IP: ip, Port: int(remote.port)}
+		}
+		request := PeerAdmission{Peer: peer, RouterInfo: info, Transport: PeerTransportNTCP2, RemoteAddr: remoteAddr}
+		if admitErr := runPeerAdmission(ctx, m.admitPeer, m.reporter, ingress.BoundaryNTCP2Handshake, request); admitErr != nil {
+			return errors.Join(ErrNTCP2Peer, admitErr)
+		}
 	}
 	if m.logger != nil {
 		m.logger.Info("public transport peer selected", "transport", "NTCP2", "peer", routerHashDiagnostic(peer), "endpoint", net.JoinHostPort(remote.host, strconv.Itoa(int(remote.port))), "phase", "dial")
@@ -862,7 +877,7 @@ func validateNTCP2HandshakePayload(payload, static []byte) (foundation.NetworkDa
 	}
 }
 
-func (m *NTCP2Manager) admitInboundPeer(peer foundation.NetworkDatabaseRouterInfo, static []byte, nowMillis uint64) bool {
+func (m *NTCP2Manager) admitInboundPeer(peer foundation.NetworkDatabaseRouterInfo, static []byte, nowMillis uint64, remote net.Addr) bool {
 	if m.peers == nil || !routerInfoMatchesNetwork(peer, m.networkID) {
 		return false
 	}
@@ -873,6 +888,15 @@ func (m *NTCP2Manager) admitInboundPeer(peer foundation.NetworkDatabaseRouterInf
 		if !routerInfoMatchesNetwork(current, m.networkID) || !hasNTCP2Static(current, static) {
 			return false
 		}
+	}
+	// Policy denial precedes NetDB admission so a rejected peer's RouterInfo
+	// is never stored by this context.
+	request := PeerAdmission{Peer: peer.Hash(), RouterInfo: peer, Transport: PeerTransportNTCP2, Inbound: true, RemoteAddr: remote}
+	if admitErr := runPeerAdmission(m.ctx, m.admitPeer, m.reporter, ingress.BoundaryNTCP2Handshake, request); admitErr != nil {
+		if m.logger != nil {
+			m.logger.Warn("transport session denied", "transport", "NTCP2", "peer", routerHashDiagnostic(peer.Hash()), "direction", "inbound", "error", admitErr)
+		}
+		return false
 	}
 	return m.peers.AdmitRouterInfo(peer, nowMillis) == nil
 }
@@ -1215,6 +1239,9 @@ func ntcp2FailurePhase(err error) string {
 	var operation *net.OpError
 	if errors.As(err, &operation) && operation.Op == "dial" {
 		return "dial"
+	}
+	if errors.Is(err, ErrPeerDenied) {
+		return "admission_denied"
 	}
 	if errors.Is(err, ErrNTCP2Peer) {
 		return "router_info_or_created_validation"

@@ -2,6 +2,8 @@ package ivnp
 
 import (
 	"cmp"
+	"context"
+	"fmt"
 	"net/netip"
 	"net/url"
 	"path/filepath"
@@ -11,6 +13,8 @@ import (
 	"unicode"
 
 	"gosuda.org/ivnp/controlplane"
+	"gosuda.org/ivnp/dataplane"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/node"
 	"gosuda.org/ivnp/state"
 )
@@ -21,6 +25,72 @@ const NetworkIDPublicI2P = 2
 
 // networkNativeName is the canonical handle of the netId=2 entry.
 const networkNativeName = "i2p"
+
+// PeerAdmission presents one authenticated transport peer for approval by a
+// network's admission callback. RouterInfo is the signature-verified,
+// netId-matched peer record; it is a view and must not be retained after the
+// callback returns — copy fields (or Hash) needed later.
+type (
+	PeerAdmission     = dataplane.RouterPeerAdmission
+	PeerAdmissionFunc = dataplane.RouterPeerAdmissionFunc
+	PeerTransport     = dataplane.RouterPeerTransport
+)
+
+const (
+	PeerTransportNTCP2 = dataplane.RouterPeerTransportNTCP2
+	PeerTransportSSU2  = dataplane.RouterPeerTransportSSU2
+)
+
+// ErrPeerDenied is the sentinel marking admission denials: every transport
+// denial — callback error or contained panic — satisfies
+// errors.Is(err, ErrPeerDenied), and helpers wrap it so denials compose.
+var ErrPeerDenied = dataplane.RouterErrPeerDenied
+
+// AdmitPeers returns a PeerAdmissionFunc allowing only the listed router
+// hashes — the static allowlist form of an enterprise membership policy.
+func AdmitPeers(allow ...Hash) PeerAdmissionFunc {
+	allowed := make(map[Hash]struct{}, len(allow))
+	for _, hash := range allow {
+		allowed[hash] = struct{}{}
+	}
+	return func(_ context.Context, peer PeerAdmission) error {
+		if _, ok := allowed[peer.Peer]; !ok {
+			return fmt.Errorf("%w: %s not in allowlist", ErrPeerDenied, foundation.EncodeI2PBase64(peer.Peer[:]))
+		}
+		return nil
+	}
+}
+
+// RejectPeers returns a PeerAdmissionFunc denying the listed router hashes —
+// an egress or ingress denylist over otherwise admitted peers.
+func RejectPeers(deny ...Hash) PeerAdmissionFunc {
+	denied := make(map[Hash]struct{}, len(deny))
+	for _, hash := range deny {
+		denied[hash] = struct{}{}
+	}
+	return func(_ context.Context, peer PeerAdmission) error {
+		if _, ok := denied[peer.Peer]; ok {
+			return fmt.Errorf("%w: %s is denylisted", ErrPeerDenied, foundation.EncodeI2PBase64(peer.Peer[:]))
+		}
+		return nil
+	}
+}
+
+// ChainAdmission returns a PeerAdmissionFunc requiring every check to admit
+// the peer; the first denial is returned.
+func ChainAdmission(checks ...PeerAdmissionFunc) PeerAdmissionFunc {
+	return func(ctx context.Context, peer PeerAdmission) error {
+		for _, check := range checks {
+			if check == nil {
+				continue
+			}
+			if err := check(ctx, peer); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
 
 // PublicParticipation selects how much a network context contributes to peers.
 type PublicParticipation uint8
@@ -59,6 +129,15 @@ type NetworkConfig struct {
 	// Participation selects this context's contribution; zero selects
 	// ParticipationWarm.
 	Participation PublicParticipation
+	// AdmitPeer gates transport sessions for this context. When non-nil it
+	// runs after the peer RouterInfo is cryptographically verified and
+	// netId-matched, before the session is installed — inbound denial closes
+	// the connection, outbound denial skips the dial. The callback runs
+	// synchronously on transport setup paths and must be fast and bounded;
+	// a panic is contained and treated as denial. Nil admits every
+	// authenticated peer. For closed networks pair this with
+	// AdmitPeers or a custom policy.
+	AdmitPeer PeerAdmissionFunc
 }
 
 // NetworkOption configures a NetworkConfig component.
@@ -386,6 +465,7 @@ func networkSpecs(cfg RouterConfig) ([]node.NetworkSpec, string, error) {
 		operating.Router.Floodfill = participation == ParticipationContributor
 		pool := nc.Exploratory
 		options.Embedded, options.Exploratory, options.Logger = true, &pool, cfg.Logger
+		options.PeerAdmission = nc.AdmitPeer
 		options.BootstrapRouterInfos = make([][]byte, len(nc.Bootstrap.RouterInfos))
 		for j, raw := range nc.Bootstrap.RouterInfos {
 			options.BootstrapRouterInfos[j] = append([]byte(nil), raw...)

@@ -111,6 +111,10 @@ type ControllerOptions struct {
 	Registry      *observability.Registry
 	NAT           NATRuntime
 	PanicReporter ingress.Reporter
+	// PeerAdmission gates transport sessions after the peer RouterInfo is
+	// verified and netId-matched; nil admits every authenticated peer. It does
+	// not apply to a caller-injected Transport.
+	PeerAdmission dataplane.RouterPeerAdmissionFunc
 }
 
 type slogPanicReporter struct{ logger *slog.Logger }
@@ -770,6 +774,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			Peers: router.NewTransportPeerSource(database), StaticPrivate: bundle.NTCP2StaticPrivate, StaticIV: bundle.NTCP2StaticIV,
 			NetworkID: uint8(cfg.Network.ID), MaxSessions: cfg.NTCP2.MaxSessions, PanicReporter: reporter, Metrics: registry, Logger: logger,
 			IdleTimeout: cfg.NTCP2.IdleTimeout,
+			AdmitPeer:   options.PeerAdmission,
 		})
 		if err != nil {
 			return nil, err
@@ -779,6 +784,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		ssu, err = dataplane.RouterNewSSU2Manager(dataplane.RouterSSU2ManagerConfig{
 			Peers: router.NewTransportPeerSource(database), StaticPrivate: bundle.SSU2StaticPrivate, IntroKey: bundle.SSU2IntroKey,
 			NetworkID: uint8(cfg.Network.ID), IdleTimeout: cfg.SSU2.IdleTimeout, MaxSessions: cfg.SSU2.MaxSessions, PanicReporter: reporter, Metrics: registry, Logger: logger,
+			AdmitPeer:   options.PeerAdmission,
 			SignControl: func(message []byte) ([]byte, error) { return ed25519.Sign(bundle.Router.SigningPrivate, message), nil },
 			PublishPeerTestResult: func(ctx context.Context, result dataplane.RouterPeerTestResult) {
 				if err := router.PublishPeerTestResult(ctx, localInfo, result); err != nil && ctx.Err() == nil {

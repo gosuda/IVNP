@@ -125,6 +125,9 @@ type SSU2ManagerConfig struct {
 	// IntroductionEndpoint returns the observed or configured external UDP
 	// endpoint used in Relay Responses and Requests for firewalled routers.
 	IntroductionEndpoint func() (netip.AddrPort, error)
+	// AdmitPeer gates transport sessions after the peer RouterInfo is verified
+	// and netId-matched. A non-nil result denies session installation.
+	AdmitPeer PeerAdmissionFunc
 }
 
 type ssu2BatchConnection interface {
@@ -217,6 +220,7 @@ type SSU2Manager struct {
 	routerInfoStoresMu  sync.RWMutex
 	routerInfoStores    map[foundation.Hash]ssu2RouterInfoStoreSnapshot
 	reporter            ingress.Reporter
+	admitPeer           PeerAdmissionFunc
 }
 
 // IOStats is the single atomic source for SSU2 socket accounting.
@@ -835,6 +839,7 @@ func NewSSU2Manager(config SSU2ManagerConfig) (*SSU2Manager, error) {
 		publishPeerTestResult: config.PublishPeerTestResult,
 		onPeerTest:            config.OnPeerTest,
 		reporter:              config.PanicReporter,
+		admitPeer:             config.AdmitPeer,
 		metrics:               config.Metrics,
 		logger:                config.Logger,
 		done:                  make(chan struct{}),
@@ -1822,6 +1827,12 @@ func (m *SSU2Manager) resolveOutbound(peer foundation.Hash) (ssu2PeerAddress, *n
 	remote, err := net.ResolveUDPAddr("udp", net.JoinHostPort(address.host, strconv.Itoa(int(address.port))))
 	if err != nil {
 		return ssu2PeerAddress{}, nil, ErrSSU2Peer
+	}
+	// A denial must not carry ErrSSU2Peer: EnsureSession would otherwise retry
+	// the rejected peer through relay introduction.
+	request := PeerAdmission{Peer: peer, RouterInfo: info, Transport: PeerTransportSSU2, RemoteAddr: remote}
+	if admitErr := runPeerAdmission(m.ctx, m.admitPeer, m.reporter, ingress.BoundarySSU2Packet, request); admitErr != nil {
+		return ssu2PeerAddress{}, nil, admitErr
 	}
 	return address, remote, nil
 }
@@ -2960,7 +2971,7 @@ func (m *SSU2Manager) handleSessionConfirmed(packet []byte, pending *ssu2Inbound
 		return
 	}
 	peer, peerIntro, err := validateSSU2ConfirmedPayload(payload, static)
-	if err != nil || peer.Hash() == m.currentBindings().LocalInfo.Hash() || !m.admitSSU2Peer(peer, static, m.now()) {
+	if err != nil || peer.Hash() == m.currentBindings().LocalInfo.Hash() || !m.admitSSU2Peer(peer, static, m.now(), remote) {
 		m.removeInboundHeld(destinationID, pending)
 		return
 	}
@@ -3760,7 +3771,7 @@ func (m *SSU2Manager) localConfirmedPayload(maxPacket int) ([]byte, error) {
 	return dataplanessu2.MarshalBlock(nil, dataplanessu2.BlockRouterInfo, data)
 }
 
-func (m *SSU2Manager) admitSSU2Peer(peer foundation.NetworkDatabaseRouterInfo, static []byte, now time.Time) bool {
+func (m *SSU2Manager) admitSSU2Peer(peer foundation.NetworkDatabaseRouterInfo, static []byte, now time.Time, remote net.Addr) bool {
 	if m.peers == nil || !routerInfoMatchesNetwork(peer, m.networkID) {
 		return false
 	}
@@ -3768,6 +3779,15 @@ func (m *SSU2Manager) admitSSU2Peer(peer foundation.NetworkDatabaseRouterInfo, s
 		if !routerInfoMatchesNetwork(current, m.networkID) || !hasSSU2Static(current, static) {
 			return false
 		}
+	}
+	// Policy denial precedes NetDB admission so a rejected peer's RouterInfo
+	// is never stored by this context.
+	request := PeerAdmission{Peer: peer.Hash(), RouterInfo: peer, Transport: PeerTransportSSU2, Inbound: true, RemoteAddr: remote}
+	if admitErr := runPeerAdmission(m.ctx, m.admitPeer, m.reporter, ingress.BoundarySSU2Packet, request); admitErr != nil {
+		if m.logger != nil {
+			m.logger.Warn("transport session denied", "transport", "SSU2", "peer", routerHashDiagnostic(peer.Hash()), "direction", "inbound", "error", admitErr)
+		}
+		return false
 	}
 	return m.peers.AdmitRouterInfo(peer, uint64(now.UnixMilli())) == nil
 }
@@ -4092,6 +4112,8 @@ func ssu2FailurePhase(err error) string {
 		return handshake.phase + "_timeout"
 	}
 	switch {
+	case errors.Is(err, ErrPeerDenied):
+		return "admission_denied"
 	case errors.Is(err, ErrSSU2Session):
 		return "session_install"
 	case errors.Is(err, ErrSSU2Peer):

@@ -12,6 +12,7 @@ import (
 
 	dataplanessu2 "gosuda.org/ivnp/dataplane/internal/transport/ssu2"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/ingress"
 )
 
 const (
@@ -400,6 +401,15 @@ func (m *SSU2Manager) acceptRelayResponse(response dataplanessu2.RelayResponse, 
 		m.finishRelayRequestLocked(response.Nonce, relay, ErrSSU2Introduction)
 		m.mu.Unlock()
 		return
+	}
+	if m.admitPeer != nil {
+		request := PeerAdmission{Peer: relay.target, RouterInfo: targetInfo, Transport: PeerTransportSSU2, RemoteAddr: udpAddressFromAddrPort(response.Endpoint)}
+		if admitErr := runPeerAdmission(m.ctx, m.admitPeer, m.reporter, ingress.BoundarySSU2Packet, request); admitErr != nil {
+			m.mu.Lock()
+			m.finishRelayRequestLocked(response.Nonce, relay, admitErr)
+			m.mu.Unlock()
+			return
+		}
 	}
 	m.startIntroducedOutbound(response, relay)
 }

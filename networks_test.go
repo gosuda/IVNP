@@ -1,6 +1,8 @@
 package ivnp
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -157,6 +159,60 @@ func TestNetworkSpecsIsolationPerPersistenceDirectory(t *testing.T) {
 	}
 	if specs[1].Operating.StatePath != filepath.Join(dir, "corp", "router.state") {
 		t.Fatalf("corp state path = %q", specs[1].Operating.StatePath)
+	}
+}
+
+func TestPeerAdmissionHelpers(t *testing.T) {
+	var alice, bob Hash
+	alice[0], bob[0] = 1, 2
+	request := func(peer Hash) PeerAdmission {
+		return PeerAdmission{Peer: peer, Transport: PeerTransportNTCP2, Inbound: true}
+	}
+
+	admit := AdmitPeers(alice)
+	if err := admit(context.Background(), request(alice)); err != nil {
+		t.Fatalf("allowlisted peer denied: %v", err)
+	}
+	if err := admit(context.Background(), request(bob)); !errors.Is(err, ErrPeerDenied) {
+		t.Fatalf("unlisted peer error = %v, want %v", err, ErrPeerDenied)
+	}
+
+	reject := RejectPeers(bob)
+	if err := reject(context.Background(), request(alice)); err != nil {
+		t.Fatalf("non-denylisted peer denied: %v", err)
+	}
+	if err := reject(context.Background(), request(bob)); !errors.Is(err, ErrPeerDenied) {
+		t.Fatalf("denylisted peer error = %v, want %v", err, ErrPeerDenied)
+	}
+
+	// A chain admits only when every check does, and the first denial wins.
+	var sentinel = errors.New("sentinel denial")
+	chain := ChainAdmission(nil, AdmitPeers(alice), func(context.Context, PeerAdmission) error { return sentinel })
+	if err := chain(context.Background(), request(alice)); !errors.Is(err, sentinel) {
+		t.Fatalf("chain denial = %v, want %v", err, sentinel)
+	}
+	if err := ChainAdmission(AdmitPeers(alice))(context.Background(), request(bob)); !errors.Is(err, ErrPeerDenied) {
+		t.Fatalf("chain allowlist miss = %v, want %v", err, ErrPeerDenied)
+	}
+	if err := ChainAdmission(RejectPeers(bob))(context.Background(), request(alice)); err != nil {
+		t.Fatalf("chain admit error = %v", err)
+	}
+}
+
+func TestNetworkSpecsCarryPeerAdmissionPerContext(t *testing.T) {
+	cfg := DefaultRouterConfig()
+	corp := NewNetwork("corp", 77)
+	corp.AdmitPeer = AdmitPeers()
+	cfg.SetNetworks(DefaultI2PNetwork(), corp)
+	specs, _, err := networkSpecs(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if specs[0].Options.PeerAdmission != nil {
+		t.Fatal("public context inherited a peer admission callback")
+	}
+	if specs[1].Options.PeerAdmission == nil {
+		t.Fatal("dedicated context lost the configured admission callback")
 	}
 }
 

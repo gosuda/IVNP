@@ -7,9 +7,71 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/ingress"
 )
 
-var ErrStarted = errors.New("router: already started")
+var (
+	ErrStarted    = errors.New("router: already started")
+	ErrPeerDenied = errors.New("router: peer denied by admission policy")
+)
+
+// PeerTransport identifies the transport protocol carrying a peer session.
+type PeerTransport uint8
+
+const (
+	PeerTransportNTCP2 PeerTransport = iota + 1
+	PeerTransportSSU2
+)
+
+func (t PeerTransport) String() string {
+	switch t {
+	case PeerTransportNTCP2:
+		return "NTCP2"
+	case PeerTransportSSU2:
+		return "SSU2"
+	default:
+		return "unknown"
+	}
+}
+
+// PeerAdmission presents one authenticated transport peer for policy approval.
+// RouterInfo is the signature-verified, netId-matched peer record — for
+// inbound peers it was received in the handshake and bound to the session
+// static key; for outbound peers it is the record being dialed. RouterInfo is
+// a view over transport-owned bytes and must not be retained after the
+// callback returns.
+type PeerAdmission struct {
+	Peer       foundation.Hash
+	RouterInfo foundation.NetworkDatabaseRouterInfo
+	Transport  PeerTransport
+	Inbound    bool
+	RemoteAddr net.Addr
+}
+
+// PeerAdmissionFunc approves a verified transport peer before its session is
+// installed. A non-nil error denies the session. The callback runs
+// synchronously on transport setup paths, so it must be fast and bounded;
+// ctx carries the handshake or dial deadline.
+type PeerAdmissionFunc func(context.Context, PeerAdmission) error
+
+// runPeerAdmission invokes fn with panic containment: a panicking callback is
+// reported through reporter and treated as denial. Every denial — callback
+// error or panic — carries ErrPeerDenied so classification and callers can
+// recognize policy rejections uniformly.
+func runPeerAdmission(ctx context.Context, fn PeerAdmissionFunc, reporter ingress.Reporter, boundary ingress.Boundary, request PeerAdmission) (err error) {
+	if fn == nil {
+		return nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = errors.Join(ingress.Report(recovered, reporter, boundary, request.RemoteAddr), ErrPeerDenied)
+		}
+	}()
+	if err = fn(ctx, request); err != nil {
+		err = errors.Join(err, ErrPeerDenied)
+	}
+	return err
+}
 
 type TransportLocalInfo interface {
 	Hash() foundation.Hash

@@ -242,22 +242,22 @@ func TestNTCP2InboundRouterInfoPolicyRejectsStaleFutureAndRotationDowngrade(t *t
 	}
 
 	stale := publish(staticOne, now-uint64(90*time.Minute/time.Millisecond)-1)
-	if manager.admitInboundPeer(stale, staticOne, now) {
+	if manager.admitInboundPeer(stale, staticOne, now, nil) {
 		t.Fatal("accepted RouterInfo older than NTCP2 maximum age")
 	}
 	first := publish(staticOne, now-1)
-	if !manager.admitInboundPeer(first, staticOne, now) {
+	if !manager.admitInboundPeer(first, staticOne, now, nil) {
 		t.Fatal("rejected current RouterInfo")
 	}
 	current := publish(staticTwo, now)
-	if !manager.admitInboundPeer(current, staticTwo, now) {
+	if !manager.admitInboundPeer(current, staticTwo, now, nil) {
 		t.Fatal("rejected newer RouterInfo")
 	}
-	if manager.admitInboundPeer(first, staticOne, now) {
+	if manager.admitInboundPeer(first, staticOne, now, nil) {
 		t.Fatal("accepted archived RouterInfo with a rotated static key")
 	}
 	future := publish(staticThree, now+uint64(2*time.Minute/time.Millisecond)+1)
-	if manager.admitInboundPeer(future, staticThree, now) {
+	if manager.admitInboundPeer(future, staticThree, now, nil) {
 		t.Fatal("accepted RouterInfo beyond maximum future skew")
 	}
 	stored, ok := manager.peers.RouterInfo(current.Hash())
