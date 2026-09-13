@@ -35,7 +35,12 @@ import (
 
 var version = "active-dev"
 
-var errEmptySeedPhrase = errors.New("seed phrase is empty after normalization")
+var (
+	errEmptySeedPhrase          = errors.New("seed phrase is empty after normalization")
+	errAdvertiseHostNeedsPort   = errors.New("-router-advertise-host requires -router-port")
+	errAdvertisePortOutOfRange  = errors.New("-router-advertise-port must be between 1 and 65535")
+	errAdvertiseHostnameTooLong = errors.New("hostname longer than 255 characters")
+)
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
@@ -204,7 +209,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		routerSubsystem = subsystem
-		logger.Info("embedded router started successfully")
+		clientStatus, statusErr := subsystem.ClientStatus(ctx)
+		if statusErr != nil {
+			logger.Warn("failed to read embedded router status", "error", statusErr)
+		}
+		logger.Info("embedded router started successfully", "router_hash", clientStatus.RouterHash)
 	}
 
 	activeCrawlPass := func(crawlCtx context.Context) {
@@ -393,7 +402,7 @@ func resolveAdvertisedEndpoint(host string, advertisedPort, routerPort int, logg
 		return "", 0, nil
 	}
 	if routerPort <= 0 {
-		return "", 0, errors.New("-router-advertise-host requires -router-port")
+		return "", 0, errAdvertiseHostNeedsPort
 	}
 	if err := validateAdvertisedHost(host); err != nil {
 		return "", 0, fmt.Errorf("invalid -router-advertise-host %q: %w", host, err)
@@ -401,7 +410,7 @@ func resolveAdvertisedEndpoint(host string, advertisedPort, routerPort int, logg
 	port := routerPort
 	if advertisedPort != 0 {
 		if advertisedPort < 1 || advertisedPort > 65535 {
-			return "", 0, errors.New("-router-advertise-port must be between 1 and 65535")
+			return "", 0, errAdvertisePortOutOfRange
 		}
 		port = advertisedPort
 	}
@@ -415,7 +424,7 @@ func validateAdvertisedHost(host string) error {
 		return nil
 	}
 	if len(host) > 255 {
-		return errors.New("hostname longer than 255 characters")
+		return errAdvertiseHostnameTooLong
 	}
 	for _, label := range strings.Split(host, ".") {
 		if label == "" || len(label) > 63 {
