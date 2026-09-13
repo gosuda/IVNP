@@ -152,6 +152,34 @@ func TestLocalRouterInfoAdvertisesConfiguredFloodfillWithReachabilityState(t *te
 	}
 }
 
+func TestLocalRouterInfoAdvertisesHiddenCapabilityWithoutTransit(t *testing.T) {
+	local, err := foundation.GenerateLocalAddress()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := NewLocalRouterInfo(LocalRouterInfoConfig{
+		NetworkID: 2, Local: local, NoTransit: true,
+		BandwidthRateBytesPerSecond: 8 << 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.SetReachability(ReachabilityReachable)
+	if err = owner.Publish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := mappingValue(t, owner.Snapshot().Options, "caps"); got != "KHR" {
+		t.Fatalf("non-transit caps = %q, want KHR", got)
+	}
+	owner.SetReachability(ReachabilityFirewalled)
+	if err = owner.Publish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := mappingValue(t, owner.Snapshot().Options, "caps"); got != "KHU" {
+		t.Fatalf("firewalled non-transit caps = %q, want KHU", got)
+	}
+}
+
 func TestLocalRouterBandwidthCapabilityMatchesJavaThresholds(t *testing.T) {
 	for _, test := range []struct {
 		bytesPerSecond int

@@ -1,0 +1,31 @@
+name: live I2P network round trip
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Run weekly as healthcheck
+    - cron: '0 3 * * 0'
+
+permissions:
+  contents: read
+
+jobs:
+  live-i2p-roundtrip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run live I2P streaming, HTTP, and datagram round-trip
+        shell: bash
+        run: |
+          set -euo pipefail
+          IVNP_LIVE_ROUNDTRIP=1 \
+            go test -tags integration -v -timeout=18m \
+              -run '^TestLiveI2PRoundTrip$' .

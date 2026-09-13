@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,16 +43,69 @@ type packetSocket struct {
 	active                      sync.WaitGroup
 }
 
+func (d *Destination) resolvePacketProtocol(network string) (uint8, error) {
+	switch network {
+	case "udp", "udp4", "udp6", "packet", "datagram":
+		return 19, nil
+	case "i2p", "i2p-packet", "i2p-datagram", "i2p-datagram2":
+		return 19, nil
+	case "i2p-datagram1":
+		return 17, nil
+	case "ivnp", "ivnp-packet", "ivnp-datagram", "ivnp-datagram2":
+		return 19, nil
+	case "ivnp-datagram1":
+		return 17, nil
+	default:
+		target := network
+		for _, suffix := range []string{"-packet", "-datagram", "-datagram2"} {
+			if strings.HasSuffix(network, suffix) {
+				target = strings.TrimSuffix(network, suffix)
+				break
+			}
+		}
+		if d != nil && d.owner != nil {
+			if _, ok := d.owner.fabricNames[target]; ok {
+				return 19, nil
+			}
+		}
+		return 0, ErrUnsupportedNetwork
+	}
+}
+
+func (d *Destination) resolveUnauthPacketProtocol(network string) (uint8, error) {
+	switch network {
+	case "meta", "i2p-datagram3", "ivnp-datagram3", "packet3", "datagram3":
+		return 20, nil
+	case "raw", "udp-raw", "i2p-raw", "ivnp-raw":
+		return 18, nil
+	default:
+		if strings.HasSuffix(network, "-datagram3") {
+			fabric := strings.TrimSuffix(network, "-datagram3")
+			if d != nil && d.owner != nil {
+				if _, ok := d.owner.fabricNames[fabric]; ok {
+					return 20, nil
+				}
+			}
+		}
+		if strings.HasSuffix(network, "-raw") {
+			fabric := strings.TrimSuffix(network, "-raw")
+			if d != nil && d.owner != nil {
+				if _, ok := d.owner.fabricNames[fabric]; ok {
+					return 18, nil
+				}
+			}
+		}
+		return 0, ErrUnsupportedNetwork
+	}
+}
+
 func (d *Destination) ListenPacket(network, address string) (*PacketConn, error) {
 	return d.ListenPacketContext(context.Background(), network, address)
 }
 func (d *Destination) ListenPacketContext(ctx context.Context, network, address string) (*PacketConn, error) {
-	var protocol uint8
-	switch network {
-	case "i2p", "i2p-datagram2":
-		protocol = 19
-	case "i2p-datagram1":
-		protocol = 17
+	protocol, err := d.resolvePacketProtocol(network)
+	if err != nil {
+		return nil, &net.OpError{Op: "listen", Net: network, Err: err}
 	}
 	s, err := d.listenPacket(ctx, network, address, protocol)
 	if err != nil {
@@ -63,12 +117,9 @@ func (d *Destination) ListenUnauthPacket(network, address string) (*UnauthPacket
 	return d.ListenUnauthPacketContext(context.Background(), network, address)
 }
 func (d *Destination) ListenUnauthPacketContext(ctx context.Context, network, address string) (*UnauthPacketConn, error) {
-	var protocol uint8
-	switch network {
-	case "i2p-datagram3":
-		protocol = 20
-	case "i2p-raw":
-		protocol = 18
+	protocol, err := d.resolveUnauthPacketProtocol(network)
+	if err != nil {
+		return nil, &net.OpError{Op: "listen", Net: network, Err: err}
 	}
 	s, err := d.listenPacket(ctx, network, address, protocol)
 	if err != nil {

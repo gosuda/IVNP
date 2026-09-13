@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,18 +19,39 @@ type Dialer struct {
 	Timeout     time.Duration
 	Deadline    time.Time
 	LocalPort   uint16
+	// Policy optionally overrides overlay routing, fallback, and privacy options.
+	Policy OverlayDialPolicy
 }
 
 type ListenConfig struct {
 	Destination *Destination
+	// Policy optionally overrides overlay listener protocol, route class, and privacy options.
+	Policy OverlayListenPolicy
 }
 
-func streamNetwork(network string) error {
+func (d *Destination) resolveStreamNetwork(network string) (targetNet string, isOverlay bool, err error) {
 	switch network {
-	case "i2p", "i2p-stream", "tcp":
-		return nil
+	case "tcp", "tcp4", "tcp6", "stream":
+		defaultNet := networkNativeName
+		if d != nil && d.owner != nil {
+			defaultNet = d.owner.DefaultNetwork()
+		}
+		if defaultNet == networkNativeName {
+			return networkNativeName, false, nil
+		}
+		return defaultNet, true, nil
+	case "i2p", "i2p-stream":
+		return networkNativeName, false, nil
+	case "ivnp", "ivnp-stream":
+		return "ivnp", true, nil
 	default:
-		return ErrUnsupportedNetwork
+		target := strings.TrimSuffix(network, "-stream")
+		if d != nil && d.owner != nil {
+			if _, ok := d.owner.fabricNames[target]; ok {
+				return target, true, nil
+			}
+		}
+		return "", false, ErrUnsupportedNetwork
 	}
 }
 
@@ -56,11 +79,15 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		return nil, &net.OpError{Op: "dial", Net: network, Err: err}
 	}
 	defer owner.endOperation()
-	if err := streamNetwork(network); err != nil {
-		return nil, &net.OpError{Op: "dial", Net: network, Err: err}
-	}
 	if d.Timeout < 0 {
 		return nil, &net.OpError{Op: "dial", Net: network, Err: invalidConfig("Dialer.Timeout")}
+	}
+	targetNet, isOverlay, err := owner.resolveStreamNetwork(network)
+	if err != nil {
+		return nil, &net.OpError{Op: "dial", Net: network, Err: err}
+	}
+	if isOverlay {
+		return d.dialOverlayNetwork(ctx, targetNet, address)
 	}
 	deadline := d.Deadline
 	if d.Timeout > 0 {
@@ -135,8 +162,12 @@ func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (ne
 		return nil, &net.OpError{Op: "listen", Net: network, Err: err}
 	}
 	defer d.endOperation()
-	if err := streamNetwork(network); err != nil {
+	targetNet, isOverlay, err := d.resolveStreamNetwork(network)
+	if err != nil {
 		return nil, &net.OpError{Op: "listen", Net: network, Err: err}
+	}
+	if isOverlay {
+		return lc.listenOverlayNetwork(ctx, targetNet, address)
 	}
 	local, err := parseBindAddress(d.hash, address)
 	if err != nil {
@@ -175,20 +206,20 @@ func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (ne
 
 func (lc *ListenConfig) ListenPacket(ctx context.Context, network, address string) (*PacketConn, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, &net.OpError{Op: "listen", Net: network, Err: err}
 	}
 	if lc.Destination == nil {
-		return nil, ErrDestinationRequired
+		return nil, &net.OpError{Op: "listen", Net: network, Err: ErrDestinationRequired}
 	}
 	return lc.Destination.ListenPacketContext(ctx, network, address)
 }
 
 func (lc *ListenConfig) ListenUnauthPacket(ctx context.Context, network, address string) (*UnauthPacketConn, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, &net.OpError{Op: "listen", Net: network, Err: err}
 	}
 	if lc.Destination == nil {
-		return nil, ErrDestinationRequired
+		return nil, &net.OpError{Op: "listen", Net: network, Err: ErrDestinationRequired}
 	}
 	return lc.Destination.ListenUnauthPacketContext(ctx, network, address)
 }
@@ -271,4 +302,112 @@ func (l *streamListener) Close() error {
 		l.owner.unregisterResource(l)
 	})
 	return l.err
+}
+
+func (d *Dialer) dialOverlayNetwork(ctx context.Context, network, address string) (net.Conn, error) {
+	owner := d.Destination
+	if owner.service == nil && owner.overlaySpec == nil {
+		return nil, &net.OpError{Op: "dial", Net: network, Err: ErrOverlayRequired}
+	}
+	target, err := ParseOverlayTarget(address)
+	if err != nil {
+		return nil, &net.OpError{Op: "dial", Net: network, Err: err}
+	}
+	policy := d.Policy
+	if network != "ivnp" && network != "ivnp-stream" {
+		if fabricID, ok := owner.owner.fabricNames[network]; ok {
+			policy.Fabrics = []FabricID{fabricID}
+		}
+	}
+	deadline := d.Deadline
+	if d.Timeout > 0 {
+		limit := time.Now().Add(d.Timeout)
+		if deadline.IsZero() || limit.Before(deadline) {
+			deadline = limit
+		}
+	}
+	setup, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(owner.ctx, cancel)
+	defer func() { stop(); cancel() }()
+	if parent, ok := setup.Deadline(); !deadline.IsZero() && (!ok || deadline.Before(parent)) {
+		limited, expire := context.WithDeadlineCause(setup, deadline, os.ErrDeadlineExceeded)
+		defer expire()
+		setup = limited
+	}
+	conn, err := owner.DialOverlay(setup, target, policy)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && errors.Is(context.Cause(setup), os.ErrDeadlineExceeded) {
+			err = os.ErrDeadlineExceeded
+		}
+		if owner.ctx.Err() != nil {
+			err = errors.Join(net.ErrClosed, err)
+		}
+		return nil, &net.OpError{Op: "dial", Net: network, Addr: OverlayAddr{Endpoint: target.Endpoint.ID, Port: target.Port}, Err: err}
+	}
+	return conn, nil
+}
+
+func (lc *ListenConfig) listenOverlayNetwork(ctx context.Context, network, address string) (net.Listener, error) {
+	d := lc.Destination
+	if d.service == nil && d.overlaySpec == nil {
+		return nil, &net.OpError{Op: "listen", Net: network, Err: ErrOverlayRequired}
+	}
+	var reqPort uint16
+	if address != "" {
+		portStr := strings.TrimPrefix(address, ":")
+		if p, parseErr := strconv.ParseUint(portStr, 10, 16); parseErr == nil {
+			reqPort = uint16(p)
+		} else {
+			target, err := ParseOverlayTarget(address)
+			if err != nil {
+				return nil, &net.OpError{Op: "listen", Net: network, Err: err}
+			}
+			if target.Endpoint.ID != (EndpointID{}) && target.Endpoint.ID != d.EndpointID() {
+				return nil, &net.OpError{Op: "listen", Net: network, Addr: OverlayAddr{Endpoint: target.Endpoint.ID, Port: target.Port}, Err: ErrAddressInvalid}
+			}
+			reqPort = target.Port
+		}
+	}
+
+	svc, err := d.ensureOverlayService(reqPort, true)
+	if err != nil {
+		return nil, &net.OpError{Op: "listen", Net: network, Addr: OverlayAddr{Endpoint: d.EndpointID(), Port: reqPort}, Err: err}
+	}
+
+	policy := lc.Policy
+	listener, err := d.ListenOverlayContext(ctx, policy)
+	if err != nil {
+		return nil, &net.OpError{Op: "listen", Net: network, Addr: OverlayAddr{Endpoint: d.EndpointID(), Port: svc.Port()}, Err: err}
+	}
+
+	wrapped := &overlayNetListener{OverlayListener: listener, owner: d}
+	if err = d.registerResource(wrapped); err != nil {
+		return nil, errors.Join(err, wrapped.Close())
+	}
+	return wrapped, nil
+}
+
+type overlayNetListener struct {
+	*OverlayListener
+	owner *Destination
+	once  sync.Once
+	err   error
+}
+
+var _ net.Listener = (*overlayNetListener)(nil)
+
+func (l *overlayNetListener) Accept() (net.Conn, error) {
+	return l.OverlayListener.Accept(context.Background())
+}
+
+func (l *overlayNetListener) Close() error {
+	l.once.Do(func() {
+		l.err = l.OverlayListener.Close()
+		l.owner.unregisterResource(l)
+	})
+	return l.err
+}
+
+func (l *overlayNetListener) Addr() net.Addr {
+	return l.OverlayListener.Addr()
 }

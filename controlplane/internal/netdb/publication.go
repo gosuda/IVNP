@@ -1,6 +1,7 @@
 package netdb
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -107,8 +108,10 @@ type LeaseSetPublisher struct {
 	opMu             sync.Mutex
 	mu               sync.Mutex
 	leases           []foundation.NetworkDatabaseLease
+	options          []foundation.MappingEntry
 	storePayload     []byte // immutable signed LeaseSet bytes, not a Store envelope
 	expiresAt        uint64
+	publishedAt      uint32
 	nextPublication  uint64
 	discoveryResult  <-chan LookupResult
 	discoveryTargets []foundation.Hash
@@ -215,6 +218,23 @@ func (p *LeaseSetPublisher) Publish(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 	return p.publish(ctx, true)
+}
+
+// SetOptions installs the signed record's mapping entries — extension
+// contracts such as x-ov.* / x-ivnp.* — replacing any previously installed
+// set. A nil or empty slice restores the canonical empty mapping. Options
+// are signed and stored on the next Publish or Maintain; only the cleartext
+// LeaseSet2 path carries them.
+func (p *LeaseSetPublisher) SetOptions(entries []foundation.MappingEntry) error {
+	if p == nil {
+		return ErrLeaseSetPublisherConfig
+	}
+	p.opMu.Lock()
+	defer p.opMu.Unlock()
+	if p.closed || p.local2 == nil {
+		return ErrLeaseSetPublisherConfig
+	}
+	return p.local2.ReplaceOptions(entries)
 }
 
 // Confirmed reports whether at least one floodfill acknowledged the current
@@ -331,13 +351,25 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 		return 0, nil
 	}
 
-	changed := !sameLeases(p.leases, leases)
+	var options []foundation.MappingEntry
+	if p.local2 != nil {
+		options = p.local2.Options()
+	}
+	changed := !sameLeases(p.leases, leases) || !sameMappingEntries(p.options, options)
 	if changed {
-		store, err := p.marshalLeaseSet(now)
+		// The store replaces only a strictly newer Published version, so a
+		// changed record within the same second advances its own version.
+		marshalNow := now
+		if p.publishedAt != 0 && marshalNow/1000 <= uint64(p.publishedAt) {
+			marshalNow = (uint64(p.publishedAt) + 1) * 1000
+		}
+		store, err := p.marshalLeaseSet(marshalNow)
 		if err != nil {
 			return 0, err
 		}
+		p.publishedAt = uint32(marshalNow / 1000)
 		p.leases = append(p.leases[:0], leases...)
+		p.options = append(p.options[:0], options...)
 		p.storePayload = store
 		localStore, err := foundation.NetworkDatabaseMarshalDatabaseStore(p.hash, p.storeType, store, 0, foundation.Hash{}, 0)
 		if err != nil {
@@ -549,6 +581,18 @@ func sameLeases(left, right []foundation.NetworkDatabaseLease) bool {
 	}
 	for index := range left {
 		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameMappingEntries(left, right []foundation.MappingEntry) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !bytes.Equal(left[index].Key, right[index].Key) || !bytes.Equal(left[index].Value, right[index].Value) {
 			return false
 		}
 	}

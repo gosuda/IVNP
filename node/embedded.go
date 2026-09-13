@@ -9,6 +9,7 @@ import (
 	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/node/internal/overlaybridge"
 	"gosuda.org/ivnp/state"
 )
 
@@ -18,6 +19,7 @@ var errDestinationReadinessCapability = errors.New("node: destination has no rea
 // Close cancels all children and joins every owned worker.
 type EmbeddedRouter struct {
 	controller *controlplane.Controller
+	bridge     *overlaybridge.Bridge
 	cancel     context.CancelFunc
 	once       sync.Once
 	closeErr   error
@@ -26,6 +28,17 @@ type EmbeddedRouter struct {
 // NewEmbeddedRouter uses ctx only during construction. Persistent state is opt-in
 // through StatePath and KeyPath; an empty pair selects memory-only storage.
 func NewEmbeddedRouter(ctx context.Context, cfg state.ConfigurationOperating, options controlplane.ControllerOptions) (*EmbeddedRouter, error) {
+	return newEmbeddedRouter(ctx, cfg, options, nil)
+}
+
+// NewEmbeddedRouterWithOverlay additionally composes the overlay bridge: the
+// native controller becomes the netId=2 context and each configured fabric
+// gets its own listeners and peer table. A nil spec is the plain constructor.
+func NewEmbeddedRouterWithOverlay(ctx context.Context, cfg state.ConfigurationOperating, options controlplane.ControllerOptions, spec *overlaybridge.Spec) (*EmbeddedRouter, error) {
+	return newEmbeddedRouter(ctx, cfg, options, spec)
+}
+
+func newEmbeddedRouter(ctx context.Context, cfg state.ConfigurationOperating, options controlplane.ControllerOptions, spec *overlaybridge.Spec) (*EmbeddedRouter, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -48,6 +61,13 @@ func NewEmbeddedRouter(ctx context.Context, cfg state.ConfigurationOperating, op
 		}
 		return nil, errors.Join(err, router.Close())
 	}
+	if spec != nil {
+		bridge, err := overlaybridge.Open(ctx, *spec, controller)
+		if err != nil {
+			return nil, errors.Join(err, router.Close())
+		}
+		router.bridge = bridge
+	}
 	return router, nil
 }
 
@@ -56,6 +76,15 @@ func (r *EmbeddedRouter) Hash() foundation.Hash {
 		return foundation.Hash{}
 	}
 	return r.controller.Hash()
+}
+
+// Overlay returns the composed overlay bridge, or nil when the router was
+// built without an overlay spec.
+func (r *EmbeddedRouter) Overlay() *overlaybridge.Bridge {
+	if r == nil {
+		return nil
+	}
+	return r.bridge
 }
 
 func (r *EmbeddedRouter) WaitReady(ctx context.Context) error {
@@ -94,7 +123,13 @@ func (r *EmbeddedRouter) Close() error {
 	}
 	r.once.Do(func() {
 		r.cancel()
-		r.closeErr = errors.Join(r.controller.Close(), r.controller.Wait())
+		// The bridge closes first: its listeners stop accepting before the
+		// controller tears down the native context they may carry evidence for.
+		var bridgeErr error
+		if r.bridge != nil {
+			bridgeErr = r.bridge.Close()
+		}
+		r.closeErr = errors.Join(bridgeErr, r.controller.Close(), r.controller.Wait())
 	})
 	return r.closeErr
 }

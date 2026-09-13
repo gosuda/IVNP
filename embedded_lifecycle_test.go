@@ -302,12 +302,12 @@ func embeddedTestConfig(t *testing.T) RouterConfig {
 
 func newEmbeddedTestRouter(t *testing.T, cfg RouterConfig, transport *embeddedMemoryTransport) *Router {
 	t.Helper()
-	settings, options, err := routerSettings(cfg)
+	settings, options, spec, err := routerSettings(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	options.Transport = transport
-	router, err := newRouter(t.Context(), cfg, settings, options)
+	router, err := newRouter(t.Context(), cfg, settings, options, spec)
 	if err != nil {
 		t.Fatal(err)
 	}

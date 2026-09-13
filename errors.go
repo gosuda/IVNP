@@ -22,6 +22,12 @@ var (
 	ErrResourceLimit             = errors.New("i2p: resource limit reached")
 	ErrMessageTooLarge           = errors.New("i2p: message too large")
 	ErrMessageTruncated          = errors.New("i2p: message truncated")
+	ErrOverlayRequired           = errors.New("i2p: overlay service requires a configured realm")
+)
+
+var (
+	errLegacyNetworkFields = errors.New("legacy network fields cannot combine with Networks")
+	errNativeRequired      = errors.New("Networks requires exactly one \"i2p\" entry")
 )
 
 type ConfigError struct {

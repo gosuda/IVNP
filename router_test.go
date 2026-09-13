@@ -142,7 +142,7 @@ func TestCorruptPersistentStateDoesNotReplaceMasterKey(t *testing.T) {
 	if err := router.Close(); err != nil {
 		t.Fatal(err)
 	}
-	settings, _, err := routerSettings(cfg)
+	settings, _, _, err := routerSettings(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,19 +226,19 @@ func TestDefaultRouterConfigPriorityReseed(t *testing.T) {
 func TestRouterConfigPriorityReseedValidation(t *testing.T) {
 	cfg := DefaultRouterConfig()
 	cfg.Bootstrap.PriorityReseedTimeout = -time.Second
-	if _, _, err := routerSettings(cfg); err == nil {
+	if _, _, _, err := routerSettings(cfg); err == nil {
 		t.Fatal("negative PriorityReseedTimeout was accepted")
 	}
 
 	cfg = DefaultRouterConfig()
 	cfg.Bootstrap.PriorityReseedURLs = []string{"http://insecure.example/i2p?netid=2"}
-	if _, _, err := routerSettings(cfg); err == nil {
+	if _, _, _, err := routerSettings(cfg); err == nil {
 		t.Fatal("insecure HTTP PriorityReseedURL was accepted")
 	}
 
 	cfg = DefaultRouterConfig()
 	cfg.Bootstrap.PriorityReseedURLs = []string{"https://hotseed.gosuda.org/i2pseeds.su3?netid=999"}
-	if _, _, err := routerSettings(cfg); err == nil {
+	if _, _, _, err := routerSettings(cfg); err == nil {
 		t.Fatal("PriorityReseedURL with wrong netid was accepted")
 	}
 }

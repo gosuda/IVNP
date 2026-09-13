@@ -4,6 +4,7 @@ package node
 
 import (
 	"gosuda.org/ivnp/controlplane"
+	"gosuda.org/ivnp/node/internal/overlaybridge"
 	noderuntime "gosuda.org/ivnp/node/internal/runtime"
 	"gosuda.org/ivnp/state"
 )
@@ -16,6 +17,18 @@ type (
 	TunnelRuntimeSnapshot = controlplane.TunnelRuntimeSnapshot
 	DestinationPolicy     = controlplane.DestinationPolicy
 	DestinationPolicyKind = controlplane.DestinationPolicyKind
+
+	// OverlaySpec composes the node's overlay host: the native context plus
+	// each named IVNP fabric under one realm.
+	OverlaySpec = overlaybridge.Spec
+	// OverlayFabric is one IVNP network context's configuration.
+	OverlayFabric = overlaybridge.FabricSpec
+	// OverlayRealm is the membership and policy namespace over bound contexts.
+	OverlayRealm = overlaybridge.RealmSpec
+	// OverlayPeer is one statically configured fabric member.
+	OverlayPeer = overlaybridge.StaticPeer
+	// OverlayBridge is the composed overlay host owned by an EmbeddedRouter.
+	OverlayBridge = overlaybridge.Bridge
 )
 
 const (

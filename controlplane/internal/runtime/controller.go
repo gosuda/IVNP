@@ -703,6 +703,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	}
 	localInfo, err := router.NewLocalRouterInfo(router.LocalRouterInfoConfig{
 		Local: bundle.Router, Database: database, Clock: clock, NetworkID: cfg.Network.ID, Floodfill: cfg.Router.Floodfill,
+		NoTransit:                   !cfg.Router.Transit,
 		BandwidthRateBytesPerSecond: cfg.Tunnel.BandwidthRateBytesPerSecond, Metrics: registry,
 		RouterVersion: cfg.Router.Version,
 		Options:       routerFamilyOption(cfg.Router.Family),
@@ -979,6 +980,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			Bandwidth: func(tunnel.ShortBuildRequest) uint32 {
 				return uint32(cfg.Tunnel.BandwidthRateBytesPerSecond / 1024)
 			},
+			Admission:     transitAdmission(cfg),
 			LocalDelivery: func(message foundation.I2NPMessage) error { return service.HandleI2NP(message, now(), false) },
 			Now:           now, MaxPending: cfg.Tunnel.BuildPendingCapacity, Profiles: profiles, Logger: logger, Metrics: registry,
 			CreatorBudget: creatorBudget, Stats: tunnel.NewBuildStatistics(),
@@ -1170,6 +1172,15 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	keepBundle = true
 	keepTaintedDir = true
 	return d, nil
+}
+
+// transitAdmission wires the configured transit participation policy: routers
+// configured without transit reject every participating tunnel build request.
+func transitAdmission(cfg state.ConfigurationOperating) tunnel.BuildAdmission {
+	if cfg.Router.Transit {
+		return nil
+	}
+	return func(tunnel.ShortBuildRequest) bool { return false }
 }
 
 func routerFamilyOption(family string) []router.MappingOption {
@@ -1641,6 +1652,7 @@ func (d *Controller) refreshObservability() {
 		ClientOutboundTunnels:      snapshot.Tunnel.ClientOutboundActive,
 		FloodfillConfigured:        d.config.Router.Floodfill,
 		FloodfillAdvertised:        foundation.NetworkDatabaseIsFloodfill(d.localInfo.Snapshot()),
+		TransitConfigured:          d.config.Router.Transit,
 	})
 	if stage < 3 && operational {
 		stage = 3
@@ -1905,6 +1917,7 @@ func (d *Controller) ClientStatus(context.Context) (ManagementStatus, error) {
 		ClientOutboundTunnels:      snapshot.Tunnel.ClientOutboundActive,
 		FloodfillConfigured:        d.config.Router.Floodfill,
 		FloodfillAdvertised:        foundation.NetworkDatabaseIsFloodfill(d.localInfo.Snapshot()),
+		TransitConfigured:          d.config.Router.Transit,
 		RouterReachable:            snapshot.Bootstrap.RouterReachable != 0,
 		SSU2VectorIO:               snapshot.SSU2.VectorIOEnabled != 0,
 		SSU2KernelDropAccounting:   snapshot.SSU2.KernelDropAccounting != 0,

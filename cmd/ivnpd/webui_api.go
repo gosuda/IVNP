@@ -42,6 +42,7 @@ type statusResponse struct {
 	Reachability        string `json:"reachability"`
 	FloodfillConfigured bool   `json:"floodfill_configured"`
 	FloodfillAdvertised bool   `json:"floodfill_advertised"`
+	TransitConfigured   bool   `json:"transit_configured"`
 	Readiness           any    `json:"readiness"`
 	Transports          struct {
 		NTCP2 transportStatus `json:"ntcp2"`
@@ -222,6 +223,7 @@ func (s *WebUIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Reachability:        reachability,
 		FloodfillConfigured: config.Router.Floodfill,
 		FloodfillAdvertised: clientStatus.Readiness.FloodfillAdvertised,
+		TransitConfigured:   config.Router.Transit,
 		Readiness:           clientStatus.Readiness,
 	}
 	response.Transports.NTCP2 = transportStatus{
