@@ -155,6 +155,14 @@ Usage of ivnp-reseed:
         Deterministic RSA-4096 signing key seed phrase (env RESEED_SEED_PHRASE preferred)
   -router-port int
         Port for embedded router NTCP2/SSU2 transports (default 0 for random/ephemeral)
+  -router-advertise-host string
+        Public host or IP advertised in the embedded router's info so remote
+        routers can establish inbound transport connections (env
+        RESEED_ROUTER_ADVERTISE_HOST). Requires -router-port. When empty the
+        router relies on UPnP/NAT-PMP and otherwise stays firewalled.
+  -router-advertise-port int
+        Public port advertised when it differs from -router-port, e.g. NAT port
+        forwarding (default: same as -router-port)
   -no-router
         Disable embedded router (test/replay mode)
   -healthcheck string
@@ -190,6 +198,13 @@ go build -trimpath -o /usr/local/bin/ivnp-reseed ./cmd/ivnp-reseed
 
 # Run with dual-port binding (HTTP 8080 for proxy, 8443 for direct)
 ivnp-reseed -listen ":8080,:8443" -data-dir /var/lib/ivnp-reseed
+
+# Behind NAT without UPnP/NAT-PMP support: advertise the public address so the
+# embedded floodfill router accepts inbound connections (advertise port defaults
+# to -router-port; use -router-advertise-port when NAT port forwarding maps an
+# external port to a different internal one)
+ivnp-reseed -listen ":8080,:8443" -data-dir /var/lib/ivnp-reseed \
+    -router-port 39898 -router-advertise-host reseed.example.org
 ```
 
 ### Docker (Distroless)
