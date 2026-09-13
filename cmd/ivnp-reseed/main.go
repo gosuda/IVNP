@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"net/http/pprof"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -64,6 +65,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	routerAdvertiseHost := flags.String("router-advertise-host", envOr("RESEED_ROUTER_ADVERTISE_HOST", ""), "public host or IP advertised in the embedded router's info for inbound connections (requires -router-port; empty keeps the router firewalled)")
 	routerAdvertisePort := flags.Int("router-advertise-port", 0, "public port advertised when it differs from -router-port, e.g. NAT port forwarding (default: same as -router-port)")
 	noRouter := flags.Bool("no-router", false, "disable embedded router (test/replay mode)")
+	pprofAddr := flags.String("pprof", "", "serve net/http/pprof endpoints on this address (e.g. 127.0.0.1:6060); disabled when empty")
 	healthCheckURL := flags.String("healthcheck", "", "check health endpoint URL and exit 0 (healthy) or 1 (unhealthy)")
 	runOnce := flags.Bool("once", false, "run one pass and exit")
 	showVersion := flags.Bool("version", false, "show version and exit")
@@ -329,6 +331,27 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	var pprofServer *http.Server
+	if *pprofAddr != "" {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		pprofServer = &http.Server{
+			Addr:              *pprofAddr,
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() {
+			logger.Info("starting pprof server", "listen", *pprofAddr)
+			if srvErr := pprofServer.ListenAndServe(); srvErr != nil && srvErr != http.ErrServerClosed {
+				logger.Error("pprof server failed", "listen", *pprofAddr, "error", srvErr)
+			}
+		}()
+	}
+
 	packageTicker := time.NewTicker(*interval)
 	defer packageTicker.Stop()
 
@@ -342,6 +365,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			for _, s := range httpServers {
 				_ = s.Shutdown(shutdownCtx)
+			}
+			if pprofServer != nil {
+				_ = pprofServer.Shutdown(shutdownCtx)
 			}
 			shutdownCancel()
 			return 0
