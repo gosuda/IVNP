@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
 	"net/url"
 	"path/filepath"
@@ -107,6 +108,50 @@ const (
 	// participant.
 	ParticipationContributor
 )
+
+// DialStrategy defines how multiple bound networks are explored during an
+// unqualified dial ("tcp", "stream", "ivnp").
+type DialStrategy uint8
+
+const (
+	// DialHappyEyeballs staggers dials across networks by FallbackDelay (RFC 8305 style).
+	// Subsequent legs are delayed, allowing preferred networks to connect first.
+	// This is the default zero-value strategy.
+	DialHappyEyeballs DialStrategy = iota
+
+	// DialParallel dials all candidate networks simultaneously with zero delay.
+	// The first successful handshake wins and cancels all other attempts.
+	DialParallel
+
+	// DialSequential dials candidate networks one by one in preference order,
+	// falling back to the next network only when the previous one fails or times out.
+	DialSequential
+)
+
+// DefaultHappyEyeballsDelay is the default stagger delay when DialHappyEyeballs is selected.
+const DefaultHappyEyeballsDelay = 250 * time.Millisecond
+
+// DialPolicy configures multi-network dial orchestration.
+type DialPolicy struct {
+	// Strategy selects how candidate networks are explored (DialParallel, DialHappyEyeballs, DialSequential).
+	Strategy DialStrategy
+	// FallbackDelay staggers subsequent network attempts when Strategy == DialHappyEyeballs.
+	// If zero, DefaultHappyEyeballsDelay is used.
+	FallbackDelay time.Duration
+	// Networks restricts the dial to a subset of the destination's bound networks.
+	// If empty, all bound networks are candidates.
+	Networks []string
+}
+
+// ConnectionNetwork returns the bound network name that established this connection
+// (e.g. "i2p" or a dedicated network name). If the connection does not carry a
+// recognized network context, an empty string is returned.
+func ConnectionNetwork(conn net.Conn) string {
+	if na, ok := conn.(interface{ NetworkContext() string }); ok {
+		return na.NetworkContext()
+	}
+	return ""
+}
 
 // NetworkConfig describes one I2P protocol context: the transports, bootstrap,
 // and tunnel policy serving one netId. Every entry has the same shape — the

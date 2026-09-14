@@ -215,6 +215,7 @@ func (r *Router) NewDestination(ctx context.Context, cfg DestinationConfig) (*De
 		endpoints: endpoints, nets: append([]string(nil), nets...), owner: r,
 		ctx: lifetime, cancel: release,
 		hash: first.Hash(), b32: first.B32(), public: first.Destination(),
+		dialPolicy:  cfg.DialPolicy,
 		packetQueue: cfg.PacketQueue, resources: make(map[io.Closer]struct{}),
 	}
 	r.mu.Lock()
@@ -261,6 +262,7 @@ type Destination struct {
 	hash        Hash
 	b32         string
 	public      []byte
+	dialPolicy  DialPolicy
 	packetQueue PacketQueueConfig
 	mu          sync.Mutex
 	closed      bool

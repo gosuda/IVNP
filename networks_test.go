@@ -3,9 +3,12 @@ package ivnp
 import (
 	"context"
 	"errors"
+	"net"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"gosuda.org/ivnp/interfaces/destination"
 )
 
 func TestNetworkPlanLegacyDefaults(t *testing.T) {
@@ -255,5 +258,206 @@ func TestResolveDefaultNetwork(t *testing.T) {
 	// An unknown DefaultNetwork fails.
 	if _, err = resolveDefaultNetwork(RouterConfig{DefaultNetwork: "ghost"}, []NetworkConfig{native, corp}); err == nil {
 		t.Fatal("unknown DefaultNetwork was accepted")
+	}
+}
+
+func TestDialPolicyInheritanceAndResolve(t *testing.T) {
+	dest := &Destination{
+		dialPolicy: DialPolicy{
+			Strategy: DialParallel,
+			Networks: []string{"corp"},
+		},
+	}
+
+	// 1. Inherit from Destination when Dialer.Policy is nil
+	dialer := &Dialer{Destination: dest}
+	resolved := dialer.resolvePolicy()
+	if resolved.Strategy != DialParallel || len(resolved.Networks) != 1 || resolved.Networks[0] != "corp" {
+		t.Fatalf("expected inherited policy, got %+v", resolved)
+	}
+
+	// 2. Override when Dialer.Policy is explicitly provided
+	custom := &DialPolicy{
+		Strategy:      DialHappyEyeballs,
+		FallbackDelay: 500 * time.Millisecond,
+		Networks:      []string{"i2p"},
+	}
+	dialer.Policy = custom
+	resolved = dialer.resolvePolicy()
+	if resolved.Strategy != DialHappyEyeballs || resolved.FallbackDelay != 500*time.Millisecond || len(resolved.Networks) != 1 || resolved.Networks[0] != "i2p" {
+		t.Fatalf("expected overridden policy, got %+v", resolved)
+	}
+
+	// 3. Fallback to default DialHappyEyeballs when both are nil
+	nilDialer := &Dialer{}
+	resolved = nilDialer.resolvePolicy()
+	if resolved.Strategy != DialHappyEyeballs || resolved.FallbackDelay != DefaultHappyEyeballsDelay {
+		t.Fatalf("expected default HappyEyeballs policy, got %+v", resolved)
+	}
+}
+
+func TestConnectionNetwork(t *testing.T) {
+	c1 := &streamConn{netName: "corp-mesh"}
+	if got := ConnectionNetwork(c1); got != "corp-mesh" {
+		t.Fatalf("ConnectionNetwork = %q, want corp-mesh", got)
+	}
+
+	pipeA, pipeB := net.Pipe()
+	defer pipeA.Close()
+	defer pipeB.Close()
+	if got := ConnectionNetwork(pipeA); got != "" {
+		t.Fatalf("ConnectionNetwork on plain net.Conn = %q, want empty", got)
+	}
+}
+
+var (
+	errMockStreamNotImplemented = errors.New("not implemented")
+	errMockStreamDialFailed     = errors.New("mock dial failed")
+)
+
+type mockStreamEndpoint struct {
+	destination.DestinationEndpoint
+	dialFn func(ctx context.Context, target string, localPort uint16) (net.Conn, error)
+}
+
+func (m *mockStreamEndpoint) DialStream(ctx context.Context, target string, localPort uint16) (net.Conn, error) {
+	if m.dialFn != nil {
+		return m.dialFn(ctx, target, localPort)
+	}
+	return nil, errMockStreamNotImplemented
+}
+
+func (m *mockStreamEndpoint) ListenStream(ctx context.Context, addr string) (net.Listener, error) {
+	return nil, errMockStreamNotImplemented
+}
+
+func TestDialEndpointsParallel(t *testing.T) {
+	pipeA, pipeB := net.Pipe()
+	defer pipeA.Close()
+	defer pipeB.Close()
+
+	startedA := make(chan struct{})
+	startedB := make(chan struct{})
+
+	epA := &mockStreamEndpoint{
+		dialFn: func(ctx context.Context, target string, localPort uint16) (net.Conn, error) {
+			close(startedA)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	epB := &mockStreamEndpoint{
+		dialFn: func(ctx context.Context, target string, localPort uint16) (net.Conn, error) {
+			close(startedB)
+			return pipeA, nil
+		},
+	}
+
+	eps := []namedEndpoint{
+		{name: "netA", ep: epA},
+		{name: "netB", ep: epB},
+	}
+
+	policy := DialPolicy{Strategy: DialParallel}
+	conn, winNet, err := dialEndpoints(context.Background(), eps, policy, "target.b32.i2p:80", 0)
+	if err != nil {
+		t.Fatalf("dialEndpoints failed: %v", err)
+	}
+	if winNet != "netB" {
+		t.Fatalf("winning net = %q, want netB", winNet)
+	}
+	if conn == nil {
+		t.Fatal("expected non-nil connection")
+	}
+
+	// Verify that both legs started simultaneously
+	select {
+	case <-startedA:
+	case <-time.After(time.Second):
+		t.Fatal("leg A did not start")
+	}
+	select {
+	case <-startedB:
+	case <-time.After(time.Second):
+		t.Fatal("leg B did not start")
+	}
+}
+
+func TestDialEndpointsSequential(t *testing.T) {
+	pipeA, pipeB := net.Pipe()
+	defer pipeA.Close()
+	defer pipeB.Close()
+
+	var order []string
+	epA := &mockStreamEndpoint{
+		dialFn: func(ctx context.Context, target string, localPort uint16) (net.Conn, error) {
+			order = append(order, "netA")
+			return nil, errMockStreamDialFailed
+		},
+	}
+	epB := &mockStreamEndpoint{
+		dialFn: func(ctx context.Context, target string, localPort uint16) (net.Conn, error) {
+			order = append(order, "netB")
+			return pipeA, nil
+		},
+	}
+
+	eps := []namedEndpoint{
+		{name: "netA", ep: epA},
+		{name: "netB", ep: epB},
+	}
+
+	policy := DialPolicy{Strategy: DialSequential}
+	conn, winNet, err := dialEndpoints(context.Background(), eps, policy, "target.b32.i2p:80", 0)
+	if err != nil {
+		t.Fatalf("dialEndpoints failed: %v", err)
+	}
+	if winNet != "netB" {
+		t.Fatalf("winning net = %q, want netB", winNet)
+	}
+	if conn == nil {
+		t.Fatal("expected non-nil connection")
+	}
+	if len(order) != 2 || order[0] != "netA" || order[1] != "netB" {
+		t.Fatalf("execution order = %v, want [netA netB]", order)
+	}
+}
+
+func TestStreamEndpointsFiltering(t *testing.T) {
+	epA := &mockStreamEndpoint{}
+	epB := &mockStreamEndpoint{}
+	epC := &mockStreamEndpoint{}
+
+	dest := &Destination{
+		nets: []string{"netA", "netB", "netC"},
+		endpoints: map[string]destination.DestinationEndpoint{
+			"netA": epA,
+			"netB": epB,
+			"netC": epC,
+		},
+	}
+
+	// 1. Unfiltered (empty policy.Networks) -> all endpoints
+	eps, err := dest.streamEndpoints("tcp", DialPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eps) != 3 {
+		t.Fatalf("expected 3 endpoints, got %d", len(eps))
+	}
+
+	// 2. Filtered with policy.Networks = ["netC", "netA"] -> exactly 2 in specified order
+	eps, err = dest.streamEndpoints("tcp", DialPolicy{Networks: []string{"netC", "netA"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eps) != 2 || eps[0].name != "netC" || eps[1].name != "netA" {
+		t.Fatalf("unexpected filtered endpoints: %+v", eps)
+	}
+
+	// 3. Filtered with non-matching network -> ErrUnsupportedNetwork
+	_, err = dest.streamEndpoints("tcp", DialPolicy{Networks: []string{"unknown"}})
+	if !errors.Is(err, ErrUnsupportedNetwork) {
+		t.Fatalf("expected ErrUnsupportedNetwork, got %v", err)
 	}
 }

@@ -29,6 +29,7 @@ type namedEndpoint struct {
 // dialResult is one raced leg's outcome; a non-nil conn must be either the
 // winner or closed by the caller.
 type dialResult struct {
+	name string
 	conn net.Conn
 	err  error
 }
@@ -38,6 +39,27 @@ type Dialer struct {
 	Timeout     time.Duration
 	Deadline    time.Time
 	LocalPort   uint16
+	// Policy optionally overrides the Destination's DialPolicy.
+	// If nil, Destination.DialPolicy is inherited.
+	Policy *DialPolicy
+}
+
+func (d *Dialer) resolvePolicy() DialPolicy {
+	if d != nil && d.Policy != nil {
+		p := *d.Policy
+		if p.Strategy == DialHappyEyeballs && p.FallbackDelay <= 0 {
+			p.FallbackDelay = DefaultHappyEyeballsDelay
+		}
+		return p
+	}
+	if d != nil && d.Destination != nil {
+		p := d.Destination.dialPolicy
+		if p.Strategy == DialHappyEyeballs && p.FallbackDelay <= 0 {
+			p.FallbackDelay = DefaultHappyEyeballsDelay
+		}
+		return p
+	}
+	return DialPolicy{Strategy: DialHappyEyeballs, FallbackDelay: DefaultHappyEyeballsDelay}
 }
 
 type ListenConfig struct {
@@ -45,13 +67,26 @@ type ListenConfig struct {
 }
 
 // streamEndpoints resolves a stream network name to the bound endpoints it
-// addresses. "tcp"/"stream" and "ivnp" select every bound network in
-// preference order — the dial is a happy-eyeballs race. A configured network
-// name (with an optional "-stream" suffix) selects exactly that network.
-func (d *Destination) streamEndpoints(network string) ([]namedEndpoint, error) {
+// addresses according to the dial policy. Generic network names ("tcp",
+// "stream", "ivnp", etc.) select every bound network allowed by policy.Networks
+// in preference order. A configured network name (with an optional "-stream" suffix)
+// selects exactly that network.
+func (d *Destination) streamEndpoints(network string, policy DialPolicy) ([]namedEndpoint, error) {
 	switch network {
 	case "", "tcp", "tcp4", "tcp6", "stream", "ivnp", "ivnp-stream":
-		return d.allEndpoints(), nil
+		if len(policy.Networks) == 0 {
+			return d.allEndpoints(), nil
+		}
+		eps := make([]namedEndpoint, 0, len(policy.Networks))
+		for _, name := range policy.Networks {
+			if ep := d.endpoints[name]; ep != nil {
+				eps = append(eps, namedEndpoint{name: name, ep: ep})
+			}
+		}
+		if len(eps) == 0 {
+			return nil, ErrUnsupportedNetwork
+		}
+		return eps, nil
 	default:
 		name := strings.TrimSuffix(network, "-stream")
 		if ep := d.endpoints[name]; ep != nil {
@@ -96,7 +131,8 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	if d.Timeout < 0 {
 		return nil, &net.OpError{Op: "dial", Net: network, Err: invalidConfig("Dialer.Timeout")}
 	}
-	eps, err := owner.streamEndpoints(network)
+	policy := d.resolvePolicy()
+	eps, err := owner.streamEndpoints(network, policy)
 	if err != nil {
 		return nil, &net.OpError{Op: "dial", Net: network, Err: err}
 	}
@@ -123,8 +159,9 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		err = setup.Err()
 	}
 	var connection net.Conn
+	var netName string
 	if err == nil {
-		connection, err = dialEndpoints(setup, eps, target.String(), d.LocalPort)
+		connection, netName, err = dialEndpoints(setup, eps, policy, target.String(), d.LocalPort)
 	}
 	if err == nil {
 		err = setup.Err()
@@ -141,37 +178,69 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		}
 		return nil, &net.OpError{Op: "dial", Net: network, Addr: target, Err: err}
 	}
-	wrapped, err := owner.wrapStream(connection, network)
+	wrapped, err := owner.wrapStream(connection, network, netName)
 	if err != nil {
 		return nil, &net.OpError{Op: "dial", Net: network, Addr: target, Err: err}
 	}
 	return wrapped, nil
 }
 
-// dialEndpoints dials the target on every given endpoint in order, staggering
-// each leg by dialHedgeDelay. The first successful leg wins; losing legs are
-// canceled and any late-arriving connection they produced is closed.
-func dialEndpoints(setup context.Context, eps []namedEndpoint, target string, localPort uint16) (net.Conn, error) {
+// dialEndpoints dials the target across candidate endpoints according to policy.
+// In DialParallel mode, all candidates are dialed simultaneously with zero delay.
+// In DialHappyEyeballs mode (default), subsequent legs are staggered by policy.FallbackDelay.
+// In DialSequential mode, candidates are attempted one by one in preference order.
+func dialEndpoints(setup context.Context, eps []namedEndpoint, policy DialPolicy, target string, localPort uint16) (net.Conn, string, error) {
 	if len(eps) == 1 {
 		backend, ok := eps[0].ep.(destination.StreamDestinationEndpoint)
 		if !ok {
-			return nil, ErrUnsupportedIdentity
+			return nil, "", ErrUnsupportedIdentity
 		}
-		return backend.DialStream(setup, target, localPort)
+		conn, err := backend.DialStream(setup, target, localPort)
+		if err != nil {
+			return nil, "", err
+		}
+		return conn, eps[0].name, nil
 	}
+
+	if policy.Strategy == DialSequential {
+		var errs []error
+		for _, entry := range eps {
+			if err := setup.Err(); err != nil {
+				errs = append(errs, err)
+				break
+			}
+			backend, ok := entry.ep.(destination.StreamDestinationEndpoint)
+			if !ok {
+				errs = append(errs, ErrUnsupportedIdentity)
+				continue
+			}
+			conn, err := backend.DialStream(setup, target, localPort)
+			if err == nil {
+				return conn, entry.name, nil
+			}
+			errs = append(errs, err)
+		}
+		return nil, "", errors.Join(errs...)
+	}
+
 	results := make(chan dialResult, len(eps))
 	race, cancel := context.WithCancel(setup)
 	defer cancel()
 	var won atomic.Bool
+
 	for i := range eps {
 		go func(i int) {
-			if i > 0 {
-				timer := time.NewTimer(dialHedgeDelay * time.Duration(i))
+			if policy.Strategy == DialHappyEyeballs && i > 0 {
+				delay := policy.FallbackDelay
+				if delay <= 0 {
+					delay = DefaultHappyEyeballsDelay
+				}
+				timer := time.NewTimer(delay * time.Duration(i))
 				select {
 				case <-timer.C:
 				case <-race.Done():
 					timer.Stop()
-					results <- dialResult{err: race.Err()}
+					results <- dialResult{name: eps[i].name, err: race.Err()}
 					return
 				}
 			}
@@ -184,12 +253,13 @@ func dialEndpoints(setup context.Context, eps []namedEndpoint, target string, lo
 				conn, err = backend.DialStream(race, target, localPort)
 			}
 			if err == nil && won.Load() {
-				err = conn.Close()
+				_ = conn.Close()
 				conn = nil
 			}
-			results <- dialResult{conn: conn, err: err}
+			results <- dialResult{name: eps[i].name, conn: conn, err: err}
 		}(i)
 	}
+
 	pending := len(eps)
 	var errs []error
 	for pending > 0 {
@@ -198,14 +268,14 @@ func dialEndpoints(setup context.Context, eps []namedEndpoint, target string, lo
 		if r.err == nil && !won.Swap(true) {
 			cancel()
 			go drainDialResults(results, pending)
-			return r.conn, nil
+			return r.conn, r.name, nil
 		}
 		if r.conn != nil {
 			_ = r.conn.Close()
 		}
 		errs = append(errs, r.err)
 	}
-	return nil, errors.Join(errs...)
+	return nil, "", errors.Join(errs...)
 }
 
 // drainDialResults closes connections produced by legs that lost the race.
@@ -237,7 +307,7 @@ func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (ne
 		return nil, &net.OpError{Op: "listen", Net: network, Err: err}
 	}
 	defer d.endOperation()
-	eps, err := d.streamEndpoints(network)
+	eps, err := d.streamEndpoints(network, DialPolicy{})
 	if err != nil {
 		return nil, &net.OpError{Op: "listen", Net: network, Err: err}
 	}
@@ -320,11 +390,14 @@ type streamConn struct {
 	local   Addr
 	remote  Addr
 	network string
+	netName string
 	once    sync.Once
 	err     error
 }
 
-func (d *Destination) wrapStream(connection net.Conn, network string) (net.Conn, error) {
+func (c *streamConn) NetworkContext() string { return c.netName }
+
+func (d *Destination) wrapStream(connection net.Conn, network, netName string) (net.Conn, error) {
 	local, err := ParseAddr(connection.LocalAddr().String())
 	if err != nil {
 		return nil, errors.Join(err, connection.Close())
@@ -333,7 +406,7 @@ func (d *Destination) wrapStream(connection net.Conn, network string) (net.Conn,
 	if err != nil {
 		return nil, errors.Join(err, connection.Close())
 	}
-	wrapped := &streamConn{Conn: connection, owner: d, local: local, remote: remote, network: network}
+	wrapped := &streamConn{Conn: connection, owner: d, local: local, remote: remote, network: network, netName: netName}
 	if err = d.registerResource(wrapped); err != nil {
 		return nil, errors.Join(err, wrapped.Close())
 	}
@@ -383,7 +456,7 @@ func (l *streamListener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return l.owner.wrapStream(connection, l.network)
+	return l.owner.wrapStream(connection, l.network, l.network)
 }
 
 func (l *streamListener) Close() error {

@@ -101,6 +101,10 @@ type DestinationConfig struct {
 	// destination address is reachable on every bound network. Empty binds the
 	// default network only. Unqualified dials race every bound network.
 	Networks []string
+	// DialPolicy configures how unqualified dials ("tcp", "stream", "ivnp")
+	// explore the bound networks. If omitted, DialHappyEyeballs is used across all
+	// bound networks.
+	DialPolicy DialPolicy
 }
 
 type PacketQueueConfig struct {
