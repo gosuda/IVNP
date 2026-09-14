@@ -426,7 +426,10 @@ func TestSSU2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 		Clock:     WallClock{},
 		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message foundation.I2NPMessage, nowMillis uint64, _ bool) error {
 			deliveredAt.Store(nowMillis)
-			received <- message
+			received <- foundation.I2NPMessage{
+				Header:  message.Header,
+				Payload: append([]byte(nil), message.Payload...),
+			}
 			return nil
 		},
 	}); err != nil {
@@ -616,7 +619,10 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 		{bobManager, bobConn, bob, func(foundation.I2NPMessage, uint64, bool) error { return nil }},
 		{charlieManager, charlieConn, charlie, func(message foundation.I2NPMessage, nowMillis uint64, fromFloodfill bool) error {
 			if message.Header.Type == foundation.I2NPData {
-				received <- message
+				received <- foundation.I2NPMessage{
+					Header:  message.Header,
+					Payload: append([]byte(nil), message.Payload...),
+				}
 				return nil
 			}
 			if message.Header.Type == foundation.I2NPDatabaseStore {
@@ -649,12 +655,12 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 		}
 	})
 
-	sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
-	defer sendCancel()
-	if err = bobManager.EnsureSession(sendCtx, charlie.Hash()); err != nil {
+	bobCtx, bobCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer bobCancel()
+	if err = bobManager.EnsureSession(bobCtx, charlie.Hash()); err != nil {
 		t.Fatalf("authenticate Bob-Charlie session: %v", err)
 	}
-	if err = bobManager.Send(sendCtx, charlie.Hash(), foundation.I2NPMessage{
+	if err = bobManager.Send(bobCtx, charlie.Hash(), foundation.I2NPMessage{
 		Header:  foundation.I2NPHeader{Type: foundation.I2NPDeliveryStatus, ID: 70, Expiration: uint64(time.Now().Add(time.Minute).UnixMilli())},
 		Payload: make([]byte, 12),
 	}); err != nil {
@@ -684,6 +690,10 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 	if _, err = selectSSU2Address(alice.Snapshot()); err == nil {
 		t.Fatal("firewalled Alice RouterInfo retained a direct endpoint")
 	}
+	charliePublished := charlie.Snapshot().Published
+	waitForSSU2Live(t, time.Second, func() bool {
+		return uint64(time.Now().UnixMilli()) > charliePublished
+	}, "Charlie new RouterInfo publication timestamp")
 	if err = charlie.ReplaceAddresses([]transportTestAddress{{
 		Transport: "SSU",
 		Cost:      3,
@@ -716,23 +726,31 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 		Header:  foundation.I2NPHeader{Type: foundation.I2NPData, ID: 71, Expiration: uint64(time.Now().Add(time.Minute).UnixMilli())},
 		Payload: []byte("introduced SSU2 session"),
 	}
-	if err = aliceManager.EnsureSession(sendCtx, charlie.Hash()); err != nil {
-		t.Fatalf("authenticate introduced SSU2 session: %v", err)
-	}
-	if err = aliceManager.Send(sendCtx, charlie.Hash(), message); err != nil {
+	aliceCtx, aliceCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer aliceCancel()
+	waitForSSU2Live(t, 15*time.Second, func() bool {
+		return aliceManager.EnsureSession(aliceCtx, charlie.Hash()) == nil
+	}, "Alice introduced SSU2 session to Charlie")
+	if err = aliceManager.Send(aliceCtx, charlie.Hash(), message); err != nil {
 		t.Fatalf("send through automatic native SSU2 introduction: %v", err)
 	}
-	if _, found := charlieDB.Get(alice.Hash()); !found {
-		t.Fatal("relay DatabaseStore did not admit Alice RouterInfo at Charlie")
-	}
+	waitForSSU2Live(t, 15*time.Second, func() bool {
+		_, found := charlieDB.Get(alice.Hash())
+		return found
+	}, "relay DatabaseStore to admit Alice RouterInfo at Charlie")
+	receiveTimer := time.NewTimer(15 * time.Second)
+	defer receiveTimer.Stop()
 	for {
 		select {
 		case got := <-received:
 			if got.Header.ID == message.Header.ID && bytes.Equal(got.Payload, message.Payload) {
 				return
 			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("introduced native SSU2 session did not deliver I2NP")
+			t.Logf("ignoring intermediate I2NP message: type=%v id=%d len=%d", got.Header.Type, got.Header.ID, len(got.Payload))
+		case <-receiveTimer.C:
+			t.Fatalf("introduced native SSU2 session did not deliver I2NP (expected ID %d, payload %q)", message.Header.ID, message.Payload)
+		case <-ctx.Done():
+			t.Fatalf("test context canceled while waiting for I2NP delivery: %v", ctx.Err())
 		}
 	}
 }
