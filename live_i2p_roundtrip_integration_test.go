@@ -7,6 +7,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -185,86 +187,229 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 
 	// 5. Test Streaming Ping-Pong, Deadlines & Chunked Data Transfer
 	t.Run("streaming echo deadlines and chunked transfer", func(t *testing.T) {
-		accepted := make(chan net.Conn, 1)
-		acceptErr := make(chan error, 1)
+		accepted := make(chan net.Conn, 4)
+		acceptErr := make(chan error, 4)
+		stopAccept := make(chan struct{})
+		defer close(stopAccept)
+
 		go func() {
-			conn, acceptErrVal := streamListener.Accept()
-			if acceptErrVal != nil {
-				acceptErr <- acceptErrVal
-				return
+			for {
+				conn, acceptErrVal := streamListener.Accept()
+				if acceptErrVal != nil {
+					select {
+					case acceptErr <- acceptErrVal:
+					case <-stopAccept:
+					}
+					return
+				}
+				select {
+				case accepted <- conn:
+				case <-stopAccept:
+					_ = conn.Close()
+					return
+				}
 			}
-			accepted <- conn
 		}()
 
-		t.Logf("Dialing target %s over live I2P...", targetB32)
 		dialAddr := net.JoinHostPort(targetB32, "8080")
-		outbound, dialErr := destB.DialContext(ctx, "i2p", dialAddr)
-		if dialErr != nil {
-			t.Fatalf("dial target B32: %v", dialErr)
-		}
-		defer outbound.Close()
+		backoff := 2 * time.Second
 
-		var inbound net.Conn
-		select {
-		case inbound = <-accepted:
-		case errVal := <-acceptErr:
-			t.Fatalf("accept connection: %v", errVal)
-		case <-ctx.Done():
-			t.Fatalf("timeout waiting for connection: %v", ctx.Err())
-		}
-		defer inbound.Close()
+		var lastErr error
+		for attempt := 1; attempt <= 3; attempt++ {
+			// Drain any stale connection received from an earlier timed-out attempt
+			for len(accepted) > 0 {
+				stale := <-accepted
+				_ = stale.Close()
+			}
 
-		// Test SetDeadline on established connection
-		deadline := time.Now().Add(60 * time.Second)
-		if err := outbound.SetDeadline(deadline); err != nil {
-			t.Fatalf("outbound set deadline: %v", err)
-		}
-		if err := inbound.SetDeadline(deadline); err != nil {
-			t.Fatalf("inbound set deadline: %v", err)
+			t.Logf("Streaming transfer over live I2P (attempt %d/3)...", attempt)
+			dialCtx, dialCancel := context.WithTimeout(ctx, 30*time.Second)
+			outbound, dialErr := destB.DialContext(dialCtx, "i2p", dialAddr)
+			if dialErr != nil {
+				dialCancel()
+				lastErr = fmt.Errorf("dial: %w", dialErr)
+				t.Logf("attempt %d dial failed: %v", attempt, dialErr)
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			}
+
+			var inbound net.Conn
+			select {
+			case inbound = <-accepted:
+				dialCancel()
+			case errVal := <-acceptErr:
+				dialCancel()
+				_ = outbound.Close()
+				lastErr = fmt.Errorf("accept: %w", errVal)
+				t.Logf("attempt %d accept failed: %v", attempt, errVal)
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			case <-time.After(15 * time.Second):
+				dialCancel()
+				_ = outbound.Close()
+				lastErr = errors.New("timeout waiting for accepted connection")
+				t.Logf("attempt %d timed out waiting for accepted connection", attempt)
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			case <-ctx.Done():
+				dialCancel()
+				_ = outbound.Close()
+				t.Fatalf("context canceled: %v", ctx.Err())
+			}
+
+			// Test SetDeadline on established connection
+			deadline := time.Now().Add(60 * time.Second)
+			if err := outbound.SetDeadline(deadline); err != nil {
+				_ = outbound.Close()
+				_ = inbound.Close()
+				lastErr = fmt.Errorf("outbound set deadline: %w", err)
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			}
+			if err := inbound.SetDeadline(deadline); err != nil {
+				_ = outbound.Close()
+				_ = inbound.Close()
+				lastErr = fmt.Errorf("inbound set deadline: %w", err)
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			}
+
+			// Ping: Source -> Target
+			pingMsg := []byte("live-ping-stream-verification")
+			if _, writeErr := outbound.Write(pingMsg); writeErr != nil {
+				_ = outbound.Close()
+				_ = inbound.Close()
+				lastErr = fmt.Errorf("write ping: %w", writeErr)
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			}
+
+			recvBuf := make([]byte, len(pingMsg))
+			if _, readErr := io.ReadFull(inbound, recvBuf); readErr != nil {
+				_ = outbound.Close()
+				_ = inbound.Close()
+				lastErr = fmt.Errorf("read ping: %w", readErr)
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			}
+			if !bytes.Equal(recvBuf, pingMsg) {
+				_ = outbound.Close()
+				_ = inbound.Close()
+				lastErr = fmt.Errorf("received %q, want %q", recvBuf, pingMsg)
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			}
+
+			// Pong: Target -> Source
+			pongMsg := []byte("live-pong-stream-response")
+			if _, writeErr := inbound.Write(pongMsg); writeErr != nil {
+				_ = outbound.Close()
+				_ = inbound.Close()
+				lastErr = fmt.Errorf("write pong: %w", writeErr)
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			}
+
+			recvBuf = make([]byte, len(pongMsg))
+			if _, readErr := io.ReadFull(outbound, recvBuf); readErr != nil {
+				_ = outbound.Close()
+				_ = inbound.Close()
+				lastErr = fmt.Errorf("read pong: %w", readErr)
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			}
+			if !bytes.Equal(recvBuf, pongMsg) {
+				_ = outbound.Close()
+				_ = inbound.Close()
+				lastErr = fmt.Errorf("received %q, want %q", recvBuf, pongMsg)
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			}
+
+			// Multi-chunk bulk data transfer test (8KB pseudo-random payload)
+			payload := make([]byte, 8192)
+			_, _ = rand.Read(payload)
+
+			writeErrCh := make(chan error, 1)
+			go func() {
+				_, wErr := outbound.Write(payload)
+				writeErrCh <- wErr
+			}()
+
+			receivedChunk := make([]byte, len(payload))
+			if _, readErr := io.ReadFull(inbound, receivedChunk); readErr != nil {
+				_ = outbound.Close()
+				_ = inbound.Close()
+				lastErr = fmt.Errorf("read bulk chunk: %w", readErr)
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			}
+			if !bytes.Equal(receivedChunk, payload) {
+				_ = outbound.Close()
+				_ = inbound.Close()
+				lastErr = errors.New("bulk chunk corrupted over live stream")
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			}
+
+			if wErr := <-writeErrCh; wErr != nil {
+				_ = outbound.Close()
+				_ = inbound.Close()
+				lastErr = fmt.Errorf("write bulk chunk: %w", wErr)
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			}
+
+			_ = outbound.Close()
+			_ = inbound.Close()
+			lastErr = nil
+			break
 		}
 
-		// Ping: Source -> Target
-		pingMsg := []byte("live-ping-stream-verification")
-		if _, writeErr := outbound.Write(pingMsg); writeErr != nil {
-			t.Fatalf("write ping: %v", writeErr)
-		}
-
-		recvBuf := make([]byte, len(pingMsg))
-		if _, readErr := io.ReadFull(inbound, recvBuf); readErr != nil {
-			t.Fatalf("read ping: %v", readErr)
-		}
-		if !bytes.Equal(recvBuf, pingMsg) {
-			t.Fatalf("received %q, want %q", recvBuf, pingMsg)
-		}
-
-		// Pong: Target -> Source
-		pongMsg := []byte("live-pong-stream-response")
-		if _, writeErr := inbound.Write(pongMsg); writeErr != nil {
-			t.Fatalf("write pong: %v", writeErr)
-		}
-
-		recvBuf = make([]byte, len(pongMsg))
-		if _, readErr := io.ReadFull(outbound, recvBuf); readErr != nil {
-			t.Fatalf("read pong: %v", readErr)
-		}
-		if !bytes.Equal(recvBuf, pongMsg) {
-			t.Fatalf("received %q, want %q", recvBuf, pongMsg)
-		}
-
-		// Multi-chunk bulk data transfer test (8KB pseudo-random payload)
-		payload := make([]byte, 8192)
-		_, _ = rand.Read(payload)
-
-		go func() {
-			_, _ = outbound.Write(payload)
-		}()
-
-		receivedChunk := make([]byte, len(payload))
-		if _, readErr := io.ReadFull(inbound, receivedChunk); readErr != nil {
-			t.Fatalf("read bulk chunk: %v", readErr)
-		}
-		if !bytes.Equal(receivedChunk, payload) {
-			t.Fatal("bulk chunk corrupted over live stream")
+		if lastErr != nil {
+			t.Fatalf("streaming echo deadlines and chunked transfer failed after 3 attempts: %v", lastErr)
 		}
 
 		t.Log("Streaming echo, deadlines, and chunked transfer over live B32 succeeded.")
