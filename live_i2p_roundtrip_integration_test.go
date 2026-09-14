@@ -237,34 +237,45 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 			}
 
 			var inbound net.Conn
-			select {
-			case inbound = <-accepted:
-				dialCancel()
-			case errVal := <-acceptErr:
-				dialCancel()
-				_ = outbound.Close()
-				lastErr = fmt.Errorf("accept: %w", errVal)
-				t.Logf("attempt %d accept failed: %v", attempt, errVal)
-				if attempt < 3 {
-					time.Sleep(backoff)
-					backoff *= 2
+			var acceptFailed bool
+			acceptTimer := time.NewTimer(15 * time.Second)
+			for inbound == nil && !acceptFailed {
+				select {
+				case cand := <-accepted:
+					if cand.RemoteAddr().String() == outbound.LocalAddr().String() {
+						inbound = cand
+					} else {
+						t.Logf("attempt %d discarding stale connection from %s (want %s)", attempt, cand.RemoteAddr(), outbound.LocalAddr())
+						_ = cand.Close()
+					}
+				case errVal := <-acceptErr:
+					dialCancel()
+					_ = outbound.Close()
+					lastErr = fmt.Errorf("accept: %w", errVal)
+					t.Logf("attempt %d accept failed: %v", attempt, errVal)
+					acceptFailed = true
+				case <-acceptTimer.C:
+					dialCancel()
+					_ = outbound.Close()
+					lastErr = errors.New("timeout waiting for accepted connection")
+					t.Logf("attempt %d timed out waiting for accepted connection", attempt)
+					acceptFailed = true
+				case <-ctx.Done():
+					acceptTimer.Stop()
+					dialCancel()
+					_ = outbound.Close()
+					t.Fatalf("context canceled: %v", ctx.Err())
 				}
-				continue
-			case <-time.After(15 * time.Second):
-				dialCancel()
-				_ = outbound.Close()
-				lastErr = errors.New("timeout waiting for accepted connection")
-				t.Logf("attempt %d timed out waiting for accepted connection", attempt)
-				if attempt < 3 {
-					time.Sleep(backoff)
-					backoff *= 2
-				}
-				continue
-			case <-ctx.Done():
-				dialCancel()
-				_ = outbound.Close()
-				t.Fatalf("context canceled: %v", ctx.Err())
 			}
+			acceptTimer.Stop()
+			if acceptFailed {
+				if attempt < 3 {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+				continue
+			}
+			dialCancel()
 
 			// Test SetDeadline on established connection
 			deadline := time.Now().Add(60 * time.Second)
