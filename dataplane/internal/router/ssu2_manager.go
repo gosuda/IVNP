@@ -4398,13 +4398,17 @@ func (m *SSU2Manager) writeToClass(ctx context.Context, packet []byte, remote ne
 	free := m.egressFree
 	queue := m.egressQueue
 	running := m.runningLocked()
+	conn := m.conn
 	m.mu.RUnlock()
-	if !running || free == nil || queue == nil {
-		if running && m.conn != nil {
+	if !running {
+		return ErrSSU2Session
+	}
+	if free == nil || queue == nil {
+		if conn != nil {
 			if m.metrics != nil {
 				m.metrics.AddSSU2SendEnqueuedDatagrams(1)
 			}
-			n, err := m.conn.WriteToUDP(packet, net.UDPAddrFromAddrPort(addrPort))
+			n, err := conn.WriteToUDP(packet, net.UDPAddrFromAddrPort(addrPort))
 			if err == nil && n == len(packet) {
 				if m.metrics != nil {
 					m.metrics.AddSSU2SentDatagrams(1)

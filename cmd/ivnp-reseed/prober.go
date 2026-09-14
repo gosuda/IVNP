@@ -106,22 +106,10 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 	}
 
 	reachableCount := p.store.ReachableCount()
-	cooldownFailed := ProbeCooldownFailed
-	if reachableCount < 1024 {
-		cooldownFailed = 60 * time.Second // Rapid retry in expansion mode
-	} else {
-		cooldownFailed = 3 * time.Minute // Conservative backoff in maintenance mode
-	}
-
 	now := time.Now()
 	var candidates []PeerRecord
 	for _, rec := range peers {
-		cooldown := ProbeCooldownReachable
-		if rec.Stats.TotalProbes == 0 {
-			cooldown = 0
-		} else if rec.Stats.ConsecutiveFails > 0 {
-			cooldown = cooldownFailed
-		}
+		cooldown := CalculateProbeCooldown(rec, reachableCount)
 		if now.Sub(rec.Stats.LastProbed) >= cooldown {
 			candidates = append(candidates, rec)
 		}
@@ -274,4 +262,27 @@ func (p *Prober) ProbeSingle(ctx context.Context, hash foundation.Hash) (bool, t
 		}
 	}
 	return false, 0
+}
+
+// CalculateProbeCooldown determines the cooldown duration before a peer can be probed again,
+// applying exponential backoff for peers with repeated consecutive probe failures.
+func CalculateProbeCooldown(rec PeerRecord, reachableCount int) time.Duration {
+	if rec.Stats.TotalProbes == 0 {
+		return 0
+	}
+	if rec.Stats.ConsecutiveFails == 0 {
+		return ProbeCooldownReachable
+	}
+	base := ProbeCooldownFailed
+	if reachableCount < 1024 {
+		base = 60 * time.Second // Rapid retry in expansion mode
+	} else {
+		base = 3 * time.Minute // Conservative backoff in maintenance mode
+	}
+	if rec.Stats.ConsecutiveFails <= 1 {
+		return base
+	}
+	shift := min(rec.Stats.ConsecutiveFails-1, 5) // max 2^5 = 32x
+	cooldown := base * time.Duration(1<<shift)
+	return min(cooldown, ProbeCooldownMaxFailed)
 }

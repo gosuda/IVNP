@@ -217,8 +217,8 @@ func (s *samSession) startReceiver(route destination.DestinationRoute, capacity 
 	default:
 	}
 	s.subscription = subscription
-	s.mu.Unlock()
 	s.wg.Go(func() { ; s.receiveLoop(subscription) })
+	s.mu.Unlock()
 	return nil
 }
 

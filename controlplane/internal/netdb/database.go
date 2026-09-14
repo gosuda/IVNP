@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
@@ -60,7 +61,7 @@ type Database struct {
 	maxLeases        int
 	networkID        uint32
 	gzipPool         sync.Pool
-	metrics          *observability.Registry
+	metrics          atomic.Pointer[observability.Registry]
 }
 
 func NewDatabase(local foundation.Hash, bucketCapacity int) *Database {
@@ -81,8 +82,16 @@ func NewDatabaseForNetwork(local foundation.Hash, bucketCapacity int, networkID 
 // SetMetrics sets the observability registry for recording NetDB metrics.
 func (d *Database) SetMetrics(metrics *observability.Registry) {
 	if d != nil {
-		d.metrics = metrics
+		d.metrics.Store(metrics)
 	}
+}
+
+// Metrics returns the observability registry for recording NetDB metrics, if configured.
+func (d *Database) Metrics() *observability.Registry {
+	if d == nil {
+		return nil
+	}
+	return d.metrics.Load()
 }
 
 // RoutingKey computes the daily DHT routing key SHA256(hash || YYYYMMDD) in UTC.
@@ -183,8 +192,8 @@ func (d *Database) admitRouterInfo(info foundation.NetworkDatabaseRouterInfo, se
 		return err
 	}
 	d.routers.StoreVerified(ownedInfo, floodfill, seenAt)
-	if d.metrics != nil {
-		d.metrics.SetNetDBRouters(uint64(d.routers.Len()))
+	if metrics := d.Metrics(); metrics != nil {
+		metrics.SetNetDBRouters(uint64(d.routers.Len()))
 	}
 	return nil
 }
@@ -211,11 +220,11 @@ func (d *Database) HandleDatabaseStoreAsPublished(store foundation.I2NPDatabaseS
 	default:
 		err = ErrStoreUnsupported
 	}
-	if d.metrics != nil {
+	if metrics := d.Metrics(); metrics != nil {
 		if err == nil {
-			d.metrics.IncNetDBStores()
+			metrics.IncNetDBStores()
 		} else {
-			d.metrics.IncNetDBStoreFailures()
+			metrics.IncNetDBStoreFailures()
 		}
 	}
 	return err

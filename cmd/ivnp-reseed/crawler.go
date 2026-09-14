@@ -81,6 +81,20 @@ func (c *ActiveCrawler) HarvestRefs(refs []controlplane.NetworkDatabaseRouterRef
 	return admitted
 }
 
+// DynamicExplorationBudget calculates an optimal query budget based on current K-bucket deficits.
+// It scales down lookups when K-buckets are already well-covered, eliminating wasteful DHT queries.
+func (c *ActiveCrawler) DynamicExplorationBudget(maxCap int) int {
+	if c == nil || c.store == nil || maxCap <= 0 {
+		return 0
+	}
+	emptyBuckets, severeDeficit, moderateDeficit, minorDeficit := c.categorizeDeficits()
+	needed := len(emptyBuckets)*4 + len(severeDeficit)*2 + len(moderateDeficit) + len(minorDeficit)
+	if needed == 0 {
+		return min(maxCap, 2)
+	}
+	return min(maxCap, max(2, needed))
+}
+
 // TreeExplore inspects all 256 DHT key-space buckets, identifies empty or sparse
 // buckets, and dispatches targeted exploratory lookups down the DHT prefix tree
 // to discover floodfills and routers within those exact keyspace prefixes.
@@ -128,7 +142,12 @@ func (c *ActiveCrawler) TreeExplore(ctx context.Context, subsystem *node.Subsyst
 		return dispatched, err
 	}
 
-	// 5. Priority 5: Full-keyspace uniform random exploration only if budget still remains
+	// 5. Priority 5: Full-keyspace uniform random exploration only if severe deficits exist
+	// and budget still remains. If key buckets are populated, suppress random exploration.
+	if len(emptyBuckets) == 0 && len(severeDeficit) == 0 {
+		return dispatched, nil
+	}
+
 	for dispatched < maxQueries && ctx.Err() == nil {
 		var target foundation.Hash
 		if _, err := rand.Read(target[:]); err != nil {

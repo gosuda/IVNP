@@ -12,13 +12,18 @@ const (
 	MaxStorePeers = 5000
 
 	// DefaultProbeRateLimit bounds outbound probes to avoid flooding peers while actively verifying network state.
-	DefaultProbeRateLimit = 60.0 // probes per second (loosened from 15.0)
-	DefaultProbeBurst     = 120.0
+	DefaultProbeRateLimit = 8.0 // probes per second
+	DefaultProbeBurst     = 16.0
 
 	// Probe cooldowns differentiated by peer state:
 	ProbeCooldownReachable = 3 * time.Minute  // loosened from 10m
 	ProbeCooldownFailed    = 90 * time.Second // recheck failed peers sooner
 	ProbeCooldownInterval  = 3 * time.Minute  // default fallback interval
+	ProbeCooldownMaxFailed = 30 * time.Minute // maximum backoff for persistently failing peers
+
+	// Default exploration DHT query budgets per pass:
+	DefaultExploreBudgetExpansion   = 24 // Reachable < 1024: bounded active exploration
+	DefaultExploreBudgetMaintenance = 8  // Reachable >= 1024: targeted sparse repair
 )
 
 // ExplorationMode tracks the dynamic budget allocation phase.
