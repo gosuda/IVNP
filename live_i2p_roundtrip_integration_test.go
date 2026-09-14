@@ -34,8 +34,10 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 		t.Skip("set IVNP_LIVE_ROUNDTRIP=1 to run the live I2P network round trip test")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
+
+	const maxAttempts = 5
 
 	// 1. Configure Router A (target: server/responder)
 	cfgA := ivnp.DefaultRouterConfig()
@@ -215,21 +217,21 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 		backoff := 2 * time.Second
 
 		var lastErr error
-		for attempt := 1; attempt <= 3; attempt++ {
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			// Drain any stale connection received from an earlier timed-out attempt
 			for len(accepted) > 0 {
 				stale := <-accepted
 				_ = stale.Close()
 			}
 
-			t.Logf("Streaming transfer over live I2P (attempt %d/3)...", attempt)
-			dialCtx, dialCancel := context.WithTimeout(ctx, 30*time.Second)
+			t.Logf("Streaming transfer over live I2P (attempt %d/%d)...", attempt, maxAttempts)
+			dialCtx, dialCancel := context.WithTimeout(ctx, 60*time.Second)
 			outbound, dialErr := destB.DialContext(dialCtx, "i2p", dialAddr)
 			if dialErr != nil {
 				dialCancel()
 				lastErr = fmt.Errorf("dial: %w", dialErr)
 				t.Logf("attempt %d dial failed: %v", attempt, dialErr)
-				if attempt < 3 {
+				if attempt < maxAttempts {
 					time.Sleep(backoff)
 					backoff *= 2
 				}
@@ -269,7 +271,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 			}
 			acceptTimer.Stop()
 			if acceptFailed {
-				if attempt < 3 {
+				if attempt < maxAttempts {
 					time.Sleep(backoff)
 					backoff *= 2
 				}
@@ -283,7 +285,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 				_ = outbound.Close()
 				_ = inbound.Close()
 				lastErr = fmt.Errorf("outbound set deadline: %w", err)
-				if attempt < 3 {
+				if attempt < maxAttempts {
 					time.Sleep(backoff)
 					backoff *= 2
 				}
@@ -293,7 +295,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 				_ = outbound.Close()
 				_ = inbound.Close()
 				lastErr = fmt.Errorf("inbound set deadline: %w", err)
-				if attempt < 3 {
+				if attempt < maxAttempts {
 					time.Sleep(backoff)
 					backoff *= 2
 				}
@@ -306,7 +308,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 				_ = outbound.Close()
 				_ = inbound.Close()
 				lastErr = fmt.Errorf("write ping: %w", writeErr)
-				if attempt < 3 {
+				if attempt < maxAttempts {
 					time.Sleep(backoff)
 					backoff *= 2
 				}
@@ -318,7 +320,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 				_ = outbound.Close()
 				_ = inbound.Close()
 				lastErr = fmt.Errorf("read ping: %w", readErr)
-				if attempt < 3 {
+				if attempt < maxAttempts {
 					time.Sleep(backoff)
 					backoff *= 2
 				}
@@ -328,7 +330,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 				_ = outbound.Close()
 				_ = inbound.Close()
 				lastErr = fmt.Errorf("received %q, want %q", recvBuf, pingMsg)
-				if attempt < 3 {
+				if attempt < maxAttempts {
 					time.Sleep(backoff)
 					backoff *= 2
 				}
@@ -341,7 +343,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 				_ = outbound.Close()
 				_ = inbound.Close()
 				lastErr = fmt.Errorf("write pong: %w", writeErr)
-				if attempt < 3 {
+				if attempt < maxAttempts {
 					time.Sleep(backoff)
 					backoff *= 2
 				}
@@ -353,7 +355,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 				_ = outbound.Close()
 				_ = inbound.Close()
 				lastErr = fmt.Errorf("read pong: %w", readErr)
-				if attempt < 3 {
+				if attempt < maxAttempts {
 					time.Sleep(backoff)
 					backoff *= 2
 				}
@@ -363,7 +365,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 				_ = outbound.Close()
 				_ = inbound.Close()
 				lastErr = fmt.Errorf("received %q, want %q", recvBuf, pongMsg)
-				if attempt < 3 {
+				if attempt < maxAttempts {
 					time.Sleep(backoff)
 					backoff *= 2
 				}
@@ -385,7 +387,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 				_ = outbound.Close()
 				_ = inbound.Close()
 				lastErr = fmt.Errorf("read bulk chunk: %w", readErr)
-				if attempt < 3 {
+				if attempt < maxAttempts {
 					time.Sleep(backoff)
 					backoff *= 2
 				}
@@ -395,7 +397,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 				_ = outbound.Close()
 				_ = inbound.Close()
 				lastErr = errors.New("bulk chunk corrupted over live stream")
-				if attempt < 3 {
+				if attempt < maxAttempts {
 					time.Sleep(backoff)
 					backoff *= 2
 				}
@@ -406,7 +408,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 				_ = outbound.Close()
 				_ = inbound.Close()
 				lastErr = fmt.Errorf("write bulk chunk: %w", wErr)
-				if attempt < 3 {
+				if attempt < maxAttempts {
 					time.Sleep(backoff)
 					backoff *= 2
 				}
@@ -420,7 +422,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 		}
 
 		if lastErr != nil {
-			t.Fatalf("streaming echo deadlines and chunked transfer failed after 3 attempts: %v", lastErr)
+			t.Fatalf("streaming echo deadlines and chunked transfer failed after %d attempts: %v", maxAttempts, lastErr)
 		}
 
 		t.Log("Streaming echo, deadlines, and chunked transfer over live B32 succeeded.")
@@ -430,57 +432,82 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 	t.Run("http eepsite get and post over live B32", func(t *testing.T) {
 		httpClient := &http.Client{
 			Transport: &http.Transport{
-				DialContext: destB.DialContext,
+				DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+					dialCtx, dialCancel := context.WithTimeout(ctx, 60*time.Second)
+					defer dialCancel()
+					return destB.DialContext(dialCtx, network, address)
+				},
 			},
-			Timeout: 45 * time.Second,
+			Timeout: 90 * time.Second,
 		}
 
-		// GET /health
 		healthURL := "http://" + net.JoinHostPort(targetB32, "8082") + "/health"
-		resp, getErr := httpClient.Get(healthURL)
-		if getErr != nil {
-			t.Fatalf("HTTP GET /health: %v", getErr)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("GET /health status = %d, want 200", resp.StatusCode)
-		}
-		var healthResp map[string]string
-		if decErr := json.NewDecoder(resp.Body).Decode(&healthResp); decErr != nil {
-			t.Fatalf("decode health JSON: %v", decErr)
-		}
-		if healthResp["status"] != "ok" || healthResp["network"] != "live-i2p" {
-			t.Fatalf("unexpected health body: %v", healthResp)
-		}
-
-		// POST /echo
 		echoURL := "http://" + net.JoinHostPort(targetB32, "8082") + "/echo"
 		postPayload := []byte("hello-ivnp-http-live-integration")
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, echoURL, bytes.NewReader(postPayload))
-		if reqErr != nil {
-			t.Fatalf("create POST request: %v", reqErr)
-		}
-		req.Header.Set("X-IVNP-Header", "custom-live-value")
+		backoff := 2 * time.Second
 
-		postResp, postErr := httpClient.Do(req)
-		if postErr != nil {
-			t.Fatalf("HTTP POST /echo: %v", postErr)
-		}
-		defer postResp.Body.Close()
+		var lastErr error
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			t.Logf("HTTP round trip over live I2P (attempt %d/%d)...", attempt, maxAttempts)
 
-		if postResp.StatusCode != http.StatusOK {
-			t.Fatalf("POST /echo status = %d, want 200", postResp.StatusCode)
+			// GET /health
+			resp, getErr := httpClient.Get(healthURL)
+			if getErr != nil {
+				lastErr = fmt.Errorf("HTTP GET /health: %w", getErr)
+			} else {
+				lastErr = nil
+				if resp.StatusCode != http.StatusOK {
+					lastErr = fmt.Errorf("GET /health status = %d, want 200", resp.StatusCode)
+				} else {
+					var healthResp map[string]string
+					if decErr := json.NewDecoder(resp.Body).Decode(&healthResp); decErr != nil {
+						lastErr = fmt.Errorf("decode health JSON: %w", decErr)
+					} else if healthResp["status"] != "ok" || healthResp["network"] != "live-i2p" {
+						lastErr = fmt.Errorf("unexpected health body: %v", healthResp)
+					}
+				}
+				_ = resp.Body.Close()
+			}
+
+			// POST /echo
+			if lastErr == nil {
+				req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, echoURL, bytes.NewReader(postPayload))
+				if reqErr != nil {
+					t.Fatalf("create POST request: %v", reqErr)
+				}
+				req.Header.Set("X-IVNP-Header", "custom-live-value")
+
+				postResp, postErr := httpClient.Do(req)
+				if postErr != nil {
+					lastErr = fmt.Errorf("HTTP POST /echo: %w", postErr)
+				} else {
+					echoedBody, readErr := io.ReadAll(postResp.Body)
+					_ = postResp.Body.Close()
+					switch {
+					case postResp.StatusCode != http.StatusOK:
+						lastErr = fmt.Errorf("POST /echo status = %d, want 200", postResp.StatusCode)
+					case postResp.Header.Get("X-Echoed-Header") != "custom-live-value":
+						lastErr = fmt.Errorf("echoed header = %q, want custom-live-value", postResp.Header.Get("X-Echoed-Header"))
+					case readErr != nil:
+						lastErr = fmt.Errorf("read POST echo body: %w", readErr)
+					case !bytes.Equal(echoedBody, postPayload):
+						lastErr = fmt.Errorf("echoed body = %q, want %q", echoedBody, postPayload)
+					}
+				}
+			}
+
+			if lastErr == nil {
+				break
+			}
+			t.Logf("attempt %d failed: %v", attempt, lastErr)
+			if attempt < maxAttempts {
+				time.Sleep(backoff)
+				backoff *= 2
+			}
 		}
-		if headerVal := postResp.Header.Get("X-Echoed-Header"); headerVal != "custom-live-value" {
-			t.Fatalf("echoed header = %q, want custom-live-value", headerVal)
-		}
-		echoedBody, readErr := io.ReadAll(postResp.Body)
-		if readErr != nil {
-			t.Fatalf("read POST echo body: %v", readErr)
-		}
-		if !bytes.Equal(echoedBody, postPayload) {
-			t.Fatalf("echoed body = %q, want %q", echoedBody, postPayload)
+
+		if lastErr != nil {
+			t.Fatalf("http eepsite get and post over live B32 failed after %d attempts: %v", maxAttempts, lastErr)
 		}
 		t.Log("HTTP client & server over live B32 destination succeeded.")
 	})
