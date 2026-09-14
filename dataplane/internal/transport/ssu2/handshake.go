@@ -188,6 +188,39 @@ func PeekDestinationID(packet, receiverIntroKey []byte) (uint64, error) {
 	return id, nil
 }
 
+// PeekSessionConfirmed reports whether packet carries a valid SessionConfirmed
+// short header matching destinationID without mutating packet in place.
+func PeekSessionConfirmed(packet, introKey, confirmHeaderKey []byte, destinationID uint64) bool {
+	if len(packet) < MinPacketLen || len(packet) > MaxIPv4PacketLen || len(introKey) != cryptography.ChaChaKeySize || len(confirmHeaderKey) != cryptography.ChaChaKeySize || destinationID == 0 {
+		return false
+	}
+	var first [8]byte
+	defer clear(first[:])
+	copy(first[:], packet[:8])
+	if err := xorHeaderMask(first[:], introKey, packet[len(packet)-24:len(packet)-12]); err != nil {
+		return false
+	}
+	if binary.BigEndian.Uint64(first[:]) != destinationID {
+		return false
+	}
+	var second [8]byte
+	defer clear(second[:])
+	copy(second[:], packet[8:16])
+	if err := xorHeaderMask(second[:], confirmHeaderKey, packet[len(packet)-12:]); err != nil {
+		return false
+	}
+	packetNumber := binary.BigEndian.Uint32(second[:4])
+	packetType := PacketType(second[4])
+	fragment := second[5]
+	flags := binary.BigEndian.Uint16(second[6:8])
+	if packetNumber != 0 || packetType != SessionConfirmed || flags != 0 {
+		return false
+	}
+	count := fragment & 0x0f
+	index := fragment >> 4
+	return count > 0 && index < count
+}
+
 // ParseSessionRequest removes header protection and authenticates one complete
 // SessionRequest. packet is modified in place and must be caller-owned.
 func ParseSessionRequest(packet, staticPrivate, introKey []byte, networkID uint8) (*Responder, LongHeader, []byte, error) {
@@ -479,6 +512,15 @@ func (r *ConfirmedReassembler) ReleaseSensitive() {
 		r.responder.ReleaseSensitive()
 		r.responder = nil
 	}
+}
+
+// PeekSessionConfirmed reports whether packet carries a SessionConfirmed short
+// header addressed to this pending handshake without mutating packet in place.
+func (r *ConfirmedReassembler) PeekSessionConfirmed(packet []byte) bool {
+	if r == nil || r.responder == nil || r.responder.completed {
+		return false
+	}
+	return PeekSessionConfirmed(packet, r.responder.introKey[:], r.responder.confirmHeaderKey[:], r.responder.destinationID)
 }
 
 // Add accepts one caller-owned packet. complete is true only after a complete,

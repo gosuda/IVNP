@@ -113,6 +113,14 @@ func TestSSU2HandshakeAndDataCiphers(t *testing.T) {
 	if destinationID, err := PeekDestinationID(confirmed, bobIntro); err != nil || destinationID != 1 {
 		t.Fatalf("PeekDestinationID = %d, %v", destinationID, err)
 	}
+	reassembler := NewConfirmedReassembler(responder)
+	confirmedCopy := append([]byte(nil), confirmed...)
+	if !reassembler.PeekSessionConfirmed(confirmedCopy) {
+		t.Fatal("PeekSessionConfirmed returned false for unfragmented SessionConfirmed")
+	}
+	if !bytes.Equal(confirmedCopy, confirmed) {
+		t.Fatal("PeekSessionConfirmed mutated packet in place")
+	}
 	static, openedConfirmed, err := responder.ParseSessionConfirmed(append([]byte(nil), confirmed...))
 	if err != nil || !bytes.Equal(static, aliceStatic.PublicKey().Bytes()) || !bytes.Equal(openedConfirmed, confirmedPayload) {
 		t.Fatalf("ParseSessionConfirmed = %x, %x, %v", static, openedConfirmed, err)
@@ -130,6 +138,9 @@ func TestSSU2HandshakeAndDataCiphers(t *testing.T) {
 	packet, err := aliceSend.SealDataTo(make([]byte, MaxIPv4PacketLen), ShortHeader{DestinationID: 1, PacketNumber: 1, Type: Data}, dataPayload)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if reassembler.PeekSessionConfirmed(packet) {
+		t.Fatal("PeekSessionConfirmed returned true for data packet")
 	}
 	header, opened, err := bobReceive.OpenDataTo(make([]byte, len(dataPayload)), append([]byte(nil), packet...))
 	if err != nil || header.PacketNumber != 1 || !bytes.Equal(opened, dataPayload) {
@@ -201,6 +212,12 @@ func TestSSU2SessionConfirmedFragmentReassembly(t *testing.T) {
 	}
 
 	reassembler := NewConfirmedReassembler(responder)
+	if !reassembler.PeekSessionConfirmed(packets[0]) {
+		t.Fatal("PeekSessionConfirmed returned false for fragment 0")
+	}
+	if !reassembler.PeekSessionConfirmed(packets[1]) {
+		t.Fatal("PeekSessionConfirmed returned false for fragment 1")
+	}
 	if _, _, complete, err := reassembler.Add(append([]byte(nil), packets[1]...)); err != nil || complete {
 		t.Fatalf("second fragment = complete %t, error %v", complete, err)
 	}
