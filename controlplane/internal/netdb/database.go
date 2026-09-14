@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
@@ -24,13 +25,14 @@ const (
 )
 
 var (
-	ErrStoreKeyMismatch   = errors.New("netdb: database store key does not match payload identity")
-	ErrStoreUnsupported   = errors.New("netdb: database store type is not supported")
-	ErrRouterInfoTooLarge = errors.New("netdb: decompressed RouterInfo exceeds Java I2P 4 KiB limit")
-	ErrRouterInfoStale    = errors.New("netdb: RouterInfo publication is stale")
-	ErrRouterInfoFuture   = errors.New("netdb: RouterInfo publication is too far in the future")
-	ErrLeaseSetExpired    = errors.New("netdb: LeaseSet is expired or too old")
-	ErrLeaseSetFuture     = errors.New("netdb: LeaseSet expires too far in the future")
+	ErrStoreKeyMismatch          = errors.New("netdb: database store key does not match payload identity")
+	ErrStoreUnsupported          = errors.New("netdb: database store type is not supported")
+	ErrRouterInfoTooLarge        = errors.New("netdb: decompressed RouterInfo exceeds Java I2P 4 KiB limit")
+	ErrRouterInfoStale           = errors.New("netdb: RouterInfo publication is stale")
+	ErrRouterInfoFuture          = errors.New("netdb: RouterInfo publication is too far in the future")
+	ErrLeaseSetExpired           = errors.New("netdb: LeaseSet is expired or too old")
+	ErrLeaseSetFuture            = errors.New("netdb: LeaseSet expires too far in the future")
+	ErrRouterInfoNetworkMismatch = errors.New("netdb: RouterInfo netId does not match the database network")
 )
 
 type leaseEntry struct {
@@ -57,22 +59,39 @@ type Database struct {
 	leaseExpiries    []leaseExpiry
 	leaseExpiryIndex map[foundation.Hash]int
 	maxLeases        int
+	networkID        uint32
 	gzipPool         sync.Pool
-	metrics          *observability.Registry
+	metrics          atomic.Pointer[observability.Registry]
 }
 
 func NewDatabase(local foundation.Hash, bucketCapacity int) *Database {
+	return NewDatabaseForNetwork(local, bucketCapacity, 0)
+}
+
+// NewDatabaseForNetwork scopes the database to one netId: admitted RouterInfos
+// must declare that netId (absent netId means the public I2P value 2). A zero
+// networkID disables the check for tests and single-network callers.
+func NewDatabaseForNetwork(local foundation.Hash, bucketCapacity int, networkID uint32) *Database {
 	return &Database{
 		routers: NewTable(local, bucketCapacity), leases: make(map[foundation.Hash]leaseEntry),
 		leaseExpiryIndex: make(map[foundation.Hash]int), maxLeases: 4096,
+		networkID: networkID,
 	}
 }
 
 // SetMetrics sets the observability registry for recording NetDB metrics.
 func (d *Database) SetMetrics(metrics *observability.Registry) {
 	if d != nil {
-		d.metrics = metrics
+		d.metrics.Store(metrics)
 	}
+}
+
+// Metrics returns the observability registry for recording NetDB metrics, if configured.
+func (d *Database) Metrics() *observability.Registry {
+	if d == nil {
+		return nil
+	}
+	return d.metrics.Load()
 }
 
 // RoutingKey computes the daily DHT routing key SHA256(hash || YYYYMMDD) in UTC.
@@ -146,6 +165,15 @@ func (d *Database) AdmitReseedRouterInfo(info foundation.NetworkDatabaseRouterIn
 }
 
 func (d *Database) admitRouterInfo(info foundation.NetworkDatabaseRouterInfo, seenAt, maxAgeMillis uint64) error {
+	if d.networkID != 0 {
+		id, err := foundation.NetworkDatabaseNetID(info)
+		if err != nil {
+			return err
+		}
+		if id != d.networkID {
+			return ErrRouterInfoNetworkMismatch
+		}
+	}
 	valid, err := info.Verify()
 	floodfill := foundation.NetworkDatabaseIsFloodfill(info)
 	if err != nil {
@@ -164,8 +192,8 @@ func (d *Database) admitRouterInfo(info foundation.NetworkDatabaseRouterInfo, se
 		return err
 	}
 	d.routers.StoreVerified(ownedInfo, floodfill, seenAt)
-	if d.metrics != nil {
-		d.metrics.SetNetDBRouters(uint64(d.routers.Len()))
+	if metrics := d.Metrics(); metrics != nil {
+		metrics.SetNetDBRouters(uint64(d.routers.Len()))
 	}
 	return nil
 }
@@ -192,11 +220,11 @@ func (d *Database) HandleDatabaseStoreAsPublished(store foundation.I2NPDatabaseS
 	default:
 		err = ErrStoreUnsupported
 	}
-	if d.metrics != nil {
+	if metrics := d.Metrics(); metrics != nil {
 		if err == nil {
-			d.metrics.IncNetDBStores()
+			metrics.IncNetDBStores()
 		} else {
-			d.metrics.IncNetDBStoreFailures()
+			metrics.IncNetDBStoreFailures()
 		}
 	}
 	return err

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -229,6 +230,11 @@ func (n *embeddedMemoryNetwork) reply(from, gateway foundation.Hash, tunnelID ui
 
 func embeddedTestFloodfill(t *testing.T) foundation.NetworkDatabaseRouterInfo {
 	t.Helper()
+	return embeddedTestFloodfillNet(t, 2)
+}
+
+func embeddedTestFloodfillNet(t *testing.T, netID uint32) foundation.NetworkDatabaseRouterInfo {
+	t.Helper()
 	public, private, err := ed25519.GenerateKey(cryptorand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -267,7 +273,7 @@ func embeddedTestFloodfill(t *testing.T) foundation.NetworkDatabaseRouterInfo {
 			}},
 			Options: []foundation.MappingEntry{
 				{Key: []byte("caps"), Value: []byte("f")},
-				{Key: []byte("netId"), Value: []byte("2")},
+				{Key: []byte("netId"), Value: []byte(strconv.FormatUint(uint64(netID), 10))},
 			},
 		},
 	})
@@ -302,12 +308,21 @@ func embeddedTestConfig(t *testing.T) RouterConfig {
 
 func newEmbeddedTestRouter(t *testing.T, cfg RouterConfig, transport *embeddedMemoryTransport) *Router {
 	t.Helper()
-	settings, options, err := routerSettings(cfg)
+	return newEmbeddedTestRouterN(t, cfg, func(string) dataplane.RouterTransportManager {
+		return transport
+	})
+}
+
+func newEmbeddedTestRouterN(t *testing.T, cfg RouterConfig, transports func(name string) dataplane.RouterTransportManager) *Router {
+	t.Helper()
+	specs, def, err := networkSpecs(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	options.Transport = transport
-	router, err := newRouter(t.Context(), cfg, settings, options)
+	for i := range specs {
+		specs[i].Options.Transport = transports(specs[i].Name)
+	}
+	router, err := newRouter(t.Context(), cfg, specs, def)
 	if err != nil {
 		t.Fatal(err)
 	}

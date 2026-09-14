@@ -117,7 +117,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	crawler := NewActiveCrawler(store)
-	prober := NewProber(store, 48)
+	prober := NewProber(store, 16)
 	server := NewReseedServer(ServerConfig{
 		NetworkID:     uint8(*netID),
 		ListenAddress: *listenAddr,
@@ -226,10 +226,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 				)
 			}
 			reachable := store.ReachableCount()
-			queryBudget := 48
+			maxBudget := DefaultExploreBudgetExpansion
 			if reachable >= 1024 {
-				queryBudget = 12
+				maxBudget = DefaultExploreBudgetMaintenance
 			}
+			queryBudget := crawler.DynamicExplorationBudget(maxBudget)
 			// Active DHT tree exploration to populate empty and sparse K-Buckets
 			dispatched, exploreErr := crawler.TreeExplore(crawlCtx, routerSubsystem, queryBudget)
 			if exploreErr != nil && !errors.Is(exploreErr, context.Canceled) {
@@ -493,15 +494,15 @@ func configureActiveClientRouter(baseDir, tempDir string, netID uint8, routerPor
 	cfg.AddressBook.Enabled = false
 
 	// Scale exploratory tunnel pool and lookup capacity for active DHT crawling
-	cfg.Tunnel.ExploratoryInboundTarget = 12
-	cfg.Tunnel.ExploratoryOutboundTarget = 12
-	cfg.Tunnel.ExploratoryPoolCapacity = 32
-	cfg.Tunnel.BuildPendingCapacity = 128
+	cfg.Tunnel.ExploratoryInboundTarget = 6
+	cfg.Tunnel.ExploratoryOutboundTarget = 6
+	cfg.Tunnel.ExploratoryPoolCapacity = 16
+	cfg.Tunnel.BuildPendingCapacity = 48
 	cfg.Tunnel.MaintenanceInterval = 10 * time.Second
 
 	// Expand NetDB capacity for deep network exploration
 	cfg.NetDB.BucketCapacity = 128
-	cfg.NetDB.LookupCapacity = 128
+	cfg.NetDB.LookupCapacity = 48
 
 	return cfg
 }

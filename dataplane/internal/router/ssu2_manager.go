@@ -125,6 +125,9 @@ type SSU2ManagerConfig struct {
 	// IntroductionEndpoint returns the observed or configured external UDP
 	// endpoint used in Relay Responses and Requests for firewalled routers.
 	IntroductionEndpoint func() (netip.AddrPort, error)
+	// AdmitPeer gates transport sessions after the peer RouterInfo is verified
+	// and netId-matched. A non-nil result denies session installation.
+	AdmitPeer PeerAdmissionFunc
 }
 
 type ssu2BatchConnection interface {
@@ -217,6 +220,7 @@ type SSU2Manager struct {
 	routerInfoStoresMu  sync.RWMutex
 	routerInfoStores    map[foundation.Hash]ssu2RouterInfoStoreSnapshot
 	reporter            ingress.Reporter
+	admitPeer           PeerAdmissionFunc
 }
 
 // IOStats is the single atomic source for SSU2 socket accounting.
@@ -682,13 +686,45 @@ type ssu2OutboundPending struct {
 	timer         *time.Timer
 }
 
+const ssu2MaxStagedEarlyPackets = 8
+
+type ssu2StagedPacket struct {
+	remote netip.AddrPort
+	length int
+	data   [dataplanessu2.MaxIPv4PacketLen]byte
+}
+
 type ssu2InboundPending struct {
-	reassemblyMu sync.Mutex
-	remote       net.Addr
-	sendID       uint64
-	responder    *dataplanessu2.Responder
-	reassembly   *dataplanessu2.ConfirmedReassembler
-	timer        *time.Timer
+	reassemblyMu  sync.Mutex
+	remote        net.Addr
+	sendID        uint64
+	responder     *dataplanessu2.Responder
+	reassembly    *dataplanessu2.ConfirmedReassembler
+	timer         *time.Timer
+	stagedPackets [ssu2MaxStagedEarlyPackets]ssu2StagedPacket
+	stagedCount   int
+}
+
+func (p *ssu2InboundPending) releaseSensitiveHeld() {
+	if p.responder != nil {
+		p.responder.ReleaseSensitive()
+		p.responder = nil
+	}
+	if p.reassembly != nil {
+		p.reassembly.ReleaseSensitive()
+		p.reassembly = nil
+	}
+	for i := range p.stagedPackets {
+		clear(p.stagedPackets[i].data[:])
+		p.stagedPackets[i].length = 0
+	}
+	p.stagedCount = 0
+}
+
+func (p *ssu2InboundPending) releaseSensitive() {
+	p.reassemblyMu.Lock()
+	defer p.reassemblyMu.Unlock()
+	p.releaseSensitiveHeld()
 }
 
 type ssu2RelayRequest struct {
@@ -835,6 +871,7 @@ func NewSSU2Manager(config SSU2ManagerConfig) (*SSU2Manager, error) {
 		publishPeerTestResult: config.PublishPeerTestResult,
 		onPeerTest:            config.OnPeerTest,
 		reporter:              config.PanicReporter,
+		admitPeer:             config.AdmitPeer,
 		metrics:               config.Metrics,
 		logger:                config.Logger,
 		done:                  make(chan struct{}),
@@ -1029,10 +1066,7 @@ func (m *SSU2Manager) Close() error {
 			pending.releaseSensitive()
 		}
 		for _, pending := range inbounds {
-			pending.reassemblyMu.Lock()
-			pending.responder.ReleaseSensitive()
-			pending.reassembly.ReleaseSensitive()
-			pending.reassemblyMu.Unlock()
+			pending.releaseSensitive()
 		}
 		m.syncRelayTagPublication()
 		publishCtx, publishCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1822,6 +1856,12 @@ func (m *SSU2Manager) resolveOutbound(peer foundation.Hash) (ssu2PeerAddress, *n
 	remote, err := net.ResolveUDPAddr("udp", net.JoinHostPort(address.host, strconv.Itoa(int(address.port))))
 	if err != nil {
 		return ssu2PeerAddress{}, nil, ErrSSU2Peer
+	}
+	// A denial must not carry ErrSSU2Peer: EnsureSession would otherwise retry
+	// the rejected peer through relay introduction.
+	request := PeerAdmission{Peer: peer, RouterInfo: info, Transport: PeerTransportSSU2, RemoteAddr: remote}
+	if admitErr := runPeerAdmission(m.ctx, m.admitPeer, m.reporter, ingress.BoundarySSU2Packet, request); admitErr != nil {
+		return ssu2PeerAddress{}, nil, admitErr
 	}
 	return address, remote, nil
 }
@@ -2904,18 +2944,13 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 		}
 		delete(m.inbound, header.DestinationID)
 		m.mu.Unlock()
-		pending.reassemblyMu.Lock()
-		pending.responder.ReleaseSensitive()
-		pending.reassembly.ReleaseSensitive()
-		pending.reassemblyMu.Unlock()
+		pending.releaseSensitive()
 	})
 	m.mu.Lock()
 	if !m.runningLocked() || m.sessionsByID[header.DestinationID] != nil || m.inbound[header.DestinationID] != nil {
 		m.mu.Unlock()
 		pending.timer.Stop()
-		pending.reassemblyMu.Lock()
-		pending.reassembly.ReleaseSensitive()
-		pending.reassemblyMu.Unlock()
+		pending.releaseSensitive()
 		return
 	}
 	m.inbound[header.DestinationID] = pending
@@ -2936,31 +2971,51 @@ func (m *SSU2Manager) handleSessionPacket(packet []byte, remote netip.AddrPort) 
 	session := m.sessionsByID[destinationID]
 	m.mu.RUnlock()
 	if pending != nil {
-		m.handleSessionConfirmed(packet, pending, destinationID, ssu2PacketAddr{value: remote})
+		m.handleInboundPacket(packet, pending, destinationID, remote)
 		return
 	}
 	if session != nil {
 		m.handleDataFrom(session, packet, remote)
 	}
 }
-func (m *SSU2Manager) handleSessionConfirmed(packet []byte, pending *ssu2InboundPending, destinationID uint64, remote net.Addr) {
+
+func (m *SSU2Manager) handleInboundPacket(packet []byte, pending *ssu2InboundPending, destinationID uint64, remote netip.AddrPort) {
 	pending.reassemblyMu.Lock()
 	defer pending.reassemblyMu.Unlock()
-	if !sameUDPAddress(pending.remote, remote) {
+	if !sameUDPAddress(pending.remote, ssu2PacketAddr{value: remote}) {
 		return
 	}
 	m.mu.RLock()
 	active := m.inbound[destinationID] == pending
+	session := m.sessionsByID[destinationID]
 	m.mu.RUnlock()
 	if !active {
+		if session != nil {
+			m.handleDataFrom(session, packet, remote)
+		}
 		return
 	}
+	if !pending.reassembly.PeekSessionConfirmed(packet) {
+		if pending.stagedCount < ssu2MaxStagedEarlyPackets && len(packet) <= dataplanessu2.MaxIPv4PacketLen {
+			staged := &pending.stagedPackets[pending.stagedCount]
+			staged.remote = remote
+			staged.length = len(packet)
+			copy(staged.data[:staged.length], packet)
+			pending.stagedCount++
+		}
+		return
+	}
+	m.processSessionConfirmedLocked(packet, pending, destinationID, remote)
+}
+
+func (m *SSU2Manager) processSessionConfirmedLocked(packet []byte, pending *ssu2InboundPending, destinationID uint64, remote netip.AddrPort) {
+	remoteAddr := ssu2PacketAddr{value: remote}
 	static, payload, complete, err := pending.reassembly.Add(packet)
 	if err != nil || !complete {
 		return
 	}
 	peer, peerIntro, err := validateSSU2ConfirmedPayload(payload, static)
-	if err != nil || peer.Hash() == m.currentBindings().LocalInfo.Hash() || !m.admitSSU2Peer(peer, static, m.now()) {
+	if err != nil || peer.Hash() == m.currentBindings().LocalInfo.Hash() || !m.admitSSU2Peer(peer, static, m.now(), remoteAddr) {
 		m.removeInboundHeld(destinationID, pending)
 		return
 	}
@@ -2969,8 +3024,18 @@ func (m *SSU2Manager) handleSessionConfirmed(packet []byte, pending *ssu2Inbound
 		m.removeInboundHeld(destinationID, pending)
 		return
 	}
-	session := &ssu2TransportSession{peer: peer.Hash(), sendID: pending.sendID, receiveID: destinationID, remote: cloneUDPAddress(remote), send: send, receive: receive, nextPacket: 1, fragments: make(map[uint32]*ssu2FragmentAssembly), lastActivity: m.now()}
-	session.initReliability(m.ssu2LargeMTU(remote, ssu2AdvertisedMTU(peer, remote)))
+	session := &ssu2TransportSession{
+		peer:         peer.Hash(),
+		sendID:       pending.sendID,
+		receiveID:    destinationID,
+		remote:       cloneUDPAddress(remoteAddr),
+		send:         send,
+		receive:      receive,
+		nextPacket:   1,
+		fragments:    make(map[uint32]*ssu2FragmentAssembly),
+		lastActivity: m.now(),
+	}
+	session.initReliability(m.ssu2LargeMTU(remoteAddr, ssu2AdvertisedMTU(peer, remoteAddr)))
 	m.mu.Lock()
 	if m.inbound[destinationID] != pending || !m.installSessionLocked(session) {
 		m.mu.Unlock()
@@ -2980,12 +3045,27 @@ func (m *SSU2Manager) handleSessionConfirmed(packet []byte, pending *ssu2Inbound
 	}
 	delete(m.inbound, destinationID)
 	m.mu.Unlock()
-	pending.timer.Stop()
-	pending.responder.ReleaseSensitive()
-	pending.reassembly.ReleaseSensitive()
+	if pending.timer != nil {
+		pending.timer.Stop()
+	}
+	if pending.responder != nil {
+		pending.responder.ReleaseSensitive()
+		pending.responder = nil
+	}
+	if pending.reassembly != nil {
+		pending.reassembly.ReleaseSensitive()
+		pending.reassembly = nil
+	}
 	session.received.Observe(0)
 	m.queueACK(session)
 	_ = m.sendNewToken(session)
+	for i := 0; i < pending.stagedCount; i++ {
+		staged := &pending.stagedPackets[i]
+		m.handleDataFrom(session, staged.data[:staged.length], staged.remote)
+		clear(staged.data[:staged.length])
+		staged.length = 0
+	}
+	pending.stagedCount = 0
 }
 
 func (m *SSU2Manager) removeSession(session *ssu2TransportSession) {
@@ -3760,7 +3840,7 @@ func (m *SSU2Manager) localConfirmedPayload(maxPacket int) ([]byte, error) {
 	return dataplanessu2.MarshalBlock(nil, dataplanessu2.BlockRouterInfo, data)
 }
 
-func (m *SSU2Manager) admitSSU2Peer(peer foundation.NetworkDatabaseRouterInfo, static []byte, now time.Time) bool {
+func (m *SSU2Manager) admitSSU2Peer(peer foundation.NetworkDatabaseRouterInfo, static []byte, now time.Time, remote net.Addr) bool {
 	if m.peers == nil || !routerInfoMatchesNetwork(peer, m.networkID) {
 		return false
 	}
@@ -3768,6 +3848,15 @@ func (m *SSU2Manager) admitSSU2Peer(peer foundation.NetworkDatabaseRouterInfo, s
 		if !routerInfoMatchesNetwork(current, m.networkID) || !hasSSU2Static(current, static) {
 			return false
 		}
+	}
+	// Policy denial precedes NetDB admission so a rejected peer's RouterInfo
+	// is never stored by this context.
+	request := PeerAdmission{Peer: peer.Hash(), RouterInfo: peer, Transport: PeerTransportSSU2, Inbound: true, RemoteAddr: remote}
+	if admitErr := runPeerAdmission(m.ctx, m.admitPeer, m.reporter, ingress.BoundarySSU2Packet, request); admitErr != nil {
+		if m.logger != nil {
+			m.logger.Warn("transport session denied", "transport", "SSU2", "peer", routerHashDiagnostic(peer.Hash()), "direction", "inbound", "error", admitErr)
+		}
+		return false
 	}
 	return m.peers.AdmitRouterInfo(peer, uint64(now.UnixMilli())) == nil
 }
@@ -4092,6 +4181,8 @@ func ssu2FailurePhase(err error) string {
 		return handshake.phase + "_timeout"
 	}
 	switch {
+	case errors.Is(err, ErrPeerDenied):
+		return "admission_denied"
 	case errors.Is(err, ErrSSU2Session):
 		return "session_install"
 	case errors.Is(err, ErrSSU2Peer):
@@ -4124,9 +4215,7 @@ func (m *SSU2Manager) removeInboundHeld(destinationID uint64, pending *ssu2Inbou
 	if pending.timer != nil {
 		pending.timer.Stop()
 	}
-	pending.responder.ReleaseSensitive()
-	pending.responder = nil
-	pending.reassembly.ReleaseSensitive()
+	pending.releaseSensitiveHeld()
 }
 
 // dispatchI2NP remains the narrow single-message entry point used by direct
@@ -4376,13 +4465,17 @@ func (m *SSU2Manager) writeToClass(ctx context.Context, packet []byte, remote ne
 	free := m.egressFree
 	queue := m.egressQueue
 	running := m.runningLocked()
+	conn := m.conn
 	m.mu.RUnlock()
-	if !running || free == nil || queue == nil {
-		if running && m.conn != nil {
+	if !running {
+		return ErrSSU2Session
+	}
+	if free == nil || queue == nil {
+		if conn != nil {
 			if m.metrics != nil {
 				m.metrics.AddSSU2SendEnqueuedDatagrams(1)
 			}
-			n, err := m.conn.WriteToUDP(packet, net.UDPAddrFromAddrPort(addrPort))
+			n, err := conn.WriteToUDP(packet, net.UDPAddrFromAddrPort(addrPort))
 			if err == nil && n == len(packet) {
 				if m.metrics != nil {
 					m.metrics.AddSSU2SentDatagrams(1)

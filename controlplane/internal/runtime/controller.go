@@ -36,14 +36,15 @@ import (
 )
 
 var (
-	ErrStarted                = errors.New("daemon: already started")
-	ErrProxyWithoutTunnels    = errors.New("daemon: proxies require enabled tunnels")
-	ErrTooManyDestinations    = errors.New("daemon: too many destinations")
-	ErrDuplicateDestination   = errors.New("daemon: duplicate destination identity")
-	ErrReseedUnavailable      = errors.New("daemon: reseed is unavailable")
-	ErrTunnelProbeUnavailable = errors.New("daemon: tunnel probe is unavailable")
-	ErrExplorationUnavailable = errors.New("daemon: exploration is unavailable")
-	ErrStateConflict          = errors.New("router: persistent state conflicts with embedded ownership")
+	ErrStarted                    = errors.New("daemon: already started")
+	ErrProxyWithoutTunnels        = errors.New("daemon: proxies require enabled tunnels")
+	ErrTooManyDestinations        = errors.New("daemon: too many destinations")
+	ErrDuplicateDestination       = errors.New("daemon: duplicate destination identity")
+	ErrReseedUnavailable          = errors.New("daemon: reseed is unavailable")
+	ErrTunnelProbeUnavailable     = errors.New("daemon: tunnel probe is unavailable")
+	ErrExplorationUnavailable     = errors.New("daemon: exploration is unavailable")
+	ErrStateConflict              = errors.New("router: persistent state conflicts with embedded ownership")
+	ErrLocalRouterInfoUnpublished = errors.New("controlplane: local router info not yet published")
 )
 
 const (
@@ -111,6 +112,10 @@ type ControllerOptions struct {
 	Registry      *observability.Registry
 	NAT           NATRuntime
 	PanicReporter ingress.Reporter
+	// PeerAdmission gates transport sessions after the peer RouterInfo is
+	// verified and netId-matched; nil admits every authenticated peer. It does
+	// not apply to a caller-injected Transport.
+	PeerAdmission dataplane.RouterPeerAdmissionFunc
 }
 
 type slogPanicReporter struct{ logger *slog.Logger }
@@ -323,6 +328,7 @@ type Controller struct {
 	registry          *observability.Registry
 	logger            *slog.Logger
 	clock             dataplane.RouterClock
+	admitPeer         dataplane.RouterPeerAdmissionFunc
 
 	service                *dataplane.RouterService
 	tunnels                *dataplane.TunnelRuntime
@@ -661,7 +667,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			}
 		}
 	}
-	database := netdb.NewDatabase(bundle.Router.Hash, cfg.NetDB.BucketCapacity)
+	database := netdb.NewDatabaseForNetwork(bundle.Router.Hash, cfg.NetDB.BucketCapacity, cfg.Network.ID)
 	if options.Embedded {
 		database.Routers().SetRouterLimit(netdb.BucketCount * cfg.NetDB.BucketCapacity)
 	}
@@ -703,6 +709,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	}
 	localInfo, err := router.NewLocalRouterInfo(router.LocalRouterInfoConfig{
 		Local: bundle.Router, Database: database, Clock: clock, NetworkID: cfg.Network.ID, Floodfill: cfg.Router.Floodfill,
+		NoTransit:                   !cfg.Router.Transit,
 		BandwidthRateBytesPerSecond: cfg.Tunnel.BandwidthRateBytesPerSecond, Metrics: registry,
 		RouterVersion: cfg.Router.Version,
 		Options:       routerFamilyOption(cfg.Router.Family),
@@ -769,6 +776,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			Peers: router.NewTransportPeerSource(database), StaticPrivate: bundle.NTCP2StaticPrivate, StaticIV: bundle.NTCP2StaticIV,
 			NetworkID: uint8(cfg.Network.ID), MaxSessions: cfg.NTCP2.MaxSessions, PanicReporter: reporter, Metrics: registry, Logger: logger,
 			IdleTimeout: cfg.NTCP2.IdleTimeout,
+			AdmitPeer:   options.PeerAdmission,
 		})
 		if err != nil {
 			return nil, err
@@ -778,6 +786,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		ssu, err = dataplane.RouterNewSSU2Manager(dataplane.RouterSSU2ManagerConfig{
 			Peers: router.NewTransportPeerSource(database), StaticPrivate: bundle.SSU2StaticPrivate, IntroKey: bundle.SSU2IntroKey,
 			NetworkID: uint8(cfg.Network.ID), IdleTimeout: cfg.SSU2.IdleTimeout, MaxSessions: cfg.SSU2.MaxSessions, PanicReporter: reporter, Metrics: registry, Logger: logger,
+			AdmitPeer:   options.PeerAdmission,
 			SignControl: func(message []byte) ([]byte, error) { return ed25519.Sign(bundle.Router.SigningPrivate, message), nil },
 			PublishPeerTestResult: func(ctx context.Context, result dataplane.RouterPeerTestResult) {
 				if err := router.PublishPeerTestResult(ctx, localInfo, result); err != nil && ctx.Err() == nil {
@@ -979,6 +988,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			Bandwidth: func(tunnel.ShortBuildRequest) uint32 {
 				return uint32(cfg.Tunnel.BandwidthRateBytesPerSecond / 1024)
 			},
+			Admission:     transitAdmission(cfg),
 			LocalDelivery: func(message foundation.I2NPMessage) error { return service.HandleI2NP(message, now(), false) },
 			Now:           now, MaxPending: cfg.Tunnel.BuildPendingCapacity, Profiles: profiles, Logger: logger, Metrics: registry,
 			CreatorBudget: creatorBudget, Stats: tunnel.NewBuildStatistics(),
@@ -1149,6 +1159,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		responders:             responders,
 		closeNativeTransports:  closeNativeTransports,
 		releaseRouterInfoSeeds: releaseRouterInfoSeeds,
+		admitPeer:              options.PeerAdmission,
 		startReady:             make(chan struct{}),
 		destinationWake:        make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
 		destinationTunnelWake:  make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
@@ -1170,6 +1181,15 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	keepBundle = true
 	keepTaintedDir = true
 	return d, nil
+}
+
+// transitAdmission wires the configured transit participation policy: routers
+// configured without transit reject every participating tunnel build request.
+func transitAdmission(cfg state.ConfigurationOperating) tunnel.BuildAdmission {
+	if cfg.Router.Transit {
+		return nil
+	}
+	return func(tunnel.ShortBuildRequest) bool { return false }
 }
 
 func routerFamilyOption(family string) []router.MappingOption {
@@ -1641,6 +1661,7 @@ func (d *Controller) refreshObservability() {
 		ClientOutboundTunnels:      snapshot.Tunnel.ClientOutboundActive,
 		FloodfillConfigured:        d.config.Router.Floodfill,
 		FloodfillAdvertised:        foundation.NetworkDatabaseIsFloodfill(d.localInfo.Snapshot()),
+		TransitConfigured:          d.config.Router.Transit,
 	})
 	if stage < 3 && operational {
 		stage = 3
@@ -1905,6 +1926,7 @@ func (d *Controller) ClientStatus(context.Context) (ManagementStatus, error) {
 		ClientOutboundTunnels:      snapshot.Tunnel.ClientOutboundActive,
 		FloodfillConfigured:        d.config.Router.Floodfill,
 		FloodfillAdvertised:        foundation.NetworkDatabaseIsFloodfill(d.localInfo.Snapshot()),
+		TransitConfigured:          d.config.Router.Transit,
 		RouterReachable:            snapshot.Bootstrap.RouterReachable != 0,
 		SSU2VectorIO:               snapshot.SSU2.VectorIOEnabled != 0,
 		SSU2KernelDropAccounting:   snapshot.SSU2.KernelDropAccounting != 0,
@@ -1976,6 +1998,83 @@ func (d *Controller) NetDBRoutersSnapshot() []netdb.RouterRef {
 	}
 	_, routers := d.database.Routers().Snapshot()
 	return routers
+}
+
+// ExportLocalRouterInfo returns an independent snapshot copy of this context's
+// signed RouterInfo wire bytes for export to peers or discovery systems.
+func (d *Controller) ExportLocalRouterInfo() ([]byte, error) {
+	if d == nil {
+		return nil, net.ErrClosed
+	}
+	d.mu.Lock()
+	running := d.started && !d.closed
+	localInfo := d.localInfo
+	d.mu.Unlock()
+	if !running || localInfo == nil {
+		return nil, net.ErrClosed
+	}
+	raw := localInfo.Snapshot().Bytes()
+	if len(raw) == 0 {
+		return nil, ErrLocalRouterInfoUnpublished
+	}
+	return append([]byte(nil), raw...), nil
+}
+
+// ExportPeerRouterInfo returns a copy of the signed RouterInfo wire bytes for the
+// given peer from this context's NetDB, if known.
+func (d *Controller) ExportPeerRouterInfo(peer foundation.Hash) ([]byte, bool) {
+	if d == nil {
+		return nil, false
+	}
+	d.mu.Lock()
+	running := d.started && !d.closed
+	db := d.database
+	d.mu.Unlock()
+	if !running || db == nil {
+		return nil, false
+	}
+	ref, ok := db.Routers().Get(peer)
+	if !ok {
+		return nil, false
+	}
+	raw := ref.Info.Bytes()
+	return append([]byte(nil), raw...), true
+}
+
+// ImportRouterInfo validates, verifies, and installs one signed RouterInfo wire
+// record into this context's NetDB. The RouterInfo's netId must match this
+// context's configured network ID. On success, the peer's router Hash is returned.
+func (d *Controller) ImportRouterInfo(ctx context.Context, wire []byte) (foundation.Hash, error) {
+	if err := ctx.Err(); err != nil {
+		return foundation.Hash{}, err
+	}
+	if d == nil {
+		return foundation.Hash{}, net.ErrClosed
+	}
+	d.mu.Lock()
+	running := d.started && !d.closed
+	db := d.database
+	admitPeer := d.admitPeer
+	d.mu.Unlock()
+	if !running || db == nil {
+		return foundation.Hash{}, net.ErrClosed
+	}
+	nowMillis := uint64(d.clock.Now().UnixMilli())
+	info, err := validateBootstrapRouterInfo(wire, d.config, nowMillis)
+	if err != nil {
+		return foundation.Hash{}, fmt.Errorf("controlplane: invalid router info: %w", err)
+	}
+	peerHash := info.Hash()
+	if admitPeer != nil {
+		req := dataplane.RouterPeerAdmission{Peer: peerHash, RouterInfo: info, Transport: dataplane.RouterPeerTransportNTCP2}
+		if err := admitPeer(ctx, req); err != nil {
+			return foundation.Hash{}, errors.Join(dataplane.RouterErrPeerDenied, err)
+		}
+	}
+	if err := db.AdmitRouterInfo(info, false, nowMillis); err != nil {
+		return foundation.Hash{}, fmt.Errorf("controlplane: netdb admission: %w", err)
+	}
+	return peerHash, nil
 }
 
 // TriggerReseed starts one bounded reseed attempt when reseed is enabled.

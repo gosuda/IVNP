@@ -1505,3 +1505,107 @@ func TestAtomicStateFileWrites(t *testing.T) {
 	}
 	removeStaleTempFile(stale, logger) // no leftover: must not error or log
 }
+
+func TestCalculateProbeCooldown(t *testing.T) {
+	// Newcomer (total probes = 0): immediate probe (cooldown = 0)
+	newcomer := PeerRecord{
+		Stats: PeerStats{TotalProbes: 0},
+	}
+	if cd := CalculateProbeCooldown(newcomer, 100); cd != 0 {
+		t.Fatalf("newcomer cooldown = %v, want 0", cd)
+	}
+
+	// Reachable peer (consecutive fails = 0): standard reachable cooldown
+	reachable := PeerRecord{
+		Stats: PeerStats{TotalProbes: 5, ConsecutiveFails: 0, IsReachable: true},
+	}
+	if cd := CalculateProbeCooldown(reachable, 100); cd != ProbeCooldownReachable {
+		t.Fatalf("reachable cooldown = %v, want %v", cd, ProbeCooldownReachable)
+	}
+
+	// Single fail: base fail cooldown
+	singleFail := PeerRecord{
+		Stats: PeerStats{TotalProbes: 1, ConsecutiveFails: 1},
+	}
+	if cd := CalculateProbeCooldown(singleFail, 500); cd != 60*time.Second {
+		t.Fatalf("expansion 1 fail cooldown = %v, want 60s", cd)
+	}
+	if cd := CalculateProbeCooldown(singleFail, 1500); cd != 3*time.Minute {
+		t.Fatalf("maintenance 1 fail cooldown = %v, want 3m", cd)
+	}
+
+	// Exponential backoff tests
+	tests := []struct {
+		fails          int
+		reachableCount int
+		want           time.Duration
+	}{
+		// Expansion mode (base 60s)
+		{fails: 2, reachableCount: 500, want: 120 * time.Second},
+		{fails: 3, reachableCount: 500, want: 240 * time.Second},
+		{fails: 4, reachableCount: 500, want: 480 * time.Second},
+		{fails: 5, reachableCount: 500, want: 960 * time.Second},
+		{fails: 10, reachableCount: 500, want: ProbeCooldownMaxFailed}, // capped at 30m
+
+		// Maintenance mode (base 3m)
+		{fails: 2, reachableCount: 1200, want: 6 * time.Minute},
+		{fails: 3, reachableCount: 1200, want: 12 * time.Minute},
+		{fails: 4, reachableCount: 1200, want: 24 * time.Minute},
+		{fails: 5, reachableCount: 1200, want: ProbeCooldownMaxFailed}, // 48m capped to 30m
+		{fails: 20, reachableCount: 1200, want: ProbeCooldownMaxFailed},
+	}
+
+	for _, tt := range tests {
+		rec := PeerRecord{
+			Stats: PeerStats{TotalProbes: int64(tt.fails), ConsecutiveFails: tt.fails},
+		}
+		if got := CalculateProbeCooldown(rec, tt.reachableCount); got != tt.want {
+			t.Errorf("CalculateProbeCooldown(fails=%d, reachable=%d) = %v, want %v",
+				tt.fails, tt.reachableCount, got, tt.want)
+		}
+	}
+}
+
+func TestDynamicExplorationBudget(t *testing.T) {
+	var nilCrawler *ActiveCrawler
+	if b := nilCrawler.DynamicExplorationBudget(24); b != 0 {
+		t.Fatalf("nil crawler budget = %d, want 0", b)
+	}
+
+	store := NewPeerStore()
+	crawler := NewActiveCrawler(store)
+	if b := crawler.DynamicExplorationBudget(0); b != 0 {
+		t.Fatalf("zero maxCap budget = %d, want 0", b)
+	}
+
+	// Empty store: 256 empty buckets -> needed = 256 * 4 = 1024 -> capped at maxCap
+	if b := crawler.DynamicExplorationBudget(24); b != 24 {
+		t.Fatalf("expansion empty store budget = %d, want 24", b)
+	}
+	if b := crawler.DynamicExplorationBudget(8); b != 8 {
+		t.Fatalf("maintenance empty store budget = %d, want 8", b)
+	}
+
+	// Populate all 256 buckets with 4 reachable peers each
+	for i := 0; i < 256; i++ {
+		for j := 0; j < 4; j++ {
+			var h foundation.Hash
+			h[0] = byte(i)
+			h[1] = byte(j)
+			store.peers[h] = &PeerRecord{
+				Hash: h,
+				Stats: PeerStats{
+					IsReachable: true,
+				},
+			}
+		}
+	}
+
+	// Fully saturated store: no deficits -> minimal probe (at most 2)
+	if b := crawler.DynamicExplorationBudget(24); b != 2 {
+		t.Fatalf("saturated store budget = %d, want 2", b)
+	}
+	if b := crawler.DynamicExplorationBudget(8); b != 2 {
+		t.Fatalf("saturated store budget = %d, want 2", b)
+	}
+}

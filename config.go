@@ -5,10 +5,7 @@ import (
 	"crypto/ecdh"
 	"log/slog"
 	"net/netip"
-	"net/url"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"gosuda.org/ivnp/controlplane"
@@ -19,6 +16,9 @@ import (
 
 type RouterConfig struct {
 	Persistence *PersistenceConfig
+	// NetworkID through Exploratory configure a single I2P context — the
+	// official network when NetworkID is 2. When Networks is non-empty they
+	// must all be zero; each entry carries them instead.
 	NetworkID   uint32
 	NTCP2       TransportConfig
 	SSU2        TransportConfig
@@ -27,6 +27,14 @@ type RouterConfig struct {
 	Limits      RouterLimits
 	Resolver    NameResolver
 	Logger      *slog.Logger
+	// DefaultNetwork names the Networks entry serving unqualified "tcp"/"udp"
+	// operations. Empty selects the netId=2 entry, or the first entry when no
+	// public context is configured.
+	DefaultNetwork string
+	// Networks lists the I2P protocol contexts this router serves — one
+	// independent network (own transports, own NetDB) per entry, each scoped
+	// to its netId.
+	Networks []NetworkConfig
 }
 
 type PersistenceConfig struct {
@@ -88,6 +96,15 @@ type DestinationConfig struct {
 	Tunnels      TunnelPoolConfig
 	PacketQueue  PacketQueueConfig
 	RemoteAccess []RemoteLeaseSetAccess
+	// Networks names the RouterConfig.Networks entries this destination binds;
+	// each bound network gets its own endpoint over the same identity, so one
+	// destination address is reachable on every bound network. Empty binds the
+	// default network only. Unqualified dials race every bound network.
+	Networks []string
+	// DialPolicy configures how unqualified dials ("tcp", "stream", "ivnp")
+	// explore the bound networks. If omitted, DialHappyEyeballs is used across all
+	// bound networks.
+	DialPolicy DialPolicy
 }
 
 type PacketQueueConfig struct {
@@ -179,137 +196,11 @@ func validateTransport(field string, transport TransportConfig) error {
 }
 
 func routerSettings(cfg RouterConfig) (state.ConfigurationOperating, controlplane.ControllerOptions, error) {
-	var empty state.ConfigurationOperating
-	var options controlplane.ControllerOptions
-	if cfg.NetworkID > 255 {
-		return empty, options, invalidConfig("NetworkID")
+	specs, _, err := networkSpecs(cfg)
+	if err != nil {
+		return state.ConfigurationOperating{}, controlplane.ControllerOptions{}, err
 	}
-	if !cfg.NTCP2.Enabled && !cfg.SSU2.Enabled {
-		return empty, options, invalidConfig("NTCP2.Enabled")
-	}
-	if err := validateTransport("NTCP2", cfg.NTCP2); err != nil {
-		return empty, options, err
-	}
-	if err := validateTransport("SSU2", cfg.SSU2); err != nil {
-		return empty, options, err
-	}
-	if err := validateTunnelPool("Exploratory", cfg.Exploratory); err != nil {
-		return empty, options, err
-	}
-	if cfg.Limits.MaxDestinations < 1 {
-		return empty, options, invalidConfig("Limits.MaxDestinations")
-	}
-	if cfg.Limits.PacketQueueBytes <= 0 {
-		return empty, options, invalidConfig("Limits.PacketQueueBytes")
-	}
-	if cfg.Limits.MaxPendingPacketWrites <= 0 {
-		return empty, options, invalidConfig("Limits.MaxPendingPacketWrites")
-	}
-	if cfg.Bootstrap.ReseedTimeout < 0 || (len(cfg.Bootstrap.ReseedURLs) > 0 && cfg.Bootstrap.ReseedTimeout == 0) {
-		return empty, options, invalidConfig("Bootstrap.ReseedTimeout")
-	}
-	if cfg.Bootstrap.PriorityReseedTimeout < 0 || (len(cfg.Bootstrap.PriorityReseedURLs) > 0 && cfg.Bootstrap.PriorityReseedTimeout == 0) {
-		return empty, options, invalidConfig("Bootstrap.PriorityReseedTimeout")
-	}
-	if len(cfg.Bootstrap.ReseedURLs) > 32 {
-		return empty, options, invalidConfig("Bootstrap.ReseedURLs")
-	}
-	if len(cfg.Bootstrap.PriorityReseedURLs) > 32 {
-		return empty, options, invalidConfig("Bootstrap.PriorityReseedURLs")
-	}
-	requiredQuery := "netid=" + strconv.FormatUint(uint64(cfg.NetworkID), 10)
-	for i, text := range cfg.Bootstrap.ReseedURLs {
-		u, err := url.Parse(text)
-		if err != nil {
-			return empty, options, invalidConfig("Bootstrap.ReseedURLs[" + strconv.Itoa(i) + "]")
-		}
-		validEndpoint := len(text) <= 512 && u.Scheme == "https" && u.Hostname() != ""
-		forbiddenParts := u.User != nil || u.Fragment != "" || u.ForceQuery
-		if !validEndpoint || forbiddenParts || u.RawQuery != requiredQuery {
-			return empty, options, invalidConfig("Bootstrap.ReseedURLs[" + strconv.Itoa(i) + "]")
-		}
-	}
-	for i, text := range cfg.Bootstrap.PriorityReseedURLs {
-		u, err := url.Parse(text)
-		if err != nil {
-			return empty, options, invalidConfig("Bootstrap.PriorityReseedURLs[" + strconv.Itoa(i) + "]")
-		}
-		validEndpoint := len(text) <= 512 && u.Scheme == "https" && u.Hostname() != ""
-		forbiddenParts := u.User != nil || u.Fragment != "" || u.ForceQuery
-		if !validEndpoint || forbiddenParts || u.RawQuery != requiredQuery {
-			return empty, options, invalidConfig("Bootstrap.PriorityReseedURLs[" + strconv.Itoa(i) + "]")
-		}
-	}
-	operating := state.ConfigurationDefaultOperating()
-	operating.DataDir, operating.StateDir, operating.StatePath, operating.KeyPath = "", "", "", ""
-	if cfg.Persistence != nil {
-		if cfg.Persistence.Directory == "" || strings.IndexByte(cfg.Persistence.Directory, 0) >= 0 {
-			return empty, options, invalidConfig("Persistence.Directory")
-		}
-		directory, err := filepath.Abs(cfg.Persistence.Directory)
-		if err != nil {
-			return empty, options, &ConfigError{Field: "Persistence.Directory", Err: err}
-		}
-		operating.DataDir, operating.StateDir = directory, directory
-		operating.StatePath, operating.KeyPath = filepath.Join(directory, "router.state"), filepath.Join(directory, "router.keys")
-		if cfg.Persistence.TempDir != "" {
-			if strings.IndexByte(cfg.Persistence.TempDir, 0) >= 0 {
-				return empty, options, invalidConfig("Persistence.TempDir")
-			}
-			tempDir, err := filepath.Abs(cfg.Persistence.TempDir)
-			if err != nil {
-				return empty, options, &ConfigError{Field: "Persistence.TempDir", Err: err}
-			}
-			operating.TempDir = tempDir
-		}
-		taintedCopy := !cfg.Persistence.DisableTaintedCopy
-		if cfg.Persistence.TaintedCopy {
-			taintedCopy = true
-		}
-		operating.State.TaintedCopy = taintedCopy
-		options.TaintedCopy = cfg.Persistence.TaintedCopy
-
-		promoteToMaster := true
-		if cfg.Persistence.PromoteToMaster != nil {
-			promoteToMaster = *cfg.Persistence.PromoteToMaster
-		}
-		operating.State.PromoteToMaster = promoteToMaster
-		options.PromoteToMaster = &promoteToMaster
-
-		lockRetry := cfg.Persistence.LockRetryInterval
-		if lockRetry <= 0 {
-			lockRetry = 15 * time.Second
-		}
-		operating.State.LockRetryInterval = lockRetry
-		options.LockRetryInterval = lockRetry
-	}
-	operating.Network = state.ConfigurationNetwork{ID: cfg.NetworkID}
-	for _, transport := range []TransportConfig{cfg.NTCP2, cfg.SSU2} {
-		if transport.Enabled {
-			operating.Network.IPv4 = operating.Network.IPv4 || transport.Bind.Addr().Is4()
-			operating.Network.IPv6 = operating.Network.IPv6 || transport.Bind.Addr().Is6()
-		}
-	}
-	operating.NTCP2, operating.SSU2 = runtimeTransport(cfg.NTCP2), runtimeTransport(cfg.SSU2)
-	operating.Reseed.Enabled = len(cfg.Bootstrap.ReseedURLs) != 0 || len(cfg.Bootstrap.PriorityReseedURLs) != 0
-	operating.Reseed.Required = false
-	operating.Reseed.PriorityEndpoints = append([]string(nil), cfg.Bootstrap.PriorityReseedURLs...)
-	operating.Reseed.PriorityTimeout = cfg.Bootstrap.PriorityReseedTimeout
-	operating.Reseed.Endpoints = append([]string(nil), cfg.Bootstrap.ReseedURLs...)
-	operating.Reseed.Timeout = cfg.Bootstrap.ReseedTimeout
-	operating.NetDB.BootstrapRouterInfoPaths = nil
-	operating.Control, operating.SOCKS5, operating.Metrics, operating.SAM = state.ConfigurationListener{}, state.ConfigurationListener{}, state.ConfigurationListener{}, state.ConfigurationListener{}
-	operating.HTTPProxy = state.ConfigurationHTTPProxy{}
-	operating.AddressBook = state.ConfigurationAddressBook{}
-	operating.NAT.NATPMPEndpoint, operating.NAT.UPnPEndpoint = netip.AddrPort{}, ""
-	operating.State.MaxDestinations = cfg.Limits.MaxDestinations
-	pool := cfg.Exploratory
-	options.Embedded, options.Exploratory, options.Logger = true, &pool, cfg.Logger
-	options.BootstrapRouterInfos = make([][]byte, len(cfg.Bootstrap.RouterInfos))
-	for i, raw := range cfg.Bootstrap.RouterInfos {
-		options.BootstrapRouterInfos[i] = append([]byte(nil), raw...)
-	}
-	return operating, options, nil
+	return specs[0].Operating, specs[0].Options, nil
 }
 
 func runtimeTransport(cfg TransportConfig) state.ConfigurationTransport {

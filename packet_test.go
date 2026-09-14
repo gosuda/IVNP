@@ -187,7 +187,7 @@ func TestPacketWriteDeadlineCancelsPendingRoutePreparation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, _ := packetTestSocket(t, 18)
 		endpoint := &packetBlockedRoute{entered: make(chan struct{})}
-		s.owner.endpoint = endpoint
+		s.endpoint = endpoint
 		s.owner.owner = &Router{packetWrites: make(chan struct{}, 1)}
 		s.maxPayload = MaxSendDatagramSize
 		c := &UnauthPacketConn{socket: s}

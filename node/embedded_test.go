@@ -30,10 +30,10 @@ func TestEmbeddedRouterConstructionContextDoesNotOwnLifetime(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = router.Close() })
 	cancel()
-	if status := router.controller.Status(); !status.Running {
+	if status := router.Default().Status(); !status.Running {
 		t.Fatalf("constructor cancellation stopped router: %+v", status)
 	}
-	if destinations, err := router.controller.ListDestinations(t.Context()); err != nil || len(destinations) != 0 {
+	if destinations, err := router.Default().ListDestinations(t.Context()); err != nil || len(destinations) != 0 {
 		t.Fatalf("implicit destinations = %v, %v", destinations, err)
 	}
 	if err := router.Close(); err != nil {
@@ -111,4 +111,81 @@ func TestEmbeddedRouterRejectsNamedStateWithoutChangingIdentity(t *testing.T) {
 	if loaded.Router.Hash != bundle.Router.Hash || len(loaded.DestinationPrivate) != 1 {
 		t.Fatal("rejected open changed named state")
 	}
+}
+
+func TestEmbeddedRouterExportAndImportRouterInfo(t *testing.T) {
+	ctx := t.Context()
+	cfgA := embeddedTestConfiguration()
+	cfgA.NTCP2.Bind = state.ConfigurationEndpoint{Host: "127.0.0.1", Port: 20001}
+	cfgA.NTCP2.Advertised = state.ConfigurationEndpoint{Host: "127.0.0.1", Port: 20001}
+	routerA, err := NewEmbeddedRouter(ctx, cfgA, controlplane.ControllerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer routerA.Close()
+
+	cfgB := embeddedTestConfiguration()
+	cfgB.NTCP2.Bind = state.ConfigurationEndpoint{Host: "127.0.0.1", Port: 20002}
+	cfgB.NTCP2.Advertised = state.ConfigurationEndpoint{Host: "127.0.0.1", Port: 20002}
+	routerB, err := NewEmbeddedRouter(ctx, cfgB, controlplane.ControllerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer routerB.Close()
+
+	rawA, err := routerA.ExportLocalRouterInfo("")
+	if err != nil || len(rawA) == 0 {
+		t.Fatalf("ExportLocalRouterInfo failed: %v", err)
+	}
+
+	hashA, err := routerB.ImportRouterInfo(ctx, "", rawA)
+	if err != nil {
+		t.Fatalf("ImportRouterInfo failed: %v", err)
+	}
+	if hashA != routerA.Hash() {
+		t.Fatalf("imported hash = %v, want %v", hashA, routerA.Hash())
+	}
+
+	peerWire, ok := routerB.ExportPeerRouterInfo("", hashA)
+	if !ok || len(peerWire) == 0 {
+		t.Fatal("ExportPeerRouterInfo could not find newly imported peer")
+	}
+}
+
+// TestExampleExportAndImportRouterInfoPeering demonstrates how two nodes in a private
+// network exchange signed RouterInfo wire bytes without public reseed servers.
+func TestExampleExportAndImportRouterInfoPeering(t *testing.T) {
+	t.Skip("Demonstrative example showing manual peer exchange across private networks without reseed")
+
+	ctx := context.Background()
+
+	// 1. Node A boots on a dedicated private network (e.g. netId 77) without reseed endpoints.
+	var routerA *EmbeddedRouter
+	// routerA, _ = NewEmbeddedRouter(ctx, privateNetConfig, options)
+	// defer routerA.Close()
+
+	// 2. Node A exports its self-signed RouterInfo wire bytes.
+	exportedRouterInfo, err := routerA.ExportLocalRouterInfo("corp-mesh")
+	if err != nil {
+		t.Fatalf("failed to export local router info: %v", err)
+	}
+
+	// 3. Node A publishes exportedRouterInfo to an out-of-band discovery service
+	// (such as etcd, Consul, Kubernetes ConfigMap, or a management RPC).
+	// outOfBandStore.Put("peers/node-a", exportedRouterInfo)
+
+	// 4. Node B boots on the same private network (netId 77).
+	var routerB *EmbeddedRouter
+	// routerB, _ = NewEmbeddedRouter(ctx, privateNetConfig, options)
+	// defer routerB.Close()
+
+	// 5. Node B fetches Node A's wire bytes from the discovery service and imports it.
+	// nodeABytes := outOfBandStore.Get("peers/node-a")
+	peerHash, err := routerB.ImportRouterInfo(ctx, "corp-mesh", exportedRouterInfo)
+	if err != nil {
+		t.Fatalf("failed to import peer router info: %v", err)
+	}
+
+	// 6. Node B now has Node A in its NetDB, allowing outbound dials to Node A's destinations.
+	t.Logf("Successfully imported peer into corp-mesh NetDB with router hash: %s", peerHash)
 }

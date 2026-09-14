@@ -27,6 +27,7 @@ type LocalRouterInfoConfig struct {
 	Clock                       dataplane.RouterClock
 	NetworkID                   uint32
 	Floodfill                   bool
+	NoTransit                   bool
 	BandwidthRateBytesPerSecond int
 	RouterVersion               string
 	Peers                       []foundation.Hash
@@ -49,6 +50,7 @@ type LocalRouterInfo struct {
 	peers        []foundation.Hash
 	baseOptions  []foundation.MappingEntry
 	floodfill    bool
+	noTransit    bool
 	bandwidth    byte
 	reachability Reachability
 }
@@ -82,6 +84,7 @@ func NewLocalRouterInfo(config LocalRouterInfoConfig) (*LocalRouterInfo, error) 
 		metrics:     config.Metrics,
 		peers:       append([]foundation.Hash(nil), config.Peers...),
 		floodfill:   config.Floodfill,
+		noTransit:   config.NoTransit,
 		bandwidth:   localRouterBandwidthCapability(config.BandwidthRateBytesPerSecond),
 		baseOptions: cloneI2PMappingEntries(baseOptions),
 	}, nil
@@ -275,7 +278,7 @@ func (l *LocalRouterInfo) UpdateSSU2Introducers(ctx context.Context, leases []da
 }
 
 func (l *LocalRouterInfo) contactsLocked(addresses []PublishedAddress, reachability Reachability) (controlplanenetdb.RouterInfoContacts, error) {
-	options, err := localRouterCapabilities(l.baseOptions, reachability, l.floodfill, l.bandwidth)
+	options, err := localRouterCapabilities(l.baseOptions, reachability, l.floodfill, l.noTransit, l.bandwidth)
 	if err != nil {
 		return controlplanenetdb.RouterInfoContacts{}, err
 	}
@@ -316,13 +319,19 @@ func localRouterBaseOptions(networkID uint32, version string, options []MappingO
 	return canonicalMappingEntries(entries)
 }
 
-func localRouterCapabilities(base []foundation.MappingEntry, reachability Reachability, floodfill bool, bandwidth byte) ([]foundation.MappingEntry, error) {
+func localRouterCapabilities(base []foundation.MappingEntry, reachability Reachability, floodfill, noTransit bool, bandwidth byte) ([]foundation.MappingEntry, error) {
 	entries := cloneI2PMappingEntries(base)
 	if reachability == ReachabilityUnknown {
 		return entries, nil
 	}
-	capabilities := make([]byte, 0, 3)
+	capabilities := make([]byte, 0, 4)
+	if noTransit {
+		bandwidth = 'K'
+	}
 	capabilities = append(capabilities, bandwidth)
+	if noTransit {
+		capabilities = append(capabilities, 'H')
+	}
 	if floodfill {
 		capabilities = append(capabilities, 'f')
 	}

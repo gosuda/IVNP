@@ -24,6 +24,8 @@ var (
 	ErrMessageTruncated          = errors.New("i2p: message truncated")
 )
 
+var errLegacyNetworkFields = errors.New("legacy network fields cannot combine with Networks")
+
 type ConfigError struct {
 	Field string
 	Err   error

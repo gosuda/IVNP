@@ -27,6 +27,7 @@ type webUIConfigView struct {
 	} `json:"network"`
 	Router struct {
 		Floodfill bool   `json:"floodfill"`
+		Transit   bool   `json:"transit"`
 		Family    string `json:"family"`
 		Version   string `json:"version"`
 	} `json:"router"`
@@ -85,6 +86,7 @@ type transportConfigView struct {
 type webUIConfigUpdate struct {
 	Router struct {
 		Floodfill bool   `json:"floodfill"`
+		Transit   bool   `json:"transit"`
 		Family    string `json:"family"`
 	} `json:"router"`
 	Tunnel struct {
@@ -219,7 +221,7 @@ func (s *WebUIServer) updateConfig(w http.ResponseWriter, r *http.Request) {
 func newWebUIConfigView(config, runtime state.ConfigurationOperating) webUIConfigView {
 	view := webUIConfigView{}
 	view.Network.ID, view.Network.IPv4, view.Network.IPv6 = config.Network.ID, config.Network.IPv4, config.Network.IPv6
-	view.Router.Floodfill, view.Router.Family, view.Router.Version = config.Router.Floodfill, config.Router.Family, config.Router.Version
+	view.Router.Floodfill, view.Router.Transit, view.Router.Family, view.Router.Version = config.Router.Floodfill, config.Router.Transit, config.Router.Family, config.Router.Version
 	view.Tunnel.Enabled = config.Tunnel.Enabled
 	view.Tunnel.Hops = config.Tunnel.Hops
 	view.Tunnel.ExploratoryInboundTarget = config.Tunnel.ExploratoryInboundTarget
@@ -251,6 +253,7 @@ func configINIUpdates(request webUIConfigUpdate, current state.ConfigurationOper
 	integer := strconv.Itoa
 	return []iniUpdate{
 		{section: "router", key: "floodfill", value: boolean(request.Router.Floodfill)},
+		{section: "router", key: "transit", value: boolean(request.Router.Transit)},
 		{section: "router", key: "family", value: strings.TrimSpace(request.Router.Family), remove: strings.TrimSpace(request.Router.Family) == ""},
 		{section: "tunnel", key: "enabled", value: boolean(request.Tunnel.Enabled)},
 		{section: "tunnel", key: "hops", value: integer(request.Tunnel.Hops)},
@@ -410,7 +413,7 @@ func configComparableValues(config state.ConfigurationOperating) map[string]stri
 
 func webUIConfigUpdateFromView(view webUIConfigView) webUIConfigUpdate {
 	var update webUIConfigUpdate
-	update.Router.Floodfill, update.Router.Family = view.Router.Floodfill, view.Router.Family
+	update.Router.Floodfill, update.Router.Transit, update.Router.Family = view.Router.Floodfill, view.Router.Transit, view.Router.Family
 	update.Tunnel.Enabled = view.Tunnel.Enabled
 	update.Tunnel.Hops = view.Tunnel.Hops
 	update.Tunnel.ExploratoryInboundTarget = view.Tunnel.ExploratoryInboundTarget

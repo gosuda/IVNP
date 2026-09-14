@@ -372,7 +372,7 @@ func daemonTestConfig(t *testing.T) state.ConfigurationOperating {
 		StatePath: filepath.Join(base, "router.state"),
 		KeyPath:   filepath.Join(base, "router.keys"),
 		Network:   state.ConfigurationNetwork{ID: 2, IPv4: true},
-		Router:    state.ConfigurationRouter{Version: "0.9.70"},
+		Router:    state.ConfigurationRouter{Transit: true, Version: "0.9.70"},
 		State:     state.ConfigurationState{MaxBytes: 1 << 20, MaxDestinations: 16, MaxNameBytes: 64},
 		NetDB:     state.ConfigurationNetDB{BucketCapacity: 4, LookupCapacity: 8},
 		Tunnel: state.ConfigurationTunnel{

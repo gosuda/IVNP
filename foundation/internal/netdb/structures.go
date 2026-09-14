@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"strconv"
 
 	"gosuda.org/ivnp/foundation/internal/i2np"
 	foundation "gosuda.org/ivnp/foundation/internal/identity"
@@ -31,7 +32,12 @@ var (
 	ErrStructureTooLarge        = errors.New("netdb: structure exceeds protocol limit")
 	ErrNoSupportedEncryptionKey = errors.New("netdb: no supported LeaseSet2 encryption key")
 	ErrELSExpired               = errors.New("netdb: encrypted LeaseSet is expired or not current")
+	ErrInvalidNetID             = errors.New("netdb: RouterInfo netId option is invalid")
 )
+
+// NativeNetID is the I2P public network identifier declared when a
+// RouterInfo carries no netId option.
+const NativeNetID = 2
 
 // RouterAddress is one contact endpoint in a RouterInfo.
 type RouterAddress struct {
@@ -137,6 +143,29 @@ func IsFloodfill(r RouterInfo) bool {
 // Verify validates the RouterInfo signature with its RouterIdentity key.
 func (r RouterInfo) Verify() (bool, error) {
 	return r.Identity.Verify(r.Unsigned, r.Signature)
+}
+
+// NetID returns the declared netId option. I2P defines an absent netId as
+// the public network identifier 2.
+func (r RouterInfo) NetID() (uint32, error) {
+	iterator := r.Options.Iterator()
+	for {
+		key, value, ok, err := iterator.Next()
+		if err != nil {
+			return 0, err
+		}
+		if !ok {
+			return NativeNetID, nil
+		}
+		if !bytes.Equal(key, []byte("netId")) {
+			continue
+		}
+		n, err := strconv.ParseUint(string(value), 10, 32)
+		if err != nil || n > 255 {
+			return 0, ErrInvalidNetID
+		}
+		return uint32(n), nil
+	}
 }
 
 // ParseRouterInfo accepts exactly one complete, signed RouterInfo.

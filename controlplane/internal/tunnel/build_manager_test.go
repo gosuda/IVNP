@@ -1146,6 +1146,49 @@ func TestBuildManagerAllowsLocalEndpointTransitOnly(t *testing.T) {
 	}
 }
 
+func TestBuildManagerRejectsTransitWhenAdmissionDenies(t *testing.T) {
+	const now = uint64(1_700_000_000_000)
+	privateBytes := make([]byte, 32)
+	for index := range privateBytes {
+		privateBytes[index] = byte(index + 1)
+	}
+	private, err := ecdh.X25519().NewPrivateKey(privateBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := sha256.Sum256([]byte("notransit-local"))
+	sender := new(buildCaptureSender)
+	runtime := dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: sender, Now: func() uint64 { return now }})
+	manager, err := NewBuildManager(BuildManagerConfig{
+		Runtime: runtime, Sender: sender,
+		ReplyKeys: newBuildReplyRegistry(), LocalRouter: local, StaticPrivate: privateBytes, Now: func() uint64 { return now }, MaxPending: 4,
+		Admission: func(ShortBuildRequest) bool { return false },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := ShortBuildRequest{
+		ReceiveTunnelID: 101, NextTunnelID: 102, NextRouter: sha256.Sum256([]byte("notransit-next")),
+		RequestMinutes: uint32(now / 60_000), LifetimeSeconds: shortBuildLifetime, NextMessageID: 103,
+	}
+	var plaintext [ShortBuildRequestPlainSize]byte
+	if err = MarshalShortBuildRequest(plaintext[:], request, nil); err != nil {
+		t.Fatal(err)
+	}
+	var record [ShortBuildRecordSize]byte
+	if _, err = EncryptShortBuildRequest(record[:], local, private.PublicKey().Bytes(), plaintext[:]); err != nil {
+		t.Fatal(err)
+	}
+	message := foundation.I2NPMessage{Header: foundation.I2NPHeader{Type: foundation.I2NPShortTunnelBuild, ID: 202}, Payload: append([]byte{1}, record[:]...)}
+	err = manager.HandleBuildContext(context.Background(), BuildSource{Router: foundation.Hash{7}, Direct: true}, message)
+	if !errors.Is(err, ErrBuildRejected) {
+		t.Fatalf("denied transit error = %v, want %v", err, ErrBuildRejected)
+	}
+	if _, installed := runtime.InspectCircuit(request.ReceiveTunnelID); installed {
+		t.Fatal("denied transit installed a circuit")
+	}
+}
+
 func TestBuildManagerAuthenticatesTransitBeforeReservation(t *testing.T) {
 	const now = uint64(1_700_000_000_000)
 	privateBytes := make([]byte, 32)

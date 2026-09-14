@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	dataplanegarlic "gosuda.org/ivnp/dataplane/internal/garlic"
+	dataplanegarlicecies "gosuda.org/ivnp/dataplane/internal/garlic/ecies"
 	dataplanestreaming "gosuda.org/ivnp/dataplane/internal/streaming"
 	dataplanestreamingtunnel "gosuda.org/ivnp/dataplane/internal/streaming/tunnel"
 	dataplanetunnel "gosuda.org/ivnp/dataplane/internal/tunnel"
@@ -985,4 +988,87 @@ func assertRejectedGarlicScratchCleared(t *testing.T, destination GarlicDestinat
 	if scratch.reply != ([foundation.I2NPI2PDMaxPayload]byte{}) {
 		t.Error("rejected garlic retained reply data in its returned scratch buffer")
 	}
+}
+
+func TestGarlicReceiverNestedGarlicDeadlockFree(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := uint64(1_800_000_000_000)
+		privateBytes := bytes.Repeat([]byte{0x42}, 32)
+		private, err := ecdh.X25519().NewPrivateKey(privateBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		innerMessage := foundation.I2NPMessage{
+			Header:  foundation.I2NPHeader{Type: foundation.I2NPGarlic, ID: 100, Expiration: now + 60_000},
+			Payload: []byte{0, 0, 0, 0},
+		}
+
+		wire := make([]byte, 4096)
+		sealed, err := dataplanegarlicecies.SealRouterMessage(wire, private.PublicKey().Bytes(), innerMessage, now, bytes.NewReader(bytes.Repeat([]byte{0x77}, 32)))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		outerPayload := make([]byte, 4+len(sealed))
+		binary.BigEndian.PutUint32(outerPayload[:4], uint32(len(sealed)))
+		copy(outerPayload[4:], sealed)
+		outerGarlic := foundation.I2NPMessage{
+			Header:  foundation.I2NPHeader{Type: foundation.I2NPGarlic, ID: 1, Expiration: now + 60_000},
+			Payload: outerPayload,
+		}
+
+		service := NewService(Sinks{})
+		receiver, err := NewGarlicReceiver(GarlicReceiverConfig{
+			Service:       service,
+			ReplyKeys:     dataplanegarlic.NewReplyKeyRegistry(1),
+			Now:           func() uint64 { return now },
+			StaticPrivate: privateBytes,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer receiver.ReleaseSensitive()
+
+		nestedStarted := make(chan struct{})
+		proceedInner := make(chan struct{})
+		releaseDone := make(chan struct{})
+		var dispatchCount int
+		service.SetGarlicSink(func(source I2NPSource, msg foundation.I2NPMessage) error {
+			dispatchCount++
+			if dispatchCount == 1 {
+				nestedStarted <- struct{}{}
+				<-proceedInner
+				return receiver.HandleGarlicFrom(source, msg)
+			}
+			return receiver.HandleGarlicFrom(source, msg)
+		})
+
+		handleErrCh := make(chan error, 1)
+		go func() {
+			handleErrCh <- receiver.HandleGarlic(outerGarlic)
+		}()
+
+		<-nestedStarted
+		go func() {
+			receiver.ReleaseSensitive()
+			close(releaseDone)
+		}()
+		synctest.Wait()
+
+		close(proceedInner)
+		synctest.Wait()
+
+		select {
+		case <-releaseDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("deadlock: ReleaseSensitive did not complete during nested garlic dispatch")
+		}
+
+		select {
+		case <-handleErrCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("deadlock: HandleGarlic did not complete during nested garlic dispatch")
+		}
+	})
 }

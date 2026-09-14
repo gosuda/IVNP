@@ -18,6 +18,7 @@ type ReadinessDetails struct {
 	ClientOutboundTunnels      uint64 `json:"client_outbound_tunnels"`
 	FloodfillConfigured        bool   `json:"floodfill_configured"`
 	FloodfillAdvertised        bool   `json:"floodfill_advertised"`
+	TransitConfigured          bool   `json:"transit_configured"`
 	RouterReachable            bool   `json:"router_reachable"`
 	SSU2VectorIO               bool   `json:"ssu2_vector_io"`
 	SSU2KernelDropAccounting   bool   `json:"ssu2_kernel_drop_accounting"`

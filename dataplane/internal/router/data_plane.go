@@ -242,9 +242,6 @@ func (r *GarlicReceiver) ReleaseSensitive() {
 		delete(r.destinations, hash)
 	}
 	r.destinationsMu.Unlock()
-	for _, state := range states {
-		state.retireAndWait()
-	}
 	clear(r.staticPrivate[:])
 	// Every acquire path below clears its reply buffer before returning it to
 	// the pool, even on error, so dropping the pool here is safe; the GC
@@ -252,6 +249,10 @@ func (r *GarlicReceiver) ReleaseSensitive() {
 	r.replyScratch = sync.Pool{}
 	r.hasStatic = false
 	r.lifecycleMu.Unlock()
+
+	for _, state := range states {
+		state.retireAndWait()
+	}
 }
 
 // BandwidthSnapshot returns one configured local destination's non-sensitive
@@ -292,7 +293,14 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 		return err
 	}
 	r.lifecycleMu.RLock()
-	defer r.lifecycleMu.RUnlock()
+	var unlocked bool
+	unlock := func() {
+		if !unlocked {
+			unlocked = true
+			r.lifecycleMu.RUnlock()
+		}
+	}
+	defer unlock()
 	if r.released {
 		return ErrDataPlaneConfig
 	}
@@ -323,6 +331,7 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 			}
 			scratch := r.getReplyScratch()
 			reply, unwrapErr := dataplanegarlicecies.OpenOneTimeReplyExistingSession(scratch[:plainLen], key.Key, key.Tag, outer.Encrypted)
+			unlock()
 			if unwrapErr == nil {
 				if r.logger != nil {
 					r.logger.Info("tunnel build reply stage", "stage", "creator_decrypted", "garlic_id", message.Header.ID, "reply_id", reply.Header.ID)
@@ -345,15 +354,16 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 			scratch := r.getReplyScratch()
 			inner, openErr := dataplanegarlicecies.OpenRouterMessage(scratch[:plainLen], r.staticPrivate[:], outer.Encrypted, now)
 			if openErr == nil {
+				unlock()
 				openErr = r.service.
 					handleI2NP(inner, now, false, source)
+				clear(scratch[:plainLen])
+				r.replyScratch.Put(scratch)
+				return openErr
 			}
 
 			clear(scratch[:plainLen])
 			r.replyScratch.Put(scratch)
-			if openErr == nil {
-				return nil
-			}
 		}
 	}
 	for _, destination := range destinations {
@@ -377,6 +387,7 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 			destination.scratch.Put(scratch)
 			return ErrDestinationBandwidth
 		}
+		unlock()
 		receiveErr = r.handleRatchetResult(destination, result, scratch.reply[:], now)
 		clear(scratch.plaintext[:])
 		clear(scratch.reply[:])
@@ -401,6 +412,7 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 			return ErrDestinationBandwidth
 		}
 		set, parseErr := dataplanegarlic.ParseCloveSet(payload)
+		unlock()
 		if parseErr ==
 			nil {
 			parseErr = r.service.HandleGarlicCloveSet(set, now, false)

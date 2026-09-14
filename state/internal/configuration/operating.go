@@ -76,6 +76,7 @@ type Network struct {
 type Router struct {
 	IdentityType string
 	Floodfill    bool
+	Transit      bool
 	Family       string
 	Version      string
 }
@@ -401,7 +402,7 @@ func defaultOperating(base string) Operating {
 		KeyPath:   filepath.Join(stateDir, "router.keys"),
 		TempDir:   os.TempDir(),
 		Network:   Network{ID: 2, IPv4: true},
-		Router:    Router{IdentityType: "ed25519", Version: "0.9.70"},
+		Router:    Router{IdentityType: "ed25519", Transit: true, Version: "0.9.70"},
 		State:     State{MaxBytes: 16 << 20, MaxDestinations: 64, MaxNameBytes: 255, PromoteToMaster: true, LockRetryInterval: 15 * time.Second},
 		NetDB:     NetDB{BucketCapacity: 24, LookupCapacity: 32},
 		Tunnel: Tunnel{
@@ -527,6 +528,13 @@ func applyRouter(operating *Operating, values map[entryKey]string) error {
 			return invalid("router", "floodfill")
 		}
 		operating.Router.Floodfill = parsed
+	}
+	if value, ok := valueOf(values, "router", "transit"); ok {
+		parsed, err := parseBool(value)
+		if err != nil {
+			return invalid("router", "transit")
+		}
+		operating.Router.Transit = parsed
 	}
 	if value, ok := valueOf(values, "router", "family"); ok {
 		if !validLabel(value, 64) {
@@ -1278,7 +1286,7 @@ func knownOperatingKey(section, key string) bool {
 var operatingKeys = map[string]map[string]bool{
 	"paths":       {"data_dir": true, "state_dir": true, "state_path": true, "key_path": true, "temp_dir": true},
 	"network":     {"id": true, "ipv4": true, "ipv6": true},
-	"router":      {"identity_type": true, "floodfill": true, "family": true, "version": true},
+	"router":      {"identity_type": true, "floodfill": true, "transit": true, "family": true, "version": true},
 	"state":       {"max_bytes": true, "max_destinations": true, "max_name_bytes": true, "tainted_copy": true, "promote_to_master": true, "lock_retry_interval": true},
 	"netdb":       {"bucket_capacity": true, "lookup_capacity": true, "bootstrap_router_info_files": true},
 	"tunnel":      {"enabled": true, "hops": true, "exploratory_inbound_target": true, "exploratory_outbound_target": true, "exploratory_pool_capacity": true, "client_inbound_target": true, "client_outbound_target": true, "client_pool_capacity": true, "build_pending_capacity": true, "lifetime": true, "renew_before": true, "maintenance_interval": true, "bandwidth_rate_bytes_per_second": true, "bandwidth_burst_bytes": true},

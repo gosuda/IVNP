@@ -75,6 +75,26 @@ func TestParseOperatingFloodfillMode(t *testing.T) {
 		t.Fatalf("invalid floodfill value error = %v", err)
 	}
 }
+
+func TestParseOperatingTransitMode(t *testing.T) {
+	config, err := ParseOperating("", "/etc/ivnp/ivnp.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.Router.Transit {
+		t.Fatal("default transit mode was disabled")
+	}
+	config, err = ParseOperating("[router]\ntransit = false\n", "/etc/ivnp/ivnp.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Router.Transit {
+		t.Fatal("explicit transit = false stayed enabled")
+	}
+	if _, err = ParseOperating("[router]\ntransit = sometimes\n", "/etc/ivnp/ivnp.conf"); !errors.Is(err, ErrInvalidOperating) {
+		t.Fatalf("invalid transit value error = %v", err)
+	}
+}
 func TestParseOperatingDisablesReseedOnlyWithExplicitEmptyEndpoints(t *testing.T) {
 	disabled, err := ParseOperating("[reseed]\nenabled = false\nendpoints =\n", "/etc/ivnp/ivnp.conf")
 	if err != nil {

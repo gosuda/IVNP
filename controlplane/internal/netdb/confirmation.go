@@ -208,8 +208,8 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 		if attempt.deadline <= now {
 			delete(p.attempts, token)
 			p.registry.retire(token)
-			if p.database != nil && p.database.metrics != nil {
-				p.database.metrics.IncPublicationTimeouts()
+			if metrics := p.database.Metrics(); metrics != nil {
+				metrics.IncPublicationTimeouts()
 			}
 			if p.logger != nil {
 				p.logger.Warn("netdb publication confirmation timeout", "store_type", uint8(p.typeID), "target", foundation.EncodeI2PBase64(attempt.target.Hash[:]), "generation", p.generation, "elapsed_ms", now-attempt.sentAt)
@@ -298,8 +298,8 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 				p.attempts[token] = publicationAttempt{token: token, target: target, sentAt: now, deadline: saturatingAdd(now, PublicationConfirmTimeout)}
 			}
 			p.mu.Unlock()
-			if p.database != nil && p.database.metrics != nil {
-				p.database.metrics.IncPublicationAttempts()
+			if metrics := p.database.Metrics(); metrics != nil {
+				metrics.IncPublicationAttempts()
 			}
 			if p.logger != nil {
 				p.logger.Info("netdb publication attempt", "store_type", uint8(p.typeID), "target", foundation.EncodeI2PBase64(target.Hash[:]), "generation", generation, "reply_via_tunnel", tunnelID != 0)
@@ -333,8 +333,8 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 				first = err
 			}
 
-			if p.database != nil && p.database.metrics != nil {
-				p.database.metrics.IncPublicationSendFailures()
+			if metrics := p.database.Metrics(); metrics != nil {
+				metrics.IncPublicationSendFailures()
 			}
 			if p.logger != nil {
 				p.logger.Warn("netdb publication send failed", "store_type", uint8(p.typeID), "target", foundation.EncodeI2PBase64(work.target.Hash[:]), "generation", work.generation, "error", err)
@@ -385,12 +385,12 @@ func (p *confirmedPublication) confirm(token uint32, generation uint64) bool {
 	}
 	delete(p.attempts, uint32(token))
 	p.confirmed++
-	if p.database != nil && p.database.metrics != nil {
+	if metrics := p.database.Metrics(); metrics != nil {
 		switch p.typeID {
 		case foundation.I2NPStoreRouterInfo:
-			p.database.metrics.IncPublicationRouterInfoSuccesses()
+			metrics.IncPublicationRouterInfoSuccesses()
 		case foundation.I2NPStoreLeaseSet2, foundation.I2NPStoreEncryptedLeaseSet:
-			p.database.metrics.IncPublicationLeaseSet2Successes()
+			metrics.IncPublicationLeaseSet2Successes()
 		}
 	}
 	if p.logger != nil {

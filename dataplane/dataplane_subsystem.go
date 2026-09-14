@@ -100,6 +100,9 @@ type (
 	RouterNTCP2Manager               = router.NTCP2Manager
 	RouterNTCP2ManagerConfig         = router.NTCP2ManagerConfig
 	RouterNativeSocketRuntime        = router.NativeSocketRuntime
+	RouterPeerAdmission              = router.PeerAdmission
+	RouterPeerAdmissionFunc          = router.PeerAdmissionFunc
+	RouterPeerTransport              = router.PeerTransport
 	RouterPeerTestOutcome            = router.PeerTestOutcome
 	RouterPeerTestResult             = router.PeerTestResult
 	// RouterPreparedRoute is owner- and generation-scoped. InstallRoute copies
@@ -231,6 +234,8 @@ const (
 	NTCP2MaxSessionRequestLen               = ntcp2.MaxSessionRequestLen
 	NTCP2MinEncryptedFrame                  = ntcp2.MinEncryptedFrame
 	NTCP2SessionRequestCiphertextLen        = ntcp2.SessionRequestCiphertextLen
+	RouterPeerTransportNTCP2                = router.PeerTransportNTCP2
+	RouterPeerTransportSSU2                 = router.PeerTransportSSU2
 	RouterPeerTestFirewalled                = router.PeerTestFirewalled
 	RouterPeerTestOK                        = router.PeerTestOK
 	RouterPeerTestSymmetricNAT              = router.PeerTestSymmetricNAT
@@ -425,6 +430,7 @@ var (
 	RouterErrNTCP2ManagerConfig                 = router.ErrNTCP2ManagerConfig
 	RouterErrNTCP2Peer                          = router.ErrNTCP2Peer
 	RouterErrNTCP2Session                       = router.ErrNTCP2Session
+	RouterErrPeerDenied                         = router.ErrPeerDenied
 	RouterErrPreparedRouteMissing               = router.ErrPreparedRouteMissing
 	RouterErrRouteGeneration                    = router.ErrRouteGeneration
 	RouterErrRoutePreparationBusy               = router.ErrRoutePreparationBusy

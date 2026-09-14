@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"net"
 	"net/netip"
@@ -426,7 +427,10 @@ func TestSSU2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 		Clock:     WallClock{},
 		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message foundation.I2NPMessage, nowMillis uint64, _ bool) error {
 			deliveredAt.Store(nowMillis)
-			received <- message
+			received <- foundation.I2NPMessage{
+				Header:  message.Header,
+				Payload: append([]byte(nil), message.Payload...),
+			}
 			return nil
 		},
 	}); err != nil {
@@ -533,6 +537,305 @@ func TestSSU2ManagerAuthenticatesAndRoutesI2NP(t *testing.T) {
 	}
 }
 
+func TestSSU2ManagerStagesEarlyPacketsBeforeSessionConfirmed(t *testing.T) {
+	aliceConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aliceConn.Close()
+	bobConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bobConn.Close()
+	ctx := t.Context()
+
+	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
+	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
+	bobDB := newTransportTestPeers()
+	if err = bobDB.AdmitRouterInfo(alice.Snapshot(), uint64(time.Now().UnixMilli())); err != nil {
+		t.Fatalf("admit Alice RouterInfo: %v", err)
+	}
+
+	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro})
+	if err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan foundation.I2NPMessage, 1)
+	if err = bobManager.Start(ctx, TransportBindings{
+		SSU2:      bobConn,
+		LocalInfo: bob,
+		Clock:     WallClock{},
+		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message foundation.I2NPMessage, _ uint64, _ bool) error {
+			received <- foundation.I2NPMessage{
+				Header:  message.Header,
+				Payload: append([]byte(nil), message.Payload...),
+			}
+			return nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = bobManager.Close()
+		_ = bobManager.Wait()
+	})
+
+	bobPriv, err := ecdh.X25519().NewPrivateKey(bobStatic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobPub := bobPriv.PublicKey().Bytes()
+
+	initiator, err := dataplanessu2.NewInitiator(bobPub, bobIntro, 100, 200, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dateTime [4]byte
+	binary.BigEndian.PutUint32(dateTime[:], uint32(time.Now().Unix()))
+	requestPayload, err := dataplanessu2.MarshalBlock(nil, dataplanessu2.BlockDateTime, dateTime[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestPayload, err = dataplanessu2.MarshalBlock(requestPayload, dataplanessu2.BlockPadding, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobManager.mu.Lock()
+	token, err := bobManager.newTokenLocked(aliceConn.LocalAddr(), 100, 200)
+	bobManager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestPacket, err := initiator.BuildSessionRequest(make([]byte, dataplanessu2.MaxIPv4PacketLen), requestPayload, 1, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = aliceConn.WriteTo(requestPacket, bobConn.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+
+	createdBuf := make([]byte, dataplanessu2.MaxIPv4PacketLen)
+	_ = aliceConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err := aliceConn.ReadFrom(createdBuf)
+	if err != nil {
+		t.Fatalf("read SessionCreated: %v", err)
+	}
+	if _, _, err = initiator.ParseSessionCreated(createdBuf[:n]); err != nil {
+		t.Fatalf("parse SessionCreated: %v", err)
+	}
+
+	aliceRouterInfoBytes := alice.Snapshot().Bytes()
+	confirmedPayload, err := dataplanessu2.MarshalBlock(nil, dataplanessu2.BlockRouterInfo, append([]byte{0, 1}, aliceRouterInfoBytes...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmedPacket, err := initiator.BuildSessionConfirmed(make([]byte, dataplanessu2.MaxIPv4PacketLen), aliceStatic[:32], confirmedPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	aliceSend, _, err := initiator.DataCiphers(aliceIntro)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	i2npPayload := []byte("early 0.5-RTT data payload")
+	msg := foundation.I2NPMessage{
+		Header:  foundation.I2NPHeader{Type: foundation.I2NPData, ID: 42, Expiration: uint64(time.Now().Add(time.Minute).UnixMilli())},
+		Payload: i2npPayload,
+	}
+	var rawMsg [1024]byte
+	dataPayload, err := marshalSSU2I2NPTo(rawMsg[:], msg)
+	if err != nil {
+		t.Fatalf("marshal I2NP: %v", err)
+	}
+	dataPacket, err := aliceSend.SealDataTo(make([]byte, dataplanessu2.MaxIPv4PacketLen), dataplanessu2.ShortHeader{
+		DestinationID: 100,
+		PacketNumber:  1,
+		Type:          dataplanessu2.Data,
+	}, dataPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = aliceConn.WriteTo(dataPacket, bobConn.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForSSU2Live(t, time.Second, func() bool {
+		bobManager.mu.RLock()
+		defer bobManager.mu.RUnlock()
+		pending := bobManager.inbound[100]
+		if pending == nil {
+			return false
+		}
+		pending.reassemblyMu.Lock()
+		defer pending.reassemblyMu.Unlock()
+		return pending.stagedCount == 1
+	}, "Bob to stage early data packet in inbound pending queue")
+
+	if _, err = aliceConn.WriteTo(confirmedPacket, bobConn.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-received:
+		if got.Header.ID != 42 || !bytes.Equal(got.Payload, i2npPayload) {
+			t.Fatalf("received I2NP = %#v, %q; want ID 42 and %q", got.Header, got.Payload, i2npPayload)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("early data packet staged before SessionConfirmed was not delivered")
+	}
+}
+
+func TestSSU2ManagerCapsStagedEarlyPacketsAtEight(t *testing.T) {
+	aliceConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aliceConn.Close()
+	bobConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bobConn.Close()
+	ctx := t.Context()
+
+	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
+	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
+	bobDB := newTransportTestPeers()
+	if err = bobDB.AdmitRouterInfo(alice.Snapshot(), uint64(time.Now().UnixMilli())); err != nil {
+		t.Fatalf("admit Alice RouterInfo: %v", err)
+	}
+
+	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receivedCount := atomic.Int32{}
+	if err = bobManager.Start(ctx, TransportBindings{
+		SSU2:      bobConn,
+		LocalInfo: bob,
+		Clock:     WallClock{},
+		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, _ foundation.I2NPMessage, _ uint64, _ bool) error {
+			receivedCount.Add(1)
+			return nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = bobManager.Close()
+		_ = bobManager.Wait()
+	})
+
+	bobPriv, err := ecdh.X25519().NewPrivateKey(bobStatic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobPub := bobPriv.PublicKey().Bytes()
+
+	initiator, err := dataplanessu2.NewInitiator(bobPub, bobIntro, 101, 201, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dateTime [4]byte
+	binary.BigEndian.PutUint32(dateTime[:], uint32(time.Now().Unix()))
+	requestPayload, err := dataplanessu2.MarshalBlock(nil, dataplanessu2.BlockDateTime, dateTime[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestPayload, err = dataplanessu2.MarshalBlock(requestPayload, dataplanessu2.BlockPadding, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobManager.mu.Lock()
+	token, err := bobManager.newTokenLocked(aliceConn.LocalAddr(), 101, 201)
+	bobManager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestPacket, err := initiator.BuildSessionRequest(make([]byte, dataplanessu2.MaxIPv4PacketLen), requestPayload, 1, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = aliceConn.WriteTo(requestPacket, bobConn.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+
+	createdBuf := make([]byte, dataplanessu2.MaxIPv4PacketLen)
+	_ = aliceConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err := aliceConn.ReadFrom(createdBuf)
+	if err != nil {
+		t.Fatalf("read SessionCreated: %v", err)
+	}
+	if _, _, err = initiator.ParseSessionCreated(createdBuf[:n]); err != nil {
+		t.Fatalf("parse SessionCreated: %v", err)
+	}
+
+	confirmedPayload, err := dataplanessu2.MarshalBlock(nil, dataplanessu2.BlockRouterInfo, append([]byte{0, 1}, alice.Snapshot().Bytes()...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmedPacket, err := initiator.BuildSessionConfirmed(make([]byte, dataplanessu2.MaxIPv4PacketLen), aliceStatic[:32], confirmedPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	aliceSend, _, err := initiator.DataCiphers(aliceIntro)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 1; i <= 10; i++ {
+		msg := foundation.I2NPMessage{
+			Header:  foundation.I2NPHeader{Type: foundation.I2NPData, ID: uint32(i), Expiration: uint64(time.Now().Add(time.Minute).UnixMilli())},
+			Payload: []byte{byte(i)},
+		}
+		var rawMsg [256]byte
+		dataPayload, err := marshalSSU2I2NPTo(rawMsg[:], msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dataPacket, err := aliceSend.SealDataTo(make([]byte, dataplanessu2.MaxIPv4PacketLen), dataplanessu2.ShortHeader{
+			DestinationID: 101,
+			PacketNumber:  uint32(i),
+			Type:          dataplanessu2.Data,
+		}, dataPayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = aliceConn.WriteTo(dataPacket, bobConn.LocalAddr()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	waitForSSU2Live(t, time.Second, func() bool {
+		bobManager.mu.RLock()
+		defer bobManager.mu.RUnlock()
+		pending := bobManager.inbound[101]
+		if pending == nil {
+			return false
+		}
+		pending.reassemblyMu.Lock()
+		defer pending.reassemblyMu.Unlock()
+		return pending.stagedCount == ssu2MaxStagedEarlyPackets
+	}, "Bob to stage exactly 8 packets without overflow")
+
+	if _, err = aliceConn.WriteTo(confirmedPacket, bobConn.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForSSU2Live(t, 3*time.Second, func() bool {
+		return receivedCount.Load() == 8
+	}, "Bob to receive all 8 staged packets")
+
+	if count := receivedCount.Load(); count != 8 {
+		t.Fatalf("received packets count = %d, want 8", count)
+	}
+}
+
 func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 	aliceConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -616,7 +919,10 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 		{bobManager, bobConn, bob, func(foundation.I2NPMessage, uint64, bool) error { return nil }},
 		{charlieManager, charlieConn, charlie, func(message foundation.I2NPMessage, nowMillis uint64, fromFloodfill bool) error {
 			if message.Header.Type == foundation.I2NPData {
-				received <- message
+				received <- foundation.I2NPMessage{
+					Header:  message.Header,
+					Payload: append([]byte(nil), message.Payload...),
+				}
 				return nil
 			}
 			if message.Header.Type == foundation.I2NPDatabaseStore {
@@ -649,12 +955,12 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 		}
 	})
 
-	sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
-	defer sendCancel()
-	if err = bobManager.EnsureSession(sendCtx, charlie.Hash()); err != nil {
+	bobCtx, bobCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer bobCancel()
+	if err = bobManager.EnsureSession(bobCtx, charlie.Hash()); err != nil {
 		t.Fatalf("authenticate Bob-Charlie session: %v", err)
 	}
-	if err = bobManager.Send(sendCtx, charlie.Hash(), foundation.I2NPMessage{
+	if err = bobManager.Send(bobCtx, charlie.Hash(), foundation.I2NPMessage{
 		Header:  foundation.I2NPHeader{Type: foundation.I2NPDeliveryStatus, ID: 70, Expiration: uint64(time.Now().Add(time.Minute).UnixMilli())},
 		Payload: make([]byte, 12),
 	}); err != nil {
@@ -684,6 +990,10 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 	if _, err = selectSSU2Address(alice.Snapshot()); err == nil {
 		t.Fatal("firewalled Alice RouterInfo retained a direct endpoint")
 	}
+	charliePublished := charlie.Snapshot().Published
+	waitForSSU2Live(t, time.Second, func() bool {
+		return uint64(time.Now().UnixMilli()) > charliePublished
+	}, "Charlie new RouterInfo publication timestamp")
 	if err = charlie.ReplaceAddresses([]transportTestAddress{{
 		Transport: "SSU",
 		Cost:      3,
@@ -716,23 +1026,31 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 		Header:  foundation.I2NPHeader{Type: foundation.I2NPData, ID: 71, Expiration: uint64(time.Now().Add(time.Minute).UnixMilli())},
 		Payload: []byte("introduced SSU2 session"),
 	}
-	if err = aliceManager.EnsureSession(sendCtx, charlie.Hash()); err != nil {
-		t.Fatalf("authenticate introduced SSU2 session: %v", err)
-	}
-	if err = aliceManager.Send(sendCtx, charlie.Hash(), message); err != nil {
+	aliceCtx, aliceCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer aliceCancel()
+	waitForSSU2Live(t, 15*time.Second, func() bool {
+		return aliceManager.EnsureSession(aliceCtx, charlie.Hash()) == nil
+	}, "Alice introduced SSU2 session to Charlie")
+	if err = aliceManager.Send(aliceCtx, charlie.Hash(), message); err != nil {
 		t.Fatalf("send through automatic native SSU2 introduction: %v", err)
 	}
-	if _, found := charlieDB.Get(alice.Hash()); !found {
-		t.Fatal("relay DatabaseStore did not admit Alice RouterInfo at Charlie")
-	}
+	waitForSSU2Live(t, 15*time.Second, func() bool {
+		_, found := charlieDB.Get(alice.Hash())
+		return found
+	}, "relay DatabaseStore to admit Alice RouterInfo at Charlie")
+	receiveTimer := time.NewTimer(15 * time.Second)
+	defer receiveTimer.Stop()
 	for {
 		select {
 		case got := <-received:
 			if got.Header.ID == message.Header.ID && bytes.Equal(got.Payload, message.Payload) {
 				return
 			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("introduced native SSU2 session did not deliver I2NP")
+			t.Logf("ignoring intermediate I2NP message: type=%v id=%d len=%d", got.Header.Type, got.Header.ID, len(got.Payload))
+		case <-receiveTimer.C:
+			t.Fatalf("introduced native SSU2 session did not deliver I2NP (expected ID %d, payload %q)", message.Header.ID, message.Payload)
+		case <-ctx.Done():
+			t.Fatalf("test context canceled while waiting for I2NP delivery: %v", ctx.Err())
 		}
 	}
 }
