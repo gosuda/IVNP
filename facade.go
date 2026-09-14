@@ -116,6 +116,15 @@ func (r *Router) Networks() []string {
 	return r.core.Networks()
 }
 
+// Node returns the underlying embedded node lifecycle controller.
+// Use this for node-level operations such as direct RouterInfo import and export.
+func (r *Router) Node() *node.EmbeddedRouter {
+	if r == nil {
+		return nil
+	}
+	return r.core
+}
+
 func (r *Router) WaitReady(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err

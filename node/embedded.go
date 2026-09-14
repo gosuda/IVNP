@@ -129,6 +129,54 @@ func (r *EmbeddedRouter) Hash() foundation.Hash {
 	return r.Default().Hash()
 }
 
+// ExportLocalRouterInfo returns a snapshot copy of this router's signed RouterInfo
+// wire bytes on the named network context. Empty selects the default network.
+func (r *EmbeddedRouter) ExportLocalRouterInfo(network string) ([]byte, error) {
+	if r == nil {
+		return nil, net.ErrClosed
+	}
+	c := r.Default()
+	if network != "" {
+		c = r.contexts[network]
+	}
+	if c == nil {
+		return nil, fmt.Errorf("node: unknown network %q", network)
+	}
+	return c.ExportLocalRouterInfo()
+}
+
+// ExportPeerRouterInfo returns a copy of the named peer's signed RouterInfo wire
+// bytes from the specified network's NetDB, if known.
+func (r *EmbeddedRouter) ExportPeerRouterInfo(network string, peer foundation.Hash) ([]byte, bool) {
+	if r == nil {
+		return nil, false
+	}
+	c := r.Default()
+	if network != "" {
+		c = r.contexts[network]
+	}
+	if c == nil {
+		return nil, false
+	}
+	return c.ExportPeerRouterInfo(peer)
+}
+
+// ImportRouterInfo validates, verifies, and installs one signed RouterInfo wire
+// record into the named network context's NetDB.
+func (r *EmbeddedRouter) ImportRouterInfo(ctx context.Context, network string, wire []byte) (foundation.Hash, error) {
+	if r == nil {
+		return foundation.Hash{}, net.ErrClosed
+	}
+	c := r.Default()
+	if network != "" {
+		c = r.contexts[network]
+	}
+	if c == nil {
+		return foundation.Hash{}, fmt.Errorf("node: unknown network %q", network)
+	}
+	return c.ImportRouterInfo(ctx, wire)
+}
+
 func (r *EmbeddedRouter) WaitReady(ctx context.Context) error {
 	if r == nil {
 		return net.ErrClosed

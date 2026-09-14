@@ -36,14 +36,15 @@ import (
 )
 
 var (
-	ErrStarted                = errors.New("daemon: already started")
-	ErrProxyWithoutTunnels    = errors.New("daemon: proxies require enabled tunnels")
-	ErrTooManyDestinations    = errors.New("daemon: too many destinations")
-	ErrDuplicateDestination   = errors.New("daemon: duplicate destination identity")
-	ErrReseedUnavailable      = errors.New("daemon: reseed is unavailable")
-	ErrTunnelProbeUnavailable = errors.New("daemon: tunnel probe is unavailable")
-	ErrExplorationUnavailable = errors.New("daemon: exploration is unavailable")
-	ErrStateConflict          = errors.New("router: persistent state conflicts with embedded ownership")
+	ErrStarted                    = errors.New("daemon: already started")
+	ErrProxyWithoutTunnels        = errors.New("daemon: proxies require enabled tunnels")
+	ErrTooManyDestinations        = errors.New("daemon: too many destinations")
+	ErrDuplicateDestination       = errors.New("daemon: duplicate destination identity")
+	ErrReseedUnavailable          = errors.New("daemon: reseed is unavailable")
+	ErrTunnelProbeUnavailable     = errors.New("daemon: tunnel probe is unavailable")
+	ErrExplorationUnavailable     = errors.New("daemon: exploration is unavailable")
+	ErrStateConflict              = errors.New("router: persistent state conflicts with embedded ownership")
+	ErrLocalRouterInfoUnpublished = errors.New("controlplane: local router info not yet published")
 )
 
 const (
@@ -327,6 +328,7 @@ type Controller struct {
 	registry          *observability.Registry
 	logger            *slog.Logger
 	clock             dataplane.RouterClock
+	admitPeer         dataplane.RouterPeerAdmissionFunc
 
 	service                *dataplane.RouterService
 	tunnels                *dataplane.TunnelRuntime
@@ -1157,6 +1159,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		responders:             responders,
 		closeNativeTransports:  closeNativeTransports,
 		releaseRouterInfoSeeds: releaseRouterInfoSeeds,
+		admitPeer:              options.PeerAdmission,
 		startReady:             make(chan struct{}),
 		destinationWake:        make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
 		destinationTunnelWake:  make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
@@ -1995,6 +1998,83 @@ func (d *Controller) NetDBRoutersSnapshot() []netdb.RouterRef {
 	}
 	_, routers := d.database.Routers().Snapshot()
 	return routers
+}
+
+// ExportLocalRouterInfo returns an independent snapshot copy of this context's
+// signed RouterInfo wire bytes for export to peers or discovery systems.
+func (d *Controller) ExportLocalRouterInfo() ([]byte, error) {
+	if d == nil {
+		return nil, net.ErrClosed
+	}
+	d.mu.Lock()
+	running := d.started && !d.closed
+	localInfo := d.localInfo
+	d.mu.Unlock()
+	if !running || localInfo == nil {
+		return nil, net.ErrClosed
+	}
+	raw := localInfo.Snapshot().Bytes()
+	if len(raw) == 0 {
+		return nil, ErrLocalRouterInfoUnpublished
+	}
+	return append([]byte(nil), raw...), nil
+}
+
+// ExportPeerRouterInfo returns a copy of the signed RouterInfo wire bytes for the
+// given peer from this context's NetDB, if known.
+func (d *Controller) ExportPeerRouterInfo(peer foundation.Hash) ([]byte, bool) {
+	if d == nil {
+		return nil, false
+	}
+	d.mu.Lock()
+	running := d.started && !d.closed
+	db := d.database
+	d.mu.Unlock()
+	if !running || db == nil {
+		return nil, false
+	}
+	ref, ok := db.Routers().Get(peer)
+	if !ok {
+		return nil, false
+	}
+	raw := ref.Info.Bytes()
+	return append([]byte(nil), raw...), true
+}
+
+// ImportRouterInfo validates, verifies, and installs one signed RouterInfo wire
+// record into this context's NetDB. The RouterInfo's netId must match this
+// context's configured network ID. On success, the peer's router Hash is returned.
+func (d *Controller) ImportRouterInfo(ctx context.Context, wire []byte) (foundation.Hash, error) {
+	if err := ctx.Err(); err != nil {
+		return foundation.Hash{}, err
+	}
+	if d == nil {
+		return foundation.Hash{}, net.ErrClosed
+	}
+	d.mu.Lock()
+	running := d.started && !d.closed
+	db := d.database
+	admitPeer := d.admitPeer
+	d.mu.Unlock()
+	if !running || db == nil {
+		return foundation.Hash{}, net.ErrClosed
+	}
+	nowMillis := uint64(d.clock.Now().UnixMilli())
+	info, err := validateBootstrapRouterInfo(wire, d.config, nowMillis)
+	if err != nil {
+		return foundation.Hash{}, fmt.Errorf("controlplane: invalid router info: %w", err)
+	}
+	peerHash := info.Hash()
+	if admitPeer != nil {
+		req := dataplane.RouterPeerAdmission{Peer: peerHash, RouterInfo: info, Transport: dataplane.RouterPeerTransportNTCP2}
+		if err := admitPeer(ctx, req); err != nil {
+			return foundation.Hash{}, errors.Join(dataplane.RouterErrPeerDenied, err)
+		}
+	}
+	if err := db.AdmitRouterInfo(info, false, nowMillis); err != nil {
+		return foundation.Hash{}, fmt.Errorf("controlplane: netdb admission: %w", err)
+	}
+	return peerHash, nil
 }
 
 // TriggerReseed starts one bounded reseed attempt when reseed is enabled.
