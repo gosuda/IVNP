@@ -250,3 +250,91 @@ func confirmedRouterInfoPayload(t *testing.T) []byte {
 	}
 	return payload
 }
+
+func TestPeekSessionConfirmedRejectsMalformed(t *testing.T) {
+	introKey := bytes.Repeat([]byte{1}, 32)
+	confirmKey := bytes.Repeat([]byte{2}, 32)
+	destinationID := uint64(0x1122334455667788)
+
+	packet := make([]byte, 80)
+	header := ShortHeader{
+		DestinationID: destinationID,
+		PacketNumber:  0,
+		Type:          SessionConfirmed,
+		Fragment:      0x01,
+		Flags:         0,
+	}
+	if err := header.MarshalTo(packet[:ShortHeaderLen]); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProtectHeader(packet, introKey, confirmKey, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if !PeekSessionConfirmed(packet, introKey, confirmKey, destinationID) {
+		t.Fatal("valid SessionConfirmed was rejected")
+	}
+
+	if PeekSessionConfirmed(packet[:39], introKey, confirmKey, destinationID) {
+		t.Fatal("short packet accepted")
+	}
+	if PeekSessionConfirmed(packet, introKey, confirmKey, 0) {
+		t.Fatal("zero destinationID accepted")
+	}
+	if PeekSessionConfirmed(packet, introKey, confirmKey, destinationID+1) {
+		t.Fatal("wrong destinationID accepted")
+	}
+
+	wrongKey := bytes.Repeat([]byte{3}, 32)
+	if PeekSessionConfirmed(packet, wrongKey, confirmKey, destinationID) {
+		t.Fatal("wrong introKey accepted")
+	}
+	if PeekSessionConfirmed(packet, introKey, wrongKey, destinationID) {
+		t.Fatal("wrong confirmKey accepted")
+	}
+
+	corruptHdr := header
+	corruptHdr.PacketNumber = 1
+	corruptPacket := make([]byte, 80)
+	_ = corruptHdr.MarshalTo(corruptPacket[:ShortHeaderLen])
+	_ = ProtectHeader(corruptPacket, introKey, confirmKey, 0)
+	if PeekSessionConfirmed(corruptPacket, introKey, confirmKey, destinationID) {
+		t.Fatal("packet number != 0 accepted")
+	}
+
+	corruptHdr = header
+	corruptHdr.Type = Data
+	corruptPacket = make([]byte, 80)
+	_ = corruptHdr.MarshalTo(corruptPacket[:ShortHeaderLen])
+	_ = ProtectHeader(corruptPacket, introKey, confirmKey, 0)
+	if PeekSessionConfirmed(corruptPacket, introKey, confirmKey, destinationID) {
+		t.Fatal("type Data accepted")
+	}
+
+	corruptHdr = header
+	corruptHdr.Flags = 1
+	corruptPacket = make([]byte, 80)
+	_ = corruptHdr.MarshalTo(corruptPacket[:ShortHeaderLen])
+	_ = ProtectHeader(corruptPacket, introKey, confirmKey, 0)
+	if PeekSessionConfirmed(corruptPacket, introKey, confirmKey, destinationID) {
+		t.Fatal("non-zero flags accepted")
+	}
+
+	corruptHdr = header
+	corruptHdr.Fragment = 0x00
+	corruptPacket = make([]byte, 80)
+	_ = corruptHdr.MarshalTo(corruptPacket[:ShortHeaderLen])
+	_ = ProtectHeader(corruptPacket, introKey, confirmKey, 0)
+	if PeekSessionConfirmed(corruptPacket, introKey, confirmKey, destinationID) {
+		t.Fatal("fragment count 0 accepted")
+	}
+
+	corruptHdr = header
+	corruptHdr.Fragment = 0x22
+	corruptPacket = make([]byte, 80)
+	_ = corruptHdr.MarshalTo(corruptPacket[:ShortHeaderLen])
+	_ = ProtectHeader(corruptPacket, introKey, confirmKey, 0)
+	if PeekSessionConfirmed(corruptPacket, introKey, confirmKey, destinationID) {
+		t.Fatal("fragment index >= count accepted")
+	}
+}

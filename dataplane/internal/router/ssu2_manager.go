@@ -714,7 +714,7 @@ func (p *ssu2InboundPending) releaseSensitiveHeld() {
 		p.reassembly.ReleaseSensitive()
 		p.reassembly = nil
 	}
-	for i := 0; i < p.stagedCount; i++ {
+	for i := range p.stagedPackets {
 		clear(p.stagedPackets[i].data[:])
 		p.stagedPackets[i].length = 0
 	}
