@@ -42,7 +42,7 @@ func (s *recordingSockets) DialStream(context.Context, dataplane.RouterEndpoint)
 	s.calls++
 	return nil, errUnexpectedSocket
 }
-func (s *recordingSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (*net.UDPConn, error) {
+func (s *recordingSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
 	s.calls++
 	return nil, errUnexpectedSocket
 }
@@ -105,7 +105,7 @@ func (loopbackSockets) ListenStream(context.Context, dataplane.RouterEndpoint) (
 func (loopbackSockets) DialStream(ctx context.Context, endpoint dataplane.RouterEndpoint) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, endpoint.Network, endpoint.Address)
 }
-func (loopbackSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (*net.UDPConn, error) {
+func (loopbackSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
 	return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 }
 
@@ -121,7 +121,7 @@ func (s *defaultTransportSockets) ListenStream(context.Context, dataplane.Router
 func (s *defaultTransportSockets) DialStream(ctx context.Context, endpoint dataplane.RouterEndpoint) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, endpoint.Network, endpoint.Address)
 }
-func (s *defaultTransportSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (*net.UDPConn, error) {
+func (s *defaultTransportSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
 	s.packets++
 	return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 }

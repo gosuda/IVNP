@@ -3,6 +3,8 @@ package ntcp2
 import (
 	"net"
 	"sync"
+
+	"gosuda.org/ivnp/internal/durable"
 )
 
 // Session manages an established NTCP2 connection with directional encryption states.
@@ -10,7 +12,7 @@ type Session struct {
 	conn      net.Conn
 	send      *Direction
 	receive   *Direction
-	writeMu   sync.Mutex
+	writeMu   durable.Mutex
 	lifecycle sync.RWMutex
 	closeOnce sync.Once
 }

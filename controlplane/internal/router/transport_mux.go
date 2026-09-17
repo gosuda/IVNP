@@ -270,7 +270,7 @@ func (m *TransportMux) PrepareSession(ctx context.Context, peer foundation.Hash)
 	if err == nil {
 		return m.prepareTransportSession(primary, peer)
 	}
-	retryable := IsRetryableTransportError(err) || errors.Is(err, errTransportSessionAttemptTimeout)
+	retryable := IsRetryableTransportError(err)
 	if alternate == nil || !retryable || ctx.Err() != nil {
 		return nil, err
 	}
@@ -493,9 +493,12 @@ func (m *TransportMux) directSSU2RouterInfoCapable(info foundation.NetworkDataba
 // IsRetryableTransportError reports failures that occurred before an I2NP
 // message could be delivered and are expected while selecting live peers.
 func IsRetryableTransportError(err error) bool {
+	if errors.Is(err, errTransportSessionAttemptTimeout) {
+		return true
+	}
 	unavailable := errors.Is(err, ErrTransportUnavailable) || errors.Is(err, dataplane.RouterErrSessionUnavailable)
 	ntcpSetupFailure := errors.Is(err, dataplane.RouterErrNTCP2Peer) || errors.Is(err, dataplane.RouterErrNTCP2Session)
-	ssuSetupFailure := errors.Is(err, dataplane.RouterErrSSU2Peer) || errors.Is(err, dataplane.RouterErrSSU2Session) || errors.Is(err, dataplane.RouterErrSSU2Introduction)
+	ssuSetupFailure := errors.Is(err, dataplane.RouterErrSSU2Peer) || errors.Is(err, dataplane.RouterErrSSU2Session) || errors.Is(err, dataplane.RouterErrSSU2Introduction) || errors.Is(err, dataplane.RouterErrSSU2SendStalled)
 	if unavailable || ntcpSetupFailure || ssuSetupFailure {
 		return true
 	}

@@ -112,7 +112,7 @@ func (s ssu2SessionSender) send(ctx context.Context, message foundation.I2NPMess
 	if len(message.Payload) > foundation.I2NPI2PDMaxPayload {
 		return foundation.I2NPErrPayloadTooLarge
 	}
-	if !s.manager.sessionActive(s.session) || s.manager.contextErr() != nil {
+	if !s.manager.sessionLive(s.session) || s.manager.contextErr() != nil {
 		return ErrSessionUnavailable
 	}
 	if interruptible {

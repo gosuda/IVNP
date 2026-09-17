@@ -59,6 +59,9 @@ func enableKernelDropAccounting(raw syscall.RawConn) bool {
 }
 
 func readBatch(c *UDPBatchConn, b *Batch) (count int, err error) {
+	if c.raw == nil {
+		return readBatchPortable(c, b)
+	}
 	state := b.state.(*linuxBatchState)
 	for i := range b.packets {
 		packet := &b.packets[i]
@@ -149,6 +152,9 @@ func normalizeReadBatch(b *Batch, state *linuxBatchState, count int) (int, error
 }
 
 func writeBatchPrefix(c *UDPBatchConn, b *Batch, count int) (written int, err error) {
+	if c.raw == nil {
+		return writeBatchPrefixPortable(c, b, count)
+	}
 	state := b.state.(*linuxBatchState)
 	packets := b.packets[:count]
 	for i := range packets {

@@ -3,6 +3,7 @@ package netdb
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -49,6 +50,7 @@ type LookupResponderConfig struct {
 	Now      func() uint64
 	Random   func() uint32
 	Wrapper  LookupReplyWrapper
+	Logger   *slog.Logger
 }
 
 type lookupJob struct {
@@ -65,6 +67,7 @@ type LookupResponder struct {
 	now      func() uint64
 	random   func() uint32
 	wrapper  LookupReplyWrapper
+	logger   *slog.Logger
 
 	jobs    chan lookupJob
 	done    chan struct{}
@@ -80,7 +83,7 @@ func NewLookupResponder(config LookupResponderConfig) (*LookupResponder, error) 
 	if config.Database == nil || config.Sender == nil || config.Local == (foundation.Hash{}) || config.Now == nil || config.Random == nil {
 		return nil, ErrLookupResponderConfig
 	}
-	return &LookupResponder{database: config.Database, sender: config.Sender, local: config.Local, now: config.Now, random: config.Random, wrapper: config.Wrapper, jobs: make(chan lookupJob, lookupResponderQueue), done: make(chan struct{})}, nil
+	return &LookupResponder{database: config.Database, sender: config.Sender, local: config.Local, now: config.Now, random: config.Random, wrapper: config.Wrapper, logger: config.Logger, jobs: make(chan lookupJob, lookupResponderQueue), done: make(chan struct{})}, nil
 }
 
 // Start launches a CPU-scaled worker set bounded by the responder queue. It is
@@ -138,6 +141,9 @@ func (r *LookupResponder) Enqueue(lookup foundation.I2NPDatabaseLookupMessage) e
 	default:
 		r.mu.Unlock()
 		clearLookupJob(&job)
+		if r.logger != nil {
+			r.logger.Debug("netdb lookup dropped", "reason", "queue_full", "key", foundation.EncodeI2PBase64(lookup.Key[:]))
+		}
 		return ErrLookupResponderFull
 	}
 }
@@ -238,7 +244,11 @@ func (r *LookupResponder) respond(ctx context.Context, lookup foundation.I2NPDat
 	if lookup.ReplyThroughTunnel() {
 		tunnelID = lookup.ReplyTunnelID
 	}
-	return r.sender.SendNetDBReply(ctx, lookup.From, tunnelID, message)
+	err := r.sender.SendNetDBReply(ctx, lookup.From, tunnelID, message)
+	if r.logger != nil {
+		r.logger.Debug("netdb lookup respond", "key", foundation.EncodeI2PBase64(lookup.Key[:]), "store", len(payload) != 0, "tunnel", tunnelID, "to", foundation.EncodeI2PBase64(lookup.From[:]), "err", err)
+	}
+	return err
 }
 
 func routerInfoCurrentForLookup(info foundation.NetworkDatabaseRouterInfo, now uint64) bool {

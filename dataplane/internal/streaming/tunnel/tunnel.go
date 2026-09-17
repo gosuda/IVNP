@@ -1647,6 +1647,9 @@ func (c *tunnelConn) sendWire(ctx context.Context, wire []byte) error {
 
 // Automatic protocol replies must not hold an ingress worker across route
 // preparation. The queue owns the wire until delivery or explicit rejection.
+// A delivery failure only drops this copy: SYN-ACK and CLOSE state live in
+// synchronize/pending and are retried by the retransmission schedule, while a
+// bare ACK is superseded by the next inbound packet.
 func (c *tunnelConn) queueProtocolOwned(wire []byte, lease *wireLease) error {
 	return c.queueProtocolRequest(sendRequest{connection: c, wire: wire, lease: lease, ctx: c.network.ctx, abortOnFailure: true})
 }
@@ -1880,13 +1883,22 @@ func (c *tunnelConn) Write(src []byte) (int, error) {
 				c.network.scheduleRetry(c)
 				return written + chunkLen, err
 			}
-			c.mu.Lock()
-			pending := c.pending[sequence]
-			delete(c.pending, sequence)
-			pending.release()
-			c.signalWakeLocked()
-			c.mu.Unlock()
-			return written, err
+			if c.isDone() {
+				c.mu.Lock()
+				pending := c.pending[sequence]
+				delete(c.pending, sequence)
+				pending.release()
+				c.signalWakeLocked()
+				c.mu.Unlock()
+				return written, err
+			}
+			// The send failed before the packet reached the wire, but its
+			// sequence is consumed: dropping the pending entry would leave a
+			// permanent hole the receiver parks every later packet on. Keep
+			// it queued — the retry machinery owns delivery — and report the
+			// bytes as accepted, matching the write-deadline branch.
+			c.network.scheduleRetry(c)
+			return written + chunkLen, nil
 		}
 		written += chunkLen
 		src = src[chunkLen:]
@@ -1942,7 +1954,9 @@ func (c *tunnelConn) Close() error {
 	}
 	if err := c.initiateClose(); err != nil {
 		c.abort(false)
-		if errors.Is(err, net.ErrClosed) {
+		// initiateClose only surfaces a send error when the connection was
+		// already torn down — there is nothing left to close.
+		if errors.Is(err, net.ErrClosed) || c.isDone() {
 			return nil
 		}
 		return err

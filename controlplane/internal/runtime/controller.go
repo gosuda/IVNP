@@ -29,6 +29,7 @@ import (
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/observability"
@@ -170,7 +171,7 @@ type destinationRuntime struct {
 	session                 *dataplane.RouterDestinationSession
 	unregister              []func()
 	once                    sync.Once
-	maintenanceMu           sync.Mutex
+	maintenanceMu           durable.Mutex
 	released                atomic.Bool
 	onRelease               func(*destinationRuntime)
 	now                     func() uint64
@@ -712,6 +713,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		NoTransit:                   !cfg.Router.Transit,
 		BandwidthRateBytesPerSecond: cfg.Tunnel.BandwidthRateBytesPerSecond, Metrics: registry,
 		RouterVersion: cfg.Router.Version,
+		Reachability:  advertisedReachability(cfg),
 		Options:       routerFamilyOption(cfg.Router.Family),
 	})
 	if err != nil {
@@ -826,26 +828,6 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	publicationTokens := netdb.NewPublicationTokenRegistry(now, randomNonZeroID)
 	var lookupResponder *netdb.LookupResponder
 	var storeFlooder *netdb.StoreFlooder
-	if cfg.Router.Floodfill {
-		lookupResponder, err = netdb.NewLookupResponder(netdb.LookupResponderConfig{
-			Database: database,
-			Sender:   daemonReplySender{sender: mux, now: now},
-			Local:    bundle.Router.Hash,
-			Now:      now,
-			Random:   randomNonZeroID,
-			Wrapper:  dataplane.GarlicDatabaseLookupReplyWrapper{MessageID: randomNonZeroID},
-		})
-		if err != nil {
-			return nil, err
-		}
-		storeFlooder, err = netdb.NewStoreFlooder(netdb.StoreFlooderConfig{
-			Database: database, Sender: directStoreFloodSender{sender: mux}, Local: bundle.Router.Hash,
-			Now: now, Random: randomNonZeroID, Logger: logger,
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
 	routerPublisher, err := netdb.NewRouterInfoPublisher(netdb.RouterInfoPublisherConfig{
 		Local: localInfo, Database: database, Sender: muxLeaseSetSender{sender: mux},
 		ReplyPath: daemonReplyRoute{local: bundle.Router.Hash, now: now}, Registry: publicationTokens, Now: now, Random: randomNonZeroID, PreferredTargets: bootstrapPeers,
@@ -954,7 +936,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 	}
 	if cfg.Tunnel.Enabled {
-		tunnels = dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: dataSender, Now: now})
+		tunnels = dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: dataSender, Local: bundle.Router.Hash, Now: now, Logger: logger})
 		pool = tunnel.NewPool(cfg.Tunnel.ExploratoryPoolCapacity)
 		profiles = tunnel.NewPeerProfiles(tunnel.PeerProfilesConfig{})
 		responders = netdb.NewResponderProfiles(netdb.ResponderProfilesConfig{Now: now})
@@ -1105,6 +1087,30 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			clientRuntimes = append(clientRuntimes, clientRuntime)
 		}
 	}
+	if cfg.Router.Floodfill {
+		// Lookup replies are tunnel-routed: the responder needs the same
+		// outbound circuit and pool the DatabaseStoreReply path uses, or every
+		// ReplyThroughTunnel lookup fails with RouterErrDataPlaneConfig.
+		lookupResponder, err = netdb.NewLookupResponder(netdb.LookupResponderConfig{
+			Database: database,
+			Sender:   daemonReplySender{sender: mux, tunnels: tunnels, pool: pool, now: now},
+			Local:    bundle.Router.Hash,
+			Now:      now,
+			Random:   randomNonZeroID,
+			Wrapper:  dataplane.GarlicDatabaseLookupReplyWrapper{MessageID: randomNonZeroID},
+			Logger:   logger,
+		})
+		if err != nil {
+			return nil, err
+		}
+		storeFlooder, err = netdb.NewStoreFlooder(netdb.StoreFlooderConfig{
+			Database: database, Sender: directStoreFloodSender{sender: mux}, Local: bundle.Router.Hash,
+			Now: now, Random: randomNonZeroID, Logger: logger,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 	var tunnelTest router.DeliveryStatusHandler
 	if health != nil {
 		tunnelTest = health
@@ -1197,6 +1203,19 @@ func routerFamilyOption(family string) []router.MappingOption {
 		return nil
 	}
 	return []router.MappingOption{{Key: "family", Value: family}}
+}
+
+// advertisedReachability reports the initial RouterInfo reachability asserted
+// by configuration: an enabled transport with a complete advertised host and
+// port is an operator's claim of public reachability. Unconfigured transports
+// keep the unknown state until NAT mapping or a peer test result reports.
+func advertisedReachability(cfg state.ConfigurationOperating) router.Reachability {
+	for _, transport := range []state.ConfigurationTransport{cfg.NTCP2, cfg.SSU2} {
+		if transport.Enabled && transport.Advertised.Host != "" && transport.Advertised.Port != 0 {
+			return router.ReachabilityReachable
+		}
+	}
+	return router.ReachabilityUnknown
 }
 
 func transportEndpoint(transport state.ConfigurationTransport, network string) dataplane.RouterEndpoint {

@@ -540,7 +540,13 @@ func selectDiverseHops(refs []controlplanenetdb.RouterRef, profiles *PeerProfile
 				policy.random.oneIn(4),
 				policy.random.oneIn(4),
 			)
-			if ref.Hash == local || ref.Hash == excluded || !profiles.EligibleAt(ref.Hash, nowMillis) || !allowed {
+			if ref.Hash == local || ref.Hash == excluded || !allowed {
+				continue
+			}
+			// A live authenticated session is fresher reachability evidence than
+			// recorded failure history; connected peers remain selectable so a
+			// mesh can re-converge the moment any transport session re-forms.
+			if !profiles.EligibleAt(ref.Hash, nowMillis) && (policy.connected == nil || !policy.connected(ref.Hash)) {
 				continue
 			}
 			if err := controlplanenetdb.RouterInfoFresh(ref.Info, nowMillis); err != nil {

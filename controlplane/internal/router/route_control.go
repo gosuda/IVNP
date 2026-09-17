@@ -144,6 +144,21 @@ func (f *streamingHandshakeFeedback) SendTunnel(ctx context.Context, delivery da
 	if err := s.waitForRatchetReply(ctx, delivery.To); err != nil {
 		return err
 	}
+	err := s.execution.SendTunnelOnRoute(ctx, delivery, f.receipt)
+	if !errors.Is(err, dataplane.RouterErrPreparedRouteMissing) {
+		return s.retireFailedRoute(delivery.To, err)
+	}
+	// The pinned installation may churn between preparation and SYN
+	// retransmission; refresh the receipt onto the current route so terminal
+	// feedback still retires the installation actually used.
+	if err = s.prepare(ctx, delivery.To); err != nil && !errors.Is(err, dataplane.RouterErrRouteGeneration) {
+		return err
+	}
+	receipt, ok := s.execution.RouteReceipt(delivery.To)
+	if !ok {
+		return dataplane.RouterErrPreparedRouteMissing
+	}
+	f.receipt = receipt
 	return s.execution.SendTunnelOnRoute(ctx, delivery, f.receipt)
 }
 
@@ -351,11 +366,17 @@ func (s *StreamingTunnelSender) SendTunnel(ctx context.Context, delivery datapla
 		}
 		err := s.execution.SendTunnel(ctx, delivery)
 		if !errors.Is(err, dataplane.RouterErrPreparedRouteMissing) {
+			if err != nil && s.logger != nil {
+				s.logger.Debug("streaming tunnel send failed", "target", foundation.EncodeI2PBase64(delivery.To[:]), "error", err)
+			}
 			return s.retireFailedRoute(delivery.To, err)
 		}
 		// A missing or superseded route has not transmitted this payload.
 		// Publication renewal may replace it while preparation is in flight.
 		if err = s.prepare(ctx, delivery.To); err != nil && !errors.Is(err, dataplane.RouterErrRouteGeneration) {
+			if s.logger != nil {
+				s.logger.Debug("streaming route preparation failed", "target", foundation.EncodeI2PBase64(delivery.To[:]), "error", err)
+			}
 			return err
 		}
 	}

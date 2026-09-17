@@ -212,7 +212,7 @@ type Router struct {
 	wg         sync.WaitGroup
 
 	listeners        []net.Listener
-	ssu2Socket       *net.UDPConn
+	ssu2Socket       dataplane.RouterUDPSocket
 	transportStarted bool
 	reseedMu         sync.Mutex
 	reseedRunning    bool
@@ -376,7 +376,7 @@ func (r *Router) Start(parent context.Context) error {
 		return err
 	}
 	var ntcpListener net.Listener
-	var ssuSocket *net.UDPConn
+	var ssuSocket dataplane.RouterUDPSocket
 	var err error
 	if r.cfg.NTCP2.Network != "" {
 		ntcpListener, err = r.deps.Sockets.ListenStream(ctx, r.cfg.NTCP2)
@@ -423,6 +423,7 @@ func (r *Router) Start(parent context.Context) error {
 	}
 
 	bindings := dataplane.RouterTransportBindings{
+		DialStream:        r.deps.Sockets.DialStream,
 		LocalInfo:         r.deps.LocalInfo,
 		HandleI2NP:        r.deps.Service.HandleI2NP,
 		HandleI2NPFrom:    r.deps.Service.HandleI2NPFrom,

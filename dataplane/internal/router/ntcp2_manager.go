@@ -37,6 +37,7 @@ var (
 	ErrNTCP2ManagerConfig = errors.New("router: invalid NTCP2 manager configuration")
 	ErrNTCP2Peer          = errors.New("router: invalid NTCP2 peer RouterInfo")
 	ErrNTCP2Session       = errors.New("router: NTCP2 session unavailable")
+	errNTCP2FrameRejected = errors.New("router: NTCP2 frame rejected")
 )
 
 // NTCP2ManagerConfig contains the persisted NTCP2 static key and IV that are
@@ -95,6 +96,7 @@ type NTCP2Manager struct {
 	wg                 sync.WaitGroup
 	pending            chan struct{}
 	sessions           map[foundation.Hash]*dataplanentcp2.Session
+	sessionsInbound    map[foundation.Hash]bool
 	dialing            map[foundation.Hash]*ntcp2DialAttempt
 	replayMu           sync.Mutex
 	replay             [ntcp2ReplayEntries][32]byte
@@ -152,6 +154,7 @@ func NewNTCP2Manager(config NTCP2ManagerConfig) (*NTCP2Manager, error) {
 		done:               make(chan struct{}),
 		pending:            make(chan struct{}, config.MaxPending),
 		sessions:           make(map[foundation.Hash]*dataplanentcp2.Session),
+		sessionsInbound:    make(map[foundation.Hash]bool),
 		dialing:            make(map[foundation.Hash]*ntcp2DialAttempt),
 		replaySeen:         make(map[[32]byte]struct{}, ntcp2ReplayEntries),
 		reporter:           config.PanicReporter,
@@ -368,14 +371,11 @@ func (m *NTCP2Manager) Send(ctx context.Context, peer foundation.Hash, message f
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := ctx.Err(); err != nil {
+	sender, err := m.PreparedSession(peer)
+	if err != nil {
 		return err
 	}
-	session := m.session(peer)
-	if session == nil {
-		return ErrSessionUnavailable
-	}
-	return (ntcp2SessionSender{manager: m, peer: peer, session: session}).sendBulk(ctx, message)
+	return sender.Send(ctx, message)
 }
 
 func (m *NTCP2Manager) writeI2NP(session *dataplanentcp2.Session, message foundation.I2NPMessage) error {
@@ -411,6 +411,11 @@ func (m *NTCP2Manager) acceptLoop() {
 
 func (m *NTCP2Manager) acceptOne(conn net.Conn) {
 	peerAddress := conn.RemoteAddr()
+	reject := func(stage string, err error) {
+		if m.logger != nil {
+			m.logger.Debug("ntcp2 inbound handshake rejected", "remote", peerAddress, "stage", stage, "error", err)
+		}
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			_ = ingress.Report(recovered, m.reporter, ingress.BoundaryNTCP2Handshake, peerAddress)
@@ -422,56 +427,81 @@ func (m *NTCP2Manager) acceptOne(conn net.Conn) {
 		}
 	}()
 	if err := conn.SetDeadline(time.Now().Add(m.timeout)); err != nil {
+		reject("deadline", err)
 		return
 	}
 	bindings := m.currentBindings()
 	if bindings.LocalInfo == nil {
+		reject("bindings", ErrNTCP2Session)
 		return
 	}
 	localHash := bindings.LocalInfo.Hash()
 	var requestWire bytes.Buffer
 	responder, request, err := m.readSessionRequest(io.TeeReader(conn, &requestWire), m.staticPrivate[:], localHash[:], m.staticIV[:], m.networkID, false)
 	if err != nil {
+		reject("session_request", err)
 		return
 	}
 	defer responder.ReleaseSensitive()
 	if !m.timestampValid(request.Timestamp) || m.replayedRequest(requestWire.Bytes()[:32]) {
+		reject("replay", ErrNTCP2Peer)
 		return
 	}
 	padding := make([]byte, 32)
 	if _, err = io.ReadFull(rand.Reader, padding); err != nil {
+		reject("padding", err)
 		return
 	}
 	created, err := responder.BuildSessionCreated(make([]byte, dataplanentcp2.SessionRequestCiphertextLen+len(padding)), localHash[:], padding, dataplanentcp2.SessionCreatedOptions{PaddingLength: uint16(len(padding)), Timestamp: uint32(time.Now().Unix())})
 	if err != nil || writeAll(conn, created) != nil {
+		reject("session_created", err)
 		return
 	}
 	if request.Message3Part2Length < dataplanentcp2.FrameTagLen {
+		reject("confirmed_length", ErrNTCP2Peer)
 		return
 	}
 	confirmedLen := 48 + int(request.Message3Part2Length)
 	if confirmedLen < 64 || confirmedLen > dataplanentcp2.MaxSessionRequestLen {
+		reject("confirmed_length", ErrNTCP2Peer)
 		return
 	}
 	confirmed := make([]byte, confirmedLen)
 	if _, err = io.ReadFull(conn, confirmed); err != nil {
+		reject("confirmed_read", err)
 		return
 	}
 	static, payload, err := responder.ParseSessionConfirmed(confirmed)
 	if err != nil {
+		reject("confirmed_parse", err)
 		return
 	}
 	peer, err := validateNTCP2HandshakePayload(payload, static)
 	nowMillis := uint64(bindings.Clock.Now().UnixMilli())
-	if err != nil || peer.Hash() == localHash || !m.admitInboundPeer(peer, static, nowMillis, peerAddress) {
+	if err != nil {
+		reject("payload", err)
+		return
+	}
+	if peer.Hash() == localHash {
+		reject("self", ErrNTCP2Peer)
+		return
+	}
+	if !m.admitInboundPeer(peer, static, nowMillis, peerAddress) {
+		reject("admission", ErrPeerDenied)
 		return
 	}
 	if conn.SetDeadline(time.Time{}) != nil {
+		reject("deadline_clear", err)
 		return
 	}
 	conn = m.establishedConn(conn)
 	session, err := responder.NewDataSession(conn)
-	if err != nil || !m.install(peer.Hash(), session) {
+	if err != nil {
+		reject("data_session", err)
+		return
+	}
+	if !m.install(peer.Hash(), session, true) {
+		reject("install", ErrNTCP2Session)
 		return
 	}
 	conn = nil
@@ -523,7 +553,13 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer foundation.Hash) e
 		return ErrNTCP2Peer
 	}
 
-	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(remote.host, strconv.Itoa(int(remote.port))))
+	dial := m.bindings.DialStream
+	if dial == nil {
+		dial = func(ctx context.Context, endpoint Endpoint) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, endpoint.Network, endpoint.Address)
+		}
+	}
+	conn, err := dial(ctx, Endpoint{Network: "tcp", Address: net.JoinHostPort(remote.host, strconv.Itoa(int(remote.port)))})
 	if err != nil {
 		return err
 	}
@@ -601,7 +637,7 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer foundation.Hash) e
 	if err != nil {
 		return err
 	}
-	if !m.install(peer, session) {
+	if !m.install(peer, session, false) {
 		return ErrNTCP2Session
 	}
 	keep = true
@@ -611,19 +647,38 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer foundation.Hash) e
 	return nil
 }
 
-func (m *NTCP2Manager) install(peer foundation.Hash, session *dataplanentcp2.Session) bool {
+// install registers an authenticated session. Crossed dials produce one
+// connection per direction; both ends must converge on the same winner or
+// each retains the session the peer already rejected. The connection
+// initiated by the lower identity hash wins; between same-direction sessions
+// the newest handshake wins. The displaced session is closed after m.mu is
+// dropped so its read loop cannot remove the replacement.
+func (m *NTCP2Manager) install(peer foundation.Hash, session *dataplanentcp2.Session, inbound bool) bool {
 	m.mu.Lock()
 	if m.ctx == nil || m.ctx.Err() != nil || len(m.sessions) >= m.maxSessions {
 		m.mu.Unlock()
 		_ = session.Close()
 		return false
 	}
-	if _, exists := m.sessions[peer]; exists {
+	if displaced := m.sessions[peer]; displaced != nil {
+		if m.sessionsInbound[peer] == preferInboundSession(m.bindings.LocalInfo, peer) && m.sessionsInbound[peer] != inbound {
+			m.mu.Unlock()
+			_ = session.Close()
+			return false
+		}
+		delete(m.sessions, peer)
+		delete(m.sessionsInbound, peer)
 		m.mu.Unlock()
-		_ = session.Close()
-		return false
+		_ = displaced.Close()
+		m.mu.Lock()
+		if m.ctx == nil || m.ctx.Err() != nil {
+			m.mu.Unlock()
+			_ = session.Close()
+			return false
+		}
 	}
 	m.sessions[peer] = session
+	m.sessionsInbound[peer] = inbound
 	if m.metrics != nil {
 		m.metrics.IncTransportConnections()
 		m.metrics.SetTransportNTCP2Sessions(uint64(len(m.sessions)))
@@ -718,13 +773,18 @@ func (m *NTCP2Manager) readSession(peer foundation.Hash, session *dataplanentcp2
 			// panic must never close unrelated authenticated sessions.
 		}
 	}()
+	var readErr error
 	defer func() {
 		m.mu.Lock()
 		if m.sessions[peer] == session {
 			delete(m.sessions, peer)
+			delete(m.sessionsInbound, peer)
 			if m.metrics != nil {
 				m.metrics.IncTransportDisconnections()
 				m.metrics.SetTransportNTCP2Sessions(uint64(len(m.sessions)))
+			}
+			if m.logger != nil {
+				m.logger.Debug("ntcp2 session removed", "peer", routerHashDiagnostic(peer), "error", readErr)
 			}
 		}
 		m.mu.Unlock()
@@ -734,12 +794,14 @@ func (m *NTCP2Manager) readSession(peer foundation.Hash, session *dataplanentcp2
 	for {
 		frame, err := session.Read(plaintext)
 		if err != nil {
+			readErr = err
 			return
 		}
 		if m.metrics != nil {
 			m.metrics.AddTransportReceivedBytes(uint64(len(frame)))
 		}
 		if !m.handleNTCP2Frame(peer, frame) {
+			readErr = errNTCP2FrameRejected
 			return
 		}
 	}

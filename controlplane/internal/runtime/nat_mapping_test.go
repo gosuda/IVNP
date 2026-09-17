@@ -121,7 +121,7 @@ func (wildcardSockets) ListenStream(context.Context, dataplane.RouterEndpoint) (
 func (wildcardSockets) DialStream(ctx context.Context, endpoint dataplane.RouterEndpoint) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, endpoint.Network, endpoint.Address)
 }
-func (wildcardSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (*net.UDPConn, error) {
+func (wildcardSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
 	return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 }
 

@@ -102,9 +102,12 @@ type LeaseSetPublisher struct {
 	storeType       foundation.I2NPStoreType
 	hash            foundation.Hash
 
-	// opMu drains sends before mutation or Close; mu keeps ACK/readiness access
-	// independent of network I/O and protects confirmed replacement and closed.
-	opMu             sync.Mutex
+	// opGate drains sends before mutation or Close; mu keeps ACK/readiness
+	// access independent of network I/O and protects confirmed replacement and
+	// closed. opGate is a channel rather than a mutex so that queuing behind a
+	// publisher blocked on network I/O stays durably blocked under
+	// testing/synctest instead of freezing the bubble clock.
+	opGate           chan struct{}
 	mu               sync.Mutex
 	leases           []foundation.NetworkDatabaseLease
 	storePayload     []byte // immutable signed LeaseSet bytes, not a Store envelope
@@ -155,6 +158,7 @@ func NewLeaseSetPublisher(config LeaseSetPublisherConfig) (*LeaseSetPublisher, e
 		}
 	}
 	publisher := &LeaseSetPublisher{
+		opGate:          make(chan struct{}, 1),
 		local:           config.Local,
 		local2:          config.Local2,
 		encrypted:       config.Encrypted,
@@ -190,8 +194,12 @@ func (p *LeaseSetPublisher) Maintain(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
-	p.opMu.Lock()
-	defer p.opMu.Unlock()
+	select {
+	case p.opGate <- struct{}{}:
+		defer func() { <-p.opGate }()
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
 	if p.closed {
 		return 0, nil
 	}
@@ -209,8 +217,12 @@ func (p *LeaseSetPublisher) Publish(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
-	p.opMu.Lock()
-	defer p.opMu.Unlock()
+	select {
+	case p.opGate <- struct{}{}:
+		defer func() { <-p.opGate }()
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
 	if p.closed {
 		return 0, nil
 	}
@@ -234,8 +246,8 @@ func (p *LeaseSetPublisher) Close() {
 	if p == nil {
 		return
 	}
-	p.opMu.Lock()
-	defer p.opMu.Unlock()
+	p.opGate <- struct{}{}
+	defer func() { <-p.opGate }()
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()

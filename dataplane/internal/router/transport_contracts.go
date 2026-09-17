@@ -99,8 +99,12 @@ type TransportStatus struct {
 // The manager owns session handling; it must not expose native connections as
 // purported I2P streams. SSU2 ownership transfers only after Start succeeds.
 type TransportBindings struct {
-	NTCP2          net.Listener
-	SSU2           *net.UDPConn
+	NTCP2 net.Listener
+	SSU2  UDPSocket
+	// DialStream creates outbound stream connections for transports that dial
+	// (NTCP2). Router wires it to its SocketRuntime so simulated socket
+	// runtimes observe dials; nil falls back to a zero net.Dialer.
+	DialStream     func(context.Context, Endpoint) (net.Conn, error)
 	LocalInfo      TransportLocalInfo
 	HandleI2NP     func(foundation.I2NPMessage, uint64, bool) error
 	HandleI2NPFrom func(foundation.Hash, foundation.I2NPMessage, uint64, bool) error

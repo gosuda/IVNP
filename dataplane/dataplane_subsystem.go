@@ -125,9 +125,13 @@ type (
 	RouterSessionProvider         = router.SessionProvider
 	// RouterSessionSender borrows one session and consumes Payload before returning.
 	// A write error may follow partial delivery; do not blindly replay the message.
-	RouterSessionSender                = router.SessionSender
-	RouterSinks                        = router.Sinks
-	RouterSocketRuntime                = router.SocketRuntime
+	RouterSessionSender = router.SessionSender
+	RouterSinks         = router.Sinks
+	RouterSocketRuntime = router.SocketRuntime
+	// RouterUDPSocket is the bound datagram socket surface transports consume.
+	// *net.UDPConn implements it; simulated socket runtimes may substitute a
+	// virtual socket that never touches kernel networking.
+	RouterUDPSocket                    = router.UDPSocket
 	RouterTransportBindings            = router.TransportBindings
 	RouterTransportLocalInfo           = router.TransportLocalInfo
 	RouterTransportManager             = router.TransportManager
@@ -437,6 +441,7 @@ var (
 	RouterErrSSU2Introduction                   = router.ErrSSU2Introduction
 	RouterErrSSU2ManagerConfig                  = router.ErrSSU2ManagerConfig
 	RouterErrSSU2Peer                           = router.ErrSSU2Peer
+	RouterErrSSU2SendStalled                    = router.ErrSSU2SendStalled
 	RouterErrSSU2Session                        = router.ErrSSU2Session
 	RouterErrSessionUnavailable                 = router.ErrSessionUnavailable
 	RouterErrStarted                            = router.ErrStarted
