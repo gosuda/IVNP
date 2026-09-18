@@ -24,7 +24,12 @@ func (m *Mutex) Lock() {
 }
 
 func (m *Mutex) Unlock() {
-	<-m.sem
+	m.init()
+	select {
+	case <-m.sem:
+	default:
+		panic("durable: Unlock of unlocked Mutex")
+	}
 }
 
 func (m *Mutex) TryLock() bool {
