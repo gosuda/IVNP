@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -63,8 +64,14 @@ type simNodeConfig struct {
 
 // newSimNet creates an empty simulation. The seed feeds every link's loss,
 // jitter, and duplication sampler; equal seeds reproduce equal link behavior.
+// If DST_SEED or IVNP_DST_SEED is present in the environment, it overrides seed.
 func newSimNet(tb testing.TB, seed uint64) *simNet {
 	tb.Helper()
+	if env := cmp.Or(os.Getenv("DST_SEED"), os.Getenv("IVNP_DST_SEED")); env != "" {
+		if s, err := strconv.ParseUint(env, 10, 64); err == nil {
+			seed = s
+		}
+	}
 	n := simnet.NewNetwork(simnet.Config{Seed: seed})
 	s := &simNet{net: n}
 	tb.Cleanup(func() {
@@ -100,10 +107,9 @@ func (s *simNet) AddRouter(tb testing.TB, cfg simNodeConfig) *simNode {
 		return TransportConfig{Enabled: true, Bind: bind, Advertised: bind, MaxSessions: 64, IdleTimeout: 10 * time.Minute}
 	}
 	routerCfg := DefaultRouterConfig()
-	if os.Getenv("SIM_VERBOSE") != "" {
+	routerCfg.Logger = slog.New(slog.DiscardHandler)
+	if os.Getenv("DST_LOG") != "" {
 		routerCfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})).With("node", cfg.Name)
-	} else {
-		routerCfg.Logger = slog.New(slog.DiscardHandler)
 	}
 	routerCfg.SetNetworks(NewNetwork(networkNativeName, NetworkIDPublicI2P,
 		WithPublicParticipation(cfg.Participation),
@@ -123,11 +129,6 @@ func (s *simNet) AddRouter(tb testing.TB, cfg simNodeConfig) *simNode {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	tb.Cleanup(func() {
-		if err := router.Close(); err != nil {
-			tb.Errorf("close sim router %q: %v", cfg.Name, err)
-		}
-	})
 	node := &simNode{name: cfg.Name, host: host, router: router}
 	s.nodes = append(s.nodes, node)
 	return node

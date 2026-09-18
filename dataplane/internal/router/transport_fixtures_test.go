@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 var (
@@ -182,7 +183,7 @@ type transportTestPeerRef struct {
 	Info foundation.NetworkDatabaseRouterInfo
 }
 type transportTestPeers struct {
-	mu    sync.RWMutex
+	mu    durable.RWMutex
 	infos map[foundation.Hash]foundation.NetworkDatabaseRouterInfo
 }
 

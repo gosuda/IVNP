@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/packet"
 	"gosuda.org/ivnp/observability"
 )
@@ -92,7 +93,7 @@ type outboundCircuit struct {
 }
 
 type circuitShard struct {
-	mu       sync.RWMutex
+	mu       durable.RWMutex
 	inbound  map[uint32]*inboundCircuit
 	outbound map[uint32]*outboundCircuit
 }

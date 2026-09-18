@@ -13,7 +13,7 @@ type Session struct {
 	send      *Direction
 	receive   *Direction
 	writeMu   durable.Mutex
-	lifecycle sync.RWMutex
+	lifecycle durable.RWMutex
 	closeOnce sync.Once
 }
 

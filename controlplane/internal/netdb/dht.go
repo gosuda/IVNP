@@ -4,9 +4,9 @@ import (
 	"crypto/subtle"
 	"errors"
 	"math/bits"
-	"sync"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 )
 
@@ -35,7 +35,7 @@ type routerSelectionBuffer struct {
 // Table mirrors Java I2P's split NetDB model: routers owns every verified
 // RouterInfo, while routing is the bounded KBucketSet used by DHT traversal.
 type Table struct {
-	mu            sync.RWMutex
+	mu            durable.RWMutex
 	local         foundation.Hash
 	routers       map[foundation.Hash]routerEntry
 	routing       kBucketSet

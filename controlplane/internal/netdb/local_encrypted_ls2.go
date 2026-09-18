@@ -7,12 +7,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/hkdf"
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 var (
@@ -53,7 +53,7 @@ type LocalEncryptedLeaseSet struct {
 	dhClients   [][32]byte
 	pskClients  [][32]byte
 	random      io.Reader
-	mu          sync.RWMutex
+	mu          durable.RWMutex
 	released    bool
 }
 

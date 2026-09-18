@@ -187,7 +187,9 @@ func (r *ratchetReplyReservation) sendOwned(packet []byte) {
 			break
 		}
 	}
-	err = s.retireFailedRoute(r.target, err)
+	if receipt, ok := s.execution.RouteReceipt(r.target); ok {
+		err = s.retireFailedRoute(receipt, err)
+	}
 	if err != nil && s.logger != nil {
 		s.logger.Debug("ratchet reply delivery failed", "error", err)
 	}
@@ -213,8 +215,8 @@ func (r *ratchetReplyReservation) sendPrepared(ctx context.Context, packet []byt
 
 func (r *ratchetReplyReservation) complete(err error) {
 	s := r.sender
-	if !r.established {
-		s.remoteMu.Lock()
+	s.remoteMu.Lock()
+	if !r.gate.completed {
 		r.gate.err = err
 		r.gate.completed = true
 		r.gate.reservation = nil
@@ -222,8 +224,8 @@ func (r *ratchetReplyReservation) complete(err error) {
 			delete(s.replyGates, r.target)
 		}
 		close(r.gate.done)
-		s.remoteMu.Unlock()
 	}
+	s.remoteMu.Unlock()
 	<-s.replySlots
 	s.replies.Done()
 }

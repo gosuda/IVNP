@@ -22,6 +22,7 @@ import (
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/interfaces/stream"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/internal/pool"
 )
@@ -128,7 +129,7 @@ type TunnelNetwork struct {
 	handshakeTimeout     time.Duration
 	handshakeObserver    HandshakeObserver
 
-	mu             sync.RWMutex
+	mu             durable.RWMutex
 	listeners      map[uint16]*tunnelListener
 	byID           map[uint32]*tunnelConn
 	outboundPorts  map[uint16]int
@@ -138,7 +139,7 @@ type TunnelNetwork struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	done           chan struct{}
-	outboundMu     sync.RWMutex
+	outboundMu     durable.RWMutex
 	outbound       chan sendRequest
 	retryUpdates   chan *tunnelConn
 	cleanup        chan struct{}
@@ -364,6 +365,14 @@ func (n *TunnelNetwork) dialStream(ctx context.Context, address string, localPor
 		return nil, ErrTunnelReset
 	}
 	if !unanswered && !connection.isDone() {
+		connection.mu.Lock()
+		if connection.handshakeFeedback != nil {
+			feedback = connection.handshakeFeedback
+			connection.handshakeFeedback = nil
+		} else {
+			feedback = nil
+		}
+		connection.mu.Unlock()
 		if feedback != nil {
 			feedback.Established()
 		}
@@ -374,9 +383,6 @@ func (n *TunnelNetwork) dialStream(ctx context.Context, address string, localPor
 	}
 	if peerTimedOut {
 		connection.abort(false)
-		if feedback != nil {
-			feedback.NoResponse()
-		}
 		return nil, timeoutError{}
 	}
 	return nil, net.ErrClosed
@@ -560,11 +566,22 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 	if listener == nil {
 		return ErrTunnelAddress
 	}
+	var feedback HandshakeFeedback
+	if n.handshakeObserver != nil {
+		handshake, cancel := context.WithTimeout(n.ctx, n.handshakeTimeout)
+		var prepErr error
+		feedback, prepErr = n.handshakeObserver.PrepareHandshake(handshake, delivery.From)
+		cancel()
+		if prepErr != nil {
+			return prepErr
+		}
+	}
 	localID, err := n.allocateID()
 	if err != nil {
 		return err
 	}
 	connection := n.newConn(localID, packet.ReceiveStreamID, delivery.From, peer.identity, delivery.ToPort, delivery.FromPort, false)
+	connection.handshakeFeedback = feedback
 	connection.standardConn = listener.standardConn
 	connection.setPeerControlLocked(peer)
 	if len(packet.Payload) != 0 {
@@ -963,7 +980,7 @@ func (n *TunnelNetwork) deliver(ctx context.Context, connection *tunnelConn, wir
 	}
 	sender := n.sender
 	connection.mu.Lock()
-	if connection.remoteID == 0 && connection.handshakeFeedback != nil {
+	if connection.handshakeFeedback != nil {
 		sender = connection.handshakeFeedback
 	}
 	connection.mu.Unlock()
@@ -1325,15 +1342,24 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 	if c.remoteID != 0 && len(c.preSynchronize) != 0 {
 		deferred, c.preSynchronize = c.preSynchronize, nil
 	}
+	var establishedFeedback HandshakeFeedback
 	retryChanged := packet.Flags&FlagNoACK == 0
 	if retryChanged {
 		if !containsNACK(packet.NACKs, 0) {
 			c.releaseSynchronizeLocked()
+			if c.handshakeFeedback != nil {
+				establishedFeedback = c.handshakeFeedback
+				c.handshakeFeedback = nil
+			}
 		}
 		fastRetransmit = c.acknowledgeLocked(packet.AckThrough, packet.NACKs, time.Now())
 	}
 	if packet.Sequence != 0 {
 		sendACK, sendReset = c.handleSequenceLocked(packet)
+		if c.handshakeFeedback != nil {
+			establishedFeedback = c.handshakeFeedback
+			c.handshakeFeedback = nil
+		}
 	}
 	if c.localWriteClosed {
 		_, closePending := c.pending[c.localCloseSequence]
@@ -1343,6 +1369,9 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 		}
 	}
 	c.mu.Unlock()
+	if establishedFeedback != nil {
+		establishedFeedback.Established()
+	}
 	if retryChanged {
 		c.network.scheduleRetry(c)
 	}
@@ -1750,7 +1779,7 @@ func (c *tunnelConn) retry(now time.Time) []leasedSend {
 	rto := c.rto.RTO()
 	if len(c.synchronize) != 0 && now.Sub(c.syncSent) >= rto {
 		if c.syncRetries >= c.network.maxRetries {
-			c.handshakeFailed = c.remoteID == 0
+			c.handshakeFailed = true
 			closeConnection = true
 		} else {
 			c.syncRetries++
@@ -1999,6 +2028,16 @@ func (c *tunnelConn) scheduleGracefulCleanup() {
 }
 
 func (c *tunnelConn) abort(sendReset bool) {
+	c.mu.Lock()
+	var noResponseFeedback HandshakeFeedback
+	if c.handshakeFailed && c.handshakeFeedback != nil {
+		noResponseFeedback = c.handshakeFeedback
+		c.handshakeFeedback = nil
+	}
+	c.mu.Unlock()
+	if noResponseFeedback != nil {
+		noResponseFeedback.NoResponse()
+	}
 	if sendReset {
 		c.mu.Lock()
 		var wire []byte

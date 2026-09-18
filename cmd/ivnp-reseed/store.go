@@ -10,15 +10,15 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 // PeerStore provides thread-safe, memory-bounded peer indexing and snapshot persistence.
 type PeerStore struct {
-	mu         sync.RWMutex
+	mu         durable.RWMutex
 	peers      map[foundation.Hash]*PeerRecord
 	bySubnet16 map[[2]byte]map[foundation.Hash]struct{}
 	byFamily   map[string]map[foundation.Hash]struct{}

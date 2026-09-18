@@ -10,11 +10,11 @@ import (
 	"encoding/binary"
 	"io"
 	"strings"
-	"sync"
 	"time"
 
 	"filippo.io/edwards25519"
 	"gosuda.org/ivnp/cryptography"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 const i2pBase64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~"
@@ -24,7 +24,7 @@ const localDestinationCryptoCapabilities = byte(1<<0 | 1<<1 | 1<<2)
 // LocalDestination holds static private/public keys and encryption capabilities for a local I2P destination
 // (ECIES-X25519, ML-KEM-768/X25519, ML-KEM-1024/X25519).
 type LocalDestination struct {
-	mu                 sync.RWMutex
+	mu                 durable.RWMutex
 	destination        []byte
 	hash               Hash
 	signingType        SigningKeyType

@@ -3,10 +3,13 @@
 package router
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -22,7 +25,13 @@ import (
 // kernel networking.
 func TestSSU2SimnetSessionExchange(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		net_ := simnet.NewNetwork(simnet.Config{Seed: 3})
+		seed := uint64(3)
+		if env := cmp.Or(os.Getenv("DST_SEED"), os.Getenv("IVNP_DST_SEED")); env != "" {
+			if s, err := strconv.ParseUint(env, 10, 64); err == nil {
+				seed = s
+			}
+		}
+		net_ := simnet.NewNetwork(simnet.Config{Seed: seed})
 		defer net_.Close()
 		net_.SetBidirectional(netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2"), simnet.LinkConfig{Latency: time.Millisecond})
 		aliceHost := net_.HostAt("alice", netip.MustParseAddr("192.0.2.1"))

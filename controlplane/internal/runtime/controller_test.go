@@ -23,6 +23,7 @@ import (
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/observability"
 	"gosuda.org/ivnp/state"
 )
@@ -127,7 +128,7 @@ func (s *defaultTransportSockets) ListenUDP(context.Context, dataplane.RouterEnd
 }
 
 type daemonMemoryNetwork struct {
-	mu        sync.RWMutex
+	mu        durable.RWMutex
 	endpoints map[foundation.Hash]*daemonMemoryTransport
 	flood     foundation.Hash
 	floodDB   *netdb.Database

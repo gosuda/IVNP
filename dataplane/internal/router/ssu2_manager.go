@@ -25,6 +25,7 @@ import (
 
 	dataplanessu2 "gosuda.org/ivnp/dataplane/internal/transport/ssu2"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/observability"
@@ -175,7 +176,7 @@ type SSU2Manager struct {
 	publishPeerTestResult func(context.Context, PeerTestResult)
 	signControl           func([]byte) ([]byte, error)
 	introductionEndpoint  func() (netip.AddrPort, error)
-	mu                    sync.RWMutex
+	mu                    durable.RWMutex
 	started               bool
 	conn                  UDPSocket
 	ipv6Available         atomic.Bool
@@ -188,7 +189,7 @@ type SSU2Manager struct {
 	close                 sync.Once
 	wg                    sync.WaitGroup
 	setupSlots            chan struct{}
-	egressMu              sync.RWMutex
+	egressMu              durable.RWMutex
 
 	receiveFree chan *ssu2ReceiveBatch
 	authQueue   chan ssu2ReceiveJob
@@ -234,7 +235,7 @@ type SSU2Manager struct {
 	relayForwards       map[uint32]ssu2RelayForward
 	deferredRelayIntros map[uint32]ssu2DeferredRelayIntro
 	relayStoreJobs      chan ssu2RelayStoreJob
-	routerInfoStoresMu  sync.RWMutex
+	routerInfoStoresMu  durable.RWMutex
 	routerInfoStores    map[foundation.Hash]ssu2RouterInfoStoreSnapshot
 	reporter            ingress.Reporter
 	admitPeer           PeerAdmissionFunc
@@ -393,11 +394,11 @@ type ssu2TransportSession struct {
 	sendID     uint64
 	receiveID  uint64
 	inbound    bool
-	remoteMu   sync.RWMutex
+	remoteMu   durable.RWMutex
 	remote     net.Addr
 	send       *dataplanessu2.DataCipher
 	receive    *dataplanessu2.DataCipher
-	lifetimeMu sync.RWMutex
+	lifetimeMu durable.RWMutex
 
 	sendMu                sync.Mutex
 	packetMu              ssu2SendMutex
@@ -3317,27 +3318,22 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 			ackEliciting = true
 		}
 	}
-	// The received set already covers these packet numbers, so the ACK reports
-	// transport receipt even when a saturated queue drops the batch. Delaying
-	// it pins the sender's window while a retransmit meets the same queue.
-	if dispatch != nil {
-		batch := dispatch
-		dispatch = nil
-		dispatchErr := m.dispatchI2NPBatch(batch)
-		if ackEliciting {
-			m.queueACK(session)
-		}
-		if dispatchErr != nil {
-			return
-		}
-	} else if ackEliciting {
+	if ackEliciting {
 		m.queueACK(session)
 	}
 	if terminated {
 		lifetimeHeld = false
 		session.lifetimeMu.RUnlock()
 		m.removeSession(session)
+		if dispatch != nil {
+			_ = m.dispatchI2NPBatch(dispatch)
+		}
 		return
+	}
+	if dispatch != nil {
+		batch := dispatch
+		dispatch = nil
+		_ = m.dispatchI2NPBatch(batch)
 	}
 }
 
@@ -3599,11 +3595,16 @@ func (m *SSU2Manager) sendSessionDataContext(ctx context.Context, session *ssu2T
 		}
 		available := session.sendCapacityAvailable
 		remaining, tracked, window := session.sendWindowRemaining, len(session.sent), session.sendWindowBytes
+		sessionRTO := session.rto
 		session.sendMu.Unlock()
 		if m.logger != nil {
 			m.logger.Debug("ssu2 send waits for capacity", "peer", session.peer, "remaining", remaining, "packet", packetSize, "tracked", tracked, "window", window)
 		}
-		stall := time.NewTimer(ssu2SendStall)
+		stallDuration := max(ssu2SendStall, sessionRTO+50*time.Millisecond)
+		if stallDuration > ssu2DispatchStall {
+			stallDuration = ssu2DispatchStall
+		}
+		stall := time.NewTimer(stallDuration)
 		select {
 		case <-ctx.Done():
 			stall.Stop()

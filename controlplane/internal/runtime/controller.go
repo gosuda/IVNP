@@ -353,7 +353,7 @@ type Controller struct {
 	requestHandlers        *destinationRequestRegistry
 	destinationPublishers  *destinationPublisherRegistry
 	clientRuntimes         []*destinationRuntime
-	clientRuntimesMu       sync.RWMutex
+	clientRuntimesMu       durable.RWMutex
 	destinationMu          sync.Mutex
 	maintenanceDone        chan struct{}
 	explorationDone        chan struct{}
@@ -1013,7 +1013,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 		health, err = tunnel.NewHealth(tunnel.HealthConfig{
 			Runtime: tunnels, Pool: pool, Maintainer: maintainer, Profiles: profiles, Now: now,
-			Timeout: daemonHealthProbeTimeoutMillis, MaxPending: cfg.Tunnel.BuildPendingCapacity,
+			Timeout: daemonHealthProbeTimeoutMillis, MaxPending: cfg.Tunnel.BuildPendingCapacity, FailureThreshold: 2,
 		})
 		if err != nil {
 			return nil, err

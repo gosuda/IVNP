@@ -6,6 +6,7 @@ import (
 
 	dataplanegarlicecies "gosuda.org/ivnp/dataplane/internal/garlic/ecies"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 )
 
@@ -34,8 +35,8 @@ var (
 
 // RatchetManager coordinates sharded ECIES ratchet sessions across worker routines.
 type RatchetManager struct {
-	routeMu sync.RWMutex
-	tagMu   sync.RWMutex
+	routeMu durable.RWMutex
+	tagMu   durable.RWMutex
 	// The lowest live owner routes each tag; collisions retain the other owners.
 	tagRoutes     map[dataplanegarlicecies.SessionTag]int
 	tagCollisions map[dataplanegarlicecies.SessionTag]map[int]struct{}

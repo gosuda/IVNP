@@ -3,9 +3,9 @@ package netdb
 import (
 	"encoding/binary"
 	"errors"
-	"sync"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 var ErrLocalLeaseSet2 = errors.New("netdb: invalid local LeaseSet2")
@@ -19,7 +19,7 @@ type LocalLeaseSet2 struct {
 	public   [32]byte
 	types    []foundation.CryptoKeyType
 	offline  *foundation.OfflineSignature
-	mu       sync.RWMutex
+	mu       durable.RWMutex
 	leases   []foundation.NetworkDatabaseLease2
 }
 

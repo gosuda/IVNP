@@ -2,9 +2,9 @@ package netdb
 
 import (
 	"encoding/binary"
-	"sync"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/wire"
 )
 
@@ -12,7 +12,7 @@ import (
 // retain encryption or signing private keys; callers supply public keys and a
 // signer when they serialize a publication.
 type LocalLeaseSet struct {
-	mu       sync.RWMutex
+	mu       durable.RWMutex
 	identity []byte
 	hash     foundation.Hash
 	leases   []foundation.NetworkDatabaseLease

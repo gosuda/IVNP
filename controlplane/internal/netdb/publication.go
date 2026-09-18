@@ -370,7 +370,7 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 	}
 	discoveryChanged := p.maintainDiscovery(ctx, now)
 	if p.confirmed != nil {
-		return p.confirmed.maintain(ctx, force || discoveryChanged)
+		return p.confirmed.maintain(ctx, force || discoveryChanged || changed)
 	}
 	publishRejected := !force && !discoveryChanged && !changed
 	if publishRejected {

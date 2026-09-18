@@ -39,7 +39,7 @@ func (s *EstablishedSender) Send(ctx context.Context, peer foundation.Hash, mess
 		// A failed write may have delivered part of the message, so only
 		// pre-delivery failures fall through to the next session: a missing
 		// session or a congestion-stalled send both guarantee zero bytes left.
-		if !errors.Is(err, ErrSessionUnavailable) && !errors.Is(err, ErrSSU2SendStalled) {
+		if !errors.Is(err, ErrSessionUnavailable) && !errors.Is(err, ErrSSU2Session) && !errors.Is(err, ErrSSU2SendStalled) {
 			return err
 		}
 		lastErr = err

@@ -273,6 +273,65 @@ func TestRouteReacquisitionDoesNotReplayTransportFailure(t *testing.T) {
 	}
 }
 
+func TestFailedSendPreservesConcurrentRouteReplacement(t *testing.T) {
+	for _, handshake := range []bool{false, true} {
+		name := "established"
+		if handshake {
+			name = "handshake"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				sender, deliveries, wire := routeControlFixture(t, nil)
+				feedback, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+				if err != nil {
+					t.Fatal(err)
+				}
+				receipt, ok := sender.execution.RouteReceipt(deliveries[0].To)
+				if !ok {
+					t.Fatal("missing initial route")
+				}
+				entered, release := make(chan struct{}), make(chan struct{})
+				var unblock sync.Once
+				defer unblock.Do(func() { close(release) })
+				wire.handle = func(context.Context, foundation.I2NPMessage) error {
+					close(entered)
+					<-release
+					return dataplane.RouterErrSSU2SendStalled
+				}
+				result := make(chan error, 1)
+				go func() {
+					if handshake {
+						result <- feedback.SendTunnel(t.Context(), deliveries[0])
+					} else {
+						result <- sender.SendTunnel(t.Context(), deliveries[0])
+					}
+				}()
+				<-entered
+				if !sender.execution.RetireUnresponsiveRoute(receipt) {
+					t.Fatal("could not detach blocked route")
+				}
+				if err := sender.PrepareDestination(t.Context(), deliveries[0].To); err != nil {
+					t.Fatal(err)
+				}
+				replacement, ok := sender.execution.RouteReceipt(deliveries[0].To)
+				if !ok {
+					t.Fatal("missing replacement route")
+				}
+				unblock.Do(func() { close(release) })
+				if err := <-result; !errors.Is(err, dataplane.RouterErrSSU2SendStalled) {
+					t.Fatalf("blocked send = %v", err)
+				}
+				wire.mu.Lock()
+				wire.handle = nil
+				wire.mu.Unlock()
+				if err := sender.execution.SendTunnelOnRoute(t.Context(), deliveries[0], replacement); err != nil {
+					t.Fatalf("old send failure retired replacement: %v", err)
+				}
+			})
+		})
+	}
+}
+
 func TestSenderRetirementCancelsBlockedPreparation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		entered := make(chan struct{})
@@ -528,6 +587,10 @@ func TestConnectedRouteSurvivesAnotherHandshakeTimeout(t *testing.T) {
 	silent.NoResponse()
 	if err := sender.SendTunnel(t.Context(), deliveries[0]); err != nil {
 		t.Fatalf("connected route retired: %v", err)
+	}
+	sender.execution.RetireRoute(deliveries[0].To)
+	if err := sender.PrepareDestination(t.Context(), deliveries[0].To); err != nil {
+		t.Fatalf("stale timeout penalized responsive path: %v", err)
 	}
 }
 

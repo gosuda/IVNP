@@ -5,9 +5,9 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
-	"sync"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 var ErrLocalRouterIdentity = errors.New("netdb: local RouterInfo identity does not match signing key")
@@ -43,7 +43,7 @@ type LocalRouterInfoConfig struct {
 // Snapshot always returns an independent wire copy, so callers cannot mutate
 // the retained advertisement.
 type LocalRouterInfo struct {
-	mu        sync.RWMutex
+	mu        durable.RWMutex
 	identity  []byte
 	private   ed25519.PrivateKey
 	hash      foundation.Hash

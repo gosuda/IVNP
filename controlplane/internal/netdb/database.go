@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/observability"
 )
@@ -54,7 +55,7 @@ type leaseExpiry struct {
 // Database stores verified RouterInfos and LeaseSets with memory bounds and TTL expiration.
 type Database struct {
 	routers          *Table
-	leasesMu         sync.RWMutex
+	leasesMu         durable.RWMutex
 	leases           map[foundation.Hash]leaseEntry
 	leaseExpiries    []leaseExpiry
 	leaseExpiryIndex map[foundation.Hash]int
@@ -705,6 +706,26 @@ func (d *Database) ExpireLeases(nowMillis uint64) int {
 		removed++
 	}
 	return removed
+}
+
+// InvalidateLeaseSet removes a stored lease entry so subsequent lookups re-query NetDB.
+func (d *Database) InvalidateLeaseSet(key foundation.Hash) {
+	d.leasesMu.Lock()
+	defer d.leasesMu.Unlock()
+	delete(d.leases, key)
+	if index, ok := d.leaseExpiryIndex[key]; ok {
+		delete(d.leaseExpiryIndex, key)
+		last := len(d.leaseExpiries) - 1
+		if index != last {
+			d.leaseExpiries[index] = d.leaseExpiries[last]
+			d.leaseExpiryIndex[d.leaseExpiries[index].key] = index
+		}
+		d.leaseExpiries[last] = leaseExpiry{}
+		d.leaseExpiries = d.leaseExpiries[:last]
+		if index < len(d.leaseExpiries) {
+			d.fixLeaseExpiryLocked(index)
+		}
+	}
 }
 
 func (d *Database) inflateRouterInfo(compressed []byte) ([]byte, *pool.Lease, error) {
