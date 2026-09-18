@@ -274,6 +274,81 @@ func TestHealthExpiryPreservesCircuitWithBidirectionalTraffic(t *testing.T) {
 	}
 }
 
+func TestHealthFailureIgnoresReplacedInboundCircuit(t *testing.T) {
+	now := uint64(1_000)
+	sender := new(buildCaptureSender)
+	runtime := dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: sender, Now: func() uint64 { return now }})
+	pool := NewPool(4)
+	if _, err := runtime.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 1, FirstHop: foundation.Hash{9}, NextTunnelID: 2, ExpiresAt: now + 1_000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.Add(Entry{Circuit: buildCircuitToken(t, runtime, 1), ID: 1, Direction: Outbound, Expires: now + 1_000}, now); err != nil {
+		t.Fatal(err)
+	}
+	registerInbound := func(id uint32) {
+		t.Helper()
+		if _, err := runtime.RegisterInbound(dataplane.TunnelInboundCircuit{
+			ID: id, Endpoint: dataplane.TunnelNewEndpoint(8, 4096), ExpiresAt: now + 1_000,
+			Local: func(foundation.I2NPMessage) error { return nil },
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	registerInbound(3)
+	original := Entry{Circuit: buildCircuitToken(t, runtime, 3), ID: 3, Direction: Inbound, Expires: now + 1_000}
+	if err := pool.Add(original, now); err != nil {
+		t.Fatal(err)
+	}
+	// A second inbound entry keeps the direction populated so a wrong removal
+	// is not hidden by the maintain-error re-add path.
+	registerInbound(5)
+	if err := pool.Add(Entry{Circuit: buildCircuitToken(t, runtime, 5), ID: 5, Direction: Inbound, Expires: now + 1_000}, now); err != nil {
+		t.Fatal(err)
+	}
+	builder, err := NewBuildManager(BuildManagerConfig{
+		Runtime: runtime, Pool: pool, Sender: sender, ReplyKeys: newBuildReplyRegistry(), Now: func() uint64 { return now }, Random: new(buildCounterReader),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotator, err := NewRotator(RotatorConfig{Pool: pool, Runtime: runtime, Builder: builder, Source: &rotationSource{err: errRotationSource}, Now: func() uint64 { return now }, Target: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	health, err := NewHealth(HealthConfig{
+		Runtime: runtime, Pool: pool, Maintainer: rotator, Profiles: NewPeerProfiles(PeerProfilesConfig{Window: 4}),
+		Now: func() uint64 { return now }, Timeout: 10, MaxPending: 2, FailureThreshold: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = health.Close() })
+	pair := CircuitPair{OutboundID: 1, InboundID: 700, InboundLocalID: 3, ReplyRouter: foundation.Hash{8}}
+	if _, err = health.Probe(context.Background(), pair, foundation.Hash{7}); err != nil {
+		t.Fatal(err)
+	}
+	// Renewal replaced the inbound entry under the same local ID while the
+	// probe was in flight; the stale failure must not retire the replacement.
+	registerInbound(4)
+	replacement := Entry{Circuit: buildCircuitToken(t, runtime, 4), ID: 3, Direction: Inbound, Expires: now + 1_000}
+	if !pool.Remove(original) {
+		t.Fatal("failed to detach replaced inbound entry")
+	}
+	if err := pool.Add(replacement, now); err != nil {
+		t.Fatal(err)
+	}
+	now += 10
+	if _, expireErr := health.Expire(context.Background()); !errors.Is(expireErr, errRotationSource) {
+		t.Fatalf("Expire() = %v, want %v", expireErr, errRotationSource)
+	}
+	if entry, ok := pool.Get(3, now); !ok || entry.Circuit != replacement.Circuit {
+		t.Fatal("stale probe failure removed the renewed inbound entry")
+	}
+	if _, ok := runtime.CircuitOwner(4); !ok {
+		t.Fatal("stale probe failure removed the renewed runtime circuit")
+	}
+}
+
 func TestHealthCloseCancelsAndJoinsActiveProbe(t *testing.T) {
 	const now = uint64(1_000)
 	sender := &cancelingBuildSender{entered: make(chan struct{})}

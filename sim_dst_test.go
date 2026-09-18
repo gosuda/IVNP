@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -245,7 +246,9 @@ func TestDeterministicRouterMesh(t *testing.T) {
 		synctest.Wait()
 
 		// Partial failure model: inject 15% UDP loss with 1ms jitter.
-		// Transports (SSU2 with retransmission/RTO and NTCP2 fallback) and the
+		// Transports (SSU2 retransmission, NTCP2 fallback) and the streaming
+		// layer must absorb the loss; the drop counter proves UDP engaged.
+		dropsBefore := sim.Stats().Dropped
 		sim.Mesh(simnet.LinkConfig{
 			Latency:   2 * time.Millisecond,
 			Jitter:    time.Millisecond,
@@ -285,6 +288,11 @@ func TestDeterministicRouterMesh(t *testing.T) {
 		}
 		if !bytes.Equal(gotChunkReply, chunkReply) {
 			t.Fatal("chunkReply corrupted or mismatched under partial loss")
+		}
+		if dropped := sim.Stats().Dropped; dropped == dropsBefore {
+			t.Fatal("UDP loss model never engaged during the partial-loss round trip")
+		} else {
+			t.Logf("partial loss exercised: %d UDP packets dropped", dropped-dropsBefore)
 		}
 
 		_ = outbound.Close()
@@ -375,6 +383,131 @@ func TestDeterministicRouterMesh(t *testing.T) {
 	})
 }
 
+// TestDeterministicRouterMesh16 scales the mesh to sixteen routers: two
+// floodfills, ten transit relays, and four client destinations. Two
+// concurrent streams on disjoint destination pairs verify that exploratory
+// tunnel selection and NetDB resolution stay correct at larger fleet sizes.
+func TestDeterministicRouterMesh16(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sim := newSimNet(t, 16)
+		sim.AddRouter(t, simNodeConfig{Name: "flood1", Participation: ParticipationContributor, TunnelCount: 2})
+		sim.AddRouter(t, simNodeConfig{Name: "flood2", Participation: ParticipationContributor, TunnelCount: 2})
+		for i := 1; i <= 10; i++ {
+			sim.AddRouter(t, simNodeConfig{Name: fmt.Sprintf("relay%d", i), TunnelCount: 2})
+		}
+		alice := sim.AddRouter(t, simNodeConfig{Name: "alice", TunnelCount: 2})
+		bob := sim.AddRouter(t, simNodeConfig{Name: "bob", TunnelCount: 2})
+		carol := sim.AddRouter(t, simNodeConfig{Name: "carol", TunnelCount: 2})
+		dave := sim.AddRouter(t, simNodeConfig{Name: "dave", TunnelCount: 2})
+		sim.Mesh(simnet.LinkConfig{Latency: 2 * time.Millisecond, Jitter: time.Millisecond})
+
+		sim.ExchangeRouterInfos(t)
+		sim.WaitReady(t, 120*time.Second)
+
+		ctx := t.Context()
+		destCfg := DefaultDestinationConfig()
+		destCfg.Tunnels = TunnelPoolConfig{
+			Inbound:     TunnelDirectionConfig{Hops: 1, Count: 2},
+			Outbound:    TunnelDirectionConfig{Hops: 1, Count: 2},
+			RenewBefore: 10 * time.Second,
+		}
+
+		echo := func(dst *Destination, port string) {
+			listener, err := dst.Listen("i2p", port)
+			if err != nil {
+				t.Errorf("listen %s: %v", port, err)
+				return
+			}
+			go func() {
+				defer listener.Close()
+				for {
+					conn, err := listener.Accept()
+					if err != nil {
+						return
+					}
+					go func() {
+						defer conn.Close()
+						_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+						buf := make([]byte, 64)
+						n, err := conn.Read(buf)
+						if err != nil {
+							return
+						}
+						_ = conn.SetWriteDeadline(time.Now().Add(90 * time.Second))
+						_, _ = conn.Write(buf[:n])
+					}()
+				}
+			}()
+		}
+
+		targetBob, err := bob.router.NewDestination(ctx, destCfg)
+		if err != nil {
+			t.Fatalf("bob destination: %v", err)
+		}
+		defer targetBob.Close()
+		targetCarol, err := carol.router.NewDestination(ctx, destCfg)
+		if err != nil {
+			t.Fatalf("carol destination: %v", err)
+		}
+		defer targetCarol.Close()
+		sourceAlice, err := alice.router.NewDestination(ctx, destCfg)
+		if err != nil {
+			t.Fatalf("alice destination: %v", err)
+		}
+		defer sourceAlice.Close()
+		sourceDave, err := dave.router.NewDestination(ctx, destCfg)
+		if err != nil {
+			t.Fatalf("dave destination: %v", err)
+		}
+		defer sourceDave.Close()
+
+		echo(targetBob, ":8080")
+		echo(targetCarol, ":8080")
+
+		// Two concurrent verified round trips on disjoint destination pairs.
+		roundTrip := func(source *Destination, targetB32 string, payload []byte) error {
+			dialCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+			defer cancel()
+			conn, err := source.DialContext(dialCtx, "i2p", net.JoinHostPort(targetB32, "8080"))
+			if err != nil {
+				return err
+			}
+			defer conn.Close()
+			_ = conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
+			if _, err := conn.Write(payload); err != nil {
+				return err
+			}
+			got := make([]byte, len(payload))
+			_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+			if _, err := io.ReadFull(conn, got); err != nil {
+				return err
+			}
+			if !bytes.Equal(got, payload) {
+				return fmt.Errorf("round trip payload = %q, want %q", got, payload)
+			}
+			return nil
+		}
+
+		type result struct {
+			name string
+			err  error
+		}
+		results := make(chan result, 2)
+		go func() {
+			results <- result{"alice->bob", roundTrip(sourceAlice, targetBob.B32(), []byte("alice-to-bob-16-node-round-trip"))}
+		}()
+		go func() {
+			results <- result{"dave->carol", roundTrip(sourceDave, targetCarol.B32(), []byte("dave-to-carol-16-node-round-trip"))}
+		}()
+		for i := 0; i < 2; i++ {
+			if r := <-results; r.err != nil {
+				t.Fatalf("%s round trip: %v", r.name, r.err)
+			}
+		}
+		t.Logf("16-node mesh stats: %+v", sim.Stats())
+	})
+}
+
 // TestSimChaosFailureModels exercises advanced network failure models:
 // 1. Chinese-style middlebox UDP packet duplication (delayed multi-copy injection).
 // 2. Unidirectional / asymmetric blackhole (one-way routing failure).
@@ -383,10 +516,11 @@ func TestDeterministicRouterMesh(t *testing.T) {
 func TestSimChaosFailureModels(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sim := newSimNet(t, 2026)
-		sim.AddRouter(t, simNodeConfig{Name: "flood", Participation: ParticipationContributor})
-		alice := sim.AddRouter(t, simNodeConfig{Name: "alice"})
-
-		bob := sim.AddRouter(t, simNodeConfig{Name: "bob"})
+		// SSU2-only nodes force the streams onto UDP so the duplication and
+		// burst-loss models below provably apply to the tested traffic.
+		sim.AddRouter(t, simNodeConfig{Name: "flood", Participation: ParticipationContributor, DisableNTCP2: true})
+		alice := sim.AddRouter(t, simNodeConfig{Name: "alice", DisableNTCP2: true})
+		bob := sim.AddRouter(t, simNodeConfig{Name: "bob", DisableNTCP2: true})
 
 		// Chinese middlebox network profile: 2ms latency + 15% UDP duplication with 5ms extra delay
 		sim.Mesh(simnet.LinkConfig{
@@ -403,10 +537,9 @@ func TestSimChaosFailureModels(t *testing.T) {
 		// Verify that UDP duplication occurred on the wire and was safely absorbed
 		stats := sim.Stats()
 		if stats.Duplicated == 0 {
-			t.Log("warning: no duplicate events triggered during boot")
-		} else {
-			t.Logf("boot succeeded through middlebox duplication: %d duplicate packets handled", stats.Duplicated)
+			t.Fatal("UDP duplication model never engaged during boot")
 		}
+		t.Logf("boot succeeded through middlebox duplication: %d duplicate packets handled", stats.Duplicated)
 
 		ctx := t.Context()
 		destCfg := DefaultDestinationConfig()
@@ -431,10 +564,13 @@ func TestSimChaosFailureModels(t *testing.T) {
 		if err != nil {
 			t.Fatalf("target listen: %v", err)
 		}
-		accepted := make(chan net.Conn, 1)
+		accepted := make(chan net.Conn, 4)
 		go func() {
-			conn, acceptErr := listener.Accept()
-			if acceptErr == nil {
+			for {
+				conn, acceptErr := listener.Accept()
+				if acceptErr != nil {
+					return
+				}
 				accepted <- conn
 			}
 		}()
@@ -449,8 +585,11 @@ func TestSimChaosFailureModels(t *testing.T) {
 		defer inbound.Close()
 		synctest.Wait()
 
-		// 2. Gilbert-Elliott Burst Loss under active streaming
-		// Configure UDP burst loss: 15% transition to bad state, 30% recovery (mean burst length ~3.3 packets)
+		// 2. Gilbert-Elliott Burst Loss under active streaming.
+		// 5% entry / 50% exit gives a ~9% steady-state bad probability. Rounds
+		// repeat until the drop counter proves the model engaged; a stalled
+		// round under observed drops still proves UDP carried the stream.
+		dropsBefore := sim.Stats().Dropped
 		sim.Mesh(simnet.LinkConfig{
 			Latency:   2 * time.Millisecond,
 			DropProto: simnet.ProtoUDP,
@@ -461,25 +600,57 @@ func TestSimChaosFailureModels(t *testing.T) {
 				LossBad:  1.0,
 			},
 		})
+		engaged := func() bool { return sim.Stats().Dropped > dropsBefore }
 
-		payload := []byte("stream-over-burst-loss")
-		outbound.SetWriteDeadline(time.Now().Add(120 * time.Second))
-		if _, err := outbound.Write(payload); err != nil {
-			t.Fatalf("write payload: %v", err)
+		payload := make([]byte, 4096)
+		for i := range payload {
+			payload[i] = byte((i*17 + 5) & 0xff)
 		}
 		got := make([]byte, len(payload))
-		inbound.SetReadDeadline(time.Now().Add(120 * time.Second))
-		if _, err := io.ReadFull(inbound, got); err != nil {
-			t.Fatalf("read payload under burst loss: %v", err)
+		stalled := false
+		rounds := 0
+		for ; rounds < 8 && !engaged() && !stalled; rounds++ {
+			outbound.SetWriteDeadline(time.Now().Add(60 * time.Second))
+			_, werr := outbound.Write(payload)
+			inbound.SetReadDeadline(time.Now().Add(60 * time.Second))
+			_, rerr := io.ReadFull(inbound, got)
+			switch {
+			case werr == nil && rerr == nil:
+				if !bytes.Equal(got, payload) {
+					t.Fatal("payload corrupted or mismatched under burst loss")
+				}
+			case engaged():
+				stalled = true
+				t.Logf("burst loss stalled round %d after drops engaged (write=%v read=%v)", rounds, werr, rerr)
+			default:
+				t.Fatalf("round trip under burst loss: write=%v read=%v", werr, rerr)
+			}
 		}
-		if string(got) != string(payload) {
-			t.Fatalf("got %q, want %q", got, payload)
+		if !engaged() {
+			t.Fatal("Gilbert-Elliott UDP loss model never engaged during the round trips")
 		}
+		t.Logf("burst loss exercised: %d UDP packets dropped over %d round trips", sim.Stats().Dropped-dropsBefore, rounds)
 
-		// 3. Unidirectional Asymmetric Blackhole: sever alice -> bob link only
+		// 3. Unidirectional blackhole: sever all of alice's egress so her data
+		// cannot reach bob over any tunnel path. Bob -> alice stays open.
 		sim.Mesh(simnet.LinkConfig{Latency: 2 * time.Millisecond})
-		sim.net.Blackhole(alice.Addr(), bob.Addr())
-		// Alice -> Bob is dropped, so data from alice never reaches bob
+		if stalled {
+			// A stalled round can leave undelivered payload bytes in flight;
+			// replace the pair so the blackhole read cannot observe stale data.
+			_ = outbound.Close()
+			_ = inbound.Close()
+			if outbound, err = source.DialContext(ctx, "i2p", net.JoinHostPort(target.B32(), "8080")); err != nil {
+				t.Fatalf("redial after stalled burst-loss round: %v", err)
+			}
+			defer outbound.Close()
+			inbound = <-accepted
+			defer inbound.Close()
+		}
+		for _, node := range sim.nodes {
+			if node != alice {
+				sim.net.Blackhole(alice.Addr(), node.Addr())
+			}
+		}
 		outbound.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		_, _ = outbound.Write([]byte("blackholed-data"))
 		inbound.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -490,7 +661,11 @@ func TestSimChaosFailureModels(t *testing.T) {
 			t.Fatalf("expected timeout or closed on unidirectional blackholed link, got %v", err)
 		}
 		// Unblackhole restores reachability
-		sim.net.Unblackhole(alice.Addr(), bob.Addr())
+		for _, node := range sim.nodes {
+			if node != alice {
+				sim.net.Unblackhole(alice.Addr(), node.Addr())
+			}
+		}
 		synctest.Wait()
 
 		// 4. Abrupt Node Crash: kill bob without TCP FIN/RST

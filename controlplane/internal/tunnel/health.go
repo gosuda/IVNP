@@ -442,7 +442,7 @@ func (h *Health) failExplicit(ctx context.Context, probe pendingProbe, outIncrem
 		}
 	}
 	if inFailed && probe.inboundLocalID != 0 {
-		if entry, ok := h.pool.Get(probe.inboundLocalID, now); ok && entry.Direction == Inbound {
+		if entry, ok := h.pool.Get(probe.inboundLocalID, now); ok && entry.Direction == Inbound && entry.Circuit == probe.inboundCircuit {
 			if h.pool.Remove(entry) {
 				inEntry, haveInEntry = entry, true
 			}

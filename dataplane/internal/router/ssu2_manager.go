@@ -3325,10 +3325,6 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 		lifetimeHeld = false
 		session.lifetimeMu.RUnlock()
 		m.removeSession(session)
-		if dispatch != nil {
-			_ = m.dispatchI2NPBatch(dispatch)
-		}
-		return
 	}
 	if dispatch != nil {
 		batch := dispatch

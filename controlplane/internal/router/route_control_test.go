@@ -332,6 +332,83 @@ func TestFailedSendPreservesConcurrentRouteReplacement(t *testing.T) {
 	}
 }
 
+func TestFailedRatchetReplyPreservesConcurrentRouteReplacement(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sender, _, wire := routeControlFixture(t, nil)
+		remote, err := foundation.GenerateLegacyLocalDestination()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer remote.ReleaseSensitive()
+		local, err := controlplanenetdb.NewLocalLeaseSet2(remote)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := local.ReplaceInboundLeases([]foundation.NetworkDatabaseLease{
+			{Gateway: foundation.Hash{10}, TunnelID: 11, EndDate: 90000},
+			{Gateway: foundation.Hash{20}, TunnelID: 21, EndDate: 90000},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		raw := make([]byte, foundation.NetworkDatabaseMaxLeaseSetBytes)
+		n, err := local.MarshalTo(raw, 1000, remote.Sign)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sender.database.HandleDatabaseStore(foundation.I2NPDatabaseStoreMessage{Key: remote.Hash(), Type: foundation.I2NPStoreLeaseSet2, Data: raw[:n]}, false, 1000); err != nil {
+			t.Fatal(err)
+		}
+		target := remote.Hash()
+		if err := sender.PrepareDestination(t.Context(), target); err != nil {
+			t.Fatal(err)
+		}
+		receipt, ok := sender.execution.RouteReceipt(target)
+		if !ok {
+			t.Fatal("missing initial route")
+		}
+		entered, release := make(chan struct{}), make(chan struct{})
+		var unblock sync.Once
+		defer unblock.Do(func() { close(release) })
+		wire.handle = func(context.Context, foundation.I2NPMessage) error {
+			close(entered)
+			<-release
+			return dataplane.RouterErrSSU2SendStalled
+		}
+		reservation, err := sender.ReserveRatchetReply(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reservation.Release()
+		if err := reservation.Activate(); err != nil {
+			t.Fatal(err)
+		}
+		if err := reservation.Send(t.Context(), []byte{1, 2, 3}); err != nil {
+			t.Fatal(err)
+		}
+		<-entered
+		if !sender.execution.RetireUnresponsiveRoute(receipt) {
+			t.Fatal("could not detach blocked route")
+		}
+		if err := sender.PrepareDestination(t.Context(), target); err != nil {
+			t.Fatal(err)
+		}
+		replacement, ok := sender.execution.RouteReceipt(target)
+		if !ok {
+			t.Fatal("missing replacement route")
+		}
+		unblock.Do(func() { close(release) })
+		if err := sender.waitForRatchetReply(t.Context(), target); !errors.Is(err, dataplane.RouterErrSSU2SendStalled) {
+			t.Fatalf("blocked reply = %v", err)
+		}
+		wire.mu.Lock()
+		wire.handle = nil
+		wire.mu.Unlock()
+		if err := sender.execution.SendRatchetReplyOnRoute(t.Context(), target, []byte{4}, replacement); err != nil {
+			t.Fatalf("old reply failure retired replacement: %v", err)
+		}
+	})
+}
+
 func TestSenderRetirementCancelsBlockedPreparation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		entered := make(chan struct{})

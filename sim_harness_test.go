@@ -60,6 +60,9 @@ type simNodeConfig struct {
 	Hops int
 	// TunnelCount sets exploratory tunnels per direction; zero selects 1.
 	TunnelCount int
+	// DisableNTCP2 forces all sessions onto SSU2/UDP so UDP-scoped fault
+	// models provably engage instead of passing over TCP.
+	DisableNTCP2 bool
 }
 
 // newSimNet creates an empty simulation. The seed feeds every link's loss,
@@ -111,12 +114,15 @@ func (s *simNet) AddRouter(tb testing.TB, cfg simNodeConfig) *simNode {
 	if os.Getenv("DST_LOG") != "" {
 		routerCfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})).With("node", cfg.Name)
 	}
-	routerCfg.SetNetworks(NewNetwork(networkNativeName, NetworkIDPublicI2P,
+	opts := []NetworkOption{
 		WithPublicParticipation(cfg.Participation),
-		WithTransportNTCP2(transport(ntcp2)),
 		WithTransportSSU2(transport(ssu2)),
 		WithExploratoryPool(pool),
-	))
+	}
+	if !cfg.DisableNTCP2 {
+		opts = append(opts, WithTransportNTCP2(transport(ntcp2)))
+	}
+	routerCfg.SetNetworks(NewNetwork(networkNativeName, NetworkIDPublicI2P, opts...))
 	specs, def, err := networkSpecs(routerCfg)
 	if err != nil {
 		tb.Fatal(err)

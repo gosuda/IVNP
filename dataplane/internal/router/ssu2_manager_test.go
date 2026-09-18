@@ -2098,3 +2098,63 @@ func newSSU2TestLocal(t *testing.T, endpoint string, options ...transportTestOpt
 	}
 	return owner, static.Bytes(), intro
 }
+
+func TestSSU2TerminationStillDrainsI2NPDispatchBatch(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, 32)
+	header1 := bytes.Repeat([]byte{8}, 32)
+	header2 := bytes.Repeat([]byte{9}, 32)
+	sealer, err := dataplanessu2.NewDataCipher(key, header1, header2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver, err := dataplanessu2.NewDataCipher(key, header1, header2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := managerHotPathMessage()
+	var frame [dataplanessu2.MaxIPv4PacketLen]byte
+	payload, err := marshalSSU2I2NPTo(frame[:], message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload, err = dataplanessu2.MarshalBlock(payload, dataplanessu2.BlockTermination, make([]byte, 9)); err != nil {
+		t.Fatal(err)
+	}
+	packet, err := sealer.SealDataTo(make([]byte, dataplanessu2.MaxIPv4PacketLen), dataplanessu2.ShortHeader{
+		DestinationID: 17, PacketNumber: 1, Type: dataplanessu2.Data,
+	}, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delivered atomic.Int32
+	manager := &SSU2Manager{networkID: 2,
+		started: true, ctx: context.Background(),
+		dispatchFree: make(chan *ssu2DispatchBatch, ssu2DispatchQueueSize),
+		bindings: TransportBindings{
+			Clock: WallClock{},
+			HandleI2NPContext: func(context.Context, foundation.Hash, foundation.I2NPMessage, uint64, bool) error {
+				delivered.Add(1)
+				return nil
+			},
+		},
+	}
+	manager.dispatchFreeBudget.Store(ssu2DispatchQueueSize)
+	peer := foundation.Hash{9}
+	session := &ssu2TransportSession{
+		peer: peer, receiveID: 17, receive: receiver,
+		sent:      make(map[uint32]*ssu2SentPacket),
+		fragments: make(map[uint32]*ssu2FragmentAssembly),
+	}
+	manager.sessionsByPeer = map[foundation.Hash]*ssu2TransportSession{peer: session}
+	manager.sessionsByID = map[uint64]*ssu2TransportSession{session.receiveID: session}
+	manager.handleDataFrom(session, packet, netip.AddrPort{})
+	if got := delivered.Load(); got != 1 {
+		t.Fatalf("I2NP delivered %d times alongside termination, want 1", got)
+	}
+	released := <-manager.dispatchFree
+	select {
+	case again := <-manager.dispatchFree:
+		t.Fatalf("dispatch batch released twice: first=%p again=%p", released, again)
+	default:
+	}
+}
