@@ -170,7 +170,9 @@ type Config struct {
 	// clock inside testing/synctest and the wall clock outside.
 	Now func() time.Time
 	// Hook observes every Event when non-nil. It runs on the scheduler or
-	// sender goroutine and must be fast and non-blocking.
+	// sender goroutine while the network mutex is held, so it must be fast,
+	// non-blocking, and must not call any Network method — a reentrant send
+	// panics and any other call deadlocks.
 	Hook func(Event)
 	// UDPQueueLimit bounds each UDP socket's inbound queue in packets;
 	// overflow is dropped and counted. Zero selects 256.
@@ -238,10 +240,11 @@ func (h *Host) Name() string { return h.name }
 // Methods are safe for concurrent use; event ordering is deterministic for a
 // given schedule of calls, and per-link randomness is seeded from Config.Seed.
 type Network struct {
-	now  func() time.Time
-	seed uint64
-	hook func(Event)
-	cfg  Config
+	now    func() time.Time
+	seed   uint64
+	hook   func(Event)
+	inHook bool // guarded by mu; set while n.hook runs
+	cfg    Config
 
 	mu        sync.Mutex
 	hosts     map[netip.Addr]*Host
@@ -520,8 +523,13 @@ func (n *Network) emitLocked(kind EventKind, proto Proto, from, to netip.AddrPor
 		n.stats.Refused++
 	}
 	if n.hook != nil {
+		if n.inHook {
+			panic("simnet: hook reentry")
+		}
 		n.seq++
+		n.inHook = true
 		n.hook(Event{At: n.now(), Kind: kind, Proto: proto, From: from, To: to, Bytes: bytes, Seq: n.seq})
+		n.inHook = false
 	}
 }
 
