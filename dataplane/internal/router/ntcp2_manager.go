@@ -491,7 +491,7 @@ func (m *NTCP2Manager) acceptOne(conn net.Conn) {
 		reject("admission", ErrPeerDenied)
 		return
 	}
-	if conn.SetDeadline(time.Time{}) != nil {
+	if err := conn.SetDeadline(time.Time{}); err != nil {
 		reject("deadline_clear", err)
 		return
 	}
