@@ -10,7 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  test:
+    name: Test, vet, lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -27,3 +28,37 @@ jobs:
         run: go vet ./...
       - name: Run gojgp
         run: gojgp lint ./...
+
+  cross-platform:
+    name: ${{ matrix.os }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: macos-latest
+            arch: arm64
+          - os: windows-latest
+            arch: amd64
+          - os: windows-latest
+            arch: arm64
+    env:
+      GOARCH: ${{ matrix.arch }}
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build packages
+        run: go build ./...
+      - name: Run Windows state security regressions
+        if: runner.os == 'Windows' && matrix.arch == 'amd64'
+        run: go test -count=1 ./state/internal/filesystem_store ./state/internal/secure_store ./state/internal/configuration -run 'Test(Windows|CreatePrivate|AtomicRoundTrip|ReadBoundedRejectsSymlink|StateLock|StateRejectsUnsafe|StateCiphertext|LoadOrCreatePersists|LoadOrCreateOperating|LoadOperatingRejects|LoadRejectsSwapped)'
+      - name: Run Unix state security regressions
+        if: runner.os != 'Windows'
+        run: go test -count=1 ./state/internal/filesystem_store ./state/internal/secure_store ./state/internal/configuration
