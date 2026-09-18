@@ -666,6 +666,10 @@ func (n *Network) waitDelay(delay time.Duration) bool {
 // UDP, failures are invisible to the sender.
 func (n *Network) sendDatagram(from, to netip.AddrPort, payload []byte) {
 	n.mu.Lock()
+	if n.closed {
+		n.mu.Unlock()
+		return
+	}
 	n.emitLocked(EventSent, ProtoUDP, from, to, len(payload))
 	link := n.linkLocked(from.Addr(), to.Addr())
 	if link.down {

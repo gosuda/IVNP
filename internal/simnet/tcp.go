@@ -392,6 +392,15 @@ func (c *TCPConn) isClosed() bool {
 // reorder buffer and the reader stalls, matching documented stream loss.
 func (n *Network) sendSegment(c, peer *TCPConn, chunk []byte) {
 	n.mu.Lock()
+	if n.closed {
+		n.mu.Unlock()
+		peer.mu.Lock()
+		peer.inflight -= len(chunk)
+		peer.releaseLocked()
+		peer.nudgeReadLocked()
+		peer.mu.Unlock()
+		return
+	}
 	n.emitLocked(EventSent, ProtoTCP, c.local, c.remote, len(chunk))
 	seq := c.sendSeq
 	c.sendSeq++
