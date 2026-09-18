@@ -4551,6 +4551,7 @@ func (m *SSU2Manager) dispatchI2NPBatch(batch *ssu2DispatchBatch) error {
 		if m.logger != nil {
 			m.logger.Debug("ssu2 dispatch queue saturated, dropping batch", "peer", routerHashDiagnostic(batch.items[0].peer), "items", batch.count)
 		}
+		m.metrics.AddSSU2DispatchDrops(uint64(batch.count))
 		m.releaseDispatchBatch(batch)
 		return ErrSSU2DispatchSaturated
 	case <-m.contextDone():

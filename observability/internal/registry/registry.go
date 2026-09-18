@@ -79,6 +79,7 @@ type ssu2Metrics struct {
 	sendEnqueued, sent, sendFailed, sendQueueDrops                atomic.Uint64
 	receiveMultiBatches, sendMultiBatches                         atomic.Uint64
 	ingressQueueDepth, egressQueueDepth                           atomic.Uint64
+	dispatchDrops                                                 atomic.Uint64
 }
 
 // Snapshot is a point-in-time copy of all metrics in the registry.
@@ -139,6 +140,7 @@ type SSU2Snapshot struct {
 	SendEnqueuedDatagrams, SentDatagrams, SendFailedDatagrams, SendQueueDrops uint64
 	ReceiveMultiBatches, SendMultiBatches                                     uint64
 	IngressQueueDepth, EgressQueueDepth                                       uint64
+	DispatchDrops                                                             uint64
 }
 type ProcessSnapshot struct {
 	Goroutines, HeapInuseBytes, HeapObjects uint64
@@ -196,7 +198,7 @@ func (r *Registry) Snapshot() Snapshot {
 		Publication: PublicationSnapshot{s.publication.routerInfoSuccesses.Load(), s.publication.leaseSet2Successes.Load(), s.publication.attempts.Load(), s.publication.sendFailures.Load(), s.publication.timeouts.Load()},
 		SAM:         SAMSnapshot{s.sam.udpInvalid.Load(), s.sam.udpBackpressure.Load(), s.sam.protocolFailures.Load()},
 		Garlic:      GarlicSnapshot{s.garlic.newSessionSent.Load(), s.garlic.newSessionReceived.Load(), s.garlic.existingSessionSent.Load(), s.garlic.existingSessionReceived.Load(), s.garlic.dhStepsSent.Load(), s.garlic.dhStepsReceived.Load(), s.garlic.tunnelClovesForwarded.Load()},
-		SSU2:        SSU2Snapshot{s.ssu2.vectorIOEnabled.Load(), s.ssu2.kernelDropAccounting.Load(), s.ssu2.received.Load(), s.ssu2.enqueued.Load(), s.ssu2.processed.Load(), s.ssu2.receiveQueueDrops.Load(), s.ssu2.kernelDrops.Load(), s.ssu2.sendEnqueued.Load(), s.ssu2.sent.Load(), s.ssu2.sendFailed.Load(), s.ssu2.sendQueueDrops.Load(), s.ssu2.receiveMultiBatches.Load(), s.ssu2.sendMultiBatches.Load(), s.ssu2.ingressQueueDepth.Load(), s.ssu2.egressQueueDepth.Load()},
+		SSU2:        SSU2Snapshot{s.ssu2.vectorIOEnabled.Load(), s.ssu2.kernelDropAccounting.Load(), s.ssu2.received.Load(), s.ssu2.enqueued.Load(), s.ssu2.processed.Load(), s.ssu2.receiveQueueDrops.Load(), s.ssu2.kernelDrops.Load(), s.ssu2.sendEnqueued.Load(), s.ssu2.sent.Load(), s.ssu2.sendFailed.Load(), s.ssu2.sendQueueDrops.Load(), s.ssu2.receiveMultiBatches.Load(), s.ssu2.sendMultiBatches.Load(), s.ssu2.ingressQueueDepth.Load(), s.ssu2.egressQueueDepth.Load(), s.ssu2.dispatchDrops.Load()},
 		Process: ProcessSnapshot{
 			Goroutines: uint64(runtime.NumGoroutine()), HeapInuseBytes: memory.HeapInuse, HeapObjects: memory.HeapObjects,
 			AllocatedBytesTotal: memory.TotalAlloc, MallocsTotal: memory.Mallocs,
@@ -337,3 +339,4 @@ func (r *Registry) IncSSU2IngressQueueDepth()             { r.metrics().ssu2.ing
 func (r *Registry) DecSSU2IngressQueueDepth()             { r.metrics().ssu2.ingressQueueDepth.Add(^uint64(0)) }
 func (r *Registry) IncSSU2EgressQueueDepth()              { r.metrics().ssu2.egressQueueDepth.Add(1) }
 func (r *Registry) DecSSU2EgressQueueDepth()              { r.metrics().ssu2.egressQueueDepth.Add(^uint64(0)) }
+func (r *Registry) AddSSU2DispatchDrops(v uint64)         { r.metrics().ssu2.dispatchDrops.Add(v) }
