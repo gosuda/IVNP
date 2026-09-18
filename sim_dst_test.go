@@ -56,8 +56,11 @@ func TestDeterministicRouterMesh(t *testing.T) {
 		sim.AddRouter(t, simNodeConfig{Name: "relay3", TunnelCount: 2})
 		sim.AddRouter(t, simNodeConfig{Name: "relay4", TunnelCount: 2})
 		sim.AddRouter(t, simNodeConfig{Name: "relay5", TunnelCount: 2})
-		alice := sim.AddRouter(t, simNodeConfig{Name: "alice", TunnelCount: 2})
-		bob := sim.AddRouter(t, simNodeConfig{Name: "bob", TunnelCount: 2})
+		// The stream endpoints stay off NTCP2 so the partial-loss section
+		// below always exercises UDP; the crossed-dial winner is
+		// identity-dependent and TCP carriage makes the drop check vacuous.
+		alice := sim.AddRouter(t, simNodeConfig{Name: "alice", TunnelCount: 2, DisableNTCP2: true})
+		bob := sim.AddRouter(t, simNodeConfig{Name: "bob", TunnelCount: 2, DisableNTCP2: true})
 		sim.Mesh(simnet.LinkConfig{Latency: 2 * time.Millisecond, Jitter: time.Millisecond})
 
 		sim.ExchangeRouterInfos(t)

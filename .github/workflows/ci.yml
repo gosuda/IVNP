@@ -29,6 +29,27 @@ jobs:
       - name: Run gojgp
         run: gojgp lint ./...
 
+  dst:
+    name: DST seed ${{ matrix.seed }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [1, 16, 42, 67, 1982, 1992, 2002, 2012, 2022, 2026]
+    env:
+      DST_SEED: ${{ matrix.seed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run deterministic mesh and chaos tests
+        run: go test -count=1 -tags dst -run 'TestSim|TestDeterministic' .
+      - name: Run simulation-tagged unit tests
+        run: go test -count=1 -tags dst ./internal/simnet ./internal/durable ./dataplane/internal/streaming/tunnel ./dataplane/internal/router ./controlplane/internal/router
+
   cross-platform:
     name: ${{ matrix.os }} / ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
