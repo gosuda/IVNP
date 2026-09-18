@@ -58,6 +58,9 @@ const (
 	// silentHandshakeEvidenceRetries counts the initial SYN send, so 2 means
 	// at least one retransmit also went unanswered when the caller leaves.
 	silentHandshakeEvidenceRetries = 2
+	// maxInboundSYNPrep bounds concurrent PrepareHandshake calls so inbound
+	// SYN bursts cannot stall the authenticated delivery worker.
+	maxInboundSYNPrep = 8
 )
 
 const (
@@ -138,6 +141,8 @@ type TunnelNetwork struct {
 	outboundPorts  map[uint16]int
 	inboundPorts   map[uint16]int
 	inbound        map[inboundKey]*tunnelConn
+	synPending     map[inboundKey]struct{}
+	synTokens      chan struct{}
 	closed         bool
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -227,6 +232,8 @@ func NewTunnelNetwork(config TunnelNetworkConfig) (*TunnelNetwork, error) {
 		outboundPorts:        make(map[uint16]int),
 		inboundPorts:         make(map[uint16]int),
 		inbound:              make(map[inboundKey]*tunnelConn),
+		synPending:           make(map[inboundKey]struct{}),
+		synTokens:            make(chan struct{}, maxInboundSYNPrep),
 		ctx:                  lifetime,
 		cancel:               cancel,
 		done:                 make(chan struct{}),
@@ -574,16 +581,65 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 	if listener == nil {
 		return ErrTunnelAddress
 	}
-	var feedback HandshakeFeedback
-	if n.handshakeObserver != nil {
-		handshake, cancel := context.WithTimeout(n.ctx, n.handshakeTimeout)
-		var prepErr error
-		feedback, prepErr = n.handshakeObserver.PrepareHandshake(handshake, delivery.From)
-		cancel()
-		if prepErr != nil {
-			return prepErr
-		}
+	if n.handshakeObserver == nil {
+		return n.finishSynchronize(ctx, delivery, packet, key, listener, peer, peerMaxPayloadSize, nil)
 	}
+	// Route preparation can block for the whole handshake timeout, so it runs
+	// off the delivery worker under a bounded permit. synPending dedups SYN
+	// retransmits that arrive while preparation is still in flight.
+	n.mu.Lock()
+	if n.closed {
+		n.mu.Unlock()
+		return net.ErrClosed
+	}
+	if _, pending := n.synPending[key]; pending {
+		n.mu.Unlock()
+		return nil
+	}
+	select {
+	case n.synTokens <- struct{}{}:
+	default:
+		n.mu.Unlock()
+		return ErrTunnelBackpressure
+	}
+	n.synPending[key] = struct{}{}
+	n.wg.Add(1)
+	n.mu.Unlock()
+	owned := delivery
+	owned.Payload = append([]byte(nil), delivery.Payload...)
+	go n.runInboundSYN(key, owned, listener)
+	return nil
+}
+
+// runInboundSYN completes an admitted SYN off the delivery worker: it
+// re-parses the owned payload, prepares the handshake route, then registers
+// the connection exactly as the synchronous path did.
+func (n *TunnelNetwork) runInboundSYN(key inboundKey, delivery Delivery, listener *tunnelListener) {
+	defer n.wg.Done()
+	defer func() { <-n.synTokens }()
+	defer func() {
+		n.mu.Lock()
+		delete(n.synPending, key)
+		n.mu.Unlock()
+	}()
+	ctx, cancel := context.WithTimeout(n.ctx, n.handshakeTimeout)
+	defer cancel()
+	packet, err := dataplanestreaming.Parse(delivery.Payload)
+	if err != nil {
+		return
+	}
+	peer, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, nil, true)
+	if err != nil {
+		return
+	}
+	feedback, err := n.handshakeObserver.PrepareHandshake(ctx, delivery.From)
+	if err != nil {
+		return
+	}
+	_ = n.finishSynchronize(ctx, delivery, packet, key, listener, peer, peerMaxPayloadSize, feedback)
+}
+
+func (n *TunnelNetwork) finishSynchronize(ctx context.Context, delivery Delivery, packet Packet, key inboundKey, listener *tunnelListener, peer controlPeer, peerMaxPayloadSize int, feedback HandshakeFeedback) error {
 	localID, err := n.allocateID()
 	if err != nil {
 		return err

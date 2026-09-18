@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -25,6 +26,25 @@ func (f *handshakeFeedbackRecorder) PrepareHandshake(context.Context, foundation
 
 func (f *handshakeFeedbackRecorder) Established() { f.established++ }
 func (f *handshakeFeedbackRecorder) NoResponse()  { f.timedOut++ }
+
+type blockingPrepObserver struct {
+	TunnelSender
+	started chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (o *blockingPrepObserver) PrepareHandshake(ctx context.Context, _ foundation.Hash) (HandshakeFeedback, error) {
+	if o.calls.Add(1) == 1 {
+		close(o.started)
+	}
+	select {
+	case <-o.release:
+		return &handshakeFeedbackRecorder{TunnelSender: o.TunnelSender}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 
 type handshakeSendFunc func(context.Context, Delivery) error
 
@@ -189,6 +209,60 @@ func TestSignedResetDoesNotRequireMatchingReplyStreamID(t *testing.T) {
 		}
 		if _, err := connection.Read(make([]byte, 1)); !errors.Is(err, ErrTunnelReset) {
 			t.Fatalf("reset stream read = %v, want ErrTunnelReset", err)
+		}
+	})
+}
+
+func TestInboundSYNPreparationRunsOffDeliveryWorker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
+		client, server := newTunnelNetworkPair(t, fabric, time.Second)
+		observer := &blockingPrepObserver{
+			TunnelSender: fabric,
+			started:      make(chan struct{}),
+			release:      make(chan struct{}),
+		}
+		server.handshakeObserver = observer
+		listener, err := server.ListenI2P(t.Context(), ":80")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		synDeliveries := make(chan Delivery, 8)
+		client.sender = handshakeSendFunc(func(ctx context.Context, delivery Delivery) error {
+			if packet, parseErr := dataplanestreaming.Parse(delivery.Payload); parseErr == nil && packet.Flags&FlagSynchronize != 0 && packet.SendStreamID == 0 {
+				synDeliveries <- delivery
+			}
+			return fabric.SendTunnel(ctx, delivery)
+		})
+		dialResult := make(chan error, 1)
+		go func() {
+			_, err := client.DialI2P(t.Context(), net.JoinHostPort(server.B32(), "80"))
+			dialResult <- err
+		}()
+		synDelivery := <-synDeliveries
+		<-observer.started
+		// A retransmitted SYN arriving while route preparation is still in
+		// flight must dedup against the pending preparation, not spawn a
+		// second handshake or block the delivery worker.
+		if err := server.HandleDelivery(t.Context(), synDelivery); err != nil {
+			t.Fatalf("retransmitted SYN during preparation = %v", err)
+		}
+		if got := observer.calls.Load(); got != 1 {
+			t.Fatalf("PrepareHandshake calls = %d, want 1", got)
+		}
+		close(observer.release)
+		inbound, err := listener.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer inbound.Close()
+		if err := <-dialResult; err != nil {
+			t.Fatalf("dial after async preparation = %v", err)
+		}
+		payload := []byte("async prep")
+		if _, err := inbound.(net.Conn).Write(payload); err != nil {
+			t.Fatal(err)
 		}
 	})
 }
