@@ -39,6 +39,9 @@ jobs:
         seed: [1, 16, 42, 67, 1982, 1992, 2002, 2012, 2022, 2026]
     env:
       DST_SEED: ${{ matrix.seed }}
+      # go test surfaces captured stderr only on failure, so per-node debug
+      # logs are free on pass and present when a rare flake finally trips.
+      DST_LOG: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
