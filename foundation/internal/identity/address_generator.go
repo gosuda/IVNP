@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/ecdh"
 	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
@@ -41,7 +40,7 @@ type LocalDestination struct {
 
 // GenerateLocalDestination generates a new standard ECIES-X25519 destination with Ed25519 signing keys.
 func GenerateLocalDestination() (*LocalDestination, error) {
-	public, private, err := ed25519.GenerateKey(rand.Reader)
+	public, private, err := ed25519KeyPair(randomSource)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +50,7 @@ func GenerateLocalDestination() (*LocalDestination, error) {
 // GenerateLegacyLocalDestination creates a legacy ElGamal/Ed25519 destination with an X25519 key for LeaseSet2.
 // This maintains backward address compatibility with legacy Java I2P routers.
 func GenerateLegacyLocalDestination() (*LocalDestination, error) {
-	public, private, err := ed25519.GenerateKey(rand.Reader)
+	public, private, err := ed25519KeyPair(randomSource)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +70,7 @@ func generateLocalDestination(signingType SigningKeyType, signingPublic ed25519.
 	if len(signingPublic) != ed25519.PublicKeySize || (signingType != SigningEdDSASHA512Ed25519 && signingType != SigningRedDSASHA512Ed25519) {
 		return nil, ErrInvalidIdentity
 	}
-	x25519, err := ecdh.X25519().GenerateKey(rand.Reader)
+	x25519, err := x25519Key(randomSource)
 	if err != nil {
 		clear(signingPrivate)
 		return nil, err
@@ -89,7 +88,7 @@ func generateLocalDestination(signingType SigningKeyType, signingPublic ed25519.
 	// X25519 occupies the leading bytes of the historical 256-byte crypto
 	// field and the signing key remains right aligned in the signing field.
 	raw := make([]byte, IdentityBaseLength+CertificateHeader+4)
-	if _, err := io.ReadFull(rand.Reader, raw[:IdentityBaseLength]); err != nil {
+	if _, err := io.ReadFull(randomSource, raw[:IdentityBaseLength]); err != nil {
 		d.ReleaseSensitive()
 		return nil, err
 	}
@@ -116,12 +115,12 @@ func generateLegacyLocalDestination(signingType SigningKeyType, signingPublic ed
 		clear(signingPrivate)
 		return nil, ErrInvalidIdentity
 	}
-	encryptionPublic, encryptionPrivate, err := cryptography.GenerateElGamalKeyPair()
+	encryptionPublic, encryptionPrivate, err := cryptography.GenerateElGamalKeyPairFrom(randomSource)
 	if err != nil {
 		clear(signingPrivate)
 		return nil, err
 	}
-	x25519, err := ecdh.X25519().GenerateKey(rand.Reader)
+	x25519, err := x25519Key(randomSource)
 	if err != nil {
 		clear(signingPrivate)
 		clear(encryptionPrivate[:])
@@ -141,7 +140,7 @@ func generateLegacyLocalDestination(signingType SigningKeyType, signingPublic ed
 	clear(encryptionPrivate[:])
 
 	raw := make([]byte, IdentityBaseLength+CertificateHeader+4)
-	if _, err = io.ReadFull(rand.Reader, raw[:IdentityBaseLength]); err != nil {
+	if _, err = io.ReadFull(randomSource, raw[:IdentityBaseLength]); err != nil {
 		d.ReleaseSensitive()
 		return nil, err
 	}
@@ -730,17 +729,17 @@ func GenerateAddress() (destination []byte, hash Hash, public ed25519.PublicKey,
 
 // GenerateLocalAddress creates a local legacy ElGamal/Ed25519 destination.
 func GenerateLocalAddress() (address LocalAddress, err error) {
-	address.SigningPublic, address.SigningPrivate, err = ed25519.GenerateKey(rand.Reader)
+	address.SigningPublic, address.SigningPrivate, err = ed25519KeyPair(randomSource)
 	if err != nil {
 		return LocalAddress{}, err
 	}
-	address.EncryptionPublic, address.EncryptionPrivate, err = cryptography.GenerateElGamalKeyPair()
+	address.EncryptionPublic, address.EncryptionPrivate, err = cryptography.GenerateElGamalKeyPairFrom(randomSource)
 	if err != nil {
 		return LocalAddress{}, err
 	}
 
 	raw := make([]byte, IdentityBaseLength+CertificateHeader+4)
-	if _, err = io.ReadFull(rand.Reader, raw[:IdentityBaseLength]); err != nil {
+	if _, err = io.ReadFull(randomSource, raw[:IdentityBaseLength]); err != nil {
 		return LocalAddress{}, err
 	}
 	copy(raw[:cryptography.ElGamalPublicKeySize], address.EncryptionPublic[:])
@@ -765,11 +764,11 @@ func GenerateLocalAddress() (address LocalAddress, err error) {
 
 // GenerateLocalRouterAddress generates a local RouterIdentity with Ed25519 signing and X25519 encryption keys.
 func GenerateLocalRouterAddress() (address LocalRouterAddress, err error) {
-	address.SigningPublic, address.SigningPrivate, err = ed25519.GenerateKey(rand.Reader)
+	address.SigningPublic, address.SigningPrivate, err = ed25519KeyPair(randomSource)
 	if err != nil {
 		return LocalRouterAddress{}, err
 	}
-	x25519, err := ecdh.X25519().GenerateKey(rand.Reader)
+	x25519, err := x25519Key(randomSource)
 	if err != nil {
 		return LocalRouterAddress{}, err
 	}
@@ -777,7 +776,7 @@ func GenerateLocalRouterAddress() (address LocalRouterAddress, err error) {
 	copy(address.X25519Public[:], x25519.PublicKey().Bytes())
 
 	raw := make([]byte, IdentityBaseLength+CertificateHeader+4)
-	if _, err = io.ReadFull(rand.Reader, raw[:IdentityBaseLength]); err != nil {
+	if _, err = io.ReadFull(randomSource, raw[:IdentityBaseLength]); err != nil {
 		return LocalRouterAddress{}, err
 	}
 	copy(raw[:], address.X25519Public[:])

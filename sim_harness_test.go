@@ -5,8 +5,10 @@ package ivnp
 import (
 	"cmp"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/netip"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/dataplane"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/simnet"
 )
 
@@ -86,6 +89,9 @@ func newSimNet(tb testing.TB, seed uint64) *simNet {
 			seed = s
 		}
 	}
+	var identitySeed [32]byte
+	binary.LittleEndian.PutUint64(identitySeed[:8], seed)
+	foundation.SetDeterministicRandomSource(rand.NewChaCha8(identitySeed))
 	n := simnet.NewNetwork(simnet.Config{Seed: seed})
 	s := &simNet{net: n}
 	tb.Cleanup(func() {

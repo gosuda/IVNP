@@ -56,6 +56,11 @@ func GenerateElGamalKeyPair() (public ElGamalPublicKey, private ElGamalPrivateKe
 	return generateElGamalKeyPair(rand.Reader)
 }
 
+// GenerateElGamalKeyPairFrom generates a keypair using the provided random source.
+func GenerateElGamalKeyPairFrom(random io.Reader) (public ElGamalPublicKey, private ElGamalPrivateKey, err error) {
+	return generateElGamalKeyPair(random)
+}
+
 func generateElGamalKeyPair(random io.Reader) (public ElGamalPublicKey, private ElGamalPrivateKey, err error) {
 	p, pMinusTwo, err := elGamalParameters()
 	if err != nil {

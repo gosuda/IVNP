@@ -5,9 +5,11 @@ package ivnp
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"os"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/simnet"
 )
 
@@ -771,5 +774,39 @@ func BenchmarkSimStreamThroughput(b *testing.B) {
 		if _, err := io.ReadFull(inbound, recvBuf); err != nil {
 			b.Fatalf("read at iter %d: %v", i, err)
 		}
+	}
+}
+
+// TestDeterministicFleetIdentities verifies that a seed fixes the simulated
+// fleet's identities: the same seeded stream must produce identical router
+// and destination hashes so failures reproduce against the same topology.
+func TestDeterministicFleetIdentities(t *testing.T) {
+	generate := func(seed uint64) (routerA, routerB, dest Hash) {
+		var raw [32]byte
+		binary.LittleEndian.PutUint64(raw[:8], seed)
+		foundation.SetDeterministicRandomSource(rand.NewChaCha8(raw))
+		a, err := foundation.GenerateLocalRouterAddress()
+		if err != nil {
+			t.Fatalf("router A: %v", err)
+		}
+		b, err := foundation.GenerateLocalRouterAddress()
+		if err != nil {
+			t.Fatalf("router B: %v", err)
+		}
+		d, err := foundation.GenerateLocalDestination()
+		if err != nil {
+			t.Fatalf("destination: %v", err)
+		}
+		return a.Hash, b.Hash, d.Hash()
+	}
+	a1, b1, d1 := generate(2026)
+	a2, b2, d2 := generate(2026)
+	if a1 != a2 || b1 != b2 || d1 != d2 {
+		t.Fatalf("same-seed identities diverged: routers %x/%x %x/%x destination %x/%x",
+			a1[:4], a2[:4], b1[:4], b2[:4], d1[:4], d2[:4])
+	}
+	a3, _, _ := generate(2027)
+	if a3 == a1 {
+		t.Fatalf("different seeds produced identical router identity %x", a3[:4])
 	}
 }
