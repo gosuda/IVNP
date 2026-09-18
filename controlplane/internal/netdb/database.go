@@ -708,26 +708,6 @@ func (d *Database) ExpireLeases(nowMillis uint64) int {
 	return removed
 }
 
-// InvalidateLeaseSet removes a stored lease entry so subsequent lookups re-query NetDB.
-func (d *Database) InvalidateLeaseSet(key foundation.Hash) {
-	d.leasesMu.Lock()
-	defer d.leasesMu.Unlock()
-	delete(d.leases, key)
-	if index, ok := d.leaseExpiryIndex[key]; ok {
-		delete(d.leaseExpiryIndex, key)
-		last := len(d.leaseExpiries) - 1
-		if index != last {
-			d.leaseExpiries[index] = d.leaseExpiries[last]
-			d.leaseExpiryIndex[d.leaseExpiries[index].key] = index
-		}
-		d.leaseExpiries[last] = leaseExpiry{}
-		d.leaseExpiries = d.leaseExpiries[:last]
-		if index < len(d.leaseExpiries) {
-			d.fixLeaseExpiryLocked(index)
-		}
-	}
-}
-
 func (d *Database) inflateRouterInfo(compressed []byte) ([]byte, *pool.Lease, error) {
 	input := bytes.NewReader(compressed)
 	value := d.gzipPool.Get()
