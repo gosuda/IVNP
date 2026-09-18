@@ -116,9 +116,10 @@ type TCPConn struct {
 }
 
 type dialResult struct {
-	done chan struct{}
-	conn *TCPConn
-	err  error
+	done     chan struct{}
+	canceled atomic.Bool
+	conn     *TCPConn
+	err      error
 }
 
 // DialTCP opens a stream to remote through the link. The dial completes after
@@ -143,6 +144,7 @@ func (h *Host) DialTCP(ctx context.Context, remote netip.AddrPort) (net.Conn, er
 		}
 		return res.conn, res.err
 	case <-ctx.Done():
+		res.canceled.Store(true)
 		return nil, ctx.Err()
 	}
 }
@@ -157,10 +159,21 @@ func (n *Network) scheduleSYN(h *Host, remote netip.AddrPort, res *dialResult) {
 		close(res.done)
 		return
 	}
+	if res.canceled.Load() {
+		// The dialer gave up; stop retransmitting the SYN.
+		n.mu.Unlock()
+		return
+	}
 	link := n.linkLocked(h.addr, remote.Addr())
 	if link.down {
 		// The SYN is dropped; retry on a bounded interval until the dialer
 		// cancels, mirroring retransmission.
+		n.scheduleLocked(n.now().Add(synRetry), func() { n.scheduleSYN(h, remote, res) })
+		n.mu.Unlock()
+		return
+	}
+	if link.shouldDrop(ProtoTCP) {
+		n.emitLocked(EventDrop, ProtoTCP, netip.AddrPortFrom(h.addr, 0), remote, 64)
 		n.scheduleLocked(n.now().Add(synRetry), func() { n.scheduleSYN(h, remote, res) })
 		n.mu.Unlock()
 		return
@@ -176,6 +189,9 @@ func (n *Network) completeSYN(h *Host, remote netip.AddrPort, res *dialResult) {
 	if n.closed {
 		res.err = ErrClosed
 		close(res.done)
+		return
+	}
+	if res.canceled.Load() {
 		return
 	}
 	link := n.linkLocked(h.addr, remote.Addr())
@@ -219,6 +235,15 @@ func (n *Network) completeSYN(h *Host, remote netip.AddrPort, res *dialResult) {
 	n.conns[server] = struct{}{}
 	n.dialUsed[local] = struct{}{}
 	n.emitLocked(EventDeliver, ProtoTCP, local, remote, 0)
+	if res.canceled.Load() {
+		// The dialer abandoned after the SYN was admitted. Tear the pair
+		// down so the accepted conn observes a reset, like a real
+		// mid-handshake RST, instead of leaking a live half of the dial.
+		n.mu.Unlock()
+		client.reset()
+		n.mu.Lock()
+		return
+	}
 	res.conn = client
 	close(res.done)
 }
