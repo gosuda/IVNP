@@ -70,6 +70,31 @@ func (s *requestDirectCapture) Send(_ context.Context, target foundation.Hash, _
 	return nil
 }
 
+type requestViableSender struct {
+	requestDirectCapture
+	exists bool
+	viable bool
+}
+
+func (s *requestViableSender) HasSession(foundation.Hash) bool    { return s.exists }
+func (s *requestViableSender) SessionViable(foundation.Hash) bool { return s.viable }
+
+func TestTransportPeerConnectionPrefersSessionViability(t *testing.T) {
+	peer := foundation.Hash{1}
+	sender := &requestViableSender{exists: true}
+	connected := transportPeerConnection(sender)
+	if connected == nil {
+		t.Fatal("transportPeerConnection returned nil for a session-capable sender")
+	}
+	if connected(peer) {
+		t.Fatal("existing but degraded session counted as connected")
+	}
+	sender.viable = true
+	if !connected(peer) {
+		t.Fatal("viable session was not reported as connected")
+	}
+}
+
 type requestTunnelCapture struct {
 	calls int
 	id    uint32
@@ -1770,7 +1795,9 @@ func testDaemonProductionGraphEncryptedAuthorization(t *testing.T, authorization
 		}
 	}
 	network.mu.RUnlock()
-	if lookups < 2 || encryptedStores == 0 {
+	// Event-driven publication lands the LeaseSet before the dial, so a
+	// single successful lookup may be the only flood traffic the graph needs.
+	if lookups < 1 || encryptedStores == 0 {
 		t.Fatalf("authorized graph lookups=%d encrypted_stores=%d", lookups, encryptedStores)
 	}
 }

@@ -289,3 +289,32 @@ func TestCallerHandshakeDeadlineDoesNotPenalizePeer(t *testing.T) {
 		}
 	})
 }
+
+func TestCallerDeadlineAfterSilentRetriesReportsRouteFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		local, err := foundation.GenerateLegacyLocalDestination()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sender := discardTunnelSender{}
+		feedback := &handshakeFeedbackRecorder{TunnelSender: sender}
+		network, err := NewTunnelNetwork(TunnelNetworkConfig{Destination: local, Sender: sender, HandshakeObserver: feedback, RetransmitAfter: 250 * time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer network.Close()
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		_, err = network.DialI2P(ctx, net.JoinHostPort(foundation.B32(foundation.Hash{1}), "80"))
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("caller deadline = %v", err)
+		}
+		synctest.Wait()
+		if feedback.timedOut != 1 {
+			t.Fatalf("silent retries feedback = %+v; want timedOut=1", feedback)
+		}
+		if network.Stats().Connections != 0 {
+			t.Fatal("expired handshake remained registered")
+		}
+	})
+}

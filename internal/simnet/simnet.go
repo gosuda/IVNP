@@ -100,6 +100,10 @@ type Stats struct {
 	Duplicated   uint64
 	Refused      uint64
 	Bytes        uint64
+	SentUDP      uint64
+	SentTCP      uint64
+	DroppedUDP   uint64
+	DroppedTCP   uint64
 }
 
 // BurstLossConfig parameterizes a Gilbert-Elliott two-state Markov loss model.
@@ -493,11 +497,21 @@ func (n *Network) emitLocked(kind EventKind, proto Proto, from, to netip.AddrPor
 	switch kind {
 	case EventSent:
 		n.stats.Sent++
+		if proto == ProtoUDP {
+			n.stats.SentUDP++
+		} else if proto == ProtoTCP {
+			n.stats.SentTCP++
+		}
 	case EventDeliver:
 		n.stats.Delivered++
 		n.stats.Bytes += uint64(bytes)
 	case EventDrop:
 		n.stats.Dropped++
+		if proto == ProtoUDP {
+			n.stats.DroppedUDP++
+		} else if proto == ProtoTCP {
+			n.stats.DroppedTCP++
+		}
 	case EventQueueDrop:
 		n.stats.QueueDropped++
 	case EventDuplicate:

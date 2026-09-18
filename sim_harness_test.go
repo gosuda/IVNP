@@ -32,6 +32,17 @@ const (
 	simSSU2Port  = 40002
 )
 
+// Simulation recovery profile: low-latency links make the production health
+// knobs (60s probe timeout, 2 consecutive failures) the dominant convergence
+// delay, so sim nodes detect a dead circuit on a single 12s probe miss. The
+// maintenance interval feeds the RouterInfo refresh cadence; the periodic
+// maintenance tick itself is capped at 1s regardless.
+const (
+	simMaintenanceInterval         = 5 * time.Second
+	simHealthProbeTimeout          = 12 * time.Second
+	simHealthProbeFailureThreshold = 1
+)
+
 // simNet hosts a fleet of embedded routers over one simnet.Network.
 type simNet struct {
 	net   *simnet.Network
@@ -130,6 +141,9 @@ func (s *simNet) AddRouter(tb testing.TB, cfg simNodeConfig) *simNode {
 	runtime := &simSocketRuntime{host: host}
 	for i := range specs {
 		specs[i].Options.SocketRuntime = runtime
+		specs[i].Operating.Tunnel.MaintenanceInterval = simMaintenanceInterval
+		specs[i].Operating.Tunnel.ProbeTimeout = simHealthProbeTimeout
+		specs[i].Operating.Tunnel.ProbeFailureThreshold = simHealthProbeFailureThreshold
 	}
 	router, err := newRouter(tb.Context(), routerCfg, specs, def)
 	if err != nil {

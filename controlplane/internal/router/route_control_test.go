@@ -719,6 +719,87 @@ func TestSilentRoutesExhaustRemoteLeasesBeforeReusingFailure(t *testing.T) {
 	}
 }
 
+func TestSilentRouteStaysExcludedAcrossDialRetryGap(t *testing.T) {
+	sender, deliveries, _ := routeControlFixture(t, nil)
+	feedback, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, ok := sender.execution.RouteReceipt(deliveries[0].To)
+	if !ok {
+		t.Fatal("missing prepared route")
+	}
+	feedback.NoResponse()
+	// A dial retry lands after a short failure mark would have lapsed but
+	// while the route is still valid; the exhausted cached LeaseSet must be
+	// refreshed instead of silently repicking the dead lease.
+	sender.now = func() uint64 { return receipt.Expires - 1 }
+	if err := sender.PrepareDestination(t.Context(), deliveries[0].To); !errors.Is(err, dataplane.TunnelErrCircuitNotFound) {
+		t.Fatalf("dead lease repicked across retry gap: %v", err)
+	}
+}
+
+func TestSilentLeaseStaysExcludedAcrossCircuitReplacement(t *testing.T) {
+	sender, deliveries, _ := routeControlFixture(t, nil)
+	pool := controlplanetunnel.NewOwnedPool(sender.owner, 2)
+	for _, entry := range sender.pool.Snapshot(1000) {
+		if err := pool.Add(entry, 1000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	second, err := sender.tunnels.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 11, Owner: sender.owner, FirstHop: foundation.Hash{8}, NextTunnelID: 12, ExpiresAt: 95000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sender.tunnels.RemoveCircuit(second) })
+	if err := pool.Add(controlplanetunnel.Entry{ID: 11, Owner: sender.owner, Circuit: second, Direction: controlplanetunnel.Outbound, Expires: 95000}, 1000); err != nil {
+		t.Fatal(err)
+	}
+	sender.pool = pool
+	first, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.NoResponse()
+	retry, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry.NoResponse()
+	// Both distinct circuits absorbed a silent handshake on the same lease:
+	// the remote path is dead, not either local circuit. Replacing every
+	// outbound installation — renewal or health-driven churn — must not
+	// unmark it, otherwise the dead lease is repicked forever.
+	third, err := sender.tunnels.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 21, Owner: sender.owner, FirstHop: foundation.Hash{9}, NextTunnelID: 22, ExpiresAt: 99000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sender.tunnels.RemoveCircuit(third) })
+	fresh := controlplanetunnel.NewOwnedPool(sender.owner, 1)
+	if err := fresh.Add(controlplanetunnel.Entry{ID: 21, Owner: sender.owner, Circuit: third, Direction: controlplanetunnel.Outbound, Expires: 99000}, 1000); err != nil {
+		t.Fatal(err)
+	}
+	sender.pool = fresh
+	if err := sender.PrepareDestination(t.Context(), deliveries[0].To); !errors.Is(err, dataplane.TunnelErrCircuitNotFound) {
+		t.Fatalf("dead lease repicked after circuit replacement: %v", err)
+	}
+}
+
+func TestSendFailureMarkClearsForLaterRetry(t *testing.T) {
+	sender, deliveries, wire := routeControlFixture(t, nil)
+	wire.handle = func(context.Context, foundation.I2NPMessage) error {
+		return dataplane.RouterErrSSU2SendStalled
+	}
+	if err := sender.SendTunnel(t.Context(), deliveries[0]); !errors.Is(err, dataplane.RouterErrSSU2SendStalled) {
+		t.Fatalf("first send = %v", err)
+	}
+	sender.now = func() uint64 { return 1000 + sendFailureMarkMillis + 1 }
+	wire.handle = nil
+	if err := sender.SendTunnel(t.Context(), deliveries[0]); err != nil {
+		t.Fatalf("transient failure blacklisted healthy path: %v", err)
+	}
+}
+
 func TestPreparedRouteSurvivesFirstLocalLeaseExpiry(t *testing.T) {
 	sender, deliveries, _ := routeControlFixture(t, nil,
 		foundation.NetworkDatabaseLease{Gateway: foundation.Hash{6}, TunnelID: 7, EndDate: 500},

@@ -210,11 +210,12 @@ func (m *SSU2Manager) forwardRelayStore(job ssu2RelayStoreJob) {
 	}
 	store, err := m.cachedSSU2RouterInfoStore(job.aliceInfo, m.now())
 	if err == nil {
-		job.charlie.frameMu.Lock()
-		err = forEachSSU2I2NPFragment(job.charlie.frame[:], store, ssu2SessionPacketSize(job.charlie), func(fragment []byte, _ bool) error {
+		// Local scratch keeps congestion-capacity waits inside sendData off
+		// charlie's frameMu, which serializes path probing and teardown.
+		var frame [dataplanessu2.MaxIPv4PacketLen]byte
+		err = forEachSSU2I2NPFragment(frame[:], store, ssu2SessionPacketSize(job.charlie), func(fragment []byte, _ bool) error {
 			return m.sendData(job.charlie, fragment)
 		})
-		job.charlie.frameMu.Unlock()
 	}
 	if err == nil {
 		var intro []byte

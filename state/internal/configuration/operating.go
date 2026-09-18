@@ -102,6 +102,8 @@ type Tunnel struct {
 	Lifetime                    time.Duration
 	RenewBefore                 time.Duration
 	MaintenanceInterval         time.Duration
+	ProbeTimeout                time.Duration
+	ProbeFailureThreshold       int
 	BandwidthRateBytesPerSecond int
 	BandwidthBurstBytes         int
 }
@@ -411,6 +413,7 @@ func defaultOperating(base string) Operating {
 			ClientInboundTarget: 2, ClientOutboundTarget: 2, ClientPoolCapacity: 4,
 			BuildPendingCapacity: 32, Lifetime: 10 * time.Minute,
 			RenewBefore: 210 * time.Second, MaintenanceInterval: time.Minute,
+			ProbeTimeout: time.Minute, ProbeFailureThreshold: 2,
 			BandwidthRateBytesPerSecond: 1 << 20, BandwidthBurstBytes: 2 << 20,
 		},
 		NTCP2:  defaultTransport(),
@@ -660,6 +663,7 @@ func applyTunnel(operating *Operating, values map[entryKey]string) error {
 		{"build_pending_capacity", &tunnel.BuildPendingCapacity, 1, 256},
 		{"bandwidth_rate_bytes_per_second", &tunnel.BandwidthRateBytesPerSecond, 1 << 10, 1 << 30},
 		{"bandwidth_burst_bytes", &tunnel.BandwidthBurstBytes, 1 << 10, 1 << 30},
+		{"probe_failure_threshold", &tunnel.ProbeFailureThreshold, 1, 255},
 	} {
 		if value, ok := valueOf(values, "tunnel", setting.key); ok {
 			parsed, err := parseUint(value, setting.min, setting.max)
@@ -678,6 +682,7 @@ func applyTunnel(operating *Operating, values map[entryKey]string) error {
 		{"lifetime", &tunnel.Lifetime, 10 * time.Minute, 10 * time.Minute},
 		{"renew_before", &tunnel.RenewBefore, time.Second, 10*time.Minute - time.Nanosecond},
 		{"maintenance_interval", &tunnel.MaintenanceInterval, time.Second, 10 * time.Minute},
+		{"probe_timeout", &tunnel.ProbeTimeout, time.Second, 10 * time.Minute},
 	} {
 		if value, ok := valueOf(values, "tunnel", setting.key); ok {
 			parsed, err := parseDuration(value, setting.min, setting.max)

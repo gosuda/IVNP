@@ -73,15 +73,20 @@ const (
 	// session's send serialization, so an unresponsive peer must fail the send
 	// — not every other sender queued behind it — once no capacity signal
 	// arrives within a retransmit interval.
-	ssu2SendStall       = ssu2RetransmitInterval
-	ssu2EgressSlots     = 32
-	ssu2ACKDelay        = time.Millisecond
-	ssu2MaxNewTokens    = 1024
-	ssu2RelayTarget     = 3
-	ssu2RelayPublishMin = 100 * time.Millisecond
-	ssu2RelayPublishMax = 30 * time.Second
-	ssu2ACKIdle         = false
-	ssu2ACKPending      = true
+	ssu2SendStall = ssu2RetransmitInterval
+	// ssu2SessionDegradedCooldown is how long a send-capacity stall marks the
+	// session degraded for transport selection. A stall means in-flight bytes
+	// stayed unacknowledged beyond one bound, so callers should prefer an
+	// alternate transport until sends prove capacity again.
+	ssu2SessionDegradedCooldown = 2 * ssu2DispatchStall
+	ssu2EgressSlots             = 32
+	ssu2ACKDelay                = time.Millisecond
+	ssu2MaxNewTokens            = 1024
+	ssu2RelayTarget             = 3
+	ssu2RelayPublishMin         = 100 * time.Millisecond
+	ssu2RelayPublishMax         = 30 * time.Second
+	ssu2ACKIdle                 = false
+	ssu2ACKPending              = true
 )
 
 var (
@@ -420,6 +425,7 @@ type ssu2TransportSession struct {
 	rtt                   time.Duration
 	rttDeviation          time.Duration
 	lastCongestion        time.Time
+	degradedUntil         time.Time
 	sendCapacityAvailable chan struct{}
 	largeMTU              int
 	mtu                   atomic.Int32
@@ -1184,6 +1190,27 @@ func (m *SSU2Manager) HasSession(peer foundation.Hash) bool {
 		return false
 	}
 	return m.sessionForSend(peer) != nil
+}
+
+// SessionViable reports whether the authenticated session can currently send:
+// it exists, is not closing, and has not exhausted a congestion-capacity wait
+// within the degradation cooldown. A stalled session still exists for
+// retransmission bookkeeping but must not suppress establishing an alternate
+// transport.
+func (m *SSU2Manager) SessionViable(peer foundation.Hash) bool {
+	if m == nil {
+		return false
+	}
+	session := m.sessionForSend(peer)
+	if session == nil {
+		return false
+	}
+	session.sendMu.Lock()
+	defer session.sendMu.Unlock()
+	if session.closing || session.send == nil {
+		return false
+	}
+	return !m.now().Before(session.degradedUntil)
 }
 
 func (m *SSU2Manager) ActiveSessionCount() int {
@@ -3586,6 +3613,7 @@ func (m *SSU2Manager) sendSessionDataContext(ctx context.Context, session *ssu2T
 				windowBytes = packetSize
 				session.sendWindowRemaining -= windowBytes
 			}
+			session.degradedUntil = time.Time{}
 			session.sendMu.Unlock()
 			break
 		}
@@ -3611,6 +3639,9 @@ func (m *SSU2Manager) sendSessionDataContext(ctx context.Context, session *ssu2T
 		case <-available:
 			stall.Stop()
 		case <-stall.C:
+			session.sendMu.Lock()
+			session.degradedUntil = m.now().Add(ssu2SessionDegradedCooldown)
+			session.sendMu.Unlock()
 			return ErrSSU2SendStalled
 		}
 	}

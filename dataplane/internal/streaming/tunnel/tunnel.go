@@ -55,6 +55,9 @@ const (
 	minPeerMaxPayloadSize     = 512
 	tunnelRetryUpdateIdle     = false
 	tunnelRetryUpdatePending  = true
+	// silentHandshakeEvidenceRetries counts the initial SYN send, so 2 means
+	// at least one retransmit also went unanswered when the caller leaves.
+	silentHandshakeEvidenceRetries = 2
 )
 
 const (
@@ -349,18 +352,23 @@ func (n *TunnelNetwork) dialStream(ctx context.Context, address string, localPor
 	case <-connection.peerClosed:
 	case <-handshake.Done():
 	}
-	if err = ctx.Err(); err != nil {
-		return nil, err
-	}
 	connection.mu.Lock()
 	unanswered := connection.remoteID == 0
 	retriesExhausted := connection.handshakeFailed
 	reset := connection.reset
-	peerTimedOut := !reset && unanswered && (errors.Is(handshake.Err(), context.DeadlineExceeded) || retriesExhausted)
+	// Silence evidence comes from the protocol's own machinery, not caller
+	// patience: the handshake timer, the SYN retry budget, or retransmits
+	// already observed when the caller leaves early. A dial abandoned before
+	// the first retry proves nothing about the route.
+	peerTimedOut := !reset && unanswered && (retriesExhausted || connection.syncRetries >= silentHandshakeEvidenceRetries ||
+		(errors.Is(handshake.Err(), context.DeadlineExceeded) && ctx.Err() == nil))
 	if peerTimedOut {
 		connection.handshakeFailed = true
 	}
 	connection.mu.Unlock()
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
 	if reset {
 		return nil, ErrTunnelReset
 	}

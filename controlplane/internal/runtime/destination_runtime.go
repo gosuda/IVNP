@@ -517,7 +517,7 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 	}()
 	health, err := tunnel.NewHealth(tunnel.HealthConfig{
 		Runtime: f.tunnels, Pool: pool, Maintainer: maintainer, Profiles: profiles, Now: f.now,
-		Timeout: daemonHealthProbeTimeoutMillis, MaxPending: buildPending, FailureThreshold: 2,
+		Timeout: healthProbeTimeout(f.cfg), MaxPending: buildPending, FailureThreshold: healthProbeFailureThreshold(f.cfg),
 		ProbeBeforeActivity: true,
 	})
 	if err != nil {

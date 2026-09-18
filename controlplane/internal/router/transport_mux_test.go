@@ -173,6 +173,62 @@ type muxCountedSessionTransport struct {
 
 func (m *muxCountedSessionTransport) ActiveSessionCount() int { return m.count }
 
+type muxViableCountedTransport struct {
+	*muxCountedSessionTransport
+	viable bool
+}
+
+func (m *muxViableCountedTransport) SessionViable(peer foundation.Hash) bool {
+	return m.viable && m.muxCountedSessionTransport.HasSession(peer)
+}
+
+func TestTransportMuxDialsAlternateWhenSSU2SessionDegraded(t *testing.T) {
+	database, peer := muxTestPeer(t, true, true)
+	ntcp2 := newMuxSessionTransport()
+	ssu2 := &muxViableCountedTransport{muxCountedSessionTransport: &muxCountedSessionTransport{muxSessionTransport: newMuxSessionTransport()}}
+	ssu2.session = true
+	mux, err := NewTransportMux(TransportMuxConfig{Database: database, NTCP2: ntcp2, SSU2: ssu2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux.random = bytes.NewReader([]byte{1})
+	done := make(chan error, 1)
+	go func() { done <- mux.EnsureSession(context.Background(), peer) }()
+	select {
+	case <-ssu2.ensureStarted:
+		t.Fatal("degraded SSU2 session triggered an SSU2 re-dial")
+	case <-ntcp2.ensureStarted:
+	}
+	ntcp2.ensureRelease <- nil
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !mux.SessionViable(peer) {
+		t.Fatal("mux reported no viable session after the NTCP2 dial")
+	}
+}
+
+func TestTransportMuxSessionViableSkipsDegradedSession(t *testing.T) {
+	ntcp2 := newMuxSessionTransport()
+	ssu2 := &muxViableCountedTransport{muxCountedSessionTransport: &muxCountedSessionTransport{muxSessionTransport: newMuxSessionTransport()}}
+	mux, err := NewTransportMux(TransportMuxConfig{
+		Database: controlplanenetdb.NewDatabase(foundation.Hash{}, 8),
+		NTCP2:    ntcp2, SSU2: ssu2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := foundation.Hash{1}
+	ssu2.session = true
+	if mux.SessionViable(peer) {
+		t.Fatal("degraded SSU2 session counted as a viable connection")
+	}
+	ssu2.viable = true
+	if !mux.SessionViable(peer) {
+		t.Fatal("viable SSU2 session was not reported")
+	}
+}
+
 func TestTransportMuxSelectsPreferredSSU2BidBelowMinimum(t *testing.T) {
 	database, peer := muxTestPeer(t, true, true)
 	ntcp2 := newMuxSessionTransport()

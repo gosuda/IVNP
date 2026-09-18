@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -50,6 +51,7 @@ var (
 
 const (
 	daemonHealthProbeTimeoutMillis            = uint64(time.Minute / time.Millisecond)
+	daemonHealthFailureThreshold              = 2
 	daemonNetDBLookupTimeoutMillis            = uint64((30 * time.Second) / time.Millisecond)
 	daemonDestinationNetDBLookupTimeoutMillis = uint64((2 * time.Minute) / time.Millisecond)
 	daemonNetDBLookupCandidates               = 32
@@ -58,6 +60,16 @@ const (
 	daemonNetDBExplorationSteadyDelay         = 5 * time.Second
 	daemonMaxDestinations                     = 256
 )
+
+func healthProbeTimeout(cfg state.ConfigurationOperating) uint64 {
+	timeout := uint64(cfg.Tunnel.ProbeTimeout / time.Millisecond)
+	return cmp.Or(timeout, daemonHealthProbeTimeoutMillis)
+}
+
+func healthProbeFailureThreshold(cfg state.ConfigurationOperating) uint8 {
+	threshold := min(max(cmp.Or(cfg.Tunnel.ProbeFailureThreshold, daemonHealthFailureThreshold), 1), math.MaxUint8)
+	return uint8(threshold)
+}
 
 func daemonReplyKeyCapacity(buildPending, maxDestinations int) int {
 	maxInt := int(^uint(0) >> 1)
@@ -178,6 +190,10 @@ type destinationRuntime struct {
 	maintenanceQueued       atomic.Bool
 	tunnelMaintenanceDirty  atomic.Bool
 	tunnelMaintenanceQueued atomic.Bool
+	publishQueued           atomic.Bool
+	publishMu               sync.Mutex
+	publishNext             time.Time
+	publishTimer            *time.Timer
 	changeMu                sync.Mutex
 	changed                 chan struct{}
 	requestPath             destinationRequestPath
@@ -191,6 +207,12 @@ func (r *destinationRuntime) release() {
 		r.maintenanceMu.Lock()
 		r.released.Store(true)
 		r.notifyChanged()
+		r.publishMu.Lock()
+		if r.publishTimer != nil {
+			r.publishTimer.Stop()
+			r.publishTimer = nil
+		}
+		r.publishMu.Unlock()
 		// Cancel and join every destination-owned control-plane owner before
 		// removing its reply handlers. Late authenticated replies then observe
 		// a closed owner rather than stranded pending state.
@@ -360,7 +382,9 @@ type Controller struct {
 	publicationWake        chan struct{}
 	destinationWake        chan *destinationRuntime
 	destinationTunnelWake  chan *destinationRuntime
+	destinationPublishWake chan *destinationRuntime
 	bootstrapPoolsStarted  atomic.Bool
+	publishDebounce        time.Duration
 	tunnelWake             chan struct{}
 	netdbSaveWake          chan struct{}
 	startReady             chan struct{}
@@ -1013,7 +1037,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 		health, err = tunnel.NewHealth(tunnel.HealthConfig{
 			Runtime: tunnels, Pool: pool, Maintainer: maintainer, Profiles: profiles, Now: now,
-			Timeout: daemonHealthProbeTimeoutMillis, MaxPending: cfg.Tunnel.BuildPendingCapacity, FailureThreshold: 2,
+			Timeout: healthProbeTimeout(cfg), MaxPending: cfg.Tunnel.BuildPendingCapacity, FailureThreshold: healthProbeFailureThreshold(cfg),
 		})
 		if err != nil {
 			return nil, err
@@ -1169,6 +1193,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		startReady:             make(chan struct{}),
 		destinationWake:        make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
 		destinationTunnelWake:  make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
+		destinationPublishWake: make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
 		tunnelWake:             make(chan struct{}, 1),
 		netdbSaveWake:          make(chan struct{}, 1),
 	}
@@ -1177,6 +1202,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	}
 	if destinationFactory != nil {
 		destinationFactory.requestTunnelMaintenance = func(runtime *destinationRuntime) {
+			d.requestDestinationPublication(runtime)
 			d.requestDestinationTunnelMaintenance(runtime)
 			d.requestExploratoryMaintenance()
 		}
@@ -1489,6 +1515,10 @@ func (d *Controller) destinationMaintenanceLoop() {
 			if runtime != nil {
 				d.maintainDestinationTunnels(runtime)
 			}
+		case runtime := <-d.destinationPublishWake:
+			if runtime != nil {
+				d.maintainDestinationPublication(runtime)
+			}
 		}
 	}
 }
@@ -1573,6 +1603,63 @@ func (d *Controller) maintainTunnelHealth(now uint64) {
 	if _, err := d.tunnelHealth.Probe(d.ctx, pair, foundation.Hash{}); err != nil && !errors.Is(err, tunnel.ErrProbePending) && !errors.Is(err, tunnel.ErrProbeNotReady) && d.ctx.Err() == nil {
 		d.recordMaintenanceError(err)
 	}
+}
+
+// destinationPublishDebounce spaces LeaseSet publication evaluations during
+// rapid inbound lease churn. The first change publishes on the leading edge;
+// further changes inside the window coalesce into one trailing evaluation.
+// Tests may shorten it via Controller.publishDebounce.
+const destinationPublishDebounce = 2500 * time.Millisecond
+
+// requestDestinationPublication wakes the publisher when tunnel state events
+// (build completions installing inbound leases) may have changed the published
+// snapshot. The publisher itself gates on the changed-snapshot check, so
+// events that did not alter inbound leases cost one cheap evaluation.
+func (d *Controller) requestDestinationPublication(runtime *destinationRuntime) {
+	if d == nil || runtime == nil || !runtime.active() || d.destinationPublishWake == nil {
+		return
+	}
+	debounce := cmp.Or(d.publishDebounce, destinationPublishDebounce)
+	runtime.publishMu.Lock()
+	now := time.Now()
+	if !now.Before(runtime.publishNext) {
+		runtime.publishNext = now.Add(debounce)
+		runtime.publishMu.Unlock()
+		d.enqueueDestinationPublication(runtime)
+		return
+	}
+	if runtime.publishTimer == nil {
+		runtime.publishTimer = time.AfterFunc(runtime.publishNext.Sub(now), func() {
+			runtime.publishMu.Lock()
+			runtime.publishTimer = nil
+			runtime.publishNext = time.Now().Add(debounce)
+			runtime.publishMu.Unlock()
+			d.enqueueDestinationPublication(runtime)
+		})
+	}
+	runtime.publishMu.Unlock()
+}
+
+func (d *Controller) enqueueDestinationPublication(runtime *destinationRuntime) {
+	if !runtime.publishQueued.CompareAndSwap(destinationMaintenanceIdle, destinationMaintenanceQueued) {
+		return
+	}
+	select {
+	case d.destinationPublishWake <- runtime:
+	case <-d.ctx.Done():
+		runtime.publishQueued.Store(destinationMaintenanceIdle)
+	}
+}
+
+func (d *Controller) maintainDestinationPublication(runtime *destinationRuntime) {
+	defer runtime.publishQueued.Store(destinationMaintenanceIdle)
+	if !runtime.active() || runtime.publisher == nil {
+		return
+	}
+	publicationContext, cancel := context.WithTimeout(d.ctx, 30*time.Second)
+	_, err := runtime.publisher.Maintain(publicationContext)
+	cancel()
+	d.recordMaintenanceError(err)
 }
 
 func (d *Controller) requestDestinationTunnelMaintenance(runtime *destinationRuntime) {
@@ -2606,6 +2693,9 @@ func transportPeerEligibility(sender dataplane.TunnelSender) func(foundation.Has
 }
 
 func transportPeerConnection(sender dataplane.TunnelSender) func(foundation.Hash) bool {
+	if sessions, ok := sender.(interface{ SessionViable(foundation.Hash) bool }); ok {
+		return sessions.SessionViable
+	}
 	if sessions, ok := sender.(interface{ HasSession(foundation.Hash) bool }); ok {
 		return sessions.HasSession
 	}
