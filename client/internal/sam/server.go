@@ -14,6 +14,7 @@ import (
 
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/observability"
 )
@@ -64,7 +65,7 @@ type ServerConfig struct {
 // Server serves inbound SAM while Network remains the external SAM client.
 type Server struct {
 	config       ServerConfig
-	mu           sync.RWMutex
+	mu           durable.RWMutex
 	sessions     map[string]*samSession
 	destinations map[foundation.Hash]*samSession
 	listener     net.Listener

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -29,6 +30,7 @@ import (
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/observability"
@@ -49,6 +51,7 @@ var (
 
 const (
 	daemonHealthProbeTimeoutMillis            = uint64(time.Minute / time.Millisecond)
+	daemonHealthFailureThreshold              = 2
 	daemonNetDBLookupTimeoutMillis            = uint64((30 * time.Second) / time.Millisecond)
 	daemonDestinationNetDBLookupTimeoutMillis = uint64((2 * time.Minute) / time.Millisecond)
 	daemonNetDBLookupCandidates               = 32
@@ -57,6 +60,16 @@ const (
 	daemonNetDBExplorationSteadyDelay         = 5 * time.Second
 	daemonMaxDestinations                     = 256
 )
+
+func healthProbeTimeout(cfg state.ConfigurationOperating) uint64 {
+	timeout := uint64(cfg.Tunnel.ProbeTimeout / time.Millisecond)
+	return cmp.Or(timeout, daemonHealthProbeTimeoutMillis)
+}
+
+func healthProbeFailureThreshold(cfg state.ConfigurationOperating) uint8 {
+	threshold := min(max(cmp.Or(cfg.Tunnel.ProbeFailureThreshold, daemonHealthFailureThreshold), 1), math.MaxUint8)
+	return uint8(threshold)
+}
 
 func daemonReplyKeyCapacity(buildPending, maxDestinations int) int {
 	maxInt := int(^uint(0) >> 1)
@@ -170,13 +183,17 @@ type destinationRuntime struct {
 	session                 *dataplane.RouterDestinationSession
 	unregister              []func()
 	once                    sync.Once
-	maintenanceMu           sync.Mutex
+	maintenanceMu           durable.Mutex
 	released                atomic.Bool
 	onRelease               func(*destinationRuntime)
 	now                     func() uint64
 	maintenanceQueued       atomic.Bool
 	tunnelMaintenanceDirty  atomic.Bool
 	tunnelMaintenanceQueued atomic.Bool
+	publishQueued           atomic.Bool
+	publishMu               sync.Mutex
+	publishNext             time.Time
+	publishTimer            *time.Timer
 	changeMu                sync.Mutex
 	changed                 chan struct{}
 	requestPath             destinationRequestPath
@@ -190,6 +207,12 @@ func (r *destinationRuntime) release() {
 		r.maintenanceMu.Lock()
 		r.released.Store(true)
 		r.notifyChanged()
+		r.publishMu.Lock()
+		if r.publishTimer != nil {
+			r.publishTimer.Stop()
+			r.publishTimer = nil
+		}
+		r.publishMu.Unlock()
 		// Cancel and join every destination-owned control-plane owner before
 		// removing its reply handlers. Late authenticated replies then observe
 		// a closed owner rather than stranded pending state.
@@ -352,14 +375,16 @@ type Controller struct {
 	requestHandlers        *destinationRequestRegistry
 	destinationPublishers  *destinationPublisherRegistry
 	clientRuntimes         []*destinationRuntime
-	clientRuntimesMu       sync.RWMutex
+	clientRuntimesMu       durable.RWMutex
 	destinationMu          sync.Mutex
 	maintenanceDone        chan struct{}
 	explorationDone        chan struct{}
 	publicationWake        chan struct{}
 	destinationWake        chan *destinationRuntime
 	destinationTunnelWake  chan *destinationRuntime
+	destinationPublishWake chan *destinationRuntime
 	bootstrapPoolsStarted  atomic.Bool
+	publishDebounce        time.Duration
 	tunnelWake             chan struct{}
 	netdbSaveWake          chan struct{}
 	startReady             chan struct{}
@@ -712,6 +737,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		NoTransit:                   !cfg.Router.Transit,
 		BandwidthRateBytesPerSecond: cfg.Tunnel.BandwidthRateBytesPerSecond, Metrics: registry,
 		RouterVersion: cfg.Router.Version,
+		Reachability:  advertisedReachability(cfg),
 		Options:       routerFamilyOption(cfg.Router.Family),
 	})
 	if err != nil {
@@ -826,26 +852,6 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	publicationTokens := netdb.NewPublicationTokenRegistry(now, randomNonZeroID)
 	var lookupResponder *netdb.LookupResponder
 	var storeFlooder *netdb.StoreFlooder
-	if cfg.Router.Floodfill {
-		lookupResponder, err = netdb.NewLookupResponder(netdb.LookupResponderConfig{
-			Database: database,
-			Sender:   daemonReplySender{sender: mux, now: now},
-			Local:    bundle.Router.Hash,
-			Now:      now,
-			Random:   randomNonZeroID,
-			Wrapper:  dataplane.GarlicDatabaseLookupReplyWrapper{MessageID: randomNonZeroID},
-		})
-		if err != nil {
-			return nil, err
-		}
-		storeFlooder, err = netdb.NewStoreFlooder(netdb.StoreFlooderConfig{
-			Database: database, Sender: directStoreFloodSender{sender: mux}, Local: bundle.Router.Hash,
-			Now: now, Random: randomNonZeroID, Logger: logger,
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
 	routerPublisher, err := netdb.NewRouterInfoPublisher(netdb.RouterInfoPublisherConfig{
 		Local: localInfo, Database: database, Sender: muxLeaseSetSender{sender: mux},
 		ReplyPath: daemonReplyRoute{local: bundle.Router.Hash, now: now}, Registry: publicationTokens, Now: now, Random: randomNonZeroID, PreferredTargets: bootstrapPeers,
@@ -954,7 +960,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 	}
 	if cfg.Tunnel.Enabled {
-		tunnels = dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: dataSender, Now: now})
+		tunnels = dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: dataSender, Local: bundle.Router.Hash, Now: now, Logger: logger})
 		pool = tunnel.NewPool(cfg.Tunnel.ExploratoryPoolCapacity)
 		profiles = tunnel.NewPeerProfiles(tunnel.PeerProfilesConfig{})
 		responders = netdb.NewResponderProfiles(netdb.ResponderProfilesConfig{Now: now})
@@ -1031,7 +1037,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 		health, err = tunnel.NewHealth(tunnel.HealthConfig{
 			Runtime: tunnels, Pool: pool, Maintainer: maintainer, Profiles: profiles, Now: now,
-			Timeout: daemonHealthProbeTimeoutMillis, MaxPending: cfg.Tunnel.BuildPendingCapacity,
+			Timeout: healthProbeTimeout(cfg), MaxPending: cfg.Tunnel.BuildPendingCapacity, FailureThreshold: healthProbeFailureThreshold(cfg),
 		})
 		if err != nil {
 			return nil, err
@@ -1105,6 +1111,30 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			clientRuntimes = append(clientRuntimes, clientRuntime)
 		}
 	}
+	if cfg.Router.Floodfill {
+		// Lookup replies are tunnel-routed: the responder needs the same
+		// outbound circuit and pool the DatabaseStoreReply path uses, or every
+		// ReplyThroughTunnel lookup fails with RouterErrDataPlaneConfig.
+		lookupResponder, err = netdb.NewLookupResponder(netdb.LookupResponderConfig{
+			Database: database,
+			Sender:   daemonReplySender{sender: mux, tunnels: tunnels, pool: pool, now: now},
+			Local:    bundle.Router.Hash,
+			Now:      now,
+			Random:   randomNonZeroID,
+			Wrapper:  dataplane.GarlicDatabaseLookupReplyWrapper{MessageID: randomNonZeroID},
+			Logger:   logger,
+		})
+		if err != nil {
+			return nil, err
+		}
+		storeFlooder, err = netdb.NewStoreFlooder(netdb.StoreFlooderConfig{
+			Database: database, Sender: directStoreFloodSender{sender: mux}, Local: bundle.Router.Hash,
+			Now: now, Random: randomNonZeroID, Logger: logger,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 	var tunnelTest router.DeliveryStatusHandler
 	if health != nil {
 		tunnelTest = health
@@ -1163,6 +1193,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		startReady:             make(chan struct{}),
 		destinationWake:        make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
 		destinationTunnelWake:  make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
+		destinationPublishWake: make(chan *destinationRuntime, max(1, cfg.State.MaxDestinations)),
 		tunnelWake:             make(chan struct{}, 1),
 		netdbSaveWake:          make(chan struct{}, 1),
 	}
@@ -1171,6 +1202,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	}
 	if destinationFactory != nil {
 		destinationFactory.requestTunnelMaintenance = func(runtime *destinationRuntime) {
+			d.requestDestinationPublication(runtime)
 			d.requestDestinationTunnelMaintenance(runtime)
 			d.requestExploratoryMaintenance()
 		}
@@ -1197,6 +1229,19 @@ func routerFamilyOption(family string) []router.MappingOption {
 		return nil
 	}
 	return []router.MappingOption{{Key: "family", Value: family}}
+}
+
+// advertisedReachability reports the initial RouterInfo reachability asserted
+// by configuration: an enabled transport with a complete advertised host and
+// port is an operator's claim of public reachability. Unconfigured transports
+// keep the unknown state until NAT mapping or a peer test result reports.
+func advertisedReachability(cfg state.ConfigurationOperating) router.Reachability {
+	for _, transport := range []state.ConfigurationTransport{cfg.NTCP2, cfg.SSU2} {
+		if transport.Enabled && transport.Advertised.Host != "" && transport.Advertised.Port != 0 {
+			return router.ReachabilityReachable
+		}
+	}
+	return router.ReachabilityUnknown
 }
 
 func transportEndpoint(transport state.ConfigurationTransport, network string) dataplane.RouterEndpoint {
@@ -1470,6 +1515,10 @@ func (d *Controller) destinationMaintenanceLoop() {
 			if runtime != nil {
 				d.maintainDestinationTunnels(runtime)
 			}
+		case runtime := <-d.destinationPublishWake:
+			if runtime != nil {
+				d.maintainDestinationPublication(runtime)
+			}
 		}
 	}
 }
@@ -1554,6 +1603,63 @@ func (d *Controller) maintainTunnelHealth(now uint64) {
 	if _, err := d.tunnelHealth.Probe(d.ctx, pair, foundation.Hash{}); err != nil && !errors.Is(err, tunnel.ErrProbePending) && !errors.Is(err, tunnel.ErrProbeNotReady) && d.ctx.Err() == nil {
 		d.recordMaintenanceError(err)
 	}
+}
+
+// destinationPublishDebounce spaces LeaseSet publication evaluations during
+// rapid inbound lease churn. The first change publishes on the leading edge;
+// further changes inside the window coalesce into one trailing evaluation.
+// Tests may shorten it via Controller.publishDebounce.
+const destinationPublishDebounce = 2500 * time.Millisecond
+
+// requestDestinationPublication wakes the publisher when tunnel state events
+// (build completions installing inbound leases) may have changed the published
+// snapshot. The publisher itself gates on the changed-snapshot check, so
+// events that did not alter inbound leases cost one cheap evaluation.
+func (d *Controller) requestDestinationPublication(runtime *destinationRuntime) {
+	if d == nil || runtime == nil || !runtime.active() || d.destinationPublishWake == nil {
+		return
+	}
+	debounce := cmp.Or(d.publishDebounce, destinationPublishDebounce)
+	runtime.publishMu.Lock()
+	now := time.Now()
+	if !now.Before(runtime.publishNext) {
+		runtime.publishNext = now.Add(debounce)
+		runtime.publishMu.Unlock()
+		d.enqueueDestinationPublication(runtime)
+		return
+	}
+	if runtime.publishTimer == nil {
+		runtime.publishTimer = time.AfterFunc(runtime.publishNext.Sub(now), func() {
+			runtime.publishMu.Lock()
+			runtime.publishTimer = nil
+			runtime.publishNext = time.Now().Add(debounce)
+			runtime.publishMu.Unlock()
+			d.enqueueDestinationPublication(runtime)
+		})
+	}
+	runtime.publishMu.Unlock()
+}
+
+func (d *Controller) enqueueDestinationPublication(runtime *destinationRuntime) {
+	if !runtime.publishQueued.CompareAndSwap(destinationMaintenanceIdle, destinationMaintenanceQueued) {
+		return
+	}
+	select {
+	case d.destinationPublishWake <- runtime:
+	case <-d.ctx.Done():
+		runtime.publishQueued.Store(destinationMaintenanceIdle)
+	}
+}
+
+func (d *Controller) maintainDestinationPublication(runtime *destinationRuntime) {
+	defer runtime.publishQueued.Store(destinationMaintenanceIdle)
+	if !runtime.active() || runtime.publisher == nil {
+		return
+	}
+	publicationContext, cancel := context.WithTimeout(d.ctx, 30*time.Second)
+	_, err := runtime.publisher.Maintain(publicationContext)
+	cancel()
+	d.recordMaintenanceError(err)
 }
 
 func (d *Controller) requestDestinationTunnelMaintenance(runtime *destinationRuntime) {
@@ -2587,6 +2693,9 @@ func transportPeerEligibility(sender dataplane.TunnelSender) func(foundation.Has
 }
 
 func transportPeerConnection(sender dataplane.TunnelSender) func(foundation.Hash) bool {
+	if sessions, ok := sender.(interface{ SessionViable(foundation.Hash) bool }); ok {
+		return sessions.SessionViable
+	}
 	if sessions, ok := sender.(interface{ HasSession(foundation.Hash) bool }); ok {
 		return sessions.HasSession
 	}

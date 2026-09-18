@@ -89,7 +89,7 @@ func TestNTCP2IdleTimeoutRetiresSessionAndUnblocksIO(t *testing.T) {
 		}
 		session := dataplanentcp2.NewSession(manager.establishedConn(left), newDirection(), newDirection())
 		peer := foundation.Hash{1}
-		if !manager.install(peer, session) {
+		if !manager.install(peer, session, true) {
 			t.Fatal("session installation failed")
 		}
 		writeDone := make(chan error, 1)

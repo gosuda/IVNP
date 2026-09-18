@@ -25,6 +25,7 @@ import (
 
 	dataplanessu2 "gosuda.org/ivnp/dataplane/internal/transport/ssu2"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/observability"
@@ -63,14 +64,29 @@ const (
 	ssu2ReceiveBatchCount = 4
 	ssu2ReceiveBatchSize  = 32
 	ssu2DispatchQueueSize = 64
-	ssu2EgressSlots       = 32
-	ssu2ACKDelay          = time.Millisecond
-	ssu2MaxNewTokens      = 1024
-	ssu2RelayTarget       = 3
-	ssu2RelayPublishMin   = 100 * time.Millisecond
-	ssu2RelayPublishMax   = 30 * time.Second
-	ssu2ACKIdle           = false
-	ssu2ACKPending        = true
+	// ssu2DispatchStall bounds the backpressure an authenticated receive worker
+	// applies when the dispatch shard is full. It must exceed the receiver's
+	// ACK cadence so bursts stay reliable, while staying short enough that a
+	// wedged dispatch stage cannot starve inbound ACK handling for long.
+	ssu2DispatchStall = 4 * time.Second
+	// ssu2SendStall bounds one wait for congestion capacity. The wait holds the
+	// session's send serialization, so an unresponsive peer must fail the send
+	// — not every other sender queued behind it — once no capacity signal
+	// arrives within a retransmit interval.
+	ssu2SendStall = ssu2RetransmitInterval
+	// ssu2SessionDegradedCooldown is how long a send-capacity stall marks the
+	// session degraded for transport selection. A stall means in-flight bytes
+	// stayed unacknowledged beyond one bound, so callers should prefer an
+	// alternate transport until sends prove capacity again.
+	ssu2SessionDegradedCooldown = 2 * ssu2DispatchStall
+	ssu2EgressSlots             = 32
+	ssu2ACKDelay                = time.Millisecond
+	ssu2MaxNewTokens            = 1024
+	ssu2RelayTarget             = 3
+	ssu2RelayPublishMin         = 100 * time.Millisecond
+	ssu2RelayPublishMax         = 30 * time.Second
+	ssu2ACKIdle                 = false
+	ssu2ACKPending              = true
 )
 
 var (
@@ -78,6 +94,13 @@ var (
 	ErrSSU2Peer          = errors.New("router: invalid SSU2 peer RouterInfo")
 	ErrSSU2Session       = errors.New("router: SSU2 session unavailable")
 	ErrSSU2Introduction  = errors.New("router: SSU2 introduction unavailable")
+	// ErrSSU2DispatchSaturated reports an I2NP batch dropped because every
+	// dispatch queue was full; the datagram layer remains lossy under overload.
+	ErrSSU2DispatchSaturated = errors.New("router: SSU2 dispatch queue saturated")
+	// ErrSSU2SendStalled reports an I2NP send dropped after the congestion
+	// window produced no capacity for a full stall bound. Nothing was written,
+	// so callers may retry or reroute exactly as after a failed setup.
+	ErrSSU2SendStalled = errors.New("router: SSU2 send capacity stalled")
 )
 
 // PeerTestOutcome is the protocol result for one address family. Symmetric
@@ -158,9 +181,9 @@ type SSU2Manager struct {
 	publishPeerTestResult func(context.Context, PeerTestResult)
 	signControl           func([]byte) ([]byte, error)
 	introductionEndpoint  func() (netip.AddrPort, error)
-	mu                    sync.RWMutex
+	mu                    durable.RWMutex
 	started               bool
-	conn                  *net.UDPConn
+	conn                  UDPSocket
 	ipv6Available         atomic.Bool
 	batchConn             ssu2BatchConnection
 	bindings              TransportBindings
@@ -171,7 +194,7 @@ type SSU2Manager struct {
 	close                 sync.Once
 	wg                    sync.WaitGroup
 	setupSlots            chan struct{}
-	egressMu              sync.RWMutex
+	egressMu              durable.RWMutex
 
 	receiveFree chan *ssu2ReceiveBatch
 	authQueue   chan ssu2ReceiveJob
@@ -192,10 +215,14 @@ type SSU2Manager struct {
 	ackQueue           chan *ssu2TransportSession
 	egressFree         chan *ssu2EgressSlot
 	egressQueue        chan *ssu2EgressSlot
-	ioStats            ssu2IOStats
-	metrics            *observability.Registry
-	logger             *slog.Logger
-	kernelDrops        atomic.Uint64
+	// egressDrained, guarded by egressMu, is set once failQueuedEgress runs.
+	// Enqueues holding the read lock check it so a slot can never land in
+	// the queue after the final drain, where no sender would report done.
+	egressDrained bool
+	ioStats       ssu2IOStats
+	metrics       *observability.Registry
+	logger        *slog.Logger
+	kernelDrops   atomic.Uint64
 
 	sessionsByPeer      map[foundation.Hash]*ssu2TransportSession
 	sessionsByID        map[uint64]*ssu2TransportSession
@@ -217,7 +244,7 @@ type SSU2Manager struct {
 	relayForwards       map[uint32]ssu2RelayForward
 	deferredRelayIntros map[uint32]ssu2DeferredRelayIntro
 	relayStoreJobs      chan ssu2RelayStoreJob
-	routerInfoStoresMu  sync.RWMutex
+	routerInfoStoresMu  durable.RWMutex
 	routerInfoStores    map[foundation.Hash]ssu2RouterInfoStoreSnapshot
 	reporter            ingress.Reporter
 	admitPeer           PeerAdmissionFunc
@@ -271,19 +298,41 @@ type ssu2DispatchItem struct {
 	message foundation.I2NPMessage
 }
 
-// ssu2DispatchBatch is leased to one authenticated receive batch until every
-// borrowed I2NP view has been delivered synchronously.  Its fixed storage keeps
-// the receive path allocation-free and makes buffer ownership explicit.
+// ssu2DispatchBatch is leased to one authenticated receive packet. Borrowed
+// I2NP payload views are copied into arena at append time so the batch is
+// self-owned and receive workers never wait on delivery. Its fixed storage
+// keeps the receive path allocation-free and makes buffer ownership explicit.
 type ssu2DispatchBatch struct {
-	items [ssu2ReceiveBatchSize * 8]ssu2DispatchItem
-	count uint8
-	done  chan error
+	items     [ssu2ReceiveBatchSize * 8]ssu2DispatchItem
+	count     uint8
+	done      chan error
+	arena     [dataplanessu2.MaxIPv4PacketLen]byte
+	arenaUsed int
 }
 
 var directDispatchBatchPool = sync.Pool{
 	New: func() any {
 		return &ssu2DispatchBatch{done: make(chan error, 1)}
 	},
+}
+
+// reportDone records the dispatch result for synchronous test seams. The
+// receive path no longer waits on done, so the send must never park the
+// dispatch worker on a recycled batch whose buffer still holds a prior result.
+func (batch *ssu2DispatchBatch) reportDone(err error) {
+	select {
+	case batch.done <- err:
+	default:
+	}
+}
+
+// drainDone discards a stale result so a pooled batch starts with an empty
+// completion buffer.
+func (batch *ssu2DispatchBatch) drainDone() {
+	select {
+	case <-batch.done:
+	default:
+	}
 }
 
 type ssu2EgressSlot struct {
@@ -353,11 +402,12 @@ type ssu2TransportSession struct {
 	peer       foundation.Hash
 	sendID     uint64
 	receiveID  uint64
-	remoteMu   sync.RWMutex
+	inbound    bool
+	remoteMu   durable.RWMutex
 	remote     net.Addr
 	send       *dataplanessu2.DataCipher
 	receive    *dataplanessu2.DataCipher
-	lifetimeMu sync.RWMutex
+	lifetimeMu durable.RWMutex
 
 	sendMu                sync.Mutex
 	packetMu              ssu2SendMutex
@@ -379,6 +429,7 @@ type ssu2TransportSession struct {
 	rtt                   time.Duration
 	rttDeviation          time.Duration
 	lastCongestion        time.Time
+	degradedUntil         time.Time
 	sendCapacityAvailable chan struct{}
 	largeMTU              int
 	mtu                   atomic.Int32
@@ -1145,6 +1196,27 @@ func (m *SSU2Manager) HasSession(peer foundation.Hash) bool {
 	return m.sessionForSend(peer) != nil
 }
 
+// SessionViable reports whether the authenticated session can currently send:
+// it exists, is not closing, and has not exhausted a congestion-capacity wait
+// within the degradation cooldown. A stalled session still exists for
+// retransmission bookkeeping but must not suppress establishing an alternate
+// transport.
+func (m *SSU2Manager) SessionViable(peer foundation.Hash) bool {
+	if m == nil {
+		return false
+	}
+	session := m.sessionForSend(peer)
+	if session == nil {
+		return false
+	}
+	session.sendMu.Lock()
+	defer session.sendMu.Unlock()
+	if session.closing || session.send == nil {
+		return false
+	}
+	return !m.now().Before(session.degradedUntil)
+}
+
 func (m *SSU2Manager) ActiveSessionCount() int {
 	if m == nil {
 		return 0
@@ -1214,7 +1286,7 @@ func (m *SSU2Manager) Send(ctx context.Context, peer foundation.Hash, message fo
 	if session == nil {
 		return ErrSessionUnavailable
 	}
-	return (ssu2SessionSender{manager: m, session: session}).send(ctx, message, false)
+	return (ssu2SessionSender{manager: m, session: session}).send(ctx, message, true)
 }
 
 // SendPeerTest sends an authenticated out-of-session phase-5, -6, or -7 Peer
@@ -2037,6 +2109,9 @@ func (m *SSU2Manager) enqueueReceivedPacket(received *ssu2ReceiveBatch, index in
 		if m.metrics != nil {
 			m.metrics.AddSSU2ReceiveQueueDrops(1)
 		}
+		if m.logger != nil {
+			m.logger.Debug("ssu2 receive queue full, dropping datagram", "remote", packet.Addr)
+		}
 		m.receiveComplete(received)
 	}
 }
@@ -2123,55 +2198,56 @@ func (m *SSU2Manager) retransmitOne(session *ssu2TransportSession, now time.Time
 	session.packetMu.Lock()
 	defer session.packetMu.Unlock()
 
-	session.sendMu.Lock()
-	var target *ssu2SentPacket
-	for _, sent := range session.sent {
-		if sent.latestPacket == 0 {
-			continue
+	for {
+		session.sendMu.Lock()
+		var target *ssu2SentPacket
+		for number, sent := range session.sent {
+			if sent.latestPacket == 0 || number != sent.latestPacket {
+				continue
+			}
+			if sent.sentAt.IsZero() || now.Sub(sent.sentAt) >= session.rto {
+				target = sent
+				break
+			}
 		}
-		if sent.sentAt.IsZero() || now.Sub(sent.sentAt) >= session.rto {
-			target = sent
-			break
+		if target == nil {
+			session.sendMu.Unlock()
+			return false
 		}
-	}
-	if target == nil {
+		if target.attempts >= ssu2MaxRetransmits {
+			session.sendMu.Unlock()
+			return true
+		}
+		if session.closing || session.send == nil {
+			session.sendMu.Unlock()
+			return false
+		}
+		packetNumber := session.nextPacket
+		if packetNumber == 0 {
+			session.sendMu.Unlock()
+			return true
+		}
+		session.noteCongestionLocked(now, target)
+		packet, err := session.send.SealDataTo(session.sendPacket[:], ssu2DataHeader(session.sendID, packetNumber, session.shouldRequestImmediateACKLocked()), target.payload)
+		if err != nil {
+			session.sendMu.Unlock()
+			return false
+		}
+		session.nextPacket++
+		target.sentAt = now
+		target.attempts++
+		target.latestPacket = packetNumber
+		target.nacks = 0
+		target.fast = false
+		session.sent[packetNumber] = target
+		remote := session.remoteAddr()
 		session.sendMu.Unlock()
-		return false
-	}
-	if target.attempts >= ssu2MaxRetransmits {
-		session.sendMu.Unlock()
-		return true
-	}
-	if session.closing || session.send == nil {
-		session.sendMu.Unlock()
-		return false
-	}
-	packetNumber := session.nextPacket
-	if packetNumber == 0 {
-		session.sendMu.Unlock()
-		return true
-	}
-	session.noteCongestionLocked(now, target)
-	packet, err := session.send.SealDataTo(session.sendPacket[:], ssu2DataHeader(session.sendID, packetNumber, session.shouldRequestImmediateACKLocked()), target.payload)
-	if err != nil {
-		session.sendMu.Unlock()
-		return false
-	}
-	session.nextPacket++
-	target.sentAt = now
-	target.attempts++
-	target.latestPacket = packetNumber
-	target.nacks = 0
-	target.fast = false
-	session.sent[packetNumber] = target
-	remote := session.remoteAddr()
-	session.sendMu.Unlock()
 
-	if m.writeTo(packet, remote) != nil {
-		return true
+		if m.writeTo(packet, remote) != nil {
+			return true
+		}
+		session.touch(now)
 	}
-	session.touch(now)
-	return false
 }
 
 func (m *SSU2Manager) handlePacket(packet []byte, remote netip.AddrPort) {
@@ -2198,6 +2274,9 @@ func (m *SSU2Manager) handlePacket(packet []byte, remote netip.AddrPort) {
 		if known {
 			m.handleSessionPacket(packet, remote)
 			return
+		}
+		if m.logger != nil {
+			m.logger.Debug("ssu2 drop unknown destination", "dest", destinationID, "remote", remote.String())
 		}
 	}
 	header, payload, err := dataplanessu2.ParseOutOfSession(packet, m.introKey, m.networkID)
@@ -2855,7 +2934,12 @@ func (m *SSU2Manager) sendSessionConfirmed(pending *ssu2OutboundPending) {
 		}
 	}
 	m.mu.Lock()
-	if m.outbound[pending.peer] != pending || !m.installSessionLocked(session) {
+	var displaced *ssu2TransportSession
+	ok := m.outbound[pending.peer] == pending
+	if ok {
+		displaced, ok = m.installSessionLocked(session)
+	}
+	if !ok {
 		m.mu.Unlock()
 		m.markOutboundFailed(pending, ErrSSU2Session)
 		return
@@ -2863,6 +2947,9 @@ func (m *SSU2Manager) sendSessionConfirmed(pending *ssu2OutboundPending) {
 	m.finishOutboundLocked(pending, nil)
 	sessionCount := len(m.sessionsByPeer)
 	m.mu.Unlock()
+	if displaced != nil {
+		displaced.ReleaseSensitive()
+	}
 	installed = true
 	if m.metrics != nil {
 		m.metrics.IncTransportConnections()
@@ -3028,6 +3115,7 @@ func (m *SSU2Manager) processSessionConfirmedLocked(packet []byte, pending *ssu2
 		peer:         peer.Hash(),
 		sendID:       pending.sendID,
 		receiveID:    destinationID,
+		inbound:      true,
 		remote:       cloneUDPAddress(remoteAddr),
 		send:         send,
 		receive:      receive,
@@ -3037,7 +3125,12 @@ func (m *SSU2Manager) processSessionConfirmedLocked(packet []byte, pending *ssu2
 	}
 	session.initReliability(m.ssu2LargeMTU(remoteAddr, ssu2AdvertisedMTU(peer, remoteAddr)))
 	m.mu.Lock()
-	if m.inbound[destinationID] != pending || !m.installSessionLocked(session) {
+	var displaced *ssu2TransportSession
+	ok := m.inbound[destinationID] == pending
+	if ok {
+		displaced, ok = m.installSessionLocked(session)
+	}
+	if !ok {
 		m.mu.Unlock()
 		m.removeInboundHeld(destinationID, pending)
 		session.ReleaseSensitive()
@@ -3045,6 +3138,9 @@ func (m *SSU2Manager) processSessionConfirmedLocked(packet []byte, pending *ssu2
 	}
 	delete(m.inbound, destinationID)
 	m.mu.Unlock()
+	if displaced != nil {
+		displaced.ReleaseSensitive()
+	}
 	if pending.timer != nil {
 		pending.timer.Stop()
 	}
@@ -3072,6 +3168,9 @@ func (m *SSU2Manager) removeSession(session *ssu2TransportSession) {
 	m.mu.Lock()
 	m.removeSessionLocked(session)
 	m.mu.Unlock()
+	if m.logger != nil {
+		m.logger.Debug("ssu2 session removed", "peer", routerHashDiagnostic(session.peer), "receive_id", session.receiveID)
+	}
 	session.ReleaseSensitive()
 }
 
@@ -3118,6 +3217,9 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 	}
 	if !session.received.ObserveNew(header.PacketNumber) {
 		session.receiveMu.Unlock()
+		// A retransmitted number still earns an ACK: the first ACK may have
+		// been lost, and the cumulative range already covers it.
+		m.queueACK(session)
 		return
 	}
 	session.receiveMu.Unlock()
@@ -3125,6 +3227,9 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 		expected, expectedOK := addrPortKey(session.remoteAddr())
 		canonicalRemote := netip.AddrPortFrom(remote.Addr().Unmap(), remote.Port())
 		if !expectedOK || expected != canonicalRemote {
+			if m.logger != nil {
+				m.logger.Debug("ssu2 session packet from unexpected remote", "peer", routerHashDiagnostic(session.peer), "expected", expected, "got", canonicalRemote)
+			}
 			m.handleCandidatePath(session, payload, net.UDPAddrFromAddrPort(canonicalRemote))
 			return
 		}
@@ -3162,7 +3267,7 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 			if err != nil {
 				return
 			}
-			dispatch, err = m.appendDispatchI2NP(dispatch, session.peer, message)
+			dispatch, err = m.appendDispatchI2NP(dispatch, session.peer, message, true)
 			if err != nil {
 				return
 			}
@@ -3180,7 +3285,7 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 				return
 			}
 			if complete {
-				dispatch, err = m.appendDispatchI2NP(dispatch, session.peer, message)
+				dispatch, err = m.appendDispatchI2NP(dispatch, session.peer, message, false)
 				if err != nil {
 					return
 				}
@@ -3244,20 +3349,18 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 			ackEliciting = true
 		}
 	}
-	if dispatch != nil {
-		if m.dispatchI2NPBatch(dispatch) != nil {
-			return
-		}
-		dispatch = nil
+	if ackEliciting {
+		m.queueACK(session)
 	}
 	if terminated {
 		lifetimeHeld = false
 		session.lifetimeMu.RUnlock()
 		m.removeSession(session)
-		return
 	}
-	if ackEliciting {
-		m.queueACK(session)
+	if dispatch != nil {
+		batch := dispatch
+		dispatch = nil
+		_ = m.dispatchI2NPBatch(batch)
 	}
 }
 
@@ -3340,7 +3443,7 @@ func (m *SSU2Manager) sendSessionDataTo(session *ssu2TransportSession, remote ne
 	defer session.packetMu.Unlock()
 
 	session.sendMu.Lock()
-	if session.closing || !m.sessionActive(session) || session.nextPacket == 0 || session.send == nil {
+	if session.closing || !m.sessionLive(session) || session.nextPacket == 0 || session.send == nil {
 		session.sendMu.Unlock()
 		return ErrSSU2Session
 	}
@@ -3425,7 +3528,9 @@ func (m *SSU2Manager) ackLoop() {
 		}
 		for _, session := range pending {
 			session.ackQueued.Store(ssu2ACKIdle)
-			_ = m.sendACK(session)
+			if err := m.sendACK(session); err != nil && m.logger != nil {
+				m.logger.Debug("ssu2 ack send failed", "peer", routerHashDiagnostic(session.peer), "error", err)
+			}
 		}
 		clear(pending)
 		pending = pending[:0]
@@ -3492,7 +3597,11 @@ func (m *SSU2Manager) sendSessionDataContext(ctx context.Context, session *ssu2T
 	)
 	for {
 		session.sendMu.Lock()
-		if session.closing || !m.sessionActive(session) || session.send == nil {
+		live := m.sessionLive(session)
+		if session.closing || !live || session.send == nil {
+			if m.logger != nil {
+				m.logger.Debug("ssu2 send rejected", "peer", routerHashDiagnostic(session.peer), "closing", session.closing, "live", live, "send_nil", session.send == nil)
+			}
 			session.sendMu.Unlock()
 			return ErrSSU2Session
 		}
@@ -3508,15 +3617,36 @@ func (m *SSU2Manager) sendSessionDataContext(ctx context.Context, session *ssu2T
 				windowBytes = packetSize
 				session.sendWindowRemaining -= windowBytes
 			}
+			session.degradedUntil = time.Time{}
 			session.sendMu.Unlock()
 			break
 		}
 		available := session.sendCapacityAvailable
+		remaining, tracked, window := session.sendWindowRemaining, len(session.sent), session.sendWindowBytes
+		sessionRTO := session.rto
 		session.sendMu.Unlock()
+		if m.logger != nil {
+			m.logger.Debug("ssu2 send waits for capacity", "peer", session.peer, "remaining", remaining, "packet", packetSize, "tracked", tracked, "window", window)
+		}
+		stallDuration := max(ssu2SendStall, sessionRTO+50*time.Millisecond)
+		if stallDuration > ssu2DispatchStall {
+			stallDuration = ssu2DispatchStall
+		}
+		stall := time.NewTimer(stallDuration)
 		select {
 		case <-ctx.Done():
+			stall.Stop()
 			return ctx.Err()
+		case <-m.contextDone():
+			stall.Stop()
+			return ErrSSU2Session
 		case <-available:
+			stall.Stop()
+		case <-stall.C:
+			session.sendMu.Lock()
+			session.degradedUntil = m.now().Add(ssu2SessionDegradedCooldown)
+			session.sendMu.Unlock()
+			return ErrSSU2SendStalled
 		}
 	}
 
@@ -3537,7 +3667,7 @@ func (m *SSU2Manager) sendSessionDataContext(ctx context.Context, session *ssu2T
 		session.sendMu.Unlock()
 		return err
 	}
-	if session.closing || !m.sessionActive(session) || session.send == nil {
+	if session.closing || !m.sessionLive(session) || session.send == nil {
 		session.releaseSendReservationLocked(retained, windowBytes)
 		session.sendMu.Unlock()
 		return ErrSSU2Session
@@ -3630,6 +3760,17 @@ func (m *SSU2Manager) sessionActive(session *ssu2TransportSession) bool {
 	active := m.runningLocked() && m.sessionsByID[session.receiveID] == session && m.sessionsByPeer[session.peer] == session
 	m.mu.RUnlock()
 	return active
+}
+
+// sessionLive reports whether the session is still installed for inbound
+// traffic. Unlike sessionActive it does not require canonical sessionsByPeer
+// ownership: a superseded session must keep sending ACKs and data so the
+// peer's congestion window drains while the newer session takes over.
+func (m *SSU2Manager) sessionLive(session *ssu2TransportSession) bool {
+	m.mu.RLock()
+	live := m.runningLocked() && m.sessionsByID[session.receiveID] == session
+	m.mu.RUnlock()
+	return live
 }
 
 func (s *ssu2TransportSession) acknowledge(ranges []dataplanessu2.ACKRange, now time.Time) {
@@ -3754,6 +3895,7 @@ func (s *ssu2TransportSession) recalculateRTOLocked(sample time.Duration) {
 func (s *ssu2TransportSession) noteCongestionLocked(now time.Time, sent *ssu2SentPacket) {
 	mtu := int(s.mtu.Load())
 	s.packetsRetransmitted++
+	remaining := s.sendWindowRemaining
 	if sent.fast {
 		s.slowStartThreshold = max(s.sendWindowBytes/2, 2*mtu)
 		s.sendWindowBytes = min(ssu2MaximumSendWindow, s.slowStartThreshold+3*mtu)
@@ -3766,6 +3908,9 @@ func (s *ssu2TransportSession) noteCongestionLocked(now time.Time, sent *ssu2Sen
 		s.rto = min(ssu2MaximumRTO, max(ssu2RetransmitInterval, 2*s.rto))
 	}
 	s.adjustMTULocked(sent.packetSize, false)
+	if s.sendWindowRemaining > remaining {
+		s.signalSendCapacityLocked()
+	}
 }
 
 func (s *ssu2TransportSession) adjustMTULocked(packetSize int, success bool) {
@@ -4108,15 +4253,44 @@ func (m *SSU2Manager) retryToken(remote net.Addr, destinationID, sourceID, bucke
 	return token, nil
 }
 
-func (m *SSU2Manager) installSessionLocked(session *ssu2TransportSession) bool {
-	if !m.runningLocked() || len(m.sessionsByID) >= m.maxSessions || m.sessionsByID[session.receiveID] != nil {
-		return false
+// installSessionLocked installs a freshly authenticated session. Crossed
+// handshakes produce one session per direction; both peers must converge on
+// the same canonical winner or each keeps the session the other dropped. The
+// session initiated by the lower identity hash wins the sessionsByPeer slot,
+// while a non-preferred newcomer stays live for inbound traffic so its peer
+// can drain its congestion window before discarding it. A displaced session
+// is removed from sessionsByID and returned so callers can release it after
+// dropping m.mu.
+func (m *SSU2Manager) installSessionLocked(session *ssu2TransportSession) (displaced *ssu2TransportSession, ok bool) {
+	if !m.runningLocked() || m.sessionsByID[session.receiveID] != nil {
+		return nil, false
+	}
+	previous := m.sessionsByPeer[session.peer]
+	if previous == nil && len(m.sessionsByID) >= m.maxSessions {
+		return nil, false
 	}
 	m.sessionsByID[session.receiveID] = session
-	if m.sessionsByPeer[session.peer] == nil {
+	if previous == nil {
 		m.sessionsByPeer[session.peer] = session
+		return nil, true
 	}
-	return true
+	if previous.inbound == preferInboundSession(m.bindings.LocalInfo, session.peer) && previous.inbound != session.inbound {
+		return nil, true
+	}
+	delete(m.sessionsByID, previous.receiveID)
+	m.sessionsByPeer[session.peer] = session
+	return previous, true
+}
+
+// preferInboundSession reports whether the canonical session to peer should
+// be the inbound one: the connection initiated by the lower identity hash
+// wins deterministically on both ends. Nil LocalInfo prefers outbound.
+func preferInboundSession(info TransportLocalInfo, peer foundation.Hash) bool {
+	if info == nil {
+		return false
+	}
+	local := info.Hash()
+	return bytes.Compare(local[:], peer[:]) > 0
 }
 
 func (m *SSU2Manager) finishOutboundLocked(pending *ssu2OutboundPending, err error) bool {
@@ -4220,9 +4394,10 @@ func (m *SSU2Manager) removeInboundHeld(destinationID uint64, pending *ssu2Inbou
 
 // dispatchI2NP remains the narrow single-message entry point used by direct
 // callers; the live receive path always calls dispatchI2NPBatch once per UDP
-// packet.
+// packet. The caller's payload is treated as borrowed and copied, because
+// dispatch completes asynchronously after the caller's buffer may be reused.
 func (m *SSU2Manager) dispatchI2NP(peer foundation.Hash, message foundation.I2NPMessage) error {
-	batch, err := m.appendDispatchI2NP(nil, peer, message)
+	batch, err := m.appendDispatchI2NP(nil, peer, message, true)
 	if err != nil {
 		return err
 	}
@@ -4247,6 +4422,7 @@ func (m *SSU2Manager) borrowDispatchBatch() (*ssu2DispatchBatch, error) {
 	if free == nil {
 		batch := directDispatchBatchPool.Get().(*ssu2DispatchBatch)
 		batch.count = 0
+		batch.drainDone()
 		return batch, nil
 	}
 	if !running {
@@ -4254,6 +4430,7 @@ func (m *SSU2Manager) borrowDispatchBatch() (*ssu2DispatchBatch, error) {
 	}
 	select {
 	case batch := <-free:
+		batch.drainDone()
 		return batch, nil
 	default:
 	}
@@ -4266,6 +4443,7 @@ func (m *SSU2Manager) borrowDispatchBatch() (*ssu2DispatchBatch, error) {
 	m.dispatchFreeBudget.Add(1)
 	select {
 	case batch := <-free:
+		batch.drainDone()
 		return batch, nil
 	case <-m.contextDone():
 		return nil, ErrSSU2Session
@@ -4280,6 +4458,7 @@ func (m *SSU2Manager) releaseDispatchBatch(batch *ssu2DispatchBatch) {
 		batch.items[index] = ssu2DispatchItem{}
 	}
 	batch.count = 0
+	batch.arenaUsed = 0
 	m.mu.RLock()
 	free := m.dispatchFree
 	m.mu.RUnlock()
@@ -4287,13 +4466,18 @@ func (m *SSU2Manager) releaseDispatchBatch(batch *ssu2DispatchBatch) {
 		directDispatchBatchPool.Put(batch)
 		return
 	}
+	// A full free channel means the batch budget already covers every live
+	// borrow; only a double-release can reach this state, so the batch must be
+	// spilled rather than parked — parking an authLoop worker would starve the
+	// receive path of ACKs.
 	select {
 	case free <- batch:
-	case <-m.contextDone():
+	default:
+		directDispatchBatchPool.Put(batch)
 	}
 }
 
-func (m *SSU2Manager) appendDispatchI2NP(batch *ssu2DispatchBatch, peer foundation.Hash, message foundation.I2NPMessage) (*ssu2DispatchBatch, error) {
+func (m *SSU2Manager) appendDispatchI2NP(batch *ssu2DispatchBatch, peer foundation.Hash, message foundation.I2NPMessage, borrowed bool) (*ssu2DispatchBatch, error) {
 	if batch == nil {
 		var err error
 		batch, err = m.borrowDispatchBatch()
@@ -4304,14 +4488,31 @@ func (m *SSU2Manager) appendDispatchI2NP(batch *ssu2DispatchBatch, peer foundati
 	if int(batch.count) == len(batch.items) {
 		return batch, ErrSSU2Session
 	}
+	// Borrowed payload views point into a receive buffer that is recycled as
+	// soon as the worker returns; copy them into the batch arena so dispatch
+	// can run asynchronously. The borrowed views from one packet always fit:
+	// their sum is bounded by MaxIPv4PacketLen. Owned payloads (fragment
+	// reassembly) already outlive the packet and are stored unmodified.
+	if borrowed && len(message.Payload) != 0 {
+		if len(batch.arena)-batch.arenaUsed >= len(message.Payload) {
+			view := batch.arena[batch.arenaUsed : batch.arenaUsed+len(message.Payload)]
+			copy(view, message.Payload)
+			message.Payload = view
+			batch.arenaUsed += len(message.Payload)
+		} else {
+			message.Payload = append([]byte(nil), message.Payload...)
+		}
+	}
 	batch.items[batch.count] = ssu2DispatchItem{peer: peer, message: message}
 	batch.count++
 	return batch, nil
 }
 
-// dispatchI2NPBatch transfers a complete set of synchronous, borrowed message
-// views to the bounded dispatch stage. The caller retains the receive packet
-// until this returns, so HandleI2NP must not retain Payload.
+// dispatchI2NPBatch hands a complete set of self-owned message views to the
+// bounded dispatch stage. The receive worker must not wait on delivery:
+// parking here blocks inbound ACK processing behind downstream congestion and
+// wedges the peer's send window. A saturated queue drops the batch — datagram
+// admission remains lossy — rather than reviving that convoy.
 func (m *SSU2Manager) dispatchI2NPBatch(batch *ssu2DispatchBatch) error {
 	if batch == nil || batch.count == 0 {
 		m.releaseDispatchBatch(batch)
@@ -4338,18 +4539,28 @@ func (m *SSU2Manager) dispatchI2NPBatch(batch *ssu2DispatchBatch) error {
 	}
 	select {
 	case queue <- batch:
+		return nil
+	default:
+	}
+	// A full shard applies bounded backpressure rather than instant loss:
+	// the packet is already in the cumulative ACK set, so a dropped batch is
+	// an acknowledged-but-undelivered message. Waiting keeps bursts reliable;
+	// the stall bound keeps a wedged dispatch stage from starving ACK handling.
+	timer := time.NewTimer(ssu2DispatchStall)
+	defer timer.Stop()
+	select {
+	case queue <- batch:
+		return nil
+	case <-timer.C:
+		if m.logger != nil {
+			m.logger.Debug("ssu2 dispatch queue saturated, dropping batch", "peer", routerHashDiagnostic(batch.items[0].peer), "items", batch.count)
+		}
+		m.metrics.AddSSU2DispatchDrops(uint64(batch.count))
+		m.releaseDispatchBatch(batch)
+		return ErrSSU2DispatchSaturated
 	case <-m.contextDone():
 		m.releaseDispatchBatch(batch)
 		return ErrSSU2Session
-	}
-	select {
-	case err := <-batch.done:
-		m.releaseDispatchBatch(batch)
-		return err
-	case <-m.contextDone():
-		err := <-batch.done
-		m.releaseDispatchBatch(batch)
-		return err
 	}
 }
 
@@ -4358,25 +4569,33 @@ func (m *SSU2Manager) dispatchLoop(queue chan *ssu2DispatchBatch) {
 	for {
 		select {
 		case batch := <-queue:
-			var err error
-			for index := range int(batch.count) {
-				if err = m.deliverI2NPRecovered(batch.items[index].peer, batch.items[index].message); err != nil {
-					break
-				}
-			}
-			batch.done <- err
+			batch.reportDone(m.deliverDispatchBatch(batch))
+			m.releaseDispatchBatch(batch)
 		case <-m.contextDone():
-			failQueuedDispatches(queue)
+			m.failQueuedDispatches(queue)
 			return
 		}
 	}
 }
 
-func failQueuedDispatches(queue chan *ssu2DispatchBatch) {
+func (m *SSU2Manager) deliverDispatchBatch(batch *ssu2DispatchBatch) error {
+	for index := range int(batch.count) {
+		if err := m.deliverI2NPRecovered(batch.items[index].peer, batch.items[index].message); err != nil {
+			if m.logger != nil {
+				m.logger.Warn("ssu2 i2np delivery failed", "type", batch.items[index].message.Header.Type, "peer", routerHashDiagnostic(batch.items[index].peer), "error", err)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *SSU2Manager) failQueuedDispatches(queue chan *ssu2DispatchBatch) {
 	for {
 		select {
 		case batch := <-queue:
-			batch.done <- ErrSSU2Session
+			batch.reportDone(ErrSSU2Session)
+			m.releaseDispatchBatch(batch)
 		default:
 			return
 		}
@@ -4500,9 +4719,25 @@ func (m *SSU2Manager) writeToClass(ctx context.Context, packet []byte, remote ne
 	if err != nil || !options.wait {
 		return err
 	}
-	err = <-slot.done
-	m.recycleEgressSlot(slot)
-	return err
+	select {
+	case err = <-slot.done:
+		m.recycleEgressSlot(slot)
+		return err
+	case <-ctx.Done():
+		// The egress loop still owns the slot: it must finish the write and
+		// report done before the slot can return to the bounded pool.
+		go func() {
+			<-slot.done
+			m.recycleEgressSlot(slot)
+		}()
+		return ctx.Err()
+	case <-m.contextDone():
+		go func() {
+			<-slot.done
+			m.recycleEgressSlot(slot)
+		}()
+		return ErrSSU2Session
+	}
 }
 
 func (m *SSU2Manager) enqueueEgress(ctx context.Context, packet []byte, addr netip.AddrPort, relay, wait bool, flow uint64, free, queue chan *ssu2EgressSlot) (*ssu2EgressSlot, error) {
@@ -4524,6 +4759,10 @@ func (m *SSU2Manager) enqueueEgress(ctx context.Context, packet []byte, addr net
 	slot.relay = relay
 	slot.wait = wait
 	slot.flow = flow
+	if m.egressDrained {
+		m.recycleEgressSlot(slot)
+		return nil, ErrSSU2Session
+	}
 	select {
 	case queue <- slot:
 		if m.metrics != nil {
@@ -4719,6 +4958,7 @@ func shuffleIndependentRelayRun(slots []*ssu2EgressSlot) {
 func (m *SSU2Manager) failQueuedEgress() {
 	m.egressMu.Lock()
 	defer m.egressMu.Unlock()
+	m.egressDrained = true
 	for {
 		select {
 		case slot := <-m.egressQueue:
@@ -5168,7 +5408,7 @@ func (m *SSU2Manager) selectSSU2Address(info foundation.NetworkDatabaseRouterInf
 	return selectSSU2AddressForNetwork(info, available)
 }
 
-func ssu2IPv6Available(conn *net.UDPConn) bool {
+func ssu2IPv6Available(conn UDPSocket) bool {
 	if conn == nil {
 		return false
 	}
@@ -5217,7 +5457,7 @@ func (m *SSU2Manager) ssu2LargeMTU(remote net.Addr, advertised int) int {
 	return min(max(large, ssu2MinimumNetworkMTU), ssu2MaximumNetworkMTU)
 }
 
-func ssu2LocalMTU(conn *net.UDPConn, ipv6 bool) int {
+func ssu2LocalMTU(conn UDPSocket, ipv6 bool) int {
 	if conn == nil {
 		return 0
 	}

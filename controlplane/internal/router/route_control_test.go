@@ -273,6 +273,142 @@ func TestRouteReacquisitionDoesNotReplayTransportFailure(t *testing.T) {
 	}
 }
 
+func TestFailedSendPreservesConcurrentRouteReplacement(t *testing.T) {
+	for _, handshake := range []bool{false, true} {
+		name := "established"
+		if handshake {
+			name = "handshake"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				sender, deliveries, wire := routeControlFixture(t, nil)
+				feedback, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+				if err != nil {
+					t.Fatal(err)
+				}
+				receipt, ok := sender.execution.RouteReceipt(deliveries[0].To)
+				if !ok {
+					t.Fatal("missing initial route")
+				}
+				entered, release := make(chan struct{}), make(chan struct{})
+				var unblock sync.Once
+				defer unblock.Do(func() { close(release) })
+				wire.handle = func(context.Context, foundation.I2NPMessage) error {
+					close(entered)
+					<-release
+					return dataplane.RouterErrSSU2SendStalled
+				}
+				result := make(chan error, 1)
+				go func() {
+					if handshake {
+						result <- feedback.SendTunnel(t.Context(), deliveries[0])
+					} else {
+						result <- sender.SendTunnel(t.Context(), deliveries[0])
+					}
+				}()
+				<-entered
+				if !sender.execution.RetireUnresponsiveRoute(receipt) {
+					t.Fatal("could not detach blocked route")
+				}
+				if err := sender.PrepareDestination(t.Context(), deliveries[0].To); err != nil {
+					t.Fatal(err)
+				}
+				replacement, ok := sender.execution.RouteReceipt(deliveries[0].To)
+				if !ok {
+					t.Fatal("missing replacement route")
+				}
+				unblock.Do(func() { close(release) })
+				if err := <-result; !errors.Is(err, dataplane.RouterErrSSU2SendStalled) {
+					t.Fatalf("blocked send = %v", err)
+				}
+				wire.mu.Lock()
+				wire.handle = nil
+				wire.mu.Unlock()
+				if err := sender.execution.SendTunnelOnRoute(t.Context(), deliveries[0], replacement); err != nil {
+					t.Fatalf("old send failure retired replacement: %v", err)
+				}
+			})
+		})
+	}
+}
+
+func TestFailedRatchetReplyPreservesConcurrentRouteReplacement(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sender, _, wire := routeControlFixture(t, nil)
+		remote, err := foundation.GenerateLegacyLocalDestination()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer remote.ReleaseSensitive()
+		local, err := controlplanenetdb.NewLocalLeaseSet2(remote)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := local.ReplaceInboundLeases([]foundation.NetworkDatabaseLease{
+			{Gateway: foundation.Hash{10}, TunnelID: 11, EndDate: 90000},
+			{Gateway: foundation.Hash{20}, TunnelID: 21, EndDate: 90000},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		raw := make([]byte, foundation.NetworkDatabaseMaxLeaseSetBytes)
+		n, err := local.MarshalTo(raw, 1000, remote.Sign)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sender.database.HandleDatabaseStore(foundation.I2NPDatabaseStoreMessage{Key: remote.Hash(), Type: foundation.I2NPStoreLeaseSet2, Data: raw[:n]}, false, 1000); err != nil {
+			t.Fatal(err)
+		}
+		target := remote.Hash()
+		if err := sender.PrepareDestination(t.Context(), target); err != nil {
+			t.Fatal(err)
+		}
+		receipt, ok := sender.execution.RouteReceipt(target)
+		if !ok {
+			t.Fatal("missing initial route")
+		}
+		entered, release := make(chan struct{}), make(chan struct{})
+		var unblock sync.Once
+		defer unblock.Do(func() { close(release) })
+		wire.handle = func(context.Context, foundation.I2NPMessage) error {
+			close(entered)
+			<-release
+			return dataplane.RouterErrSSU2SendStalled
+		}
+		reservation, err := sender.ReserveRatchetReply(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reservation.Release()
+		if err := reservation.Activate(); err != nil {
+			t.Fatal(err)
+		}
+		if err := reservation.Send(t.Context(), []byte{1, 2, 3}); err != nil {
+			t.Fatal(err)
+		}
+		<-entered
+		if !sender.execution.RetireUnresponsiveRoute(receipt) {
+			t.Fatal("could not detach blocked route")
+		}
+		if err := sender.PrepareDestination(t.Context(), target); err != nil {
+			t.Fatal(err)
+		}
+		replacement, ok := sender.execution.RouteReceipt(target)
+		if !ok {
+			t.Fatal("missing replacement route")
+		}
+		unblock.Do(func() { close(release) })
+		if err := sender.waitForRatchetReply(t.Context(), target); !errors.Is(err, dataplane.RouterErrSSU2SendStalled) {
+			t.Fatalf("blocked reply = %v", err)
+		}
+		wire.mu.Lock()
+		wire.handle = nil
+		wire.mu.Unlock()
+		if err := sender.execution.SendRatchetReplyOnRoute(t.Context(), target, []byte{4}, replacement); err != nil {
+			t.Fatalf("old reply failure retired replacement: %v", err)
+		}
+	})
+}
+
 func TestSenderRetirementCancelsBlockedPreparation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		entered := make(chan struct{})
@@ -529,6 +665,10 @@ func TestConnectedRouteSurvivesAnotherHandshakeTimeout(t *testing.T) {
 	if err := sender.SendTunnel(t.Context(), deliveries[0]); err != nil {
 		t.Fatalf("connected route retired: %v", err)
 	}
+	sender.execution.RetireRoute(deliveries[0].To)
+	if err := sender.PrepareDestination(t.Context(), deliveries[0].To); err != nil {
+		t.Fatalf("stale timeout penalized responsive path: %v", err)
+	}
 }
 
 func TestSilentRoutesExhaustRemoteLeasesBeforeReusingFailure(t *testing.T) {
@@ -576,6 +716,87 @@ func TestSilentRoutesExhaustRemoteLeasesBeforeReusingFailure(t *testing.T) {
 	second.NoResponse()
 	if err := sender.PrepareDestination(t.Context(), remote.Hash()); !errors.Is(err, dataplane.TunnelErrCircuitNotFound) {
 		t.Fatalf("exhausted silent leases were reused: %v", err)
+	}
+}
+
+func TestSilentRouteStaysExcludedAcrossDialRetryGap(t *testing.T) {
+	sender, deliveries, _ := routeControlFixture(t, nil)
+	feedback, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, ok := sender.execution.RouteReceipt(deliveries[0].To)
+	if !ok {
+		t.Fatal("missing prepared route")
+	}
+	feedback.NoResponse()
+	// A dial retry lands after a short failure mark would have lapsed but
+	// while the route is still valid; the exhausted cached LeaseSet must be
+	// refreshed instead of silently repicking the dead lease.
+	sender.now = func() uint64 { return receipt.Expires - 1 }
+	if err := sender.PrepareDestination(t.Context(), deliveries[0].To); !errors.Is(err, dataplane.TunnelErrCircuitNotFound) {
+		t.Fatalf("dead lease repicked across retry gap: %v", err)
+	}
+}
+
+func TestSilentLeaseStaysExcludedAcrossCircuitReplacement(t *testing.T) {
+	sender, deliveries, _ := routeControlFixture(t, nil)
+	pool := controlplanetunnel.NewOwnedPool(sender.owner, 2)
+	for _, entry := range sender.pool.Snapshot(1000) {
+		if err := pool.Add(entry, 1000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	second, err := sender.tunnels.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 11, Owner: sender.owner, FirstHop: foundation.Hash{8}, NextTunnelID: 12, ExpiresAt: 95000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sender.tunnels.RemoveCircuit(second) })
+	if err := pool.Add(controlplanetunnel.Entry{ID: 11, Owner: sender.owner, Circuit: second, Direction: controlplanetunnel.Outbound, Expires: 95000}, 1000); err != nil {
+		t.Fatal(err)
+	}
+	sender.pool = pool
+	first, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.NoResponse()
+	retry, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry.NoResponse()
+	// Both distinct circuits absorbed a silent handshake on the same lease:
+	// the remote path is dead, not either local circuit. Replacing every
+	// outbound installation — renewal or health-driven churn — must not
+	// unmark it, otherwise the dead lease is repicked forever.
+	third, err := sender.tunnels.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 21, Owner: sender.owner, FirstHop: foundation.Hash{9}, NextTunnelID: 22, ExpiresAt: 99000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sender.tunnels.RemoveCircuit(third) })
+	fresh := controlplanetunnel.NewOwnedPool(sender.owner, 1)
+	if err := fresh.Add(controlplanetunnel.Entry{ID: 21, Owner: sender.owner, Circuit: third, Direction: controlplanetunnel.Outbound, Expires: 99000}, 1000); err != nil {
+		t.Fatal(err)
+	}
+	sender.pool = fresh
+	if err := sender.PrepareDestination(t.Context(), deliveries[0].To); !errors.Is(err, dataplane.TunnelErrCircuitNotFound) {
+		t.Fatalf("dead lease repicked after circuit replacement: %v", err)
+	}
+}
+
+func TestSendFailureMarkClearsForLaterRetry(t *testing.T) {
+	sender, deliveries, wire := routeControlFixture(t, nil)
+	wire.handle = func(context.Context, foundation.I2NPMessage) error {
+		return dataplane.RouterErrSSU2SendStalled
+	}
+	if err := sender.SendTunnel(t.Context(), deliveries[0]); !errors.Is(err, dataplane.RouterErrSSU2SendStalled) {
+		t.Fatalf("first send = %v", err)
+	}
+	sender.now = func() uint64 { return 1000 + sendFailureMarkMillis + 1 }
+	wire.handle = nil
+	if err := sender.SendTunnel(t.Context(), deliveries[0]); err != nil {
+		t.Fatalf("transient failure blacklisted healthy path: %v", err)
 	}
 }
 

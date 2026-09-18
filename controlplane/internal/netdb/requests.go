@@ -223,6 +223,13 @@ func (m *RequestManager) LookupLeaseSet(ctx context.Context, key foundation.Hash
 	return m.Lookup(ctx, LeaseSetLookup, key)
 }
 
+// LookupLeaseSetFresh starts or coalesces a LeaseSet lookup that bypasses the
+// cached copy. Route exhaustion can outlive a cached LeaseSet whose leases
+// all transit failed tunnels, so callers re-resolve after peer republishing.
+func (m *RequestManager) LookupLeaseSetFresh(ctx context.Context, key foundation.Hash) (<-chan LookupResult, error) {
+	return m.lookup(ctx, LeaseSetLookup, key, true)
+}
+
 // Lookup queues bounded send work and returns without waiting for transport I/O.
 // The result channel reports completion; Expire enforces the shared request deadline.
 func (m *RequestManager) Lookup(ctx context.Context, typeID LookupType, key foundation.Hash) (<-chan LookupResult, error) {

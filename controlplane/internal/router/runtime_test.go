@@ -74,7 +74,7 @@ func (s *fakeSockets) ListenStream(context.Context, dataplane.RouterEndpoint) (n
 func (s *fakeSockets) DialStream(context.Context, dataplane.RouterEndpoint) (net.Conn, error) {
 	return nil, errUnexpectedSocketDial
 }
-func (s *fakeSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (*net.UDPConn, error) {
+func (s *fakeSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
 	s.log.add("listen-packet")
 	if s.packetErr != nil {
 		return nil, s.packetErr

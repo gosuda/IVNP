@@ -214,6 +214,7 @@ func prometheusText(snapshot Snapshot) []byte {
 		{"ivnp_ssu2_send_multi_batches_total", "Send syscalls accepting multiple datagrams.", "counter", snapshot.SSU2.SendMultiBatches},
 		{"ivnp_ssu2_ingress_queue_depth", "Current SSU2 ingress queue depth.", "gauge", snapshot.SSU2.IngressQueueDepth},
 		{"ivnp_ssu2_egress_queue_depth", "Current SSU2 egress queue depth.", "gauge", snapshot.SSU2.EgressQueueDepth},
+		{"ivnp_ssu2_dispatch_drops_total", "I2NP messages dropped after dispatch queue saturation; already counted in the cumulative ACK set.", "counter", snapshot.SSU2.DispatchDrops},
 		{"ivnp_transport_connections_total", "Total transport connections.", "counter", snapshot.Transport.Connections},
 		{"ivnp_transport_disconnections_total", "Total transport disconnections.", "counter", snapshot.Transport.Disconnections},
 		{"ivnp_transport_handshake_failures_total", "Total failed transport handshakes.", "counter", snapshot.Transport.HandshakeFailures},

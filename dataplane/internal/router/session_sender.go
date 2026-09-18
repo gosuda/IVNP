@@ -6,6 +6,7 @@ import (
 	"net/netip"
 
 	dataplanentcp2 "gosuda.org/ivnp/dataplane/internal/transport/ntcp2"
+	dataplanessu2 "gosuda.org/ivnp/dataplane/internal/transport/ssu2"
 	"gosuda.org/ivnp/foundation"
 )
 
@@ -112,18 +113,16 @@ func (s ssu2SessionSender) send(ctx context.Context, message foundation.I2NPMess
 	if len(message.Payload) > foundation.I2NPI2PDMaxPayload {
 		return foundation.I2NPErrPayloadTooLarge
 	}
-	if !s.manager.sessionActive(s.session) || s.manager.contextErr() != nil {
+	if !s.manager.sessionLive(s.session) || s.manager.contextErr() != nil {
 		return ErrSessionUnavailable
 	}
-	if interruptible {
-		if err := s.session.frameMu.LockContext(ctx); err != nil {
-			return err
-		}
-	} else {
-		s.session.frameMu.Lock()
-	}
-	defer s.session.frameMu.Unlock()
-	return forEachSSU2I2NPFragment(s.session.frame[:], message, ssu2SessionPacketSize(s.session), func(payload []byte, _ bool) error {
+	// Per-call fragment scratch keeps the send path off session.frame: a
+	// congestion-capacity wait inside sendSessionDataContext must never pin
+	// frameMu, which serializes path probes and teardown behind stalled bulk.
+	// sendSessionDataContext revalidates liveness after every wait and copies
+	// each fragment before returning, so the view never outlives the call.
+	var frame [dataplanessu2.MaxIPv4PacketLen]byte
+	return forEachSSU2I2NPFragment(frame[:], message, ssu2SessionPacketSize(s.session), func(payload []byte, _ bool) error {
 		return s.manager.sendSessionDataContext(ctx, s.session, payload, ssu2SessionDataOptions{
 			reliable: true, congestionControlled: true, waitEgress: true, interruptible: interruptible,
 		})

@@ -1217,6 +1217,52 @@ func TestSSU2SessionReleaseSynchronizesWithReceive(t *testing.T) {
 	}
 }
 
+func TestSSU2SessionViableTracksCongestionDegradation(t *testing.T) {
+	key := bytes.Repeat([]byte{1}, 32)
+	header1 := bytes.Repeat([]byte{2}, 32)
+	header2 := bytes.Repeat([]byte{3}, 32)
+	send, err := dataplanessu2.NewDataCipher(key, header1, header2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receive, err := dataplanessu2.NewDataCipher(key, header1, header2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := foundation.Hash{1}
+	session := &ssu2TransportSession{
+		peer: peer, sendID: 9, receiveID: 10,
+		send: send, receive: receive, nextPacket: 2,
+		sent:         make(map[uint32]*ssu2SentPacket),
+		fragments:    make(map[uint32]*ssu2FragmentAssembly),
+		lastActivity: time.Now(),
+	}
+	manager := &SSU2Manager{networkID: 2,
+		started: true, ctx: context.Background(), idleTimeout: time.Minute,
+		sessionsByPeer: map[foundation.Hash]*ssu2TransportSession{peer: session},
+		sessionsByID:   map[uint64]*ssu2TransportSession{session.receiveID: session},
+		bindings:       TransportBindings{Clock: WallClock{}},
+	}
+	if !manager.SessionViable(peer) {
+		t.Fatal("fresh SSU2 session was not viable")
+	}
+	session.degradedUntil = time.Now().Add(time.Hour)
+	if manager.SessionViable(peer) {
+		t.Fatal("congestion-stalled SSU2 session remained viable")
+	}
+	if !manager.HasSession(peer) {
+		t.Fatal("degraded SSU2 session lost its existence for retransmission bookkeeping")
+	}
+	session.degradedUntil = time.Now().Add(-time.Second)
+	if !manager.SessionViable(peer) {
+		t.Fatal("SSU2 session did not recover viability after the degradation cooldown")
+	}
+	session.send = nil
+	if manager.SessionViable(peer) {
+		t.Fatal("released SSU2 session remained viable")
+	}
+}
+
 func TestSSU2ReplayDropsACKAndPathChallengeBlocks(t *testing.T) {
 	key := bytes.Repeat([]byte{1}, 32)
 	header1 := bytes.Repeat([]byte{2}, 32)
@@ -2097,4 +2143,92 @@ func newSSU2TestLocal(t *testing.T, endpoint string, options ...transportTestOpt
 		t.Fatal(err)
 	}
 	return owner, static.Bytes(), intro
+}
+
+func TestSSU2SendDoesNotHoldFrameMuDuringCapacityWait(t *testing.T) {
+	manager, session := newSSU2SendTestHarness(t)
+	session.sendMu.Lock()
+	session.sendWindowRemaining = 0
+	session.sendMu.Unlock()
+	sender := ssu2SessionSender{manager: manager, session: session}
+	done := make(chan error, 1)
+	go func() {
+		done <- sender.Send(t.Context(), managerHotPathMessage())
+	}()
+	// The send stalls for the whole congestion-capacity wait; frameMu must
+	// stay free so path probes and teardown are not serialized behind it.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !session.frameMu.mu.TryLock() {
+			session.ReleaseSensitive()
+			<-done
+			t.Fatal("send held frameMu while waiting for send capacity")
+		}
+		session.frameMu.mu.Unlock()
+		runtime.Gosched()
+	}
+	session.ReleaseSensitive()
+	if err := <-done; !errors.Is(err, ErrSSU2Session) && !errors.Is(err, ErrSSU2SendStalled) {
+		t.Fatalf("blocked send error = %v, want session teardown error", err)
+	}
+}
+
+func TestSSU2TerminationStillDrainsI2NPDispatchBatch(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, 32)
+	header1 := bytes.Repeat([]byte{8}, 32)
+	header2 := bytes.Repeat([]byte{9}, 32)
+	sealer, err := dataplanessu2.NewDataCipher(key, header1, header2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver, err := dataplanessu2.NewDataCipher(key, header1, header2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := managerHotPathMessage()
+	var frame [dataplanessu2.MaxIPv4PacketLen]byte
+	payload, err := marshalSSU2I2NPTo(frame[:], message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload, err = dataplanessu2.MarshalBlock(payload, dataplanessu2.BlockTermination, make([]byte, 9)); err != nil {
+		t.Fatal(err)
+	}
+	packet, err := sealer.SealDataTo(make([]byte, dataplanessu2.MaxIPv4PacketLen), dataplanessu2.ShortHeader{
+		DestinationID: 17, PacketNumber: 1, Type: dataplanessu2.Data,
+	}, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delivered atomic.Int32
+	manager := &SSU2Manager{networkID: 2,
+		started: true, ctx: context.Background(),
+		dispatchFree: make(chan *ssu2DispatchBatch, ssu2DispatchQueueSize),
+		bindings: TransportBindings{
+			Clock: WallClock{},
+			HandleI2NPContext: func(context.Context, foundation.Hash, foundation.I2NPMessage, uint64, bool) error {
+				delivered.Add(1)
+				return nil
+			},
+		},
+	}
+	manager.dispatchFreeBudget.Store(ssu2DispatchQueueSize)
+	peer := foundation.Hash{9}
+	session := &ssu2TransportSession{
+		peer: peer, receiveID: 17, receive: receiver,
+		sent:      make(map[uint32]*ssu2SentPacket),
+		fragments: make(map[uint32]*ssu2FragmentAssembly),
+	}
+	manager.sessionsByPeer = map[foundation.Hash]*ssu2TransportSession{peer: session}
+	manager.sessionsByID = map[uint64]*ssu2TransportSession{session.receiveID: session}
+	manager.handleDataFrom(session, packet, netip.AddrPort{})
+	if got := delivered.Load(); got != 1 {
+		t.Fatalf("I2NP delivered %d times alongside termination, want 1", got)
+	}
+	released := <-manager.dispatchFree
+	select {
+	case again := <-manager.dispatchFree:
+		t.Fatalf("dispatch batch released twice: first=%p again=%p", released, again)
+	default:
+	}
 }

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 var (
@@ -70,9 +72,10 @@ type PairedPoolMaintainer struct {
 	maintenanceMu          sync.Mutex
 	inboundSourceMu        sync.Mutex
 	outboundSourceMu       sync.Mutex
-	lifecycleMu            sync.RWMutex
+	lifecycleMu            durable.RWMutex
 	ctx                    context.Context
 	cancel                 context.CancelFunc
+	pairIndex              atomic.Uint64
 	closed                 bool
 }
 
@@ -280,9 +283,29 @@ func (m *PairedPoolMaintainer) Pair(now uint64) (CircuitPair, bool) {
 	if m.closed {
 		return CircuitPair{}, false
 	}
-	outbound, haveOutbound := m.pool.Select(Outbound, now)
-	inbound, haveInbound := m.pool.Select(Inbound, now)
-	if !haveOutbound || !haveInbound || inbound.Gateway == (foundation.Hash{}) || inbound.GatewayTunnelID == 0 {
+	outbounds := m.pool.SelectableOutbound(now)
+	inbounds := m.pool.PublishableInbound(now)
+	if len(outbounds) == 0 || len(inbounds) == 0 {
+		return CircuitPair{}, false
+	}
+	idx := m.pairIndex.Add(1) - 1
+	var outbound, inbound Entry
+	haveOutbound, haveInbound := false, false
+	for attempt := range outbounds {
+		cand := outbounds[(idx+uint64(attempt))%uint64(len(outbounds))]
+		if cand.Expires > now {
+			outbound, haveOutbound = cand, true
+			break
+		}
+	}
+	for attempt := range inbounds {
+		cand := inbounds[(idx+uint64(attempt))%uint64(len(inbounds))]
+		if cand.Expires > now && cand.Gateway != (foundation.Hash{}) && cand.GatewayTunnelID != 0 {
+			inbound, haveInbound = cand, true
+			break
+		}
+	}
+	if !haveOutbound || !haveInbound {
 		return CircuitPair{}, false
 	}
 	pair := CircuitPair{OutboundID: outbound.ID, InboundID: inbound.GatewayTunnelID, InboundLocalID: inbound.ID, ReplyRouter: inbound.Gateway}

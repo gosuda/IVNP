@@ -1,4 +1,4 @@
-name: live I2P network round trip
+name: Live I2P round trip
 
 on:
   push:

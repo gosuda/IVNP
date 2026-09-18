@@ -9,8 +9,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	"gosuda.org/ivnp/internal/durable"
 )
 
 type ServerConfig struct {
@@ -25,7 +26,7 @@ type ReseedServer struct {
 	store     *PeerStore
 	startedAt time.Time
 
-	mu        sync.RWMutex
+	mu        durable.RWMutex
 	pkg       ReseedPackage
 	certPEM   []byte
 	pubKeyPEM []byte

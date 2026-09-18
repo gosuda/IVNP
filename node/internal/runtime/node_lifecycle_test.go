@@ -23,7 +23,7 @@ func (nodeSockets) ListenStream(context.Context, dataplane.RouterEndpoint) (net.
 func (nodeSockets) DialStream(ctx context.Context, endpoint dataplane.RouterEndpoint) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, endpoint.Network, endpoint.Address)
 }
-func (nodeSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (*net.UDPConn, error) {
+func (nodeSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
 	return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 }
 func TestStartRollsBackWhenMetricsListenerFails(t *testing.T) {

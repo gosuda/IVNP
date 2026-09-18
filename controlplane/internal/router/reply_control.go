@@ -170,11 +170,13 @@ func (r *ratchetReplyReservation) sendOwned(packet []byte) {
 	s := r.sender
 	ctx, cancel := context.WithTimeout(s.preparationCtx, s.preparationTimeout)
 	var err error
+	var receipt dataplane.RouterPreparedRouteReceipt
 	for {
 		if err = ctx.Err(); err != nil {
 			break
 		}
-		err = r.sendPrepared(ctx, packet)
+		receipt, _ = s.execution.RouteReceipt(r.target)
+		err = r.sendPrepared(ctx, packet, receipt)
 		if !errors.Is(err, dataplane.RouterErrPreparedRouteMissing) {
 			break
 		}
@@ -187,7 +189,9 @@ func (r *ratchetReplyReservation) sendOwned(packet []byte) {
 			break
 		}
 	}
-	err = s.retireFailedRoute(r.target, err)
+	// Publication renewal may install a replacement while a send blocks; only
+	// the pinned installation this send actually used may be retired for it.
+	err = s.retireFailedRoute(receipt, err)
 	if err != nil && s.logger != nil {
 		s.logger.Debug("ratchet reply delivery failed", "error", err)
 	}
@@ -196,7 +200,7 @@ func (r *ratchetReplyReservation) sendOwned(packet []byte) {
 	r.complete(err)
 }
 
-func (r *ratchetReplyReservation) sendPrepared(ctx context.Context, packet []byte) error {
+func (r *ratchetReplyReservation) sendPrepared(ctx context.Context, packet []byte, receipt dataplane.RouterPreparedRouteReceipt) error {
 	s := r.sender
 	// Authorization changes wait for admitted replies, but publication renewal
 	// remains independent of the handoff and may replace an unsent route.
@@ -208,13 +212,13 @@ func (r *ratchetReplyReservation) sendPrepared(ctx context.Context, packet []byt
 	if current != r.gate.policyGeneration {
 		return dataplane.RouterErrRouteGeneration
 	}
-	return s.execution.SendRatchetReply(ctx, r.target, packet)
+	return s.execution.SendRatchetReplyOnRoute(ctx, r.target, packet, receipt)
 }
 
 func (r *ratchetReplyReservation) complete(err error) {
 	s := r.sender
-	if !r.established {
-		s.remoteMu.Lock()
+	s.remoteMu.Lock()
+	if !r.gate.completed {
 		r.gate.err = err
 		r.gate.completed = true
 		r.gate.reservation = nil
@@ -222,8 +226,8 @@ func (r *ratchetReplyReservation) complete(err error) {
 			delete(s.replyGates, r.target)
 		}
 		close(r.gate.done)
-		s.remoteMu.Unlock()
 	}
+	s.remoteMu.Unlock()
 	<-s.replySlots
 	s.replies.Done()
 }

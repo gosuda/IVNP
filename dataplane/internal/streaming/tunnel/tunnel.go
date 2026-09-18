@@ -22,6 +22,7 @@ import (
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/interfaces/stream"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/internal/pool"
 )
@@ -54,6 +55,12 @@ const (
 	minPeerMaxPayloadSize     = 512
 	tunnelRetryUpdateIdle     = false
 	tunnelRetryUpdatePending  = true
+	// silentHandshakeEvidenceRetries counts the initial SYN send, so 2 means
+	// at least one retransmit also went unanswered when the caller leaves.
+	silentHandshakeEvidenceRetries = 2
+	// maxInboundSYNPrep bounds concurrent PrepareHandshake calls so inbound
+	// SYN bursts cannot stall the authenticated delivery worker.
+	maxInboundSYNPrep = 8
 )
 
 const (
@@ -128,17 +135,19 @@ type TunnelNetwork struct {
 	handshakeTimeout     time.Duration
 	handshakeObserver    HandshakeObserver
 
-	mu             sync.RWMutex
+	mu             durable.RWMutex
 	listeners      map[uint16]*tunnelListener
 	byID           map[uint32]*tunnelConn
 	outboundPorts  map[uint16]int
 	inboundPorts   map[uint16]int
 	inbound        map[inboundKey]*tunnelConn
+	synPending     map[inboundKey]struct{}
+	synTokens      chan struct{}
 	closed         bool
 	ctx            context.Context
 	cancel         context.CancelFunc
 	done           chan struct{}
-	outboundMu     sync.RWMutex
+	outboundMu     durable.RWMutex
 	outbound       chan sendRequest
 	retryUpdates   chan *tunnelConn
 	cleanup        chan struct{}
@@ -223,6 +232,8 @@ func NewTunnelNetwork(config TunnelNetworkConfig) (*TunnelNetwork, error) {
 		outboundPorts:        make(map[uint16]int),
 		inboundPorts:         make(map[uint16]int),
 		inbound:              make(map[inboundKey]*tunnelConn),
+		synPending:           make(map[inboundKey]struct{}),
+		synTokens:            make(chan struct{}, maxInboundSYNPrep),
 		ctx:                  lifetime,
 		cancel:               cancel,
 		done:                 make(chan struct{}),
@@ -348,22 +359,35 @@ func (n *TunnelNetwork) dialStream(ctx context.Context, address string, localPor
 	case <-connection.peerClosed:
 	case <-handshake.Done():
 	}
-	if err = ctx.Err(); err != nil {
-		return nil, err
-	}
 	connection.mu.Lock()
 	unanswered := connection.remoteID == 0
 	retriesExhausted := connection.handshakeFailed
 	reset := connection.reset
-	peerTimedOut := !reset && unanswered && (errors.Is(handshake.Err(), context.DeadlineExceeded) || retriesExhausted)
+	// Silence evidence comes from the protocol's own machinery, not caller
+	// patience: the handshake timer, the SYN retry budget, or retransmits
+	// already observed when the caller leaves early. A dial abandoned before
+	// the first retry proves nothing about the route.
+	peerTimedOut := !reset && unanswered && (retriesExhausted || connection.syncRetries >= silentHandshakeEvidenceRetries ||
+		(errors.Is(handshake.Err(), context.DeadlineExceeded) && ctx.Err() == nil))
 	if peerTimedOut {
 		connection.handshakeFailed = true
 	}
 	connection.mu.Unlock()
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
 	if reset {
 		return nil, ErrTunnelReset
 	}
 	if !unanswered && !connection.isDone() {
+		connection.mu.Lock()
+		if connection.handshakeFeedback != nil {
+			feedback = connection.handshakeFeedback
+			connection.handshakeFeedback = nil
+		} else {
+			feedback = nil
+		}
+		connection.mu.Unlock()
 		if feedback != nil {
 			feedback.Established()
 		}
@@ -374,9 +398,6 @@ func (n *TunnelNetwork) dialStream(ctx context.Context, address string, localPor
 	}
 	if peerTimedOut {
 		connection.abort(false)
-		if feedback != nil {
-			feedback.NoResponse()
-		}
 		return nil, timeoutError{}
 	}
 	return nil, net.ErrClosed
@@ -560,11 +581,71 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 	if listener == nil {
 		return ErrTunnelAddress
 	}
+	if n.handshakeObserver == nil {
+		return n.finishSynchronize(ctx, delivery, packet, key, listener, peer, peerMaxPayloadSize, nil)
+	}
+	// Route preparation can block for the whole handshake timeout, so it runs
+	// off the delivery worker under a bounded permit. synPending dedups SYN
+	// retransmits that arrive while preparation is still in flight.
+	n.mu.Lock()
+	if n.closed {
+		n.mu.Unlock()
+		return net.ErrClosed
+	}
+	if _, pending := n.synPending[key]; pending {
+		n.mu.Unlock()
+		return nil
+	}
+	select {
+	case n.synTokens <- struct{}{}:
+	default:
+		n.mu.Unlock()
+		return ErrTunnelBackpressure
+	}
+	n.synPending[key] = struct{}{}
+	n.wg.Add(1)
+	n.mu.Unlock()
+	owned := delivery
+	owned.Payload = append([]byte(nil), delivery.Payload...)
+	go n.runInboundSYN(key, owned, listener)
+	return nil
+}
+
+// runInboundSYN completes an admitted SYN off the delivery worker: it
+// re-parses the owned payload, prepares the handshake route, then registers
+// the connection exactly as the synchronous path did.
+func (n *TunnelNetwork) runInboundSYN(key inboundKey, delivery Delivery, listener *tunnelListener) {
+	defer n.wg.Done()
+	defer func() { <-n.synTokens }()
+	defer func() {
+		n.mu.Lock()
+		delete(n.synPending, key)
+		n.mu.Unlock()
+	}()
+	ctx, cancel := context.WithTimeout(n.ctx, n.handshakeTimeout)
+	defer cancel()
+	packet, err := dataplanestreaming.Parse(delivery.Payload)
+	if err != nil {
+		return
+	}
+	peer, peerMaxPayloadSize, err := verifyControl(packet, delivery.Payload, delivery.From, nil, true)
+	if err != nil {
+		return
+	}
+	feedback, err := n.handshakeObserver.PrepareHandshake(ctx, delivery.From)
+	if err != nil {
+		return
+	}
+	_ = n.finishSynchronize(ctx, delivery, packet, key, listener, peer, peerMaxPayloadSize, feedback)
+}
+
+func (n *TunnelNetwork) finishSynchronize(ctx context.Context, delivery Delivery, packet Packet, key inboundKey, listener *tunnelListener, peer controlPeer, peerMaxPayloadSize int, feedback HandshakeFeedback) error {
 	localID, err := n.allocateID()
 	if err != nil {
 		return err
 	}
 	connection := n.newConn(localID, packet.ReceiveStreamID, delivery.From, peer.identity, delivery.ToPort, delivery.FromPort, false)
+	connection.handshakeFeedback = feedback
 	connection.standardConn = listener.standardConn
 	connection.setPeerControlLocked(peer)
 	if len(packet.Payload) != 0 {
@@ -963,7 +1044,7 @@ func (n *TunnelNetwork) deliver(ctx context.Context, connection *tunnelConn, wir
 	}
 	sender := n.sender
 	connection.mu.Lock()
-	if connection.remoteID == 0 && connection.handshakeFeedback != nil {
+	if connection.handshakeFeedback != nil {
 		sender = connection.handshakeFeedback
 	}
 	connection.mu.Unlock()
@@ -1325,15 +1406,24 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 	if c.remoteID != 0 && len(c.preSynchronize) != 0 {
 		deferred, c.preSynchronize = c.preSynchronize, nil
 	}
+	var establishedFeedback HandshakeFeedback
 	retryChanged := packet.Flags&FlagNoACK == 0
 	if retryChanged {
 		if !containsNACK(packet.NACKs, 0) {
 			c.releaseSynchronizeLocked()
+			if c.handshakeFeedback != nil {
+				establishedFeedback = c.handshakeFeedback
+				c.handshakeFeedback = nil
+			}
 		}
 		fastRetransmit = c.acknowledgeLocked(packet.AckThrough, packet.NACKs, time.Now())
 	}
 	if packet.Sequence != 0 {
 		sendACK, sendReset = c.handleSequenceLocked(packet)
+		if c.handshakeFeedback != nil {
+			establishedFeedback = c.handshakeFeedback
+			c.handshakeFeedback = nil
+		}
 	}
 	if c.localWriteClosed {
 		_, closePending := c.pending[c.localCloseSequence]
@@ -1343,6 +1433,9 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 		}
 	}
 	c.mu.Unlock()
+	if establishedFeedback != nil {
+		establishedFeedback.Established()
+	}
 	if retryChanged {
 		c.network.scheduleRetry(c)
 	}
@@ -1647,6 +1740,9 @@ func (c *tunnelConn) sendWire(ctx context.Context, wire []byte) error {
 
 // Automatic protocol replies must not hold an ingress worker across route
 // preparation. The queue owns the wire until delivery or explicit rejection.
+// A delivery failure only drops this copy: SYN-ACK and CLOSE state live in
+// synchronize/pending and are retried by the retransmission schedule, while a
+// bare ACK is superseded by the next inbound packet.
 func (c *tunnelConn) queueProtocolOwned(wire []byte, lease *wireLease) error {
 	return c.queueProtocolRequest(sendRequest{connection: c, wire: wire, lease: lease, ctx: c.network.ctx, abortOnFailure: true})
 }
@@ -1747,7 +1843,7 @@ func (c *tunnelConn) retry(now time.Time) []leasedSend {
 	rto := c.rto.RTO()
 	if len(c.synchronize) != 0 && now.Sub(c.syncSent) >= rto {
 		if c.syncRetries >= c.network.maxRetries {
-			c.handshakeFailed = c.remoteID == 0
+			c.handshakeFailed = true
 			closeConnection = true
 		} else {
 			c.syncRetries++
@@ -1880,13 +1976,22 @@ func (c *tunnelConn) Write(src []byte) (int, error) {
 				c.network.scheduleRetry(c)
 				return written + chunkLen, err
 			}
-			c.mu.Lock()
-			pending := c.pending[sequence]
-			delete(c.pending, sequence)
-			pending.release()
-			c.signalWakeLocked()
-			c.mu.Unlock()
-			return written, err
+			if c.isDone() {
+				c.mu.Lock()
+				pending := c.pending[sequence]
+				delete(c.pending, sequence)
+				pending.release()
+				c.signalWakeLocked()
+				c.mu.Unlock()
+				return written, err
+			}
+			// The send failed before the packet reached the wire, but its
+			// sequence is consumed: dropping the pending entry would leave a
+			// permanent hole the receiver parks every later packet on. Keep
+			// it queued — the retry machinery owns delivery — and report the
+			// bytes as accepted, matching the write-deadline branch.
+			c.network.scheduleRetry(c)
+			return written + chunkLen, nil
 		}
 		written += chunkLen
 		src = src[chunkLen:]
@@ -1942,7 +2047,9 @@ func (c *tunnelConn) Close() error {
 	}
 	if err := c.initiateClose(); err != nil {
 		c.abort(false)
-		if errors.Is(err, net.ErrClosed) {
+		// initiateClose only surfaces a send error when the connection was
+		// already torn down — there is nothing left to close.
+		if errors.Is(err, net.ErrClosed) || c.isDone() {
 			return nil
 		}
 		return err
@@ -1985,6 +2092,16 @@ func (c *tunnelConn) scheduleGracefulCleanup() {
 }
 
 func (c *tunnelConn) abort(sendReset bool) {
+	c.mu.Lock()
+	var noResponseFeedback HandshakeFeedback
+	if c.handshakeFailed && c.handshakeFeedback != nil {
+		noResponseFeedback = c.handshakeFeedback
+		c.handshakeFeedback = nil
+	}
+	c.mu.Unlock()
+	if noResponseFeedback != nil {
+		noResponseFeedback.NoResponse()
+	}
 	if sendReset {
 		c.mu.Lock()
 		var wire []byte

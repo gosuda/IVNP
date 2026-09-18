@@ -13,6 +13,7 @@ import (
 	dataplanestreamingtunnel "gosuda.org/ivnp/dataplane/internal/streaming/tunnel"
 	dataplanetunnel "gosuda.org/ivnp/dataplane/internal/tunnel"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/observability"
@@ -44,7 +45,7 @@ type PreparedRouteSender struct {
 	tunnels       PreparedTunnelWriter
 	now           func() uint64
 	nextID        MessageIDSource
-	lifecycleMu   sync.RWMutex
+	lifecycleMu   durable.RWMutex
 	released      bool
 	limiter       *DestinationBandwidthLimiter
 	scratch       chan *streamingSenderScratch
@@ -342,6 +343,15 @@ func (s *PreparedRouteSender) sendTunnel(ctx context.Context, delivery dataplane
 	return err
 }
 func (s *PreparedRouteSender) SendRatchetReply(ctx context.Context, target foundation.Hash, packet []byte) error {
+	return s.sendRatchetReply(ctx, target, packet, nil)
+}
+
+// SendRatchetReplyOnRoute admits only the installation identified by receipt.
+func (s *PreparedRouteSender) SendRatchetReplyOnRoute(ctx context.Context, target foundation.Hash, packet []byte, receipt PreparedRouteReceipt) error {
+	return s.sendRatchetReply(ctx, target, packet, &receipt)
+}
+
+func (s *PreparedRouteSender) sendRatchetReply(ctx context.Context, target foundation.Hash, packet []byte, receipt *PreparedRouteReceipt) error {
 	if s == nil || len(packet) == 0 {
 		return ErrGarlicPacket
 	}
@@ -355,6 +365,9 @@ func (s *PreparedRouteSender) SendRatchetReply(ctx context.Context, target found
 		return err
 	}
 	defer entry.active.Done()
+	if receipt != nil && (!receipt.matches(s.owner, entry) || receipt.Remote != target) {
+		return ErrPreparedRouteMissing
+	}
 	route := &entry.route
 	if route.Legacy {
 		return ErrUnsupportedEncryption

@@ -17,6 +17,7 @@ import (
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/observability"
 	"gosuda.org/ivnp/state"
@@ -91,7 +92,7 @@ func (p DestinationPolicy) durable() *state.SecureStateEncryptedLeaseSetPolicy {
 }
 
 type destinationBuildReplyRegistry struct {
-	mu       sync.RWMutex
+	mu       durable.RWMutex
 	next     uint64
 	handlers []destinationBuildReplyRegistration
 }
@@ -158,7 +159,7 @@ func (r *destinationBuildReplyRegistry) HandleReply(message foundation.I2NPMessa
 }
 
 type destinationRequestRegistry struct {
-	mu       sync.RWMutex
+	mu       durable.RWMutex
 	next     uint64
 	handlers []destinationRequestRegistration
 }
@@ -245,7 +246,7 @@ func (r *destinationRequestRegistry) Close() error {
 }
 
 type destinationPublisherRegistry struct {
-	mu         sync.RWMutex
+	mu         durable.RWMutex
 	next       uint64
 	publishers []destinationPublisherRegistration
 }
@@ -516,7 +517,8 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 	}()
 	health, err := tunnel.NewHealth(tunnel.HealthConfig{
 		Runtime: f.tunnels, Pool: pool, Maintainer: maintainer, Profiles: profiles, Now: f.now,
-		Timeout: daemonHealthProbeTimeoutMillis, MaxPending: buildPending,
+		Timeout: healthProbeTimeout(f.cfg), MaxPending: buildPending, FailureThreshold: healthProbeFailureThreshold(f.cfg),
+		ProbeBeforeActivity: true,
 	})
 	if err != nil {
 		return nil, err

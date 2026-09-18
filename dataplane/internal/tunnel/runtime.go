@@ -5,11 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/packet"
 	"gosuda.org/ivnp/observability"
 )
@@ -20,6 +22,10 @@ const (
 	fragmentReassemblyLifetime = 45 * time.Second
 	defaultDeliveryBlocks      = TunnelPayloadLen / 3
 	circuitShards              = 64
+	// forwardSendTimeout bounds ingress-driven hand-off to a directly connected
+	// peer. Transit and endpoint delivery must degrade to loss rather than
+	// backpressure authenticated packet reception indefinitely.
+	forwardSendTimeout = 10 * time.Second
 )
 
 var (
@@ -87,7 +93,7 @@ type outboundCircuit struct {
 }
 
 type circuitShard struct {
-	mu       sync.RWMutex
+	mu       durable.RWMutex
 	inbound  map[uint32]*inboundCircuit
 	outbound map[uint32]*outboundCircuit
 }
@@ -98,20 +104,26 @@ type senderBox struct{ sender Sender }
 type RuntimeConfig struct {
 	Sender  Sender
 	Gateway *Gateway
+	// Local identifies this router for endpoint delivery instructions that name
+	// the runtime owner; a zero hash disables the self-delivery shortcut.
+	Local   foundation.Hash
 	Now     func() uint64
 	Metrics *observability.Registry
+	Logger  *slog.Logger
 }
 
 // Runtime manages active inbound and outbound tunnel circuits and routes tunnel messages.
 type Runtime struct {
 	gateway   *Gateway
 	now       func() uint64
+	local     foundation.Hash
 	nextID    atomic.Uint32
 	sender    atomic.Pointer[senderBox]
 	shards    [circuitShards]circuitShard
 	blocks    sync.Pool // *[]Block with defaultDeliveryBlocks capacity
 	metricsMu sync.Mutex
 	metrics   *observability.Registry
+	logger    *slog.Logger
 }
 
 // NewRuntime constructs a tunnel runtime without network I/O.
@@ -127,7 +139,7 @@ func NewRuntime(cfg RuntimeConfig) *Runtime {
 		gateway = NewGateway(nil)
 	}
 
-	runtime := &Runtime{gateway: gateway, now: now, metrics: cfg.Metrics}
+	runtime := &Runtime{gateway: gateway, now: now, local: cfg.Local, metrics: cfg.Metrics, logger: cfg.Logger}
 	var seed [4]byte
 	if _, err := rand.Read(seed[:]); err == nil {
 		runtime.nextID.Store(binary.BigEndian.Uint32(seed[:]))
@@ -536,6 +548,10 @@ func (r *Runtime) sendBlock(ctx context.Context, circuitID uint32, generation *c
 		buffer.Release()
 		if err != nil {
 			releaseBuffers(buffers[index+1 : count])
+			if r.logger != nil {
+				r.logger.Debug("tunnel outbound fragment send failed", "circuit", circuitID,
+					"peer", foundation.EncodeI2PBase64(circuit.firstHop[:]), "fragment", index, "error", err)
+			}
 			return err
 		}
 	}
@@ -566,8 +582,13 @@ func (r *Runtime) HandleGateway(tunnelID uint32, message foundation.I2NPMessage)
 		buffer.Release()
 		return err
 	}
-	err := r.SendBlock(context.Background(), tunnelID, Block{Delivery: DeliveryLocal, Last: true, Data: frame})
+	ctx, cancel := context.WithTimeout(context.Background(), forwardSendTimeout)
+	err := r.SendBlock(ctx, tunnelID, Block{Delivery: DeliveryLocal, Last: true, Data: frame})
+	cancel()
 	buffer.Release()
+	if err != nil && r.logger != nil {
+		r.logger.Debug("tunnel gateway splice failed", "tunnel", tunnelID, "message_type", message.Header.Type, "error", err)
+	}
 	return err
 }
 
@@ -592,15 +613,24 @@ func (r *Runtime) HandleContext(ctx context.Context, message foundation.I2NPMess
 	circuit, exists := shard.inbound[data.TunnelID]
 	if !exists {
 		shard.mu.RUnlock()
+		if r.logger != nil {
+			r.logger.Debug("tunnel data for unknown inbound circuit", "tunnel", data.TunnelID)
+		}
 		return ErrCircuitNotFound
 	}
 	if r.expired(circuit.expiresAt) {
 		shard.mu.RUnlock()
+		if r.logger != nil {
+			r.logger.Debug("tunnel data for expired inbound circuit", "tunnel", data.TunnelID)
+		}
 		return ErrCircuitExpired
 	}
 	circuit.lifetime.refs.Add(1)
 	shard.mu.RUnlock()
 	defer circuit.release()
+
+	ctx, cancel := context.WithTimeout(ctx, forwardSendTimeout)
+	defer cancel()
 
 	buffer, ok := packet.Acquire(0, foundation.I2NPTunnelDataMessageLen)
 	if !ok {
@@ -616,6 +646,9 @@ func (r *Runtime) HandleContext(ctx context.Context, message foundation.I2NPMess
 	for index := range circuit.transforms {
 		if err := circuit.transforms[index].Transform(payload[4:], payload[4:]); err != nil {
 			buffer.Release()
+			if r.logger != nil {
+				r.logger.Debug("tunnel inbound transform failed", "tunnel", data.TunnelID, "error", err)
+			}
 			return err
 		}
 	}
@@ -629,6 +662,10 @@ func (r *Runtime) HandleContext(ctx context.Context, message foundation.I2NPMess
 		}
 		err := r.sendTunnelData(ctx, sender, circuit.forward.Peer, nil, payload)
 		buffer.Release()
+		if err != nil && r.logger != nil {
+			r.logger.Debug("tunnel forward failed", "tunnel", data.TunnelID, "next_tunnel", circuit.forward.TunnelID,
+				"peer", foundation.EncodeI2PBase64(circuit.forward.Peer[:]), "error", err)
+		}
 		if err == nil && r.metrics != nil {
 			r.metrics.IncTunnelParticipatingForwarded()
 		}
@@ -640,10 +677,17 @@ func (r *Runtime) HandleContext(ctx context.Context, message foundation.I2NPMess
 	if err == nil {
 		sender := r.currentSender()
 		for _, block := range (*blocks)[:count] {
-			if err = r.deliver(ctx, sender, circuit.local, block); err != nil {
+			if err = r.deliver(ctx, sender, circuit.local, block, data.TunnelID); err != nil {
+				if r.logger != nil {
+					r.logger.Debug("tunnel endpoint delivery failed", "tunnel", data.TunnelID,
+						"delivery", block.Delivery, "gateway", foundation.EncodeI2PBase64(block.Gateway[:]),
+						"next_tunnel", block.TunnelID, "error", err)
+				}
 				break
 			}
 		}
+	} else if r.logger != nil {
+		r.logger.Debug("tunnel endpoint parse failed", "tunnel", data.TunnelID, "error", err)
 	}
 	clear((*blocks)[:count])
 	r.blocks.Put(blocks)
@@ -654,13 +698,18 @@ func (r *Runtime) HandleContext(ctx context.Context, message foundation.I2NPMess
 	return err
 }
 
-func (r *Runtime) deliver(ctx context.Context, sender Sender, local func(foundation.I2NPMessage) error, block Block) error {
+func (r *Runtime) deliver(ctx context.Context, sender Sender, local func(foundation.I2NPMessage) error, block Block, inboundTunnel uint32) error {
 	message, used, err := foundation.I2NPParseUnchecked(block.Data)
 	if err != nil {
 		return err
 	}
 	if used != len(block.Data) {
 		return foundation.I2NPErrMalformed
+	}
+	if r.logger != nil {
+		r.logger.Debug("tunnel endpoint block", "tunnel", inboundTunnel, "delivery", block.Delivery,
+			"gateway", foundation.EncodeI2PBase64(block.Gateway[:]), "next_tunnel", block.TunnelID,
+			"message_type", message.Header.Type)
 	}
 	switch block.Delivery {
 	case DeliveryLocal:
@@ -669,11 +718,23 @@ func (r *Runtime) deliver(ctx context.Context, sender Sender, local func(foundat
 		}
 		return local(message)
 	case DeliveryRouter:
+		if r.local != (foundation.Hash{}) && block.Gateway == r.local {
+			if local == nil {
+				return ErrDeliveryHandler
+			}
+			return local(message)
+		}
 		if sender == nil {
 			return ErrTunnelSender
 		}
 		return sender.Send(ctx, block.Gateway, message)
 	case DeliveryTunnel:
+		if r.local != (foundation.Hash{}) && block.Gateway == r.local {
+			// The endpoint is also the named gateway: splice the embedded
+			// message into the local gateway circuit instead of opening a
+			// transport session to self.
+			return r.HandleGateway(block.TunnelID, message)
+		}
 		if sender == nil {
 			return ErrTunnelSender
 		}

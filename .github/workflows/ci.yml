@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test, vet, lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install gojgp
+        run: go install github.com/gosuda/JustGoodPractices/cmd/gojgp@v1.2.0
+      - name: Run all tests
+        run: go test -count=1 ./...
+      - name: Run go vet
+        run: go vet ./...
+      - name: Run gojgp
+        run: gojgp lint ./...
+
+  dst:
+    name: DST seed ${{ matrix.seed }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [1, 16, 42, 67, 1982, 1992, 2002, 2012, 2022, 2026]
+    env:
+      DST_SEED: ${{ matrix.seed }}
+      # go test surfaces captured stderr only on failure, so per-node debug
+      # logs are free on pass and present when a rare flake finally trips.
+      DST_LOG: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run deterministic mesh and chaos tests
+        run: go test -count=1 -tags dst -run 'TestSim|TestDeterministic' .
+      - name: Run simulation-tagged unit tests
+        run: go test -count=1 -tags dst ./internal/simnet ./internal/durable ./dataplane/internal/streaming/tunnel ./dataplane/internal/router ./controlplane/internal/router
+
+  cross-platform:
+    name: ${{ matrix.os }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: macos-latest
+            arch: arm64
+          - os: windows-latest
+            arch: amd64
+          - os: windows-latest
+            arch: arm64
+    env:
+      GOARCH: ${{ matrix.arch }}
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build packages
+        run: go build ./...
+      - name: Run Windows state security regressions
+        if: runner.os == 'Windows' && matrix.arch == 'amd64'
+        run: go test -count=1 ./state/internal/filesystem_store ./state/internal/secure_store ./state/internal/configuration -run 'Test(Windows|CreatePrivate|AtomicRoundTrip|ReadBoundedRejectsSymlink|StateLock|StateRejectsUnsafe|StateCiphertext|LoadOrCreatePersists|LoadOrCreateOperating|LoadOperatingRejects|LoadRejectsSwapped)'
+      - name: Run Unix state security regressions
+        if: runner.os != 'Windows'
+        run: go test -count=1 ./state/internal/filesystem_store ./state/internal/secure_store ./state/internal/configuration

@@ -1,5 +1,3 @@
-//go:build !linux || !amd64
-
 package ssu2
 
 import (
@@ -7,18 +5,19 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
-	"syscall"
 )
+
+// This file is compiled on every platform: it is the whole implementation on
+// non-Linux builds and the fallback for non-native UDPSocket values (for
+// example simulated transports) on Linux.
 
 type portableBatchState struct{}
 
-func newBatchState(int) any { return portableBatchState{} }
+func newBatchStatePortable(int) any { return portableBatchState{} }
 
-func enableKernelDropAccounting(syscall.RawConn) bool { return false }
-
-// Portable platforms preserve the same packet and error semantics with one
+// The portable path preserves the same packet and error semantics with one
 // datagram per receive and a bounded sequential send loop.
-func readBatch(c *UDPBatchConn, b *Batch) (int, error) {
+func readBatchPortable(c *UDPBatchConn, b *Batch) (int, error) {
 	packet := &b.packets[0]
 	if len(packet.Data) == 0 || len(packet.Data) > MaxDatagramSize {
 		return 0, ErrInvalidDatagram
@@ -37,7 +36,7 @@ func readBatch(c *UDPBatchConn, b *Batch) (int, error) {
 	return 1, nil
 }
 
-func writeBatchPrefix(c *UDPBatchConn, b *Batch, count int) (int, error) {
+func writeBatchPrefixPortable(c *UDPBatchConn, b *Batch, count int) (int, error) {
 	var addresses [MaxBatch]netip.AddrPort
 	// Match sendmmsg semantics: reject a malformed prefix before emitting any
 	// datagram. This matters to callers which retry the unsent suffix.
@@ -94,8 +93,6 @@ func zoneIndex(zone string) uint32 {
 	}
 	return uint32(iface.Index)
 }
-
-func usesKernelVector() bool { return false }
 
 // MSG_TRUNC is 0x20 on Linux, 0x10 on BSD-derived systems, and MSG_PARTIAL
 // is 0x8000 on Windows. ReadMsgUDP reports the platform flag unchanged.

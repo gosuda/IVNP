@@ -72,29 +72,48 @@ func (b *Batch) valid() bool {
 	return b != nil && len(b.packets) != 0 && len(b.packets) <= MaxBatch && b.state != nil
 }
 
+// UDPSocket is the bound-UDP-socket surface the SSU2 transport consumes.
+// *net.UDPConn implements it; simulated transports substitute their own
+// implementation so tests can control addressing and delivery without a
+// kernel socket.
+type UDPSocket interface {
+	net.PacketConn
+	ReadFromUDP(b []byte) (int, *net.UDPAddr, error)
+	WriteToUDP(b []byte, addr *net.UDPAddr) (int, error)
+	ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error)
+	WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (int, error)
+	ReadMsgUDPAddrPort(b, oob []byte) (n, oobn, flags int, addr netip.AddrPort, err error)
+}
+
 // UDPBatchConn exclusively owns conn until Close. Do not perform I/O on conn
 // directly after passing it to NewUDPBatchConn. ReadBatch and WriteBatch may
 // run concurrently with different Batch values, but a Batch itself may be in
 // at most one operation at a time.
 type UDPBatchConn struct {
-	conn                 *net.UDPConn
+	conn                 UDPSocket
 	raw                  syscall.RawConn
 	closeOnce            sync.Once
 	kernelDrops          atomic.Uint64
 	kernelDropAccounting bool
 }
 
-// NewUDPBatchConn transfers ownership of conn to a batch I/O wrapper.
-func NewUDPBatchConn(conn *net.UDPConn) (*UDPBatchConn, error) {
+// NewUDPBatchConn transfers ownership of conn to a batch I/O wrapper. A
+// *net.UDPConn enables the kernel vector path and drop accounting where the
+// platform provides them; any other UDPSocket uses the portable per-datagram
+// path.
+func NewUDPBatchConn(conn UDPSocket) (*UDPBatchConn, error) {
 	if conn == nil {
 		return nil, ErrInvalidBatch
 	}
-	raw, err := conn.SyscallConn()
-	if err != nil {
-		return nil, err
+	result := &UDPBatchConn{conn: conn}
+	if native, ok := conn.(*net.UDPConn); ok {
+		raw, err := native.SyscallConn()
+		if err != nil {
+			return nil, err
+		}
+		result.raw = raw
+		result.kernelDropAccounting = enableKernelDropAccounting(raw)
 	}
-	result := &UDPBatchConn{conn: conn, raw: raw}
-	result.kernelDropAccounting = enableKernelDropAccounting(raw)
 	return result, nil
 }
 
@@ -102,7 +121,7 @@ func NewUDPBatchConn(conn *net.UDPConn) (*UDPBatchConn, error) {
 // slots are valid. A non-nil error can accompany packets already received,
 // such as ErrDatagramTruncated. Closing c unblocks a pending ReadBatch.
 func (c *UDPBatchConn) ReadBatch(b *Batch) (int, error) {
-	if c == nil || c.raw == nil || !b.valid() {
+	if c == nil || c.conn == nil || !b.valid() {
 		return 0, ErrInvalidBatch
 	}
 	return readBatch(c, b)
@@ -110,7 +129,7 @@ func (c *UDPBatchConn) ReadBatch(b *Batch) (int, error) {
 
 // WriteBatch transmits every packet slot in b once.
 func (c *UDPBatchConn) WriteBatch(b *Batch) (int, error) {
-	if c == nil || c.raw == nil || !b.valid() {
+	if c == nil || c.conn == nil || !b.valid() {
 		return 0, ErrInvalidBatch
 	}
 	return writeBatchPrefix(c, b, len(b.packets))
@@ -120,15 +139,18 @@ func (c *UDPBatchConn) WriteBatch(b *Batch) (int, error) {
 // long-lived writer retain a fixed 32-slot vector while flushing a smaller
 // ready prefix without manufacturing empty datagrams.
 func (c *UDPBatchConn) WriteBatchPrefix(b *Batch, count int) (int, error) {
-	if c == nil || c.raw == nil || !b.valid() || count < 1 || count > len(b.packets) {
+	if c == nil || c.conn == nil || !b.valid() || count < 1 || count > len(b.packets) {
 		return 0, ErrInvalidBatch
 	}
 	return writeBatchPrefix(c, b, count)
 }
 
-// VectorIOEnabled reports whether this build uses recvmmsg/sendmmsg rather
-// than the portable per-datagram fallback.
-func (c *UDPBatchConn) VectorIOEnabled() bool { return c != nil && usesKernelVector() }
+// VectorIOEnabled reports whether this connection uses recvmmsg/sendmmsg
+// rather than the portable per-datagram fallback. Only native *net.UDPConn
+// sockets with a syscall.RawConn qualify.
+func (c *UDPBatchConn) VectorIOEnabled() bool {
+	return c != nil && c.raw != nil && usesKernelVector()
+}
 
 // KernelDropAccounting reports whether SO_RXQ_OVFL was enabled on this socket.
 func (c *UDPBatchConn) KernelDropAccounting() bool {

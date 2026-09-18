@@ -262,6 +262,12 @@ func (m *TransportMux) PrepareSession(ctx context.Context, peer foundation.Hash)
 	if !ok {
 		return nil, ErrTransportUnavailable
 	}
+	if alternate != nil && m.sessionDegraded(primary, peer) {
+		// A degraded session on the primary transport cannot pass traffic but
+		// still exists, so re-dialing it yields nothing. Prefer establishing
+		// the alternate transport instead of burning the attempt budget.
+		primary, alternate = alternate, nil
+	}
 	attempts := 1
 	if alternate != nil {
 		attempts++
@@ -270,7 +276,7 @@ func (m *TransportMux) PrepareSession(ctx context.Context, peer foundation.Hash)
 	if err == nil {
 		return m.prepareTransportSession(primary, peer)
 	}
-	retryable := IsRetryableTransportError(err) || errors.Is(err, errTransportSessionAttemptTimeout)
+	retryable := IsRetryableTransportError(err)
 	if alternate == nil || !retryable || ctx.Err() != nil {
 		return nil, err
 	}
@@ -313,11 +319,50 @@ func ensureTransportSession(ctx context.Context, manager dataplane.RouterTranspo
 	return err
 }
 
+// sessionDegraded reports whether the manager holds a session for peer that
+// exists but cannot currently send — sessionManager skips it, yet dialing the
+// same transport again would only return the degraded session.
+func (m *TransportMux) sessionDegraded(manager dataplane.RouterTransportManager, peer foundation.Hash) bool {
+	sessions, ok := manager.(preferredSessionManager)
+	if !ok || !sessions.HasSession(peer) {
+		return false
+	}
+	return !m.sessionViable(manager, peer)
+}
+
+// sessionViable reports whether the manager's session for peer can currently
+// send. Managers that distinguish liveness from existence (SSU2 congestion
+// degradation) override SessionViable; others fall back to HasSession.
+func (m *TransportMux) sessionViable(manager dataplane.RouterTransportManager, peer foundation.Hash) bool {
+	if viable, ok := manager.(interface{ SessionViable(foundation.Hash) bool }); ok {
+		return viable.SessionViable(peer)
+	}
+	if sessions, ok := manager.(preferredSessionManager); ok {
+		return sessions.HasSession(peer)
+	}
+	return false
+}
+
+// SessionViable reports whether any child transport has an authenticated
+// session that can currently send. A degraded session that still exists for
+// retransmission bookkeeping does not count as connected for peer selection.
+func (m *TransportMux) SessionViable(peer foundation.Hash) bool {
+	if m == nil {
+		return false
+	}
+	for _, manager := range m.configuredManagers() {
+		if manager != nil && m.sessionViable(manager, peer) {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *TransportMux) sessionManager(_ context.Context, peer foundation.Hash) (dataplane.RouterTransportManager, bool, error) {
 	ntcp2, ntcp2OK := m.ntcp2.(preferredSessionManager)
 	ssu2, ssu2OK := m.ssu2.(preferredSessionManager)
-	ntcp2Live := ntcp2OK && ntcp2.HasSession(peer)
-	ssu2Live := ssu2OK && ssu2.HasSession(peer)
+	ntcp2Live := ntcp2OK && m.sessionViable(m.ntcp2, peer)
+	ssu2Live := ssu2OK && m.sessionViable(m.ssu2, peer)
 	if !ntcp2Live && !ssu2Live {
 		return nil, false, nil
 	}
@@ -493,9 +538,12 @@ func (m *TransportMux) directSSU2RouterInfoCapable(info foundation.NetworkDataba
 // IsRetryableTransportError reports failures that occurred before an I2NP
 // message could be delivered and are expected while selecting live peers.
 func IsRetryableTransportError(err error) bool {
+	if errors.Is(err, errTransportSessionAttemptTimeout) {
+		return true
+	}
 	unavailable := errors.Is(err, ErrTransportUnavailable) || errors.Is(err, dataplane.RouterErrSessionUnavailable)
 	ntcpSetupFailure := errors.Is(err, dataplane.RouterErrNTCP2Peer) || errors.Is(err, dataplane.RouterErrNTCP2Session)
-	ssuSetupFailure := errors.Is(err, dataplane.RouterErrSSU2Peer) || errors.Is(err, dataplane.RouterErrSSU2Session) || errors.Is(err, dataplane.RouterErrSSU2Introduction)
+	ssuSetupFailure := errors.Is(err, dataplane.RouterErrSSU2Peer) || errors.Is(err, dataplane.RouterErrSSU2Session) || errors.Is(err, dataplane.RouterErrSSU2Introduction) || errors.Is(err, dataplane.RouterErrSSU2SendStalled)
 	if unavailable || ntcpSetupFailure || ssuSetupFailure {
 		return true
 	}

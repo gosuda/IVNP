@@ -18,7 +18,7 @@ var ErrEncryptedSigningKey = errors.New("i2p: invalid encrypted LeaseSet signing
 // GenerateRed25519Key generates a random Red25519 scalar and its corresponding public point.
 func GenerateRed25519Key() (public, private [32]byte, err error) {
 	var uniform [64]byte
-	if _, err = io.ReadFull(rand.Reader, uniform[:]); err != nil {
+	if _, err = io.ReadFull(randomSource, uniform[:]); err != nil {
 		return public, private, err
 	}
 	scalar, err := new(edwards25519.Scalar).SetUniformBytes(uniform[:])

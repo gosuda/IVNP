@@ -30,9 +30,14 @@ type LocalRouterInfoConfig struct {
 	NoTransit                   bool
 	BandwidthRateBytesPerSecond int
 	RouterVersion               string
-	Peers                       []foundation.Hash
-	Options                     []MappingOption
-	Metrics                     *observability.Registry
+	// Reachability is the initial advertised capability. A statically
+	// configured advertised endpoint is an operator's assertion of public
+	// reachability; zero keeps the unknown state until NAT mapping or a peer
+	// test result reports otherwise.
+	Reachability Reachability
+	Peers        []foundation.Hash
+	Options      []MappingOption
+	Metrics      *observability.Registry
 }
 
 // LocalRouterInfo is a concrete local RouterInfo owner. It atomically turns
@@ -78,15 +83,16 @@ func NewLocalRouterInfo(config LocalRouterInfoConfig) (*LocalRouterInfo, error) 
 		return nil, err
 	}
 	return &LocalRouterInfo{
-		info:        info,
-		database:    config.Database,
-		clock:       config.Clock,
-		metrics:     config.Metrics,
-		peers:       append([]foundation.Hash(nil), config.Peers...),
-		floodfill:   config.Floodfill,
-		noTransit:   config.NoTransit,
-		bandwidth:   localRouterBandwidthCapability(config.BandwidthRateBytesPerSecond),
-		baseOptions: cloneI2PMappingEntries(baseOptions),
+		info:         info,
+		database:     config.Database,
+		clock:        config.Clock,
+		metrics:      config.Metrics,
+		peers:        append([]foundation.Hash(nil), config.Peers...),
+		floodfill:    config.Floodfill,
+		noTransit:    config.NoTransit,
+		reachability: config.Reachability,
+		bandwidth:    localRouterBandwidthCapability(config.BandwidthRateBytesPerSecond),
+		baseOptions:  cloneI2PMappingEntries(baseOptions),
 	}, nil
 }
 

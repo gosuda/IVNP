@@ -140,60 +140,98 @@ func testNTCP2ControlCancellation(t *testing.T, name string) {
 	})
 }
 
-func TestSSU2ControlCancellationDoesNotWaitForBulkSerialization(t *testing.T) {
-	for _, name := range []string{"framing", "packet cipher"} {
-		t.Run(name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				manager, session := newSSU2SendTestHarness(t)
-				sender, err := manager.PreparedSession(session.peer)
-				if err != nil {
-					t.Fatal(err)
-				}
-				lock := &session.frameMu
-				if name == "packet cipher" {
-					lock = &session.packetMu
-				}
-				lock.Lock()
-				locked := true
-				ctx, cancel := context.WithCancel(t.Context())
-				done := make(chan error, 1)
-				finished := false
-				defer func() {
-					cancel()
-					if locked {
-						lock.Unlock()
-					}
-					if !finished {
-						<-done
-					}
-				}()
-				go func() { done <- sender.Send(ctx, managerHotPathMessage()) }()
-				synctest.Wait()
-				cancel()
-				synctest.Wait()
-				select {
-				case err := <-done:
-					finished = true
-					if !errors.Is(err, context.Canceled) {
-						t.Fatalf("control send = %v, want cancellation", err)
-					}
-				default:
-					t.Fatal("control send ignored cancellation while waiting for bulk serialization")
-				}
-				lock.Unlock()
-				locked = false
-				if queued := len(manager.egressQueue); queued != 0 {
-					t.Fatalf("canceled control send queued %d packets", queued)
-				}
-				resumed := make(chan error, 1)
-				go func() { resumed <- sender.Send(t.Context(), managerHotPathMessage()) }()
-				synctest.Wait()
-				slot := <-manager.egressQueue
-				slot.done <- nil
-				if err := <-resumed; err != nil {
-					t.Fatalf("send after canceled writer: %v", err)
-				}
-			})
-		})
-	}
+func TestSSU2ControlCancellationDoesNotWaitForPacketCipher(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, session := newSSU2SendTestHarness(t)
+		sender, err := manager.PreparedSession(session.peer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		session.packetMu.Lock()
+		locked := true
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		finished := false
+		defer func() {
+			cancel()
+			if locked {
+				session.packetMu.Unlock()
+			}
+			if !finished {
+				<-done
+			}
+		}()
+		go func() { done <- sender.Send(ctx, managerHotPathMessage()) }()
+		synctest.Wait()
+		cancel()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			finished = true
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("control send = %v, want cancellation", err)
+			}
+		default:
+			t.Fatal("control send ignored cancellation while waiting for bulk serialization")
+		}
+		session.packetMu.Unlock()
+		locked = false
+		if queued := len(manager.egressQueue); queued != 0 {
+			t.Fatalf("canceled control send queued %d packets", queued)
+		}
+		resumed := make(chan error, 1)
+		go func() { resumed <- sender.Send(t.Context(), managerHotPathMessage()) }()
+		synctest.Wait()
+		slot := <-manager.egressQueue
+		slot.done <- nil
+		if err := <-resumed; err != nil {
+			t.Fatalf("send after canceled writer: %v", err)
+		}
+	})
+}
+
+func TestSSU2ControlCancellationReturnsFromEgressWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, session := newSSU2SendTestHarness(t)
+		sender, err := manager.PreparedSession(session.peer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		finished := false
+		defer func() {
+			cancel()
+			if !finished {
+				<-done
+			}
+		}()
+		go func() { done <- sender.Send(ctx, managerHotPathMessage()) }()
+		synctest.Wait()
+		cancel()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			finished = true
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("control send = %v, want cancellation", err)
+			}
+		default:
+			t.Fatal("control send ignored cancellation while waiting for bulk serialization")
+		}
+		// The send path no longer pins a bulk mutex: cancellation mid-wait
+		// still escapes promptly, and the admitted egress slot drains and
+		// recycles so later sends are not starved.
+		slot := <-manager.egressQueue
+		slot.done <- nil
+		synctest.Wait()
+		resumed := make(chan error, 1)
+		go func() { resumed <- sender.Send(t.Context(), managerHotPathMessage()) }()
+		synctest.Wait()
+		slot = <-manager.egressQueue
+		slot.done <- nil
+		if err := <-resumed; err != nil {
+			t.Fatalf("send after canceled writer: %v", err)
+		}
+	})
 }

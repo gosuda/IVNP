@@ -48,6 +48,11 @@ type PreparedRouteReceipt struct {
 	responseVersion uint64
 }
 
+// Confirmed reports whether the route installation was observed to receive a peer response.
+func (r PreparedRouteReceipt) Confirmed() bool {
+	return r.responseVersion > 0
+}
+
 type preparedRouteEntry struct {
 	route           PreparedRoute
 	active          sync.WaitGroup

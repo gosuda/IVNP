@@ -8,6 +8,7 @@ import (
 
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 var (
@@ -42,6 +43,7 @@ type pendingProbe struct {
 	outboundID       uint32
 	circuit          dataplane.TunnelCircuitToken
 	inboundLocalID   uint32
+	inboundCircuit   dataplane.TunnelCircuitToken
 	outboundActivity uint64
 	inboundActivity  uint64
 	sentAt           uint64
@@ -80,7 +82,7 @@ type Health struct {
 	failureThreshold uint8
 	requireActivity  bool
 
-	lifecycleMu sync.RWMutex
+	lifecycleMu durable.RWMutex
 	mu          sync.Mutex
 	nextID      uint32
 	pending     map[uint32]pendingProbe
@@ -207,6 +209,9 @@ func (h *Health) Probe(ctx context.Context, pair CircuitPair, peer foundation.Ha
 			h.mu.Unlock()
 			return 0, ErrHealthConfig
 		}
+		if inEntry, inOK := h.pool.Get(pair.InboundLocalID, now); inOK {
+			probe.inboundCircuit = inEntry.Circuit
+		}
 	}
 	h.pending[id] = probe
 	h.mu.Unlock()
@@ -276,6 +281,9 @@ func (h *Health) HandleDeliveryStatus(status foundation.I2NPDeliveryStatusMessag
 	delete(h.pending, status.MessageID)
 	h.mu.Unlock()
 	h.clearFailures(probe.circuit)
+	if probe.inboundCircuit != (dataplane.TunnelCircuitToken{}) {
+		h.clearFailures(probe.inboundCircuit)
+	}
 	h.record(probe, true, now-probe.sentAt)
 	return true
 }
@@ -315,6 +323,9 @@ func (h *Health) Expire(ctx context.Context) (expired int, err error) {
 		expired++
 		if h.passedTraffic(failed[index]) {
 			h.clearFailures(failed[index].circuit)
+			if failed[index].inboundCircuit != (dataplane.TunnelCircuitToken{}) {
+				h.clearFailures(failed[index].inboundCircuit)
+			}
 			continue
 		}
 		if err = h.fail(ctx, failed[index]); err != nil {
@@ -394,33 +405,73 @@ func (h *Health) dropPending(id uint32) {
 }
 
 func (h *Health) fail(ctx context.Context, probe pendingProbe) error {
+	return h.failExplicit(ctx, probe, 1, 1)
+}
+
+func (h *Health) failExplicit(ctx context.Context, probe pendingProbe, outIncrement, inIncrement uint8) error {
 	h.record(probe, false, 0)
 	h.mu.Lock()
-	failures := h.failures[probe.circuit] + 1
-	h.failures[probe.circuit] = failures
-	if failures < h.failureThreshold {
+	outFailures := h.failures[probe.circuit] + outIncrement
+	h.failures[probe.circuit] = outFailures
+	var inFailures uint8
+	if probe.inboundCircuit != (dataplane.TunnelCircuitToken{}) {
+		inFailures = h.failures[probe.inboundCircuit] + inIncrement
+		h.failures[probe.inboundCircuit] = inFailures
+	}
+	outFailed := outFailures >= h.failureThreshold
+	inFailed := inFailures >= h.failureThreshold
+	if !outFailed && !inFailed {
 		h.mu.Unlock()
 		return nil
 	}
-	delete(h.failures, probe.circuit)
+	if outFailed {
+		delete(h.failures, probe.circuit)
+	}
+	if inFailed && probe.inboundCircuit != (dataplane.TunnelCircuitToken{}) {
+		delete(h.failures, probe.inboundCircuit)
+	}
 	h.mu.Unlock()
 	now := h.now()
-	entry, ok := h.pool.Get(probe.outboundID, now)
-	if !ok || entry.Circuit != probe.circuit {
-		return nil
-	}
-	if !h.pool.Remove(entry) {
-		return nil
-	}
-	started, err := h.maintainer.Maintain(ctx)
-	if err != nil || started == 0 {
-		if restoreErr := h.pool.Add(entry, h.now()); restoreErr != nil {
-			return errors.Join(err, restoreErr)
+	var outEntry, inEntry Entry
+	var haveOutEntry, haveInEntry bool
+	if outFailed {
+		if entry, ok := h.pool.Get(probe.outboundID, now); ok && entry.Circuit == probe.circuit {
+			if h.pool.Remove(entry) {
+				outEntry, haveOutEntry = entry, true
+			}
 		}
-		return err
 	}
-	h.runtime.RemoveCircuit(probe.circuit)
-	return nil
+	if inFailed && probe.inboundLocalID != 0 {
+		if entry, ok := h.pool.Get(probe.inboundLocalID, now); ok && entry.Direction == Inbound && entry.Circuit == probe.inboundCircuit {
+			if h.pool.Remove(entry) {
+				inEntry, haveInEntry = entry, true
+			}
+		}
+	}
+	if !haveOutEntry && !haveInEntry {
+		return nil
+	}
+	_, err := h.maintainer.Maintain(ctx)
+	if err != nil {
+		if haveOutEntry && h.pool.Count(outEntry.Direction, h.now()) == 0 {
+			_ = h.pool.Add(outEntry, h.now())
+			haveOutEntry = false
+		}
+		if haveInEntry && h.pool.Count(inEntry.Direction, h.now()) == 0 {
+			_ = h.pool.Add(inEntry, h.now())
+			haveInEntry = false
+		}
+		if !haveOutEntry && !haveInEntry {
+			return err
+		}
+	}
+	if haveOutEntry {
+		h.runtime.RemoveCircuit(probe.circuit)
+	}
+	if haveInEntry {
+		h.runtime.RemoveCircuit(inEntry.Circuit)
+	}
+	return err
 }
 
 func (h *Health) record(probe pendingProbe, success bool, latency uint64) {
