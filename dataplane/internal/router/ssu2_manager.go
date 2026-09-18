@@ -218,11 +218,11 @@ type SSU2Manager struct {
 	// egressDrained, guarded by egressMu, is set once failQueuedEgress runs.
 	// Enqueues holding the read lock check it so a slot can never land in
 	// the queue after the final drain, where no sender would report done.
-	egressDrained      bool
-	ioStats            ssu2IOStats
-	metrics            *observability.Registry
-	logger             *slog.Logger
-	kernelDrops        atomic.Uint64
+	egressDrained bool
+	ioStats       ssu2IOStats
+	metrics       *observability.Registry
+	logger        *slog.Logger
+	kernelDrops   atomic.Uint64
 
 	sessionsByPeer      map[foundation.Hash]*ssu2TransportSession
 	sessionsByID        map[uint64]*ssu2TransportSession
