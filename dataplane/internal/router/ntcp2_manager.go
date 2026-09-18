@@ -655,13 +655,26 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer foundation.Hash) e
 // the newest handshake wins. The displaced session is closed after m.mu is
 // dropped so its read loop cannot remove the replacement.
 func (m *NTCP2Manager) install(peer foundation.Hash, session *dataplanentcp2.Session, inbound bool) bool {
-	m.mu.Lock()
-	if m.ctx == nil || m.ctx.Err() != nil || len(m.sessions) >= m.maxSessions {
-		m.mu.Unlock()
-		_ = session.Close()
-		return false
-	}
-	if displaced := m.sessions[peer]; displaced != nil {
+	for {
+		m.mu.Lock()
+		if m.ctx == nil || m.ctx.Err() != nil || len(m.sessions) >= m.maxSessions {
+			m.mu.Unlock()
+			_ = session.Close()
+			return false
+		}
+		displaced := m.sessions[peer]
+		if displaced == nil {
+			m.sessions[peer] = session
+			m.sessionsInbound[peer] = inbound
+			if m.metrics != nil {
+				m.metrics.IncTransportConnections()
+				m.metrics.SetTransportNTCP2Sessions(uint64(len(m.sessions)))
+			}
+			m.mu.Unlock()
+			m.wg.Add(1)
+			go m.readSession(peer, session)
+			return true
+		}
 		if m.sessionsInbound[peer] == preferInboundSession(m.bindings.LocalInfo, peer) && m.sessionsInbound[peer] != inbound {
 			m.mu.Unlock()
 			_ = session.Close()
@@ -671,23 +684,10 @@ func (m *NTCP2Manager) install(peer foundation.Hash, session *dataplanentcp2.Ses
 		delete(m.sessionsInbound, peer)
 		m.mu.Unlock()
 		_ = displaced.Close()
-		m.mu.Lock()
-		if m.ctx == nil || m.ctx.Err() != nil {
-			m.mu.Unlock()
-			_ = session.Close()
-			return false
-		}
+		// The close ran without m.mu, so a racing install may have claimed
+		// the peer slot. Re-check occupancy and capacity rather than
+		// overwriting that session into an orphaned state.
 	}
-	m.sessions[peer] = session
-	m.sessionsInbound[peer] = inbound
-	if m.metrics != nil {
-		m.metrics.IncTransportConnections()
-		m.metrics.SetTransportNTCP2Sessions(uint64(len(m.sessions)))
-	}
-	m.mu.Unlock()
-	m.wg.Add(1)
-	go m.readSession(peer, session)
-	return true
 }
 
 // The inactivity timer never changes socket deadlines: caller deadlines and
