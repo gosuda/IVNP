@@ -531,3 +531,31 @@ func TestAsymmetricBlackhole(t *testing.T) {
 		}
 	})
 }
+
+// A canceled dial must leave no connection pair behind: the SYN machinery
+// observes the cancellation before registering the conn, and the dialer's
+// claim under n.mu owns anything that slipped through.
+func TestDialTCPCancelLeavesNoOrphanedConn(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := NewNetwork(Config{Seed: 5})
+		defer n.Close()
+		a, b := n.Host("a"), n.Host("b")
+		l, err := b.ListenTCP(netip.MustParseAddrPort("0.0.0.0:8080"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err = a.DialTCP(ctx, netip.AddrPortFrom(b.Addr(), 8080)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled dial = %v, want context.Canceled", err)
+		}
+		synctest.Wait()
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		if len(n.conns) != 0 {
+			t.Fatalf("canceled dial left %d conns registered", len(n.conns))
+		}
+	})
+}

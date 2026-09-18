@@ -145,6 +145,17 @@ func (h *Host) DialTCP(ctx context.Context, remote netip.AddrPort) (net.Conn, er
 		return res.conn, res.err
 	case <-ctx.Done():
 		res.canceled.Store(true)
+		// The dial may have completed in the same instant the context
+		// fired: completeSYN registers res.conn under n.mu, so claiming
+		// it under the same mutex settles ownership either way — a
+		// conn present here is ours to tear down, a nil means the
+		// canceled-dial checks already stopped or will stop the retry.
+		n.mu.Lock()
+		conn := res.conn
+		n.mu.Unlock()
+		if conn != nil {
+			conn.reset()
+		}
 		return nil, ctx.Err()
 	}
 }
