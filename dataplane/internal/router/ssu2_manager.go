@@ -215,6 +215,10 @@ type SSU2Manager struct {
 	ackQueue           chan *ssu2TransportSession
 	egressFree         chan *ssu2EgressSlot
 	egressQueue        chan *ssu2EgressSlot
+	// egressDrained, guarded by egressMu, is set once failQueuedEgress runs.
+	// Enqueues holding the read lock check it so a slot can never land in
+	// the queue after the final drain, where no sender would report done.
+	egressDrained      bool
 	ioStats            ssu2IOStats
 	metrics            *observability.Registry
 	logger             *slog.Logger
@@ -4755,6 +4759,10 @@ func (m *SSU2Manager) enqueueEgress(ctx context.Context, packet []byte, addr net
 	slot.relay = relay
 	slot.wait = wait
 	slot.flow = flow
+	if m.egressDrained {
+		m.recycleEgressSlot(slot)
+		return nil, ErrSSU2Session
+	}
 	select {
 	case queue <- slot:
 		if m.metrics != nil {
@@ -4950,6 +4958,7 @@ func shuffleIndependentRelayRun(slots []*ssu2EgressSlot) {
 func (m *SSU2Manager) failQueuedEgress() {
 	m.egressMu.Lock()
 	defer m.egressMu.Unlock()
+	m.egressDrained = true
 	for {
 		select {
 		case slot := <-m.egressQueue:
