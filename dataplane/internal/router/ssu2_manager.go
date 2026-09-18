@@ -3790,11 +3790,9 @@ func (s *ssu2TransportSession) acknowledge(ranges []dataplanessu2.ACKRange, now 
 	}
 	sendCapacityChanged := acknowledged != nil
 	if sendCapacityChanged {
-		freed := 0
 		for number, sent := range s.sent {
 			if sent.acknowledged {
 				delete(s.sent, number)
-				freed++
 			}
 		}
 		for acknowledged != nil {
