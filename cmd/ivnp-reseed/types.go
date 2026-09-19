@@ -15,6 +15,10 @@ const (
 	DefaultProbeRateLimit = 8.0 // probes per second
 	DefaultProbeBurst     = 16.0
 
+	// ProbeStatsWindow is the trailing observation window for the selection
+	// hard gate's probe success-rate requirement.
+	ProbeStatsWindow = 3 * time.Hour
+
 	// Probe cooldowns differentiated by peer state:
 	ProbeCooldownReachable = 3 * time.Minute  // loosened from 10m
 	ProbeCooldownFailed    = 90 * time.Second // recheck failed peers sooner
@@ -39,6 +43,7 @@ type PeerStats struct {
 	TotalProbes         int64         `json:"total_probes"`
 	SuccessProbes       int64         `json:"success_probes"`
 	ConsecutiveFails    int           `json:"consecutive_fails"`
+	FirstSeen           time.Time     `json:"first_seen"`
 	LastSeen            time.Time     `json:"last_seen"`
 	LastProbed          time.Time     `json:"last_probed"`
 	EWMARTT             time.Duration `json:"ewma_rtt"`
@@ -46,6 +51,11 @@ type PeerStats struct {
 	IsReachable         bool          `json:"is_reachable"`
 	TunnelBuildAccepted bool          `json:"tunnel_build_accepted,omitempty"`
 	LastTunnelAccepted  time.Time     `json:"last_tunnel_accepted,omitempty"`
+	// Trailing probe window used by the selection hard gate: a fixed
+	// observation window reset once it ages past ProbeWindow duration.
+	WinStart   time.Time `json:"win_start"`
+	WinProbes  int64     `json:"win_probes"`
+	WinSuccess int64     `json:"win_success"`
 }
 
 // PeerRecord holds a parsed RouterInfo, its raw wire payload, and indexed network properties.
@@ -60,6 +70,8 @@ type PeerRecord struct {
 	Ports       []uint16        `json:"ports,omitempty"`
 	TCPPorts    []uint16        `json:"tcp_ports,omitempty"`
 	UDPPorts    []uint16        `json:"udp_ports,omitempty"`
+	HasNTCP2    bool            `json:"has_ntcp2"`
+	HasSSU2     bool            `json:"has_ssu2"`
 	Stats       PeerStats       `json:"stats"`
 	Score       float64         `json:"score"`
 }
@@ -99,28 +111,38 @@ type KBucketStats struct {
 }
 
 type PackageStats struct {
-	PeerCount                int       `json:"peer_count"`
-	FloodfillCount           int       `json:"floodfill_count"`
-	FloodfillRatio           float64   `json:"floodfill_ratio"`
-	IPv4OnlyCount            int       `json:"ipv4_only_count"`
-	IPv4OnlyRatio            float64   `json:"ipv4_only_ratio"`
-	DualStackCount           int       `json:"dual_stack_count"`
-	DualStackRatio           float64   `json:"dual_stack_ratio"`
-	IPv6OnlyCount            int       `json:"ipv6_only_count"`
-	IPv6OnlyRatio            float64   `json:"ipv6_only_ratio"`
-	AverageAvailability      float64   `json:"average_availability"`
-	DirectlyReachableCount   int       `json:"directly_reachable_count"`
-	DirectlyReachableRatio   float64   `json:"directly_reachable_ratio"`
-	TunnelBuildAcceptedCount int       `json:"tunnel_build_accepted_count"`
-	TunnelBuildAcceptedRatio float64   `json:"tunnel_build_accepted_ratio"`
-	RTT                      RTTStats  `json:"rtt"`
-	GenerationMethod         string    `json:"generation_method"`
-	RequireReachableFilter   bool      `json:"require_reachable_filter"`
-	SU3SizeBytes             int       `json:"su3_size_bytes"`
-	ETag                     string    `json:"etag"`
-	LastGeneratedAt          time.Time `json:"last_generated_at"`
-	NextRefreshETA           int64     `json:"next_refresh_eta_seconds"`
-	RefreshIntervalSeconds   int64     `json:"refresh_interval_seconds"`
+	PeerCount                int      `json:"peer_count"`
+	FloodfillCount           int      `json:"floodfill_count"`
+	FloodfillRatio           float64  `json:"floodfill_ratio"`
+	IPv4OnlyCount            int      `json:"ipv4_only_count"`
+	IPv4OnlyRatio            float64  `json:"ipv4_only_ratio"`
+	DualStackCount           int      `json:"dual_stack_count"`
+	DualStackRatio           float64  `json:"dual_stack_ratio"`
+	IPv6OnlyCount            int      `json:"ipv6_only_count"`
+	IPv6OnlyRatio            float64  `json:"ipv6_only_ratio"`
+	AverageAvailability      float64  `json:"average_availability"`
+	DirectlyReachableCount   int      `json:"directly_reachable_count"`
+	DirectlyReachableRatio   float64  `json:"directly_reachable_ratio"`
+	TunnelBuildAcceptedCount int      `json:"tunnel_build_accepted_count"`
+	TunnelBuildAcceptedRatio float64  `json:"tunnel_build_accepted_ratio"`
+	RTT                      RTTStats `json:"rtt"`
+	GateLevel                string   `json:"gate_level"`
+	QualifiedCount           int      `json:"qualified_count"`
+	DiversePoolCount         int      `json:"diverse_pool_count"`
+	CoverageGapLZ            int      `json:"coverage_gap_lz"`
+	// Bundle composition: distribution and uniqueness within the selected set.
+	BucketDistribution     [256]int  `json:"bucket_distribution"`
+	BucketFloodfill        [256]int  `json:"bucket_floodfill"`
+	UniqueIPv4Subnets16    int       `json:"unique_ipv4_subnets_16"`
+	UniqueIPv6Subnets48    int       `json:"unique_ipv6_subnets_48"`
+	UniqueFamilies         int       `json:"unique_families"`
+	V2TransportCount       int       `json:"v2_transport_count"`
+	EpochStartedAt         time.Time `json:"epoch_started_at"`
+	SU3SizeBytes           int       `json:"su3_size_bytes"`
+	ETag                   string    `json:"etag"`
+	LastGeneratedAt        time.Time `json:"last_generated_at"`
+	NextRefreshETA         int64     `json:"next_refresh_eta_seconds"`
+	RefreshIntervalSeconds int64     `json:"refresh_interval_seconds"`
 }
 
 type DetailedStatsResponse struct {

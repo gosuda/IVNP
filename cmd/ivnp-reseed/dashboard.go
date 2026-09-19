@@ -524,6 +524,138 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       border-radius: 2px;
     }
 
+    .gate-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-xs);
+      padding: 0.2rem 0.6rem;
+      border-radius: 999px;
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid transparent;
+    }
+    .gate-badge::before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .gate-strict     { color: oklch(46% 0.13 152); border-color: oklch(46% 0.13 152 / 0.4); background: oklch(46% 0.13 152 / 0.08); }
+    .gate-no-uptime  { color: oklch(52% 0.14 85);  border-color: oklch(52% 0.14 85 / 0.4);  background: oklch(52% 0.14 85 / 0.1); }
+    .gate-cumulative-rate { color: oklch(52% 0.14 85); border-color: oklch(52% 0.14 85 / 0.4); background: oklch(52% 0.14 85 / 0.1); }
+    .gate-reachable  { color: oklch(52% 0.18 25);  border-color: oklch(52% 0.18 25 / 0.4);  background: oklch(52% 0.18 25 / 0.1); }
+    .gate-unknown    { color: var(--color-muted);  border-color: var(--color-rule); }
+
+    .bundle-head {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: var(--space-sm) var(--space-md);
+    }
+    .bundle-head .epoch-meta + .epoch-meta::before {
+      content: '·';
+      margin-right: var(--space-sm);
+      color: var(--color-rule);
+    }
+    .epoch-meta {
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      color: var(--color-muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .funnel {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin: var(--space-md) 0;
+    }
+    .funnel-row {
+      display: grid;
+      grid-template-columns: 7.5rem 1fr 5rem;
+      align-items: baseline;
+      gap: var(--space-sm);
+      font-size: var(--text-xs);
+    }
+    .funnel-row .f-label { color: var(--color-muted); }
+    .funnel-row .f-bar {
+      height: 8px;
+      border-radius: 4px;
+      background: var(--color-paper-2);
+      overflow: hidden;
+      position: relative;
+      top: 1px;
+    }
+    .funnel-row .f-fill {
+      height: 100%;
+      border-radius: 4px;
+      background: var(--color-accent);
+      min-width: 2px;
+      transition: width 400ms ease;
+    }
+    .funnel-row .f-fill.is-warn { background: oklch(58% 0.14 85); }
+    .funnel-row .f-value {
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      color: var(--color-ink);
+      font-weight: 500;
+    }
+
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-xs);
+      margin-top: var(--space-sm);
+    }
+    .chip {
+      padding: 0.25rem 0.6rem;
+      border-radius: 6px;
+      border: 1px solid var(--color-rule);
+      background: var(--color-paper);
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      color: var(--color-ink-2);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .chip strong { color: var(--color-ink); font-weight: 600; }
+
+    .coverage-pair {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: var(--space-lg);
+    }
+    @media (min-width: 60rem) {
+      .coverage-pair { grid-template-columns: 1fr 1fr; }
+    }
+    .coverage-pane h3 {
+      font-size: var(--text-sm);
+      font-weight: 600;
+      margin-bottom: var(--space-xs);
+    }
+    .coverage-pane .pane-note {
+      font-size: var(--text-xs);
+      color: var(--color-muted);
+      margin-bottom: var(--space-sm);
+    }
+    .bucket-cell.no-ff {
+      outline: 1px dashed oklch(52% 0.18 25 / 0.7);
+      outline-offset: -1px;
+    }
+    .detail-group {
+      font-size: var(--text-xs);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+      margin-bottom: var(--space-xs);
+    }
+
     .detail-grid {
       display: grid;
       grid-template-columns: 1fr;
@@ -703,6 +835,47 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       </div>
     </section>
 
+    <section class="bundle">
+      <h2 class="section-title">Current epoch bundle</h2>
+      <div class="card">
+        <div class="bundle-head">
+          <span class="gate-badge gate-unknown" id="gate-badge">—</span>
+          <span class="epoch-meta" id="epoch-window">—</span>
+          <span class="epoch-meta" id="epoch-eta">—</span>
+        </div>
+        <div class="funnel">
+          <div class="funnel-row">
+            <span class="f-label">qualified</span>
+            <span class="f-bar"><span class="f-fill" id="funnel-qualified" style="width:0%"></span></span>
+            <span class="f-value" id="funnel-qualified-n">—</span>
+          </div>
+          <div class="funnel-row">
+            <span class="f-label">diverse pool</span>
+            <span class="f-bar"><span class="f-fill" id="funnel-diverse" style="width:0%"></span></span>
+            <span class="f-value" id="funnel-diverse-n">—</span>
+          </div>
+          <div class="funnel-row">
+            <span class="f-label">selected</span>
+            <span class="f-bar"><span class="f-fill is-warn" id="funnel-selected" style="width:0%"></span></span>
+            <span class="f-value" id="funnel-selected-n">—</span>
+          </div>
+        </div>
+        <div class="chip-row" id="bundle-chips"></div>
+        <dl class="detail-grid" style="margin-top: var(--space-md);">
+          <div>
+            <div class="detail-row"><dt>Coverage gap</dt><dd id="b-gap" title="Minimum shared leading-bits between any selected peer and its nearest sibling; larger means a smaller worst-case uncovered keyspace region">—</dd></div>
+            <div class="detail-row"><dt>Floodfills</dt><dd id="b-floodfill">—</dd></div>
+            <div class="detail-row"><dt>v2 transports</dt><dd id="b-v2">—</dd></div>
+          </div>
+          <div>
+            <div class="detail-row"><dt>Unique IPv4 /16</dt><dd id="b-sub4">—</dd></div>
+            <div class="detail-row"><dt>Unique IPv6 /48</dt><dd id="b-sub6">—</dd></div>
+            <div class="detail-row"><dt>Router families</dt><dd id="b-fam">—</dd></div>
+          </div>
+        </dl>
+      </div>
+    </section>
+
     <section class="setup">
       <h2 class="section-title">Add this reseed to your router</h2>
       <div class="setup-grid">
@@ -745,15 +918,34 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
 
     <section class="coverage">
       <h2 class="section-title">Keyspace coverage</h2>
-      <p class="section-note">Peers indexed per DHT bucket, prefixes <code>0x00</code>–<code>0xFF</code>. Sparse buckets get extra lookups on each pass.</p>
-      <div class="heatmap-grid" id="heatmap-grid"></div>
-      <div class="heatmap-legend">
-        <span>0</span>
-        <span class="legend-chip" style="background: oklch(92% 0.03 256);"></span>
-        <span class="legend-chip" style="background: oklch(80% 0.09 256);"></span>
-        <span class="legend-chip" style="background: oklch(68% 0.15 256);"></span>
-        <span class="legend-chip" style="background: var(--color-accent);"></span>
-        <span id="legend-max">max —</span>
+      <p class="section-note">Peers indexed per first-byte prefix <code>0x00</code>–<code>0xFF</code>. The store view shows crawl coverage; the bundle view shows what the current archive actually contains — floodfill-empty buckets are outlined.</p>
+      <div class="coverage-pair">
+        <div class="coverage-pane">
+          <h3>Peer store</h3>
+          <p class="pane-note">All indexed peers. Sparse buckets get extra lookups each pass.</p>
+          <div class="heatmap-grid" id="heatmap-grid"></div>
+          <div class="heatmap-legend">
+            <span>0</span>
+            <span class="legend-chip" style="background: oklch(92% 0.03 256);"></span>
+            <span class="legend-chip" style="background: oklch(80% 0.09 256);"></span>
+            <span class="legend-chip" style="background: oklch(68% 0.15 256);"></span>
+            <span class="legend-chip" style="background: var(--color-accent);"></span>
+            <span id="legend-max">max —</span>
+          </div>
+        </div>
+        <div class="coverage-pane">
+          <h3>Epoch bundle</h3>
+          <p class="pane-note">Selected peers in the served archive. Dashed outline = no floodfill.</p>
+          <div class="heatmap-grid" id="bundle-heatmap-grid"></div>
+          <div class="heatmap-legend">
+            <span>0</span>
+            <span class="legend-chip" style="background: oklch(92% 0.03 256);"></span>
+            <span class="legend-chip" style="background: oklch(80% 0.09 256);"></span>
+            <span class="legend-chip" style="background: oklch(68% 0.15 256);"></span>
+            <span class="legend-chip" style="background: var(--color-accent);"></span>
+            <span id="bundle-legend-max">max —</span>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -762,16 +954,23 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       <div class="card">
         <dl class="detail-grid">
           <div>
+            <div class="detail-group">Peer store</div>
             <div class="detail-row"><dt>Reachable peers</dt><dd id="d-reachable">—</dd></div>
             <div class="detail-row"><dt>Floodfill peers</dt><dd id="d-floodfill">—</dd></div>
             <div class="detail-row"><dt>Median RTT (p50)</dt><dd id="d-rtt-p50">—</dd></div>
             <div class="detail-row"><dt>p90 RTT</dt><dd id="d-rtt-p90">—</dd></div>
             <div class="detail-row"><dt>Bucket coverage</dt><dd id="d-coverage">—</dd></div>
-          </div>
-          <div>
             <div class="detail-row"><dt>Unique IPv4 /16 subnets</dt><dd id="d-subnets">—</dd></div>
             <div class="detail-row"><dt>Unique IPv6 endpoints</dt><dd id="d-ipv6">—</dd></div>
             <div class="detail-row"><dt>Router families</dt><dd id="d-families">—</dd></div>
+          </div>
+          <div>
+            <div class="detail-group">Current bundle</div>
+            <div class="detail-row"><dt>Gate level</dt><dd id="d-gate">—</dd></div>
+            <div class="detail-row"><dt>Qualified pool</dt><dd id="d-qualified">—</dd></div>
+            <div class="detail-row"><dt>Diverse pool</dt><dd id="d-diverse">—</dd></div>
+            <div class="detail-row"><dt>Coverage gap LZ</dt><dd id="d-gap">—</dd></div>
+            <div class="detail-row"><dt>Epoch started</dt><dd id="d-epoch">—</dd></div>
             <div class="detail-row"><dt>Dual-stack share</dt><dd id="d-dual">—</dd></div>
             <div class="detail-row"><dt>Avg peer availability</dt><dd id="d-avail">—</dd></div>
           </div>
@@ -949,8 +1148,66 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
         document.getElementById('d-avail').textContent = (pkg.average_availability * 100).toFixed(0) + '%';
       }
 
-      renderHeatmap(data.kbuckets ? data.kbuckets.distribution : []);
+      renderHeatmap('heatmap-grid', 'legend-max', data.kbuckets ? data.kbuckets.distribution : [], null);
+      renderHeatmap('bundle-heatmap-grid', 'bundle-legend-max', pkg.bucket_distribution || [], pkg.bucket_floodfill || null);
+      renderBundle(pkg);
       firstRender = false;
+    }
+
+    function renderBundle(pkg) {
+      const gateEl = document.getElementById('gate-badge');
+      const gate = pkg.gate_level || 'unknown';
+      gateEl.textContent = gate;
+      gateEl.className = 'gate-badge gate-' + gate;
+
+      if (pkg.epoch_started_at) {
+        const start = new Date(pkg.epoch_started_at);
+        const end = new Date(start.getTime() + (pkg.refresh_interval_seconds || 600) * 1000);
+        document.getElementById('epoch-window').textContent =
+          'epoch ' + hhmm(start) + '–' + hhmm(end);
+      }
+      document.getElementById('epoch-eta').textContent = 'next ' + formatETA(etaSeconds);
+
+      const qualified = pkg.qualified_count || 0;
+      const diverse = pkg.diverse_pool_count || 0;
+      const selected = pkg.peer_count || 0;
+      const base = Math.max(qualified, 1);
+      document.getElementById('funnel-qualified').style.width = '100%';
+      document.getElementById('funnel-diverse').style.width = (diverse / base * 100).toFixed(1) + '%';
+      document.getElementById('funnel-selected').style.width = (selected / base * 100).toFixed(1) + '%';
+      document.getElementById('funnel-qualified-n').textContent = qualified.toLocaleString();
+      document.getElementById('funnel-diverse-n').textContent = diverse.toLocaleString();
+      document.getElementById('funnel-selected-n').textContent = selected.toLocaleString();
+
+      const ffPct = pkg.floodfill_ratio !== undefined ? (pkg.floodfill_ratio * 100).toFixed(0) : '0';
+      const chips = [
+        '<strong>' + (pkg.floodfill_count || 0).toLocaleString() + '</strong> floodfills (' + ffPct + '%)',
+        '<strong>' + (pkg.ipv4_only_count || 0).toLocaleString() + '</strong> IPv4-only',
+        '<strong>' + (pkg.dual_stack_count || 0).toLocaleString() + '</strong> dual-stack',
+        '<strong>' + (pkg.ipv6_only_count || 0).toLocaleString() + '</strong> IPv6-only',
+        '<strong>' + (pkg.directly_reachable_count || 0).toLocaleString() + '</strong> reachable',
+      ];
+      document.getElementById('bundle-chips').innerHTML =
+        chips.map(c => '<span class="chip">' + c + '</span>').join('');
+
+      document.getElementById('b-gap').textContent =
+        pkg.coverage_gap_lz !== undefined ? 'LZ=' + pkg.coverage_gap_lz + ' (worst uncovered ≈ 2⁻' + pkg.coverage_gap_lz + ')' : '—';
+      document.getElementById('b-floodfill').textContent =
+        (pkg.floodfill_count || 0).toLocaleString() + ' (' + ffPct + '%)';
+      document.getElementById('b-v2').textContent = (pkg.v2_transport_count || 0).toLocaleString();
+      document.getElementById('b-sub4').textContent = (pkg.unique_ipv4_subnets_16 || 0).toLocaleString();
+      document.getElementById('b-sub6').textContent = (pkg.unique_ipv6_subnets_48 || 0).toLocaleString();
+      document.getElementById('b-fam').textContent = (pkg.unique_families || 0).toLocaleString();
+
+      document.getElementById('d-gate').textContent = gate;
+      document.getElementById('d-qualified').textContent = qualified.toLocaleString();
+      document.getElementById('d-diverse').textContent = diverse.toLocaleString();
+      document.getElementById('d-gap').textContent = pkg.coverage_gap_lz !== undefined ? 'LZ=' + pkg.coverage_gap_lz : '—';
+      document.getElementById('d-epoch').textContent = pkg.epoch_started_at ? hhmm(new Date(pkg.epoch_started_at)) : '—';
+    }
+
+    function hhmm(d) {
+      return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
     }
 
     function renderNextStat() {
@@ -961,8 +1218,9 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
         : eta;
     }
 
-    function renderHeatmap(distribution) {
-      const container = document.getElementById('heatmap-grid');
+    function renderHeatmap(containerId, legendId, distribution, ffDistribution) {
+      const container = document.getElementById(containerId);
+      if (!container) return;
       container.innerHTML = '';
       const tooltip = document.getElementById('tooltip');
 
@@ -972,12 +1230,13 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
           if (distribution[i] > maxCount) maxCount = distribution[i];
         }
       }
-      document.getElementById('legend-max').textContent = 'max ' + maxCount;
+      document.getElementById(legendId).textContent = 'max ' + maxCount;
 
       for (let i = 0; i < 256; i++) {
         const cell = document.createElement('div');
         cell.className = 'bucket-cell';
         const count = (distribution && distribution[i]) ? distribution[i] : 0;
+        const ff = (ffDistribution && ffDistribution[i]) ? ffDistribution[i] : 0;
         const hex = '0x' + i.toString(16).padStart(2, '0').toUpperCase();
 
         if (count === 0 || maxCount === 0) {
@@ -988,10 +1247,14 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
           const c = 0.03 + ratio * 0.17;
           cell.style.background = 'oklch(' + l.toFixed(1) + '% ' + c.toFixed(3) + ' 256)';
         }
+        if (ffDistribution && count > 0 && ff === 0) {
+          cell.classList.add('no-ff');
+        }
 
         cell.onmouseenter = (e) => {
           tooltip.style.display = 'block';
-          tooltip.textContent = 'Bucket ' + hex + ' · ' + count + ' peers';
+          tooltip.textContent = 'Bucket ' + hex + ' · ' + count + ' peers' +
+            (ffDistribution ? ' · ' + ff + ' floodfills' : '');
           moveTooltip(e);
         };
         cell.onmousemove = moveTooltip;

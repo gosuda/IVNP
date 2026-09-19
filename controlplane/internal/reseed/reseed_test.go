@@ -275,12 +275,12 @@ func TestFetchAnyParallelAccumulation(t *testing.T) {
 		TargetRouterInfos: 2,
 	}
 
-	count, err := client.FetchAny(context.Background(), endpoints, database, 1000)
+	result, err := client.FetchAny(context.Background(), endpoints, database, 1000)
 	if err != nil {
 		t.Fatalf("FetchAny() error = %v", err)
 	}
-	if count < 2 {
-		t.Fatalf("FetchAny() count = %d, want at least 2", count)
+	if result.Admitted < 2 {
+		t.Fatalf("FetchAny() admitted = %d, want at least 2", result.Admitted)
 	}
 	if database.Routers().Len() < 2 {
 		t.Fatalf("database router count = %d, want at least 2", database.Routers().Len())
@@ -395,33 +395,44 @@ func TestUntrustedSU3SignerRejectedOnAnyHost(t *testing.T) {
 
 func testRouterInfoWithHost(t *testing.T, host string) []byte {
 	t.Helper()
-	local, err := foundation.GenerateLocalAddress()
-	if err != nil {
-		t.Fatal(err)
-	}
-	owner, err := controlplanenetdb.NewLocalRouterInfo(controlplanenetdb.LocalRouterInfoConfig{
-		Local: local,
-		Contacts: controlplanenetdb.RouterInfoContacts{
-			Addresses: []controlplanenetdb.LocalRouterAddress{{
-				TransportStyle: []byte("NTCP2"),
+	return testRouterInfoInBucket(t, host, -1)
+}
+
+// testRouterInfoInBucket creates a RouterInfo whose hash lands in the given
+// local K-bucket relative to the all-zero local hash (-1 accepts any bucket).
+func testRouterInfoInBucket(t *testing.T, host string, bucket int) []byte {
+	t.Helper()
+	for {
+		local, err := foundation.GenerateLocalAddress()
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner, err := controlplanenetdb.NewLocalRouterInfo(controlplanenetdb.LocalRouterInfoConfig{
+			Local: local,
+			Contacts: controlplanenetdb.RouterInfoContacts{
+				Addresses: []controlplanenetdb.LocalRouterAddress{{
+					TransportStyle: []byte("NTCP2"),
+					Options: []foundation.MappingEntry{
+						{Key: []byte("host"), Value: []byte(host)},
+						{Key: []byte("port"), Value: []byte("12345")},
+					},
+				}},
 				Options: []foundation.MappingEntry{
-					{Key: []byte("host"), Value: []byte(host)},
-					{Key: []byte("port"), Value: []byte("12345")},
+					{Key: []byte("netId"), Value: []byte("2")},
 				},
-			}},
-			Options: []foundation.MappingEntry{
-				{Key: []byte("netId"), Value: []byte("2")},
 			},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := owner.Publish(1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bucket < 0 || leadingZerosXOR(foundation.Hash{}, info.Hash()) == bucket {
+			return info.Bytes()
+		}
 	}
-	info, err := owner.Publish(1000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return info.Bytes()
 }
 
 func zipMultiArchiveBytes(t *testing.T, payloads [][]byte) []byte {
@@ -444,13 +455,18 @@ func zipMultiArchiveBytes(t *testing.T, payloads [][]byte) []byte {
 }
 
 func TestFetchIntoDedupesIPv4Subnet16(t *testing.T) {
+	// All candidates land in local bucket 0 so the per-bucket subnet quota
+	// applies: M=2 per /16 (IPv4) and /48 (IPv6), plus one peer each on
+	// uncontested subnets.
 	archive := zipMultiArchiveBytes(t, [][]byte{
-		testRouterInfoWithHost(t, "10.1.2.3"),     // claims 10.1/16
-		testRouterInfoWithHost(t, "10.1.9.9"),     // duplicate 10.1/16: dropped
-		testRouterInfoWithHost(t, "10.2.0.1"),     // claims 10.2/16
-		testRouterInfoWithHost(t, "2001:db8::1"),  // IPv6-only: shared slot
-		testRouterInfoWithHost(t, "2001:db8::2"),  // IPv6-only: dropped
-		testRouterInfoWithHost(t, "192.168.50.7"), // claims 192.168/16
+		testRouterInfoInBucket(t, "10.1.2.3", 0),
+		testRouterInfoInBucket(t, "10.1.9.9", 0),
+		testRouterInfoInBucket(t, "10.1.5.5", 0), // third 10.1/16 in bucket 0: dropped
+		testRouterInfoInBucket(t, "10.2.0.1", 0),
+		testRouterInfoInBucket(t, "2001:db8::1", 0),
+		testRouterInfoInBucket(t, "2001:db8::2", 0),
+		testRouterInfoInBucket(t, "2001:db8::3", 0), // third 2001:db8::/48: dropped
+		testRouterInfoInBucket(t, "192.168.50.7", 0),
 	})
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -470,8 +486,44 @@ func TestFetchIntoDedupesIPv4Subnet16(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchInto() error = %v", err)
 	}
-	if count != 4 || database.Routers().Len() != 4 {
-		t.Fatalf("admitted count = %d, database routers = %d, want 4", count, database.Routers().Len())
+	if count != 6 || database.Routers().Len() != 6 {
+		t.Fatalf("admitted count = %d, database routers = %d, want 6", count, database.Routers().Len())
+	}
+}
+
+func TestIngressGuardBucketSubnetQuota(t *testing.T) {
+	guard := newIngressGuard(2, 20)
+	subnetA := ingressSubnet{1, 10, 1}
+	subnetB := ingressSubnet{2, 0x20, 0x01, 0x0d, 0xb8, 0, 0}
+	if !guard.claim(0, []ingressSubnet{subnetA}) || !guard.claim(0, []ingressSubnet{subnetA}) {
+		t.Fatal("first two claims on the same subnet must pass (quota=2)")
+	}
+	if guard.claim(0, []ingressSubnet{subnetA}) {
+		t.Fatal("third claim on the same subnet in the same bucket must fail")
+	}
+	if !guard.claim(1, []ingressSubnet{subnetA}) {
+		t.Fatal("same subnet in a different bucket has its own quota")
+	}
+	if !guard.claim(0, []ingressSubnet{subnetB}) || !guard.claim(0, []ingressSubnet{subnetB}) {
+		t.Fatal("IPv6 /48 claims follow the same quota")
+	}
+	if guard.claim(0, []ingressSubnet{subnetB}) {
+		t.Fatal("third IPv6 /48 claim must fail")
+	}
+}
+
+func TestIngressGuardBucketCapacity(t *testing.T) {
+	guard := newIngressGuard(2, 3)
+	for i := 0; i < 3; i++ {
+		if !guard.claim(5, []ingressSubnet{{1, byte(i), 0}}) {
+			t.Fatalf("claim %d under bucket capacity must pass", i)
+		}
+	}
+	if guard.claim(5, []ingressSubnet{{1, 9, 9}}) {
+		t.Fatal("bucket capacity reached: further claims must fail")
+	}
+	if !guard.claim(6, []ingressSubnet{{1, 9, 9}}) {
+		t.Fatal("other buckets keep their own capacity")
 	}
 }
 
@@ -534,12 +586,12 @@ func TestFetchAnyPrioritizesHotseedWithHeadStart(t *testing.T) {
 		"https://fallback2.example.org/i2pseeds.su3?netid=2",
 	}
 
-	count, err := client.FetchAny(context.Background(), endpoints, database, 1000)
+	result, err := client.FetchAny(context.Background(), endpoints, database, 1000)
 	if err != nil {
 		t.Fatalf("FetchAny() error = %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("FetchAny() count = %d, want 1", count)
+	if result.Admitted != 1 {
+		t.Fatalf("FetchAny() admitted = %d, want 1", result.Admitted)
 	}
 
 	mu.Lock()
@@ -606,17 +658,237 @@ func TestFetchAnyPriorityFailureFallsBack(t *testing.T) {
 		"https://fallback.example.org/i2pseeds.su3?netid=2",
 	}
 
-	count, err := client.FetchAny(context.Background(), endpoints, database, 1000)
+	result, err := client.FetchAny(context.Background(), endpoints, database, 1000)
 	if err != nil {
 		t.Fatalf("FetchAny() error = %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("FetchAny() count = %d, want 1", count)
+	if result.Admitted != 1 {
+		t.Fatalf("FetchAny() admitted = %d, want 1", result.Admitted)
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
 	if len(requested) != 2 || requested[0] != "hotseed" || requested[1] != "fallback" {
 		t.Fatalf("requested = %v, want [hotseed, fallback]", requested)
+	}
+}
+
+// priorityMux routes hotseed.gosuda.org hostnames to test servers by
+// subdomain label: "hotseed.gosuda.org" hits servers[""], and
+// "<label>.hotseed.gosuda.org" hits servers[label].
+func priorityMux(t *testing.T, servers map[string]*httptest.Server) *http.Client {
+	t.Helper()
+	return &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		host := req.URL.Hostname()
+		label := ""
+		if host != "hotseed.gosuda.org" {
+			label, _, _ = strings.Cut(host, ".hotseed.gosuda.org")
+		}
+		srv := servers[label]
+		if srv == nil {
+			return nil, fmt.Errorf("unexpected host %s", host)
+		}
+		srvURL, _ := url.Parse(srv.URL)
+		clone := req.Clone(req.Context())
+		clone.URL.Scheme = srvURL.Scheme
+		clone.URL.Host = srvURL.Host
+		return srv.Client().Transport.RoundTrip(clone)
+	})}
+}
+
+func testRouterInfoBytes(t *testing.T) []byte {
+	t.Helper()
+	local, err := foundation.GenerateLocalAddress()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := controlplanenetdb.NewLocalRouterInfo(controlplanenetdb.LocalRouterInfoConfig{
+		Local: local,
+		Contacts: controlplanenetdb.RouterInfoContacts{Options: []foundation.MappingEntry{
+			{Key: []byte("netId"), Value: []byte("2")},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := owner.Publish(1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Bytes()
+}
+
+func TestFetchAnyMergesPrioritySources(t *testing.T) {
+	var hits []string
+	var mu sync.Mutex
+	newServer := func(name, entry string) *httptest.Server {
+		return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			hits = append(hits, name)
+			mu.Unlock()
+			_, _ = w.Write(zipArchiveBytes(t, entry, testRouterInfoBytes(t)))
+		}))
+	}
+	srvA := newServer("a", "routerInfo-a.dat")
+	defer srvA.Close()
+	srvB := newServer("b", "routerInfo-b.dat")
+	defer srvB.Close()
+
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	client := Client{
+		NetworkID:        2,
+		HTTPClient:       priorityMux(t, map[string]*httptest.Server{"": srvA, "b": srvB}),
+		allowUnsignedZIP: true,
+		MergeWait:        2 * time.Second,
+	}
+
+	result, err := client.FetchAny(context.Background(), []string{
+		"https://hotseed.gosuda.org/i2pseeds.su3?netid=2",
+		"https://b.hotseed.gosuda.org/i2pseeds.su3?netid=2",
+	}, database, 1000)
+	if err != nil {
+		t.Fatalf("FetchAny() error = %v", err)
+	}
+	if result.Admitted != 2 || database.Routers().Len() != 2 {
+		t.Fatalf("FetchAny() admitted = %d, routers = %d, want 2", result.Admitted, database.Routers().Len())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hits) != 2 {
+		t.Fatalf("priority hits = %v, want both servers queried for the merge", hits)
+	}
+}
+
+func TestFetchAnyMergeDisabledUsesFirstResponse(t *testing.T) {
+	aServed := make(chan struct{})
+	srvA := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(zipArchiveBytes(t, "routerInfo-a.dat", testRouterInfoBytes(t)))
+		close(aServed)
+	}))
+	defer srvA.Close()
+	srvB := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-aServed
+		_, _ = w.Write(zipArchiveBytes(t, "routerInfo-b.dat", testRouterInfoBytes(t)))
+	}))
+	defer srvB.Close()
+
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	client := Client{
+		NetworkID:        2,
+		HTTPClient:       priorityMux(t, map[string]*httptest.Server{"": srvA, "b": srvB}),
+		allowUnsignedZIP: true,
+		MergeWait:        -1,
+	}
+
+	result, err := client.FetchAny(context.Background(), []string{
+		"https://hotseed.gosuda.org/i2pseeds.su3?netid=2",
+		"https://b.hotseed.gosuda.org/i2pseeds.su3?netid=2",
+	}, database, 1000)
+	if err != nil {
+		t.Fatalf("FetchAny() error = %v", err)
+	}
+	if result.Admitted != 1 {
+		t.Fatalf("FetchAny() admitted = %d, want 1 from the first priority response", result.Admitted)
+	}
+}
+
+func TestFetchAnyMergeIngestsPartialOnDeadline(t *testing.T) {
+	srvA := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(zipArchiveBytes(t, "routerInfo-a.dat", testRouterInfoBytes(t)))
+	}))
+	defer srvA.Close()
+	srvB := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srvB.Close()
+
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	client := Client{
+		NetworkID:        2,
+		HTTPClient:       priorityMux(t, map[string]*httptest.Server{"": srvA, "b": srvB}),
+		allowUnsignedZIP: true,
+		MergeWait:        2 * time.Second,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	result, err := client.FetchAny(ctx, []string{
+		"https://hotseed.gosuda.org/i2pseeds.su3?netid=2",
+		"https://b.hotseed.gosuda.org/i2pseeds.su3?netid=2",
+	}, database, 1000)
+	if err != nil {
+		t.Fatalf("FetchAny() error = %v, want partial ingest instead of deadline error", err)
+	}
+	if result.Admitted != 1 {
+		t.Fatalf("FetchAny() admitted = %d, want 1 from the responsive priority source", result.Admitted)
+	}
+}
+
+func TestFpsOrderBucketSpreadsPicks(t *testing.T) {
+	mk := func(first, last byte, floodfill bool, src int) bucketCandidate {
+		var h foundation.Hash
+		h[0] = first
+		h[31] = last
+		return bucketCandidate{candidate: reseedCandidate{source: src}, hash: h, floodfill: floodfill}
+	}
+	cands := []bucketCandidate{
+		mk(0x80, 0, false, 0),
+		mk(0x80, 1, true, 1), // floodfill anchor
+		mk(0xFF, 2, false, 2),
+		mk(0xC0, 3, false, 3),
+	}
+	out := fpsOrderBucket(cands, 4, nil)
+	if len(out) != 4 {
+		t.Fatalf("fpsOrderBucket returned %d candidates, want 4", len(out))
+	}
+	got := []int{out[0].source, out[1].source, out[2].source, out[3].source}
+	want := []int{1, 3, 2, 0}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pick order = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestInsertAnchorKeepsClosest(t *testing.T) {
+	var local foundation.Hash
+	mk := func(lz int, salt byte) foundation.Hash {
+		var h foundation.Hash
+		h[lz/8] |= 0x80 >> (lz % 8)
+		h[31] = salt
+		return h
+	}
+	var anchors []foundation.Hash
+	for i, lz := range []int{5, 9, 20, 2, 12} {
+		anchors = insertAnchor(anchors, local, mk(lz, byte(i)), 3)
+	}
+	if len(anchors) != 3 {
+		t.Fatalf("anchors = %d, want 3", len(anchors))
+	}
+	wantLZ := []int{20, 12, 9}
+	for i, anchor := range anchors {
+		if got := leadingZerosXOR(local, anchor); got != wantLZ[i] {
+			t.Fatalf("anchors[%d] lz = %d, want %d (closest-first)", i, got, wantLZ[i])
+		}
+	}
+}
+
+func TestFpsOrderBucketHonorsPickLimit(t *testing.T) {
+	mk := func(b byte, src int) bucketCandidate {
+		var h foundation.Hash
+		h[0] = 0x80
+		h[1] = b
+		return bucketCandidate{candidate: reseedCandidate{source: src}, hash: h}
+	}
+	cands := []bucketCandidate{mk(0, 0), mk(1, 1), mk(2, 2), mk(3, 3), mk(4, 4)}
+	out := fpsOrderBucket(cands, 2, nil)
+	if len(out) != len(cands) {
+		t.Fatalf("fpsOrderBucket returned %d candidates, want %d", len(out), len(cands))
+	}
+	seen := map[int]bool{out[0].source: true, out[1].source: true}
+	for i := 2; i < len(out); i++ {
+		if seen[out[i].source] {
+			t.Fatalf("unordered tail contains a picked candidate: %v", out)
+		}
 	}
 }

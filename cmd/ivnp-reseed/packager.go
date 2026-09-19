@@ -100,14 +100,16 @@ func BuildSU3(peers []PeerRecord, signerID string, privKey *rsa.PrivateKey, now 
 
 // CalculatePackageStats computes distribution, reachability, dual-stack, availability,
 // latency, and generation telemetry for the selected peers in a reseed package.
-func CalculatePackageStats(peers []PeerRecord, su3SizeBytes int, etag string, generatedAt time.Time, requireReachable bool) PackageStats {
+func CalculatePackageStats(peers []PeerRecord, su3SizeBytes int, etag string, generatedAt time.Time, sel SelectionStats) PackageStats {
 	stats := PackageStats{
-		PeerCount:              len(peers),
-		SU3SizeBytes:           su3SizeBytes,
-		ETag:                   etag,
-		LastGeneratedAt:        generatedAt,
-		RequireReachableFilter: requireReachable,
-		GenerationMethod:       "256 K-Bucket Stratified (Java I2P 256-node Head-Start) + /16 Subnet Filter + Max-5 Bucket Leveling",
+		PeerCount:        len(peers),
+		SU3SizeBytes:     su3SizeBytes,
+		ETag:             etag,
+		LastGeneratedAt:  generatedAt,
+		GateLevel:        sel.GateLevel.String(),
+		QualifiedCount:   sel.Qualified,
+		DiversePoolCount: sel.DiversePool,
+		CoverageGapLZ:    sel.CoverageGapLZ,
 	}
 	if len(peers) == 0 {
 		return stats
@@ -120,14 +122,38 @@ func CalculatePackageStats(peers []PeerRecord, su3SizeBytes int, etag string, ge
 		dualCount   int
 		reachCount  int
 		tunnelCount int
+		v2Count     int
 		availSum    float64
 		rtts        []time.Duration
 		totalRTT    time.Duration
+		subnets4    = make(map[[2]byte]struct{})
+		subnets6    = make(map[[6]byte]struct{})
+		families    = make(map[string]struct{})
 	)
 
 	for _, p := range peers {
+		stats.BucketDistribution[p.Hash[0]]++
 		if p.IsFloodfill {
 			floodCount++
+			stats.BucketFloodfill[p.Hash[0]]++
+		}
+		if p.HasNTCP2 || p.HasSSU2 {
+			v2Count++
+		}
+		if p.Family != "" {
+			families[p.Family] = struct{}{}
+		}
+		for _, ip := range p.IPv4 {
+			if ip.Is4() {
+				b := ip.As4()
+				subnets4[[2]byte{b[0], b[1]}] = struct{}{}
+			}
+		}
+		for _, ip := range p.IPv6 {
+			if ip.Is6() {
+				b := ip.As16()
+				subnets6[[6]byte{b[0], b[1], b[2], b[3], b[4], b[5]}] = struct{}{}
+			}
 		}
 		hasV4 := len(p.IPv4) > 0
 		hasV6 := len(p.IPv6) > 0
@@ -172,6 +198,10 @@ func CalculatePackageStats(peers []PeerRecord, su3SizeBytes int, etag string, ge
 	stats.TunnelBuildAcceptedCount = tunnelCount
 	stats.TunnelBuildAcceptedRatio = float64(tunnelCount) / total
 	stats.AverageAvailability = availSum / total
+	stats.V2TransportCount = v2Count
+	stats.UniqueIPv4Subnets16 = len(subnets4)
+	stats.UniqueIPv6Subnets48 = len(subnets6)
+	stats.UniqueFamilies = len(families)
 
 	if len(rtts) > 0 {
 		slices.Sort(rtts)
