@@ -1613,6 +1613,107 @@ func TestSSU2SessionRequestSupersedesStaleSessionOnNewSourceID(t *testing.T) {
 	}
 }
 
+func TestSSU2SessionRequestSupersedesInboundWhenCapacityFull(t *testing.T) {
+	aliceConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aliceConn.Close()
+	bobConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bobConn.Close()
+	ctx := t.Context()
+
+	alice, _, _ := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
+	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
+	bobDB := newTransportTestPeers()
+	if err = bobDB.AdmitRouterInfo(alice.Snapshot(), uint64(time.Now().UnixMilli())); err != nil {
+		t.Fatalf("admit Alice RouterInfo: %v", err)
+	}
+	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro, MaxPending: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = bobManager.Start(ctx, TransportBindings{
+		SSU2:      bobConn,
+		LocalInfo: bob,
+		Clock:     WallClock{},
+		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, _ foundation.I2NPMessage, _ uint64, _ bool) error {
+			return nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = bobManager.Close()
+		_ = bobManager.Wait()
+	})
+
+	bobPriv, err := ecdh.X25519().NewPrivateKey(bobStatic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobPub := bobPriv.PublicKey().Bytes()
+
+	staleTimer := time.NewTimer(time.Hour)
+	defer staleTimer.Stop()
+	staleInbound := &ssu2InboundPending{
+		remote: aliceConn.LocalAddr(),
+		sendID: 200,
+		timer:  staleTimer,
+	}
+	bobManager.mu.Lock()
+	bobManager.inbound[100] = staleInbound
+	bobManager.mu.Unlock()
+
+	initiator, err := dataplanessu2.NewInitiator(bobPub, bobIntro, 100, 300, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dateTime [4]byte
+	binary.BigEndian.PutUint32(dateTime[:], uint32(time.Now().Unix()))
+	requestPayload, err := dataplanessu2.MarshalBlock(nil, dataplanessu2.BlockDateTime, dateTime[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestPayload, err = dataplanessu2.MarshalBlock(requestPayload, dataplanessu2.BlockPadding, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobManager.mu.Lock()
+	token, err := bobManager.newTokenLocked(aliceConn.LocalAddr(), 100, 300)
+	bobManager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestPacket, err := initiator.BuildSessionRequest(make([]byte, dataplanessu2.MaxIPv4PacketLen), requestPayload, 1, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = aliceConn.WriteTo(requestPacket, bobConn.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+
+	createdBuf := make([]byte, dataplanessu2.MaxIPv4PacketLen)
+	_ = aliceConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err := aliceConn.ReadFrom(createdBuf)
+	if err != nil {
+		t.Fatalf("read SessionCreated: %v", err)
+	}
+	if _, _, err = initiator.ParseSessionCreated(createdBuf[:n]); err != nil {
+		t.Fatalf("parse SessionCreated: %v", err)
+	}
+
+	bobManager.mu.RLock()
+	defer bobManager.mu.RUnlock()
+	pending := bobManager.inbound[100]
+	if pending == nil || pending.sendID != 300 {
+		t.Fatal("new SessionRequest did not replace stale inbound pending when pending capacity was full")
+	}
+}
+
 func TestSSU2RetryTokensAreStatelessAndEndpointBound(t *testing.T) {
 	static, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {

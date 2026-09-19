@@ -3033,7 +3033,10 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 		}
 		return
 	}
-	if len(m.inbound)+len(m.outbound) >= m.maxPending {
+	// A request with a new SourceID for an already-pending DestinationID will
+	// supersede that inbound entry; replacement does not increase pending usage.
+	replacing := m.inbound[header.DestinationID] != nil
+	if !replacing && len(m.inbound)+len(m.outbound) >= m.maxPending {
 		m.mu.Unlock()
 		return
 	}
