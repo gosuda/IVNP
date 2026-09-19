@@ -18,6 +18,7 @@ import (
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/node"
 )
 
@@ -49,7 +50,7 @@ type Router struct {
 	mu               sync.Mutex
 	closed           bool
 	children         map[*Destination]struct{}
-	creating         sync.WaitGroup
+	creating         durable.WaitGroup
 	closeOnce        sync.Once
 	closeErr         error
 }
@@ -276,7 +277,7 @@ type Destination struct {
 	mu          sync.Mutex
 	closed      bool
 	resources   map[io.Closer]struct{}
-	operations  sync.WaitGroup
+	operations  durable.WaitGroup
 	closeOnce   sync.Once
 	closeErr    error
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"gosuda.org/ivnp/internal/durable"
 )
 
 var ErrStopped = errors.New("router: service stopped")
@@ -15,7 +17,7 @@ type Lifecycle struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	running bool
-	workers sync.WaitGroup
+	workers durable.WaitGroup
 }
 
 func (l *Lifecycle) Start(parent context.Context) bool {

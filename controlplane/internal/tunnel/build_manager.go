@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
+	"hash"
 	"io"
 	"log/slog"
 	goruntime "runtime"
@@ -600,7 +601,18 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		clearBuildKeys(keys)
 		return 0, err
 	}
-	messageDeadline, err := randomizedBuildMessageDeadline(now, m.random)
+	deadlineRand := m.random
+	if keyed := deterministicDeadlineReader(func(h hash.Hash) {
+		for _, hop := range build.Hops {
+			h.Write(hop.Router[:])
+			var id [4]byte
+			binary.BigEndian.PutUint32(id[:], hop.ReceiveTunnelID)
+			h.Write(id[:])
+		}
+	}); keyed != nil {
+		deadlineRand = keyed
+	}
+	messageDeadline, err := randomizedBuildMessageDeadline(now, deadlineRand)
 	if err != nil {
 		clearBuildKeys(keys)
 		return 0, err

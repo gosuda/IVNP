@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 )
 
@@ -396,7 +397,7 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 	results := make([]error, len(targets))
 	jobs := make(chan int)
 	workers := parallelism.Workers(len(targets))
-	var group sync.WaitGroup
+	var group durable.WaitGroup
 	group.Add(workers)
 	for range workers {
 		go func() {

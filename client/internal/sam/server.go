@@ -75,7 +75,7 @@ type Server struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	done         chan struct{}
-	wg           sync.WaitGroup
+	wg           durable.WaitGroup
 	started      bool
 	closed       bool
 	sem          chan struct{}

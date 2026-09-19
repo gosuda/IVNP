@@ -71,7 +71,7 @@ type StreamingTunnelSender struct {
 	awaitControl         func(context.Context) error
 	tunnels              *dataplane.TunnelRuntime
 	replySlots           chan struct{}
-	replies              sync.WaitGroup
+	replies              durable.WaitGroup
 	replyGates           map[foundation.Hash]*ratchetReplyGate
 	replyGateCapacity    int
 	logger               *slog.Logger
@@ -92,7 +92,7 @@ type StreamingTunnelSender struct {
 	preparationTimeout   time.Duration
 	preparationCtx       context.Context
 	cancelPreparation    context.CancelFunc
-	preparing            sync.WaitGroup
+	preparing            durable.WaitGroup
 	seedMu               sync.Mutex
 	seedCache            [streamingSeedCacheCapacity]streamingSeedCacheEntry
 	seedNext             uint8
@@ -309,6 +309,25 @@ func (s *StreamingTunnelSender) recordFailedLeaseLocked(receipt dataplane.Router
 		delete(s.failedLeases, oldest)
 	}
 	s.failedLeases[path] = evidence
+}
+
+// clearFailureMarks drops recorded send and silence evidence for remote after
+// a completed refresh. An identical LeaseSet means the marks measured
+// transient loss rather than a dead remote path; a rotated LeaseSet cannot
+// match their (gateway, tunnelID) keys anyway.
+func (s *StreamingTunnelSender) clearFailureMarks(remote foundation.Hash) {
+	s.remoteMu.Lock()
+	defer s.remoteMu.Unlock()
+	for path := range s.failedRoutes {
+		if path.remote == remote {
+			delete(s.failedRoutes, path)
+		}
+	}
+	for path := range s.failedLeases {
+		if path.remote == remote {
+			delete(s.failedLeases, path)
+		}
+	}
 }
 
 func NewStreamingTunnelSender(config StreamingTunnelSenderConfig) (*StreamingTunnelSender, error) {
@@ -652,6 +671,7 @@ func (s *StreamingTunnelSender) resolveRoute(ctx context.Context, remote foundat
 	var lease foundation.NetworkDatabaseLease
 	var outbound controlplanetunnel.Entry
 	var circuit dataplane.TunnelCircuitInfo
+	var entries []controlplanetunnel.Entry
 	found, exhausted := false, false
 	for pass := 0; ; pass++ {
 		pick := s.leaseNext.Add(1) - 1
@@ -677,7 +697,7 @@ func (s *StreamingTunnelSender) resolveRoute(ctx context.Context, remote foundat
 		if err != nil {
 			return route, err
 		}
-		entries := s.pool.SelectableOutbound(now)
+		entries = s.pool.SelectableOutbound(now)
 		found, exhausted = false, false
 		for attempt := 0; attempt < leaseCount && !found; attempt++ {
 			if attempt != 0 {
@@ -740,8 +760,31 @@ func (s *StreamingTunnelSender) resolveRoute(ctx context.Context, remote foundat
 		} else {
 			break
 		}
+		// The fetched copy is the current truth even when byte-identical to
+		// the cached one: retrying its leases is how recovery is observed.
+		s.clearFailureMarks(remote)
 	}
 	if !found {
+		if s.logger != nil {
+			matched, marked := 0, 0
+			for _, entry := range entries {
+				if entry.Direction != controlplanetunnel.Outbound || entry.Owner != s.owner {
+					continue
+				}
+				matched++
+				candidate, ok := s.tunnels.InspectCircuit(entry.ID)
+				if !ok || candidate.Token != entry.Circuit || candidate.Owner != s.owner {
+					continue
+				}
+				s.remoteMu.RLock()
+				failedUntil := s.failedRoutes[failedRoutePath{remote: remote, circuit: entry.Circuit, gateway: lease.Gateway, tunnelID: lease.TunnelID}]
+				s.remoteMu.RUnlock()
+				if failedUntil > now {
+					marked++
+				}
+			}
+			s.logger.Debug("route resolve exhausted: circuit not found", "remote", foundation.EncodeI2PBase64(remote[:]), "entries", len(entries), "owner_matched", matched, "failure_marked", marked, "exhausted", exhausted)
+		}
 		return route, dataplane.TunnelErrCircuitNotFound
 	}
 	if route.Legacy {
@@ -1035,8 +1078,10 @@ func (s *StreamingTunnelSender) refreshRemoteLeaseSet(ctx context.Context, remot
 		return false
 	}
 	select {
-	case _, ok := <-result:
-		return ok
+	case outcome, ok := <-result:
+		// A completed lookup may still carry a terminal error; only fresh
+		// data justifies retrying marked combinations.
+		return ok && outcome.Err == nil
 	case <-ctx.Done():
 		return false
 	}

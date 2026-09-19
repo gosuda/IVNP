@@ -143,6 +143,7 @@ type TunnelNetwork struct {
 	inbound        map[inboundKey]*tunnelConn
 	synPending     map[inboundKey]struct{}
 	synTokens      chan struct{}
+	idSeq          atomic.Uint32
 	closed         bool
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -154,7 +155,7 @@ type TunnelNetwork struct {
 	completionPool sync.Pool
 	deliveryQueues []chan sendRequest
 	closeOnce      sync.Once
-	wg             sync.WaitGroup
+	wg             durable.WaitGroup
 }
 
 // NetworkStats holds connection count and aggregate flow-control metrics.
@@ -317,7 +318,7 @@ func (n *TunnelNetwork) dialStream(ctx context.Context, address string, localPor
 	defer cancel()
 	var feedback HandshakeFeedback
 	if !exclusive {
-		localPort = cmp.Or(localPort, randomPort())
+		localPort = cmp.Or(localPort, n.sharedPort())
 	}
 	localID, err := n.allocateID()
 	if err != nil {
@@ -796,12 +797,37 @@ func (n *TunnelNetwork) releasePortLocked(connection *tunnelConn) {
 }
 
 func (n *TunnelNetwork) allocateID() (uint32, error) {
+	if deterministicStreamSeed.Load() != nil {
+		return n.allocateSequentialID()
+	}
 	var encoded [4]byte
 	for range 128 {
 		if _, err := rand.Read(encoded[:]); err != nil {
 			return 0, err
 		}
 		id := uint32(encoded[0])<<24 | uint32(encoded[1])<<16 | uint32(encoded[2])<<8 | uint32(encoded[3])
+		if id == 0 {
+			continue
+		}
+		n.mu.RLock()
+		_, exists := n.byID[id]
+		closed := n.closed
+		n.mu.RUnlock()
+		if closed {
+			return 0, net.ErrClosed
+		}
+		if !exists {
+			return id, nil
+		}
+	}
+	return 0, ErrTunnelBackpressure
+}
+
+// allocateSequentialID issues collision-free stream IDs in counter order so a
+// pinned simulation never burns retries on random ID collisions.
+func (n *TunnelNetwork) allocateSequentialID() (uint32, error) {
+	for range 128 {
+		id := n.idSeq.Add(1)
 		if id == 0 {
 			continue
 		}
@@ -2670,6 +2696,34 @@ func randomPort() uint16 {
 		return 0
 	}
 	return uint16(encoded[0])<<8 | uint16(encoded[1])
+}
+
+// sharedPort picks a non-exclusive dial port. A pinned simulation scans
+// upward from 49152, skipping the ports register() would reject, so the
+// choice is deterministic and cannot collide with listener or exclusive
+// reservations. Falls back to a crypto draw when unpinned or exhausted.
+func (n *TunnelNetwork) sharedPort() uint16 {
+	if deterministicStreamSeed.Load() == nil {
+		return randomPort()
+	}
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	for candidate := uint16(49152); candidate != 0; candidate++ {
+		if listener := n.listeners[candidate]; listener != nil && listener.standardConn {
+			continue
+		}
+		reserved := false
+		for _, existing := range n.byID {
+			if existing.exclusivePort && existing.portReserved && existing.localPort == candidate {
+				reserved = true
+				break
+			}
+		}
+		if !reserved {
+			return candidate
+		}
+	}
+	return randomPort()
 }
 
 func (c *tunnelConn) String() string {

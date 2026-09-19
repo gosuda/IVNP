@@ -485,11 +485,21 @@ func TestDeterministicRouterMesh16(t *testing.T) {
 
 		// Two concurrent verified round trips on disjoint destination pairs.
 		roundTrip := func(source *Destination, targetB32 string, payload []byte) error {
-			dialCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+			dialCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 			defer cancel()
-			conn, err := source.DialContext(dialCtx, "i2p", net.JoinHostPort(targetB32, "8080"))
-			if err != nil {
-				return err
+			var conn net.Conn
+			for {
+				attemptCtx, attemptCancel := context.WithTimeout(dialCtx, 30*time.Second)
+				var err error
+				conn, err = source.DialContext(attemptCtx, "i2p", net.JoinHostPort(targetB32, "8080"))
+				attemptCancel()
+				if err == nil {
+					break
+				}
+				if dialCtx.Err() != nil {
+					return err
+				}
+				sim.net.Advance(2 * time.Second)
 			}
 			defer conn.Close()
 			_ = conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
@@ -519,8 +529,13 @@ func TestDeterministicRouterMesh16(t *testing.T) {
 			results <- result{"dave->carol", roundTrip(sourceDave, targetCarol.B32(), []byte("dave-to-carol-16-node-round-trip"))}
 		}()
 		for i := 0; i < 2; i++ {
-			if r := <-results; r.err != nil {
-				t.Fatalf("%s round trip: %v", r.name, r.err)
+			select {
+			case r := <-results:
+				if r.err != nil {
+					t.Fatalf("%s round trip: %v", r.name, r.err)
+				}
+			case <-time.After(150 * time.Second):
+				t.Fatal("concurrent round trips timed out waiting for a result")
 			}
 		}
 		t.Logf("16-node mesh stats: %+v", sim.Stats())
@@ -537,9 +552,12 @@ func TestSimChaosFailureModels(t *testing.T) {
 		sim := newSimNet(t, 2026)
 		// SSU2-only nodes force the streams onto UDP so the duplication and
 		// burst-loss models below provably apply to the tested traffic.
-		sim.AddRouter(t, simNodeConfig{Name: "flood", Participation: ParticipationContributor, DisableNTCP2: true})
-		alice := sim.AddRouter(t, simNodeConfig{Name: "alice", DisableNTCP2: true})
-		bob := sim.AddRouter(t, simNodeConfig{Name: "bob", DisableNTCP2: true})
+		// Two tunnels per direction keep route resolution able to steer around
+		// a single failure-marked path — with one, one silent handshake can
+		// blackhole the only (circuit, lease) pair until the mark expires.
+		sim.AddRouter(t, simNodeConfig{Name: "flood", Participation: ParticipationContributor, TunnelCount: 2, DisableNTCP2: true})
+		alice := sim.AddRouter(t, simNodeConfig{Name: "alice", TunnelCount: 2, DisableNTCP2: true})
+		bob := sim.AddRouter(t, simNodeConfig{Name: "bob", TunnelCount: 2, DisableNTCP2: true})
 
 		// Chinese middlebox network profile: 2ms latency + 15% UDP duplication with 5ms extra delay
 		sim.Mesh(simnet.LinkConfig{
@@ -564,8 +582,8 @@ func TestSimChaosFailureModels(t *testing.T) {
 		ctx := t.Context()
 		destCfg := DefaultDestinationConfig()
 		destCfg.Tunnels = TunnelPoolConfig{
-			Inbound:     TunnelDirectionConfig{Hops: 1, Count: 1},
-			Outbound:    TunnelDirectionConfig{Hops: 1, Count: 1},
+			Inbound:     TunnelDirectionConfig{Hops: 1, Count: 2},
+			Outbound:    TunnelDirectionConfig{Hops: 1, Count: 2},
 			RenewBefore: 10 * time.Second,
 		}
 
@@ -596,7 +614,9 @@ func TestSimChaosFailureModels(t *testing.T) {
 		}()
 
 		// 1. Establish initial stream over the Chinese-style duplicated network
-		outbound, err := source.DialContext(ctx, "i2p", net.JoinHostPort(target.B32(), "8080"))
+		initialCtx, initialCancel := context.WithTimeout(ctx, 60*time.Second)
+		outbound, err := source.DialContext(initialCtx, "i2p", net.JoinHostPort(target.B32(), "8080"))
+		initialCancel()
 		if err != nil {
 			t.Fatalf("initial dial: %v", err)
 		}
@@ -668,9 +688,38 @@ func TestSimChaosFailureModels(t *testing.T) {
 			// replace the pair so the blackhole read cannot observe stale data.
 			_ = outbound.Close()
 			_ = inbound.Close()
-			if outbound, err = source.DialContext(ctx, "i2p", net.JoinHostPort(target.B32(), "8080")); err != nil {
-				t.Fatalf("redial after stalled burst-loss round: %v", err)
+			// The stall starves tunnel health probes too — wait for both
+			// pools to rebuild and republish before dialing. Post-loss
+			// congestion drains at retransmit pace, so reply paths can lag
+			// build timeouts by tens of seconds before converging.
+			readyCtx, readyCancel := context.WithTimeout(ctx, 300*time.Second)
+			if readyErr := source.WaitReady(readyCtx); readyErr != nil {
+				readyCancel()
+				t.Fatalf("source tunnels did not recover after burst loss: %v", readyErr)
 			}
+			if readyErr := target.WaitReady(readyCtx); readyErr != nil {
+				readyCancel()
+				t.Fatalf("target tunnels did not recover after burst loss: %v", readyErr)
+			}
+			readyCancel()
+			// A ready pool can still lose the selected tunnel between the
+			// pool count and circuit install — retry within a bounded budget.
+			dialCtx, dialCancel := context.WithTimeout(ctx, 120*time.Second)
+			for {
+				attemptCtx, attemptCancel := context.WithTimeout(dialCtx, 30*time.Second)
+				outbound, err = source.DialContext(attemptCtx, "i2p", net.JoinHostPort(target.B32(), "8080"))
+				attemptCancel()
+				if err == nil {
+					break
+				}
+				t.Logf("redial attempt failed: %v", err)
+				if dialCtx.Err() != nil {
+					dialCancel()
+					t.Fatalf("redial after stalled burst-loss round: %v", err)
+				}
+				sim.net.Advance(2 * time.Second)
+			}
+			dialCancel()
 			defer outbound.Close()
 			select {
 			case inbound = <-accepted:

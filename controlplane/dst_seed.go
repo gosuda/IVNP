@@ -10,10 +10,12 @@ import (
 )
 
 // SetDeterministicSeeds pins the tunnel peer-selection keys, the netdb
-// explorer's noise stream, and the transport mux's preference draw for
-// deterministic simulation. Nil restores crypto randomness for all.
-func SetDeterministicSeeds(tunnelSeed, explorerSeed, muxSeed *foundation.Hash) {
+// explorer's noise stream, the transport mux's preference draw, and the
+// build-message deadline fuzz for deterministic simulation. Nil restores
+// crypto randomness for all.
+func SetDeterministicSeeds(tunnelSeed, explorerSeed, muxSeed, buildSeed *foundation.Hash) {
 	tunnel.SetDeterministicSelectionSeed(tunnelSeed)
 	netdb.SetDeterministicExplorerSeed(explorerSeed)
 	router.SetDeterministicMuxSeed(muxSeed)
+	tunnel.SetDeterministicBuildSeed(buildSeed)
 }

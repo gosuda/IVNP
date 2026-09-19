@@ -14,6 +14,7 @@ import (
 	"gosuda.org/ivnp/client"
 	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/dataplane"
+	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/observability"
 	"gosuda.org/ivnp/state"
@@ -62,7 +63,7 @@ type Daemon struct {
 	closeOnce       sync.Once
 	closeErr        error
 	err             error
-	wg              sync.WaitGroup
+	wg              durable.WaitGroup
 }
 
 func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {

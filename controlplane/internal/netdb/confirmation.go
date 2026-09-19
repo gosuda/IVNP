@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 const (
@@ -310,7 +311,7 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 			break
 		}
 		results := make([]error, len(batch))
-		var group sync.WaitGroup
+		var group durable.WaitGroup
 		group.Add(len(batch))
 		for index := range batch {
 			go func() {

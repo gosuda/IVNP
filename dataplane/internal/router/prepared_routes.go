@@ -2,12 +2,12 @@ package router
 
 import (
 	"errors"
-	"sync"
 	"sync/atomic"
 
 	"gosuda.org/ivnp/cryptography"
 	dataplanetunnel "gosuda.org/ivnp/dataplane/internal/tunnel"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 var (
@@ -55,7 +55,7 @@ func (r PreparedRouteReceipt) Confirmed() bool {
 
 type preparedRouteEntry struct {
 	route           PreparedRoute
-	active          sync.WaitGroup
+	active          durable.WaitGroup
 	used            uint64
 	wiping          atomic.Bool
 	drained         chan struct{}

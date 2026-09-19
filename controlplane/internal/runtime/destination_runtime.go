@@ -301,7 +301,7 @@ func (r *destinationPublisherRegistry) Maintain(ctx context.Context) (int, error
 		sent int
 		err  error
 	}, len(publishers))
-	var group sync.WaitGroup
+	var group durable.WaitGroup
 	group.Add(workers)
 	for range workers {
 		go func() {

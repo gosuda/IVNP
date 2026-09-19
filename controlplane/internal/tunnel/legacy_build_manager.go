@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"hash"
 	"io"
 
 	"gosuda.org/ivnp/cryptography"
@@ -92,7 +93,18 @@ func (m *BuildManager) StartVariableOutbound(ctx context.Context, build Variable
 		clearVariableBuildKeys(keys)
 		return 0, err
 	}
-	messageDeadline, err := randomizedBuildMessageDeadline(now, m.random)
+	deadlineRand := m.random
+	if keyed := deterministicDeadlineReader(func(h hash.Hash) {
+		for _, hop := range build.Hops {
+			h.Write(hop.Router[:])
+			var id [4]byte
+			binary.BigEndian.PutUint32(id[:], hop.ReceiveTunnelID)
+			h.Write(id[:])
+		}
+	}); keyed != nil {
+		deadlineRand = keyed
+	}
+	messageDeadline, err := randomizedBuildMessageDeadline(now, deadlineRand)
 	if err != nil {
 		clearVariableBuildKeys(keys)
 		return 0, err
