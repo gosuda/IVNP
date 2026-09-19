@@ -22,6 +22,11 @@ type SelectorConfig struct {
 	MinProbeSamples      int64
 	MinUptime            time.Duration
 	MinProbeSuccessRate  float64
+	// MaxInfoAge rejects RouterInfos whose Published timestamp is older than
+	// the client-side reseed freshness window; MaxInfoFuture tolerates small
+	// clock skew for future timestamps.
+	MaxInfoAge    time.Duration
+	MaxInfoFuture time.Duration
 }
 
 func DefaultSelectorConfig() SelectorConfig {
@@ -35,6 +40,8 @@ func DefaultSelectorConfig() SelectorConfig {
 		MinProbeSamples:      2,
 		MinUptime:            24 * time.Hour,
 		MinProbeSuccessRate:  0.85,
+		MaxInfoAge:           24 * time.Hour,
+		MaxInfoFuture:        2 * time.Minute,
 	}
 }
 
@@ -104,6 +111,12 @@ func SelectDiversePeersWithStats(peers []PeerRecord, cfg SelectorConfig) ([]Peer
 	}
 	if cfg.MinProbeSuccessRate <= 0 {
 		cfg.MinProbeSuccessRate = 0.85
+	}
+	if cfg.MaxInfoAge <= 0 {
+		cfg.MaxInfoAge = 24 * time.Hour
+	}
+	if cfg.MaxInfoFuture <= 0 {
+		cfg.MaxInfoFuture = 2 * time.Minute
 	}
 
 	now := time.Now()
@@ -204,10 +217,16 @@ func coverageGapLZ(peers []PeerRecord) int {
 
 // qualify reports whether a peer passes the hard gate at the given relaxation
 // level. A dialable v2 transport (NTCP2 or SSU2 with host:port) is required at
-// every level; probe success and uptime requirements relax down the ladder.
+// every level, and stale RouterInfos are rejected outright since clients drop
+// them anyway; probe success and uptime requirements relax down the ladder.
 func qualify(p *PeerRecord, lvl gateLevel, now time.Time, cfg *SelectorConfig) bool {
 	if len(p.Raw) == 0 || (!p.HasNTCP2 && !p.HasSSU2) {
 		return false
+	}
+	if !p.PublishedAt.IsZero() {
+		if age := now.Sub(p.PublishedAt); age > cfg.MaxInfoAge || age < -cfg.MaxInfoFuture {
+			return false
+		}
 	}
 	if cfg.ExcludeIPv6Only && len(p.IPv4) == 0 {
 		return false

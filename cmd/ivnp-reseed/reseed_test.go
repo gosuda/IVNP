@@ -531,6 +531,35 @@ func TestSelectorFPSAnchorIsFloodfill(t *testing.T) {
 	}
 }
 
+func TestSelectorRejectsStaleRouterInfos(t *testing.T) {
+	var peers []PeerRecord
+	for i := 0; i < 5; i++ {
+		var h [32]byte
+		h[0] = byte(i)
+		p := qualifiedPeer(h, fmt.Sprintf("10.%d.1.1", i+1), false)
+		p.PublishedAt = time.Now()
+		if i == 0 {
+			p.PublishedAt = time.Now().Add(-25 * time.Hour) // stale: > 24h
+		}
+		if i == 1 {
+			p.PublishedAt = time.Now().Add(10 * time.Minute) // future: > 2m skew
+		}
+		peers = append(peers, p)
+	}
+
+	cfg := DefaultSelectorConfig()
+	cfg.TargetCount = 5
+	selected := SelectDiversePeers(peers, cfg)
+	if len(selected) != 3 {
+		t.Fatalf("selected = %d, want 3 (stale and far-future RouterInfos rejected)", len(selected))
+	}
+	for _, p := range selected {
+		if age := time.Since(p.PublishedAt); age > 24*time.Hour || age < -2*time.Minute {
+			t.Fatalf("stale/future RouterInfo admitted: published %v ago", age)
+		}
+	}
+}
+
 func TestLeadingZerosXOR(t *testing.T) {
 	var a, b foundation.Hash
 	if lz := leadingZerosXOR(a, b); lz != 256 {
