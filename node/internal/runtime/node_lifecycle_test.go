@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/dataplane"
+	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/state"
 )
 
@@ -26,6 +27,37 @@ func (nodeSockets) DialStream(ctx context.Context, endpoint dataplane.RouterEndp
 func (nodeSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
 	return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 }
+
+var errTestNoConnectedPeers = errors.New("no connected peers")
+
+type idleNodeTransport struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func (m *idleNodeTransport) Start(ctx context.Context, _ dataplane.RouterTransportBindings) error {
+	m.ctx, m.cancel = context.WithCancel(ctx)
+	return nil
+}
+func (m *idleNodeTransport) Close() error {
+	if m.cancel != nil {
+		m.cancel()
+	}
+	return nil
+}
+func (m *idleNodeTransport) Wait() error {
+	if m.ctx != nil {
+		<-m.ctx.Done()
+	}
+	return nil
+}
+func (m *idleNodeTransport) Send(context.Context, foundation.Hash, foundation.I2NPMessage) error {
+	return errTestNoConnectedPeers
+}
+func (m *idleNodeTransport) Status() dataplane.RouterTransportStatus {
+	return dataplane.RouterTransportStatus{Running: m.ctx != nil && m.ctx.Err() == nil}
+}
+
 func TestStartRollsBackWhenMetricsListenerFails(t *testing.T) {
 	cfg := nodeTestConfig(t)
 	cfg.Metrics = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 4}

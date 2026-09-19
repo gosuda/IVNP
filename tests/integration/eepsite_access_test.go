@@ -1,6 +1,6 @@
 //go:build integration
 
-package ivnp_test
+package integration
 
 import (
 	"context"

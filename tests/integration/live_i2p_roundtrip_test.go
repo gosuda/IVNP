@@ -1,6 +1,6 @@
 //go:build integration
 
-package ivnp_test
+package integration
 
 import (
 	"bytes"
@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"gosuda.org/ivnp"
+	"gosuda.org/ivnp/foundation"
 )
 
 // TestLiveI2PRoundTrip bootstraps two client-mode routers on the official
@@ -73,7 +74,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 	defer destA.Close()
 
 	targetB32 := destA.B32()
-	t.Logf("Target destination A created: %s (hash: %s)", targetB32, destA.Hash())
+	t.Logf("Target destination A created: %s (hash: %s)", targetB32, foundation.B32(destA.Hash()))
 
 	// Verify Destination identity invariants
 	if len(targetB32) != 60 || !bytes.HasSuffix([]byte(targetB32), []byte(".b32.i2p")) {
@@ -168,7 +169,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 		t.Fatalf("create source destination B: %v", err)
 	}
 	defer destB.Close()
-	t.Logf("Source destination B created: %s (hash: %s)", destB.B32(), destB.Hash())
+	t.Logf("Source destination B created: %s (hash: %s)", destB.B32(), foundation.B32(destB.Hash()))
 
 	// 4. Test Address Resolution via destB
 	t.Run("resolve target B32 address", func(t *testing.T) {
@@ -177,7 +178,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 			t.Fatalf("resolve target B32: %v", resErr)
 		}
 		if resolved.Hash != destA.Hash() {
-			t.Fatalf("resolved hash = %v, want %v", resolved.Hash, destA.Hash())
+			t.Fatalf("resolved hash = %s, want %s", foundation.B32(resolved.Hash), foundation.B32(destA.Hash()))
 		}
 		if resolved.Port != 8080 {
 			t.Fatalf("resolved port = %d, want 8080", resolved.Port)
@@ -227,8 +228,8 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 			t.Logf("Streaming transfer over live I2P (attempt %d/%d)...", attempt, maxAttempts)
 			dialCtx, dialCancel := context.WithTimeout(ctx, 60*time.Second)
 			outbound, dialErr := destB.DialContext(dialCtx, "i2p", dialAddr)
+			dialCancel()
 			if dialErr != nil {
-				dialCancel()
 				lastErr = fmt.Errorf("dial: %w", dialErr)
 				t.Logf("attempt %d dial failed: %v", attempt, dialErr)
 				if attempt < maxAttempts {
@@ -537,7 +538,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 
 		fromAddr, ok := from.(ivnp.Addr)
 		if !ok || fromAddr.Hash != destB.Hash() {
-			t.Fatalf("received datagram from unexpected hash: %v (want %v)", from, destB.Hash())
+			t.Fatalf("received datagram from unexpected hash: %v (want %s)", from, foundation.B32(destB.Hash()))
 		}
 		if fromAddr.Port == 0 {
 			t.Fatal("ephemeral sender port was not preserved in datagram header")
@@ -559,7 +560,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 
 		replyAddr, ok := fromPong.(ivnp.Addr)
 		if !ok || replyAddr.Hash != destA.Hash() {
-			t.Fatalf("received pong from unexpected hash: %v (want %v)", fromPong, destA.Hash())
+			t.Fatalf("received pong from unexpected hash: %v (want %s)", fromPong, foundation.B32(destA.Hash()))
 		}
 		if replyAddr.Port != 8081 {
 			t.Fatalf("reply port = %d, want 8081", replyAddr.Port)
@@ -590,7 +591,7 @@ func TestLiveI2PRoundTrip(t *testing.T) {
 			t.Fatalf("received datagram3 %q, want %q", recvBuf[:n], dgram3Msg)
 		}
 		if meta.HasClaimedSource && meta.ClaimedSource != destB.Hash() {
-			t.Fatalf("claimed source = %v, want %v", meta.ClaimedSource, destB.Hash())
+			t.Fatalf("claimed source = %s, want %s", foundation.B32(meta.ClaimedSource), foundation.B32(destB.Hash()))
 		}
 		t.Log("Datagram3 transfer succeeded.")
 	})
