@@ -656,13 +656,13 @@ func (c Client) ingestCandidates(slots map[foundation.Hash]*dedupSlot, database 
 	return ReseedResult{Admitted: admitted, Anchors: anchors}
 }
 
-// insertAnchor keeps anchors sorted by XOR distance to the local hash,
-// retaining at most limit entries.
+// insertAnchor keeps the anchors closest to the local hash, sorted
+// nearest-first, retaining at most limit entries.
 func insertAnchor(anchors []foundation.Hash, local, hash foundation.Hash, limit int) []foundation.Hash {
 	dist := leadingZerosXOR(local, hash)
 	index := len(anchors)
 	for i, anchor := range anchors {
-		if leadingZerosXOR(local, anchor) > dist {
+		if leadingZerosXOR(local, anchor) < dist {
 			index = i
 			break
 		}
@@ -868,7 +868,9 @@ func (c Client) FetchAny(ctx context.Context, endpoints []string, database *cont
 			if !waitingPriority && done() {
 				return finish(), nil
 			}
-			state.launchNext(timer, hedgeDelay)
+			if !waitingPriority || len(state.slots) < state.target {
+				state.launchNext(timer, hedgeDelay)
+			}
 		case <-mergeC:
 			state.mergeExpired = true
 			if done() {

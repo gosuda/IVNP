@@ -850,6 +850,29 @@ func TestFpsOrderBucketSpreadsPicks(t *testing.T) {
 	}
 }
 
+func TestInsertAnchorKeepsClosest(t *testing.T) {
+	var local foundation.Hash
+	mk := func(lz int, salt byte) foundation.Hash {
+		var h foundation.Hash
+		h[lz/8] |= 0x80 >> (lz % 8)
+		h[31] = salt
+		return h
+	}
+	var anchors []foundation.Hash
+	for i, lz := range []int{5, 9, 20, 2, 12} {
+		anchors = insertAnchor(anchors, local, mk(lz, byte(i)), 3)
+	}
+	if len(anchors) != 3 {
+		t.Fatalf("anchors = %d, want 3", len(anchors))
+	}
+	wantLZ := []int{20, 12, 9}
+	for i, anchor := range anchors {
+		if got := leadingZerosXOR(local, anchor); got != wantLZ[i] {
+			t.Fatalf("anchors[%d] lz = %d, want %d (closest-first)", i, got, wantLZ[i])
+		}
+	}
+}
+
 func TestFpsOrderBucketHonorsPickLimit(t *testing.T) {
 	mk := func(b byte, src int) bucketCandidate {
 		var h foundation.Hash

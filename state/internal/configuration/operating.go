@@ -856,14 +856,14 @@ func applyReseed(operating *Operating, values map[entryKey]string) error {
 		reseed.BucketAdmitLimit = int(parsed)
 	}
 	if value, ok := valueOf(values, "reseed", "verify_anchor_count"); ok {
-		parsed, err := parseUint(value, 0, 64)
+		parsed, err := parseUint(value, 1, 64)
 		if err != nil {
 			return invalid("reseed", "verify_anchor_count")
 		}
 		reseed.VerifyAnchorCount = int(parsed)
 	}
 	if value, ok := valueOf(values, "reseed", "merge_wait"); ok {
-		parsed, err := parseDuration(value, -time.Second, 10*time.Minute)
+		parsed, err := parseDuration(value, -10*time.Minute, 10*time.Minute)
 		if err != nil {
 			return invalid("reseed", "merge_wait")
 		}
