@@ -372,12 +372,17 @@ func TestDeterministicRouterMesh(t *testing.T) {
 
 		reboundReq := []byte("rebound-request-verification-payload")
 		reboundResp := []byte("rebound-response-verification-payload")
-		rebound.SetWriteDeadline(time.Now().Add(60 * time.Second))
+		// Post-partition delivery can consume the full retransmission
+		// envelope: the stream RTO backs off 9s -> 18s -> 36s -> 60s
+		// (capped) across 8 retries (~363s) while the sender re-resolves
+		// routes around the dead relay.
+		const reboundIOBudget = 400 * time.Second
+		rebound.SetWriteDeadline(time.Now().Add(reboundIOBudget))
 		if _, err := rebound.Write(reboundReq); err != nil {
 			t.Fatalf("rebound write: %v", err)
 		}
 		gotReq := make([]byte, len(reboundReq))
-		reboundInbound.SetReadDeadline(time.Now().Add(60 * time.Second))
+		reboundInbound.SetReadDeadline(time.Now().Add(reboundIOBudget))
 		if _, err := io.ReadFull(reboundInbound, gotReq); err != nil {
 			t.Fatalf("rebound read req: %v", err)
 		}
@@ -385,12 +390,12 @@ func TestDeterministicRouterMesh(t *testing.T) {
 			t.Fatalf("rebound req got %q, want %q", gotReq, reboundReq)
 		}
 
-		reboundInbound.SetWriteDeadline(time.Now().Add(60 * time.Second))
+		reboundInbound.SetWriteDeadline(time.Now().Add(reboundIOBudget))
 		if _, err := reboundInbound.Write(reboundResp); err != nil {
 			t.Fatalf("rebound reply write: %v", err)
 		}
 		gotResp := make([]byte, len(reboundResp))
-		rebound.SetReadDeadline(time.Now().Add(60 * time.Second))
+		rebound.SetReadDeadline(time.Now().Add(reboundIOBudget))
 		if _, err := io.ReadFull(rebound, gotResp); err != nil {
 			t.Fatalf("rebound read resp: %v", err)
 		}
@@ -689,19 +694,16 @@ func TestSimChaosFailureModels(t *testing.T) {
 			_ = outbound.Close()
 			_ = inbound.Close()
 			// The stall starves tunnel health probes too — wait for both
-			// pools to rebuild and republish before dialing. Post-loss
-			// congestion drains at retransmit pace, so reply paths can lag
-			// build timeouts by tens of seconds before converging.
-			readyCtx, readyCancel := context.WithTimeout(ctx, 300*time.Second)
-			if readyErr := source.WaitReady(readyCtx); readyErr != nil {
-				readyCancel()
-				t.Fatalf("source tunnels did not recover after burst loss: %v", readyErr)
-			}
-			if readyErr := target.WaitReady(readyCtx); readyErr != nil {
-				readyCancel()
-				t.Fatalf("target tunnels did not recover after burst loss: %v", readyErr)
-			}
-			readyCancel()
+			// pools to rebuild and republish before dialing. Recovery is
+			// bounded by the post-stall envelope, not a fixed 300s guess:
+			// transport cooldowns (up to 300s) and build quarantine (120s)
+			// must lapse, and pool entries whose reply paths died can only
+			// be cleared by expiry within the same bound. The wait polls
+			// readiness in slices and logs each router's observable tunnel
+			// signals so a wedged recovery reports its last state.
+			waitDestinationsReady(t, ctx,
+				recoveryWatch{"source", source, alice.router},
+				recoveryWatch{"target", target, bob.router})
 			// A ready pool can still lose the selected tunnel between the
 			// pool count and circuit install — retry within a bounded budget.
 			dialCtx, dialCancel := context.WithTimeout(ctx, 120*time.Second)
@@ -765,6 +767,70 @@ func TestSimChaosFailureModels(t *testing.T) {
 
 		t.Logf("chaos test final stats: %+v", sim.Stats())
 	})
+}
+
+// recoveryWatch binds a destination to the router hosting it so the
+// recovery wait can report that router's observable tunnel signals.
+type recoveryWatch struct {
+	name   string
+	dest   *Destination
+	router *Router
+}
+
+// signal returns the router's observable recovery evidence: live pool
+// counts and confirmed LeaseSet publications.
+func (w recoveryWatch) signal(ctx context.Context) string {
+	ctrl := w.router.Node().Default()
+	if ctrl == nil {
+		return "controller unavailable"
+	}
+	status, err := ctrl.ClientStatus(ctx)
+	if err != nil {
+		return fmt.Sprintf("status unavailable: %v", err)
+	}
+	r := status.Readiness
+	return fmt.Sprintf("client_tunnels=%d/%d exploratory_tunnels=%d/%d leaseset_publications=%d netdb_routers=%d",
+		r.ClientInboundTunnels, r.ClientOutboundTunnels,
+		r.ExploratoryInboundTunnels, r.ExploratoryOutboundTunnels,
+		r.LeaseSet2Publications, r.NetDBRouters)
+}
+
+// waitDestinationsReady waits for every watched destination to report
+// ready — inbound and outbound tunnels plus a confirmed LeaseSet — while
+// logging each router's observable tunnel signals. Readiness is polled in
+// slices so the wait can outlive the post-stall recovery envelope
+// (transport cooldowns up to 300s plus build quarantine and republish
+// slack); a wedged recovery fails with its last observed state.
+func waitDestinationsReady(t *testing.T, ctx context.Context, watches ...recoveryWatch) {
+	t.Helper()
+	const (
+		slice  = 10 * time.Second
+		budget = 720 * time.Second
+	)
+	deadline := time.Now().Add(budget)
+	signals := make([]string, len(watches))
+	for {
+		ready := true
+		for i, w := range watches {
+			sliceCtx, cancel := context.WithTimeout(ctx, slice)
+			err := w.dest.WaitReady(sliceCtx)
+			cancel()
+			if err == nil {
+				continue
+			}
+			ready = false
+			if s := w.signal(ctx); s != signals[i] {
+				t.Logf("%s recovery progress: %s", w.name, s)
+				signals[i] = s
+			}
+		}
+		if ready {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("destinations did not recover within %v; last signals %v", budget, signals)
+		}
+	}
 }
 
 // BenchmarkSimStreamThroughput measures bidirectional streaming throughput
