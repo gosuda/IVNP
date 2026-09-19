@@ -11,7 +11,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"path"
 	"slices"
+	"strings"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
@@ -29,6 +32,9 @@ var (
 	ErrInvalidPrivateKey = errors.New("packager: invalid private key")
 	ErrInvalidSignerID   = errors.New("packager: invalid signer ID length")
 	ErrInvalidSignature  = errors.New("packager: invalid archive signature")
+	errSU3TooShort       = errors.New("packager: su3 archive too short")
+	errInvalidSU3Magic   = errors.New("packager: invalid su3 magic")
+	errInvalidSU3Bounds  = errors.New("packager: invalid su3 content bounds")
 )
 
 // BuildSU3 builds a signed standard I2P SU3 reseed container containing a ZIP archive of routerInfos.
@@ -214,4 +220,55 @@ func CalculatePackageStats(peers []PeerRecord, su3SizeBytes int, etag string, ge
 	}
 
 	return stats
+}
+
+// InspectSU3Archive inspects an SU3 container and counts valid RouterInfos and floodfills within.
+func InspectSU3Archive(su3Data []byte) (peerCount int, floodfillCount int, err error) {
+	if len(su3Data) < su3HeaderLen+su3RSASignatureLen {
+		return 0, 0, errSU3TooShort
+	}
+	if !bytes.Equal(su3Data[:7], []byte{'I', '2', 'P', 's', 'u', '3', 0}) {
+		return 0, 0, errInvalidSU3Magic
+	}
+	versionLen := int(su3Data[13])
+	signerLen := int(su3Data[15])
+	contentLen := int(binary.BigEndian.Uint64(su3Data[16:24]))
+
+	zipStart := su3HeaderLen + versionLen + signerLen
+	zipEnd := zipStart + contentLen
+	if zipStart > len(su3Data) || zipEnd > len(su3Data)-su3RSASignatureLen || zipStart >= zipEnd {
+		return 0, 0, errInvalidSU3Bounds
+	}
+
+	zipBytes := su3Data[zipStart:zipEnd]
+	zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+	if err != nil {
+		return 0, 0, fmt.Errorf("read su3 zip payload: %w", err)
+	}
+
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		baseName := path.Base(f.Name)
+		if !strings.HasPrefix(baseName, "routerInfo-") || !strings.HasSuffix(baseName, ".dat") {
+			continue
+		}
+		peerCount++
+		rc, openErr := f.Open()
+		if openErr != nil {
+			continue
+		}
+		raw, readErr := io.ReadAll(rc)
+		_ = rc.Close()
+		if readErr != nil {
+			continue
+		}
+		if info, parseErr := foundation.NetworkDatabaseParseRouterInfo(raw); parseErr == nil {
+			if foundation.NetworkDatabaseIsFloodfill(info) {
+				floodfillCount++
+			}
+		}
+	}
+	return peerCount, floodfillCount, nil
 }

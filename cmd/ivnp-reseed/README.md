@@ -13,7 +13,7 @@ Autonomous I2P network indexer and reseed server. Actively crawls the live I2P D
 ┌─────────────────────────────────────────────────────────────┐
 │ Embedded Router in Floodfill Mode (SSU2/NTCP2)             │
 │ - NetDB Replication & Lookups (Passive & Active Crawling)   │
-│ - Tuned Exploratory Tunnels (Pool Cap 32, Pending Cap 128)  │
+│ - Tuned Exploratory Tunnels (Pool Cap 16, Pending Cap 48)   │
 │ - Deficit-Weighted DHT Tree Exploration (256 K-Buckets)     │
 └─────────────────────────────┬───────────────────────────────┘
                               │ ActiveCrawler.HarvestRefs() & Tunnel Hops
@@ -24,7 +24,7 @@ Autonomous I2P network indexer and reseed server. Actively crawls the live I2P D
 │ - JSON persistence: reseed-peers.json                       │
 │ - Real-time 256 K-Bucket deficit & reachability tracking    │
 └─────────────────────────────┬───────────────────────────────┘
-                              │ Prober.ProbeAll() (Deficit-prioritized, 48 workers)
+                              │ Prober.ProbeAll() (Deficit-prioritized, 16 workers)
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ 4-Stage Uniform Selector                                    │
@@ -40,10 +40,10 @@ Autonomous I2P network indexer and reseed server. Actively crawls the live I2P D
                     (RSA-4096 / SHA-512)
                               │
                               ▼
-            ┌─────────────────────────────────────┐
-            │ HTTP Reseed Server & Web Dashboard  │
-            │ (Ports 8080 & 8443, 5m refresh cycle│
-            └─────────────────────────────────────┘
+            ┌──────────────────────────────────────┐
+            │  HTTP Reseed Server & Web Dashboard  │
+            │ (Ports 8080 & 8443, 10m refresh cycle│
+            └──────────────────────────────────────┘
 ```
 
 ### Core Invariants
@@ -51,8 +51,8 @@ Autonomous I2P network indexer and reseed server. Actively crawls the live I2P D
 1. **Embedded Floodfill Router**: Runs as a full floodfill router (`cfg.Router.Floodfill = true`) by default. In addition to active queries, it passively accepts and stores unsolicited NetDB `DatabaseStoreMessage` publications from the network, maximizing visibility.
 2. **Deficit-Weighted DHT Prefix Exploration**: The crawler analyzes the 256-bucket distribution in the peer store every pass. Buckets with severe deficits receive prioritized 4-way quadrant exploration queries (`[0x00, 0x40, 0x80, 0xC0]`) down the DHT prefix tree to discover nodes in unrepresented keyspace prefixes.
 3. **Dual Exploration Budget Allocation**:
-   - *Expansion Mode* (Reachable < 1024): Deep exploration (48 queries per pass), rapid 60s probe retry for failed peers, newcomer and sparse-bucket probing priority.
-   - *Maintenance Mode* (Reachable $\ge$ 1024): Conservative repair (12 queries for sparse buckets), 3m RTT refresh on active nodes, backoff on failing nodes.
+   - *Expansion Mode* (Reachable < 1024): Deep exploration (24 queries per pass), rapid 60s probe retry for failed peers, newcomer and sparse-bucket probing priority.
+   - *Maintenance Mode* (Reachable $\ge$ 1024): Conservative repair (8 queries for sparse buckets), 3m RTT refresh on active nodes, backoff on failing nodes.
 4. **Max-Min XOR Uniform Keyspace Coverage**: Instead of fixed prefix bucketing, the selector runs greedy farthest-point sampling over the full 256-bit XOR space — each pick maximizes the minimum distance to already-selected peers, bounding the worst-case covering radius. Floodfills are prioritized (highest-quality floodfill anchors the set, quota filled first, ties broken toward floodfills), then remaining slots draw from the whole qualified pool.
 5. **Hard Qualification Gate + Relaxation Ladder**: Bundle candidates must publish a dialable NTCP2 or SSU2 address, hold ≥85% probe success over a 3h window, show ≥24h observed uptime, and carry a RouterInfo published within the client's 24h reseed window (±2m skew) — stale entries are never bundled since clients reject them at admission. When strict qualification yields fewer than target, the gate relaxes deterministically (uptime → cumulative rate → reachable-only) so cold deployments still serve; below `-min-bundle-peers` the previous epoch bundle keeps serving.
 6. **Sybil & Eclipse Mitigation**: Peer selection enforces a hard limit of 1 router per IPv4 `/16`, IPv6 `/48`, and declared `family`. The peer store enforces the same contention bounds at admission: a router that tops none of its `/16` subnets or its family is rejected outright, a newly admitted winner evicts the dominated members it displaced, and a periodic sweep removes members whose rank drifted below their group winners.
@@ -71,7 +71,7 @@ Autonomous I2P network indexer and reseed server. Actively crawls the live I2P D
 | `GET` | `/reseed-rsa.pub.pem`| `text/plain` | 4096-bit RSA Public Key in PKIX PEM format (alias: `/reseed.pub`) |
 | `GET` | `/health` | `text/plain` | Container liveness check (returns `OK\n`, HTTP 200) |
 
-All reseed downloads return `Cache-Control: public, max-age=300` and an `ETag` matching the archive hash. Conditional requests with `If-None-Match` receive `304 Not Modified`. Certificate and public key endpoints return `Cache-Control: public, max-age=86400`.
+All reseed downloads return `Cache-Control: public, max-age=600` and an `ETag` matching the archive hash. Conditional requests with `If-None-Match` receive `304 Not Modified`. Certificate and public key endpoints return `Cache-Control: public, max-age=86400`.
 
 ---
 
@@ -144,7 +144,7 @@ Usage of ivnp-reseed:
   -target int
         Target number of diverse peers in reseed archive (default 1024)
   -interval duration
-        Refresh interval for harvesting, probing, and packaging (default 5m0s)
+        Refresh interval for harvesting, probing, and packaging (default 10m0s)
   -netid uint
         I2P network ID (default 2)
   -signer-id string

@@ -525,17 +525,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
     }
 
     .gate-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: var(--space-xs);
-      padding: 0.2rem 0.6rem;
-      border-radius: 999px;
-      font-family: var(--font-mono);
-      font-size: var(--text-xs);
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      border: 1px solid transparent;
+      display: none;
     }
     .gate-badge::before {
       content: '';
@@ -545,7 +535,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       background: currentColor;
     }
     .gate-strict     { color: oklch(46% 0.13 152); border-color: oklch(46% 0.13 152 / 0.4); background: oklch(46% 0.13 152 / 0.08); }
-    .gate-no-uptime  { color: oklch(52% 0.14 85);  border-color: oklch(52% 0.14 85 / 0.4);  background: oklch(52% 0.14 85 / 0.1); }
+    .gate-standard   { color: oklch(52% 0.14 85);  border-color: oklch(52% 0.14 85 / 0.4);  background: oklch(52% 0.14 85 / 0.1); }
     .gate-cumulative-rate { color: oklch(52% 0.14 85); border-color: oklch(52% 0.14 85 / 0.4); background: oklch(52% 0.14 85 / 0.1); }
     .gate-reachable  { color: oklch(52% 0.18 25);  border-color: oklch(52% 0.18 25 / 0.4);  background: oklch(52% 0.18 25 / 0.1); }
     .gate-unknown    { color: var(--color-muted);  border-color: var(--color-rule); }
@@ -839,7 +829,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       <h2 class="section-title">Current epoch bundle</h2>
       <div class="card">
         <div class="bundle-head">
-          <span class="gate-badge gate-unknown" id="gate-badge">—</span>
+          <span class="gate-badge gate-unknown" id="gate-badge" style="display: none;"></span>
           <span class="epoch-meta" id="epoch-window">—</span>
           <span class="epoch-meta" id="epoch-eta">—</span>
         </div>
@@ -966,7 +956,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
           </div>
           <div>
             <div class="detail-group">Current bundle</div>
-            <div class="detail-row"><dt>Gate level</dt><dd id="d-gate">—</dd></div>
+            <div class="detail-row" style="display: none;"><dt>Gate level</dt><dd id="d-gate">—</dd></div>
             <div class="detail-row"><dt>Qualified pool</dt><dd id="d-qualified">—</dd></div>
             <div class="detail-row"><dt>Diverse pool</dt><dd id="d-diverse">—</dd></div>
             <div class="detail-row"><dt>Coverage gap LZ</dt><dd id="d-gap">—</dd></div>
@@ -1156,9 +1146,10 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
 
     function renderBundle(pkg) {
       const gateEl = document.getElementById('gate-badge');
-      const gate = pkg.gate_level || 'unknown';
-      gateEl.textContent = gate;
-      gateEl.className = 'gate-badge gate-' + gate;
+      if (gateEl) {
+        gateEl.textContent = '';
+        gateEl.style.display = 'none';
+      }
 
       if (pkg.epoch_started_at) {
         const start = new Date(pkg.epoch_started_at);
@@ -1199,7 +1190,8 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       document.getElementById('b-sub6').textContent = (pkg.unique_ipv6_subnets_48 || 0).toLocaleString();
       document.getElementById('b-fam').textContent = (pkg.unique_families || 0).toLocaleString();
 
-      document.getElementById('d-gate').textContent = gate;
+      const dGate = document.getElementById('d-gate');
+      if (dGate) dGate.textContent = '';
       document.getElementById('d-qualified').textContent = qualified.toLocaleString();
       document.getElementById('d-diverse').textContent = diverse.toLocaleString();
       document.getElementById('d-gap').textContent = pkg.coverage_gap_lz !== undefined ? 'LZ=' + pkg.coverage_gap_lz : '—';

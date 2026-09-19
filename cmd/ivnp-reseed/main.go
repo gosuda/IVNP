@@ -131,15 +131,22 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if su3Data, readErr := os.ReadFile(su3Path); readErr == nil && len(su3Data) > 0 {
 		sum := sha256.Sum256(su3Data)
 		etag := `"` + hex.EncodeToString(sum[:8]) + `"`
+		peerCount, floodCount, inspectErr := InspectSU3Archive(su3Data)
+		if inspectErr != nil {
+			logger.Warn("failed to parse existing SU3 archive metadata", "path", su3Path, "error", inspectErr)
+		}
 		server.UpdatePackage(ReseedPackage{
-			GeneratedAt: time.Now(),
-			PeerCount:   store.Len(),
-			SU3Data:     su3Data,
-			ETag:        etag,
+			GeneratedAt:    time.Now(),
+			PeerCount:      peerCount,
+			FloodfillCount: floodCount,
+			SU3Data:        su3Data,
+			ETag:           etag,
 		})
 		logger.Info("loaded persistent reseed archive for immediate serving",
 			"path", su3Path,
 			"su3_bytes", len(su3Data),
+			"peers", peerCount,
+			"floodfills", floodCount,
 		)
 	}
 

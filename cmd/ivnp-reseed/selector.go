@@ -71,7 +71,7 @@ func (g gateLevel) String() string {
 	case gateStrict:
 		return "strict"
 	case gateNoUptime:
-		return "no-uptime"
+		return "standard"
 	case gateCumulativeRate:
 		return "cumulative-rate"
 	case gateReachable:

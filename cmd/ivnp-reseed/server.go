@@ -243,12 +243,9 @@ func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 	}
 
 	nextRefreshSec := int64(0)
-	if !pkg.GeneratedAt.IsZero() {
-		nextTime := pkg.GeneratedAt.Add(s.cfg.CacheDuration)
-		rem := time.Until(nextTime)
-		if rem > 0 {
-			nextRefreshSec = int64(rem.Seconds())
-		}
+	nextBoundary := nextEpochBoundary(time.Now(), s.cfg.CacheDuration)
+	if rem := time.Until(nextBoundary); rem > 0 {
+		nextRefreshSec = int64(rem.Seconds())
 	}
 
 	floodfillRatio := 0.0

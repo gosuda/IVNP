@@ -1836,3 +1836,53 @@ func TestDynamicExplorationBudget(t *testing.T) {
 		t.Fatalf("saturated store budget = %d, want 2", b)
 	}
 }
+
+func TestInspectSU3Archive(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info1, raw1 := createTestRouterInfo(t, "f") // floodfill
+	info2, raw2 := createTestRouterInfo(t, "")  // non-floodfill
+	peers := []PeerRecord{
+		{Hash: info1.Hash(), Raw: raw1, IsFloodfill: true},
+		{Hash: info2.Hash(), Raw: raw2, IsFloodfill: false},
+	}
+
+	signerID := "inspect-test@ivnp.network"
+	su3Bytes, err := BuildSU3(peers, signerID, rsaKey, time.Now())
+	if err != nil {
+		t.Fatalf("BuildSU3: %v", err)
+	}
+
+	peerCount, floodCount, err := InspectSU3Archive(su3Bytes)
+	if err != nil {
+		t.Fatalf("InspectSU3Archive failed: %v", err)
+	}
+	if peerCount != 2 {
+		t.Fatalf("peerCount = %d, want 2", peerCount)
+	}
+	if floodCount != 1 {
+		t.Fatalf("floodCount = %d, want 1", floodCount)
+	}
+}
+
+func TestDashboardOmitsNoUptime(t *testing.T) {
+	stats := DetailedStatsResponse{
+		Version:   "test",
+		NetworkID: 2,
+		Package: PackageStats{
+			PeerCount: 10,
+			GateLevel: "standard",
+		},
+	}
+	var buf bytes.Buffer
+	if err := RenderDashboard(&buf, stats); err != nil {
+		t.Fatalf("RenderDashboard: %v", err)
+	}
+	html := buf.String()
+	if strings.Contains(html, "NO-UPTIME") || strings.Contains(html, "no-uptime") {
+		t.Fatal("rendered dashboard contains 'no-uptime' string")
+	}
+}
