@@ -42,6 +42,11 @@ jobs:
       # go test surfaces captured stderr only on failure, so per-node debug
       # logs are free on pass and present when a rare flake finally trips.
       DST_LOG: '1'
+      # Serialize scheduling inside the synctest bubble: one P runs goroutines
+      # in runqueue order and async preemption stays off, so same-tick wakeups
+      # replay in program order instead of racing across threads.
+      GOMAXPROCS: '1'
+      GODEBUG: 'asyncpreemptoff=1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

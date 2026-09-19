@@ -98,7 +98,10 @@ func newSimNet(tb testing.TB, seed uint64) *simNet {
 	tunnelSeed := foundation.Hash(sha256.Sum256(append(identitySeed[:], "tunnel"...)))
 	explorerSeed := foundation.Hash(sha256.Sum256(append(identitySeed[:], "explorer"...)))
 	muxSeed := foundation.Hash(sha256.Sum256(append(identitySeed[:], "mux"...)))
-	controlplane.SetDeterministicSeeds(&tunnelSeed, &explorerSeed, &muxSeed)
+	buildSeed := foundation.Hash(sha256.Sum256(append(identitySeed[:], "build"...)))
+	streamSeed := foundation.Hash(sha256.Sum256(append(identitySeed[:], "stream"...)))
+	controlplane.SetDeterministicSeeds(&tunnelSeed, &explorerSeed, &muxSeed, &buildSeed)
+	dataplane.SetDeterministicSeeds(&streamSeed)
 	n := simnet.NewNetwork(simnet.Config{Seed: seed})
 	s := &simNet{net: n}
 	tb.Cleanup(func() {
@@ -108,6 +111,9 @@ func newSimNet(tb testing.TB, seed uint64) *simNet {
 		if err := n.Close(); err != nil {
 			tb.Errorf("simnet close: %v", err)
 		}
+		foundation.SetDeterministicRandomSource(nil)
+		controlplane.SetDeterministicSeeds(nil, nil, nil, nil)
+		dataplane.SetDeterministicSeeds(nil)
 	})
 	return s
 }

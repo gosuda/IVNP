@@ -519,8 +519,13 @@ func TestDeterministicRouterMesh16(t *testing.T) {
 			results <- result{"dave->carol", roundTrip(sourceDave, targetCarol.B32(), []byte("dave-to-carol-16-node-round-trip"))}
 		}()
 		for i := 0; i < 2; i++ {
-			if r := <-results; r.err != nil {
-				t.Fatalf("%s round trip: %v", r.name, r.err)
+			select {
+			case r := <-results:
+				if r.err != nil {
+					t.Fatalf("%s round trip: %v", r.name, r.err)
+				}
+			case <-time.After(120 * time.Second):
+				t.Fatal("concurrent round trips timed out waiting for a result")
 			}
 		}
 		t.Logf("16-node mesh stats: %+v", sim.Stats())
