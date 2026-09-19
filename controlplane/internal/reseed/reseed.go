@@ -15,7 +15,6 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +35,7 @@ const (
 	DefaultBucketSubnetQuota   = 2
 	DefaultBucketAdmitLimit    = 20
 	DefaultVerifyAnchorCount   = 16
+	DefaultMergeWait           = 5 * time.Second
 	ReseedUserAgent            = "Wget/1.11.4"
 )
 
@@ -67,10 +67,15 @@ type Client struct {
 	BucketSubnetQuota int
 	BucketAdmitLimit  int
 	VerifyAnchorCount int
-	SU3Signers        map[string]SU3Signer
-	Now               func() time.Time
-	AllowHTTP         bool // only for controlled tests or explicit local deployments
-	allowUnsignedZIP  bool
+	// MergeWait bounds how long FetchAny waits for outstanding priority-source
+	// responses before ingesting the merged candidate set. Zero selects
+	// DefaultMergeWait; a negative value disables merging and finishes on the
+	// first successful priority response.
+	MergeWait        time.Duration
+	SU3Signers       map[string]SU3Signer
+	Now              func() time.Time
+	AllowHTTP        bool // only for controlled tests or explicit local deployments
+	allowUnsignedZIP bool
 }
 
 // ReseedResult reports the admission outcome plus floodfill anchors chosen
@@ -120,6 +125,13 @@ func (c Client) verifyAnchorCount() int {
 		return c.VerifyAnchorCount
 	}
 	return DefaultVerifyAnchorCount
+}
+
+func (c Client) mergeWait() time.Duration {
+	if c.MergeWait == 0 {
+		return DefaultMergeWait
+	}
+	return c.MergeWait
 }
 
 func validateEndpoint(endpoint *url.URL, allowHTTP bool, networkID uint8) error {
@@ -481,42 +493,145 @@ func hasV2Transport(info foundation.NetworkDatabaseRouterInfo) bool {
 	}
 }
 
-// ingestCandidates is phase two of reseed admission: deduplicated candidates
-// are sorted by priority, signature-verified once, gated on v2 transports and
-// per-local-bucket subnet quotas, then stored. Floodfill anchors closest to
-// the local hash are retained for post-reseed connectivity checks.
-func (c Client) ingestCandidates(slots map[foundation.Hash]*dedupSlot, database *controlplanenetdb.Database, seenAt uint64) ReseedResult {
-	ordered := make([]reseedCandidate, 0, len(slots))
-	for _, slot := range slots {
-		ordered = append(ordered, slot.best)
-	}
-	slices.SortFunc(ordered, func(a, b reseedCandidate) int {
-		if fa, fb := foundation.NetworkDatabaseIsFloodfill(a.info), foundation.NetworkDatabaseIsFloodfill(b.info); fa != fb {
-			if fa {
-				return -1
-			}
-			return 1
-		}
-		if ta, tb := hasV2Transport(a.info), hasV2Transport(b.info); ta != tb {
-			if ta {
-				return -1
-			}
-			return 1
-		}
-		if a.info.Published != b.info.Published {
-			return cmp.Compare(b.info.Published, a.info.Published)
-		}
-		ha, hb := a.info.Hash(), b.info.Hash()
-		return bytes.Compare(ha[:], hb[:])
-	})
+// bucketCandidate pairs a candidate with its precomputed identity hash and
+// admission-priority flags so ordering never reparses RouterInfo bytes.
+type bucketCandidate struct {
+	candidate reseedCandidate
+	hash      foundation.Hash
+	floodfill bool
+	v2        bool
+}
 
+// candidatePriority orders candidates by admission preference: floodfills
+// first, then v2 transports, then newest published, then hash.
+func candidatePriority(a, b bucketCandidate) int {
+	if a.floodfill != b.floodfill {
+		if a.floodfill {
+			return -1
+		}
+		return 1
+	}
+	if a.v2 != b.v2 {
+		if a.v2 {
+			return -1
+		}
+		return 1
+	}
+	if a.candidate.info.Published != b.candidate.info.Published {
+		return cmp.Compare(b.candidate.info.Published, a.candidate.info.Published)
+	}
+	return bytes.Compare(a.hash[:], b.hash[:])
+}
+
+// fpsOrderBucket greedily orders one local bucket's candidates so each pick
+// maximizes XOR distance to the already-picked set, spreading admissions
+// evenly across the bucket's subspace. Distance ties break on admission
+// priority. At most picks entries are ordered; the rest append unordered.
+func fpsOrderBucket(cands []bucketCandidate, picks int, out []reseedCandidate) []reseedCandidate {
+	n := len(cands)
+	if n == 0 {
+		return out
+	}
+	if picks > n {
+		picks = n
+	}
+	maxLZ := make([]int, n)
+	for i := range maxLZ {
+		maxLZ[i] = -1
+	}
+	used := make([]bool, n)
+
+	anchor := 0
+	for i := 1; i < n; i++ {
+		if candidatePriority(cands[i], cands[anchor]) < 0 {
+			anchor = i
+		}
+	}
+	commit := func(i int) {
+		out = append(out, cands[i].candidate)
+		used[i] = true
+		for j := 0; j < n; j++ {
+			if used[j] {
+				continue
+			}
+			if lz := leadingZerosXOR(cands[j].hash, cands[i].hash); lz > maxLZ[j] {
+				maxLZ[j] = lz
+			}
+		}
+	}
+	commit(anchor)
+	betterPick := func(i, j int) bool {
+		if maxLZ[i] != maxLZ[j] {
+			return maxLZ[i] < maxLZ[j]
+		}
+		return candidatePriority(cands[i], cands[j]) < 0
+	}
+	for picked := 1; picked < picks; picked++ {
+		best := -1
+		for i := 0; i < n; i++ {
+			if used[i] {
+				continue
+			}
+			if best == -1 || betterPick(i, best) {
+				best = i
+			}
+		}
+		if best < 0 {
+			break
+		}
+		commit(best)
+	}
+	for i := 0; i < n; i++ {
+		if !used[i] {
+			out = append(out, cands[i].candidate)
+		}
+	}
+	return out
+}
+
+// orderByLocalBuckets groups deduplicated candidates by their local K-bucket
+// index and emits each bucket in max-min XOR spread order, so the admission
+// pass fills every bucket's subspace evenly rather than clustering picks in
+// populated hash ranges. Bucket quotas make cross-bucket order irrelevant, so
+// buckets emit sequentially.
+func orderByLocalBuckets(slots map[foundation.Hash]*dedupSlot, local foundation.Hash, pickLimit int) []reseedCandidate {
+	var buckets [256][]bucketCandidate
+	for hash, slot := range slots {
+		info := slot.best.info
+		b := leadingZerosXOR(local, hash)
+		buckets[b] = append(buckets[b], bucketCandidate{
+			candidate: slot.best,
+			hash:      hash,
+			floodfill: foundation.NetworkDatabaseIsFloodfill(info),
+			v2:        hasV2Transport(info),
+		})
+	}
+	ordered := make([]reseedCandidate, 0, len(slots))
+	picks := max(1, pickLimit) * 4 // order a margin past the quota for rejections
+	for b := range buckets {
+		ordered = fpsOrderBucket(buckets[b], picks, ordered)
+	}
+	return ordered
+}
+
+// ingestCandidates is phase two of reseed admission: deduplicated candidates
+// are ordered by per-local-bucket farthest-point spread, signature-verified
+// once, gated on per-local-bucket subnet quotas, then stored. Floodfill
+// anchors closest to the local hash are retained for post-reseed connectivity
+// checks.
+func (c Client) ingestCandidates(slots map[foundation.Hash]*dedupSlot, database *controlplanenetdb.Database, seenAt uint64) ReseedResult {
 	local := database.Routers().Local()
+	ordered := orderByLocalBuckets(slots, local, c.bucketAdmitLimit())
 	guard := newIngressGuard(c.bucketSubnetQuota(), c.bucketAdmitLimit())
 	anchorLimit := c.verifyAnchorCount()
 	var anchors []foundation.Hash
 	admitted := 0
 	for _, candidate := range ordered {
 		hash := candidate.info.Hash()
+		bucket := leadingZerosXOR(local, hash)
+		if guard.bucketUse[bucket] >= guard.bucketLimit {
+			continue // bucket already full: skip signature verification
+		}
 		if ok, _ := candidate.info.Verify(); !ok {
 			slot := slots[hash]
 			if slot == nil || slot.count < 2 {
@@ -527,7 +642,6 @@ func (c Client) ingestCandidates(slots map[foundation.Hash]*dedupSlot, database 
 				continue
 			}
 		}
-		bucket := leadingZerosXOR(local, hash)
 		if !guard.claim(bucket, ingressSubnetsOf(candidate.info)) {
 			continue
 		}
@@ -583,18 +697,20 @@ type fetchResult struct {
 }
 
 type fetchAnyState struct {
-	client    Client
-	ctx       context.Context
-	endpoints []string
-	seenAt    uint64
-	results   chan fetchResult
-	failures  []error
-	slots     map[foundation.Hash]*dedupSlot
-	next      int
-	active    int
-	limit     int
-	target    int
-	successes int
+	client          Client
+	ctx             context.Context
+	endpoints       []string
+	seenAt          uint64
+	results         chan fetchResult
+	failures        []error
+	slots           map[foundation.Hash]*dedupSlot
+	next            int
+	active          int
+	limit           int
+	target          int
+	successes       int
+	priorityPending int
+	mergeExpired    bool
 }
 
 func (state *fetchAnyState) launch() {
@@ -647,8 +763,11 @@ func isPriorityReseedEndpoint(endpoint string) bool {
 // FetchAny fetches reseed archives across multiple endpoints until enough
 // unique candidates are collected or sufficient independent sources succeed,
 // then runs one deduplicated, quota-gated admission pass. Prioritized
-// endpoints (such as hotseed.gosuda.org) are queried exclusively first with a
-// 2-second head start before hedging against the remaining random endpoints.
+// endpoints (such as hotseed.gosuda.org) are all queried in parallel and
+// their archives are merged — ingestion waits for every priority response so
+// a slow source still contributes coverage, bounded by Client.MergeWait —
+// before hedging against the remaining random endpoints. When MergeWait is
+// negative, the first successful priority response finishes the fetch.
 func (c Client) FetchAny(ctx context.Context, endpoints []string, database *controlplanenetdb.Database, seenAt uint64) (ReseedResult, error) {
 	if database == nil {
 		return ReseedResult{}, errNilDatabase
@@ -678,21 +797,27 @@ func (c Client) FetchAny(ctx context.Context, endpoints []string, database *cont
 	target := c.targetRouterInfos()
 	limit := max(DefaultParallelFetches, parallelism.Workers(len(ordered)))
 	state := fetchAnyState{
-		client:    c,
-		ctx:       child,
-		endpoints: ordered,
-		seenAt:    seenAt,
-		results:   make(chan fetchResult, len(ordered)),
-		failures:  make([]error, len(ordered)),
-		slots:     make(map[foundation.Hash]*dedupSlot),
-		limit:     limit,
-		target:    target,
+		client:          c,
+		ctx:             child,
+		endpoints:       ordered,
+		seenAt:          seenAt,
+		results:         make(chan fetchResult, len(ordered)),
+		failures:        make([]error, len(ordered)),
+		slots:           make(map[foundation.Hash]*dedupSlot),
+		limit:           limit,
+		target:          target,
+		priorityPending: len(priority),
 	}
 
 	finish := func() ReseedResult {
 		cancel()
 		state.drain()
 		return c.ingestCandidates(state.slots, database, seenAt)
+	}
+	done := func() bool {
+		return len(state.slots) >= state.target ||
+			state.successes >= DefaultMaxSuccessfulReseed ||
+			(state.next >= len(state.endpoints) && state.active == 0)
 	}
 
 	hasPriority := len(priority) > 0
@@ -711,29 +836,44 @@ func (c Client) FetchAny(ctx context.Context, endpoints []string, database *cont
 	}
 	timer := time.NewTimer(hedgeDelay)
 	defer timer.Stop()
+
+	mergeWait := c.mergeWait()
+	var mergeC <-chan time.Time
+	if hasPriority && mergeWait > 0 {
+		mergeTimer := time.NewTimer(mergeWait)
+		defer mergeTimer.Stop()
+		mergeC = mergeTimer.C
+	}
+
 	for state.active != 0 || state.next < len(ordered) {
 		select {
 		case outcome := <-state.results:
 			state.active--
-			if outcome.err == nil {
-				state.successes++
-				for _, candidate := range outcome.candidates {
-					addCandidate(state.slots, candidate)
-				}
-				if hasPriority && outcome.index < len(priority) && len(state.slots) > 0 {
-					return finish(), nil
-				}
-				targetMet := len(state.slots) >= state.target
-				sourcesSufficient := state.successes >= DefaultMaxSuccessfulReseed
-				allDone := state.next >= len(state.endpoints) && state.active == 0
-				if targetMet || sourcesSufficient || allDone {
-					return finish(), nil
-				}
+			if outcome.index < len(priority) {
+				state.priorityPending--
+			}
+			if outcome.err != nil {
+				state.failures[outcome.index] = outcome.err
 				state.launchNext(timer, hedgeDelay)
 				continue
 			}
-			state.failures[outcome.index] = outcome.err
+			state.successes++
+			for _, candidate := range outcome.candidates {
+				addCandidate(state.slots, candidate)
+			}
+			if mergeWait < 0 && outcome.index < len(priority) && len(state.slots) > 0 {
+				return finish(), nil
+			}
+			waitingPriority := mergeWait > 0 && hasPriority && state.priorityPending > 0 && !state.mergeExpired
+			if !waitingPriority && done() {
+				return finish(), nil
+			}
 			state.launchNext(timer, hedgeDelay)
+		case <-mergeC:
+			state.mergeExpired = true
+			if done() {
+				return finish(), nil
+			}
 		case <-timer.C:
 			if state.next < len(ordered) && state.active < state.limit {
 				state.launch()
@@ -742,6 +882,9 @@ func (c Client) FetchAny(ctx context.Context, endpoints []string, database *cont
 		case <-ctx.Done():
 			cancel()
 			state.drain()
+			if len(state.slots) > 0 {
+				return c.ingestCandidates(state.slots, database, seenAt), nil
+			}
 			return ReseedResult{}, ctx.Err()
 		}
 	}

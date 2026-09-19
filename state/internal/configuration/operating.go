@@ -158,6 +158,11 @@ type Reseed struct {
 	BucketSubnetQuota int
 	BucketAdmitLimit  int
 	VerifyAnchorCount int
+	// MergeWait bounds how long reseed waits for all priority endpoints to
+	// respond before ingesting their merged candidates. Zero selects the
+	// client default; a negative value finishes on the first priority
+	// response instead of merging.
+	MergeWait time.Duration
 }
 
 // Listener configures a local RPC, proxy, or SAM listener.
@@ -856,6 +861,13 @@ func applyReseed(operating *Operating, values map[entryKey]string) error {
 			return invalid("reseed", "verify_anchor_count")
 		}
 		reseed.VerifyAnchorCount = int(parsed)
+	}
+	if value, ok := valueOf(values, "reseed", "merge_wait"); ok {
+		parsed, err := parseDuration(value, -time.Second, 10*time.Minute)
+		if err != nil {
+			return invalid("reseed", "merge_wait")
+		}
+		reseed.MergeWait = parsed
 	}
 	if reseed.MaxTotalBytes < reseed.MaxArchiveBytes {
 		return invalid("reseed", "max_total_bytes")
