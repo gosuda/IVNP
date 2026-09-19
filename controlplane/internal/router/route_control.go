@@ -71,7 +71,7 @@ type StreamingTunnelSender struct {
 	awaitControl         func(context.Context) error
 	tunnels              *dataplane.TunnelRuntime
 	replySlots           chan struct{}
-	replies              sync.WaitGroup
+	replies              durable.WaitGroup
 	replyGates           map[foundation.Hash]*ratchetReplyGate
 	replyGateCapacity    int
 	logger               *slog.Logger
@@ -92,7 +92,7 @@ type StreamingTunnelSender struct {
 	preparationTimeout   time.Duration
 	preparationCtx       context.Context
 	cancelPreparation    context.CancelFunc
-	preparing            sync.WaitGroup
+	preparing            durable.WaitGroup
 	seedMu               sync.Mutex
 	seedCache            [streamingSeedCacheCapacity]streamingSeedCacheEntry
 	seedNext             uint8

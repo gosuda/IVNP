@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"sync"
+
+	"gosuda.org/ivnp/internal/durable"
 )
 
 var (
@@ -20,7 +22,7 @@ type server struct {
 	context    context.Context
 	cancel     context.CancelFunc
 	done       chan struct{}
-	activities sync.WaitGroup
+	activities durable.WaitGroup
 	started    bool
 	closed     bool
 }

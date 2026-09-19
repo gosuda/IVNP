@@ -12,6 +12,7 @@ import (
 	controlplanetunnel "gosuda.org/ivnp/controlplane/internal/tunnel"
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 var (
@@ -210,7 +211,7 @@ type Router struct {
 
 	closeOnce  sync.Once
 	finishOnce sync.Once
-	wg         sync.WaitGroup
+	wg         durable.WaitGroup
 
 	listeners        []net.Listener
 	ssu2Socket       dataplane.RouterUDPSocket
@@ -618,7 +619,7 @@ func (r *Router) verifyReseedAnchors(ctx context.Context, anchors []foundation.H
 		return
 	}
 	slots := make(chan struct{}, 4)
-	var wg sync.WaitGroup
+	var wg durable.WaitGroup
 	for _, anchor := range anchors {
 		select {
 		case slots <- struct{}{}:

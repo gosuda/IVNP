@@ -10,6 +10,7 @@ import (
 
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 const (
@@ -41,7 +42,7 @@ type packetSocket struct {
 	closeErr                    error
 	readDeadline, writeDeadline time.Time
 	operations                  map[*packetOperation]struct{}
-	active                      sync.WaitGroup
+	active                      durable.WaitGroup
 }
 
 // packetTarget splits a packet network name into a bound endpoint and a wire

@@ -107,11 +107,14 @@ type garlicReceiveScratch struct {
 
 type garlicDestinationState struct {
 	GarlicDestination
-	scratch      sync.Pool
-	inFlightMu   sync.Mutex
-	inFlightCond *sync.Cond
-	inFlight     int
-	retired      bool
+	scratch    sync.Pool
+	inFlightMu sync.Mutex
+	inFlight   int
+	retired    bool
+	// drained is created when retirement must wait and closed once the last
+	// in-flight user drops out. A channel (not sync.Cond) keeps the wait
+	// durable under testing/synctest.
+	drained chan struct{}
 }
 
 // getScratch borrows a receive-decrypt buffer pair from the pool, allocating
@@ -137,8 +140,8 @@ func (s *garlicDestinationState) acquire() bool {
 func (s *garlicDestinationState) done() {
 	s.inFlightMu.Lock()
 	s.inFlight--
-	if s.inFlight == 0 && s.inFlightCond != nil {
-		s.inFlightCond.Broadcast()
+	if s.inFlight == 0 && s.drained != nil {
+		close(s.drained)
 	}
 	s.inFlightMu.Unlock()
 }
@@ -146,13 +149,14 @@ func (s *garlicDestinationState) done() {
 func (s *garlicDestinationState) retireAndWait() {
 	s.inFlightMu.Lock()
 	s.retired = true
-	if s.inFlightCond == nil {
-		s.inFlightCond = sync.NewCond(&s.inFlightMu)
+	if s.inFlight != 0 && s.drained == nil {
+		s.drained = make(chan struct{})
 	}
-	for s.inFlight != 0 {
-		s.inFlightCond.Wait()
-	}
+	drained := s.drained
 	s.inFlightMu.Unlock()
+	if drained != nil {
+		<-drained
+	}
 	// Buffers must be wiped before pooling because a GC may discard them.
 	s.scratch = sync.Pool{}
 }

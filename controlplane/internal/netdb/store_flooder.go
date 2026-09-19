@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 var (
@@ -79,7 +80,7 @@ type StoreFlooder struct {
 	start     bool
 	closed    bool
 	cancel    context.CancelFunc
-	wg        sync.WaitGroup
+	wg        durable.WaitGroup
 	recent    map[[32]byte]uint64
 	keyFloods map[foundation.Hash]storeFloodCount
 }
@@ -192,7 +193,7 @@ func (f *StoreFlooder) flood(ctx context.Context, job *storeFloodJob) {
 		}
 	}
 	errs := make([]error, len(targets))
-	var sends sync.WaitGroup
+	var sends durable.WaitGroup
 	for index, target := range targets {
 		sends.Go(func() {
 			sendCtx, cancel := context.WithTimeout(ctx, storeFlooderSendTimeout)

@@ -19,6 +19,7 @@ import (
 	"gosuda.org/ivnp/controlplane/internal/nat/natpmp"
 	"gosuda.org/ivnp/controlplane/internal/nat/upnp"
 	"gosuda.org/ivnp/controlplane/internal/router"
+	"gosuda.org/ivnp/internal/durable"
 )
 
 const (
@@ -106,7 +107,7 @@ type natMappingPublisher struct {
 	cachedPublic    netip.Addr
 	cachedUPnP      upnp.Gateway
 	upnpUnavailable bool
-	wg              sync.WaitGroup
+	wg              durable.WaitGroup
 }
 
 type configTransports struct {

@@ -94,7 +94,7 @@ type NTCP2Manager struct {
 	err                error
 	done               chan struct{}
 	close              sync.Once
-	wg                 sync.WaitGroup
+	wg                 durable.WaitGroup
 	pending            chan struct{}
 	sessions           map[foundation.Hash]*dataplanentcp2.Session
 	sessionsInbound    map[foundation.Hash]bool

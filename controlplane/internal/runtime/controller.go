@@ -370,7 +370,7 @@ type Controller struct {
 	destinationFactory     *destinationRuntimeFactory
 	releaseRouterInfoSeeds func()
 	closeNativeTransports  func() error
-	maintenanceWG          sync.WaitGroup
+	maintenanceWG          durable.WaitGroup
 	buildReplies           *destinationBuildReplyRegistry
 	requestHandlers        *destinationRequestRegistry
 	destinationPublishers  *destinationPublisherRegistry
@@ -397,7 +397,7 @@ type Controller struct {
 	err          error
 	teardownOnce sync.Once
 	teardownErr  error
-	wg           sync.WaitGroup
+	wg           durable.WaitGroup
 }
 
 // NewController initializes a Daemon with the given configuration and optional runtime overrides.
@@ -1527,7 +1527,7 @@ func (d *Controller) destinationMaintenanceLoop() {
 
 func (d *Controller) maintainDestination(runtime *destinationRuntime) {
 	var maintenanceErr, publicationErr error
-	var publicationTask sync.WaitGroup
+	var publicationTask durable.WaitGroup
 	if runtime.publisher != nil {
 		publicationTask.Go(func() {
 			publicationContext, publicationCancel := context.WithTimeout(d.ctx, 30*time.Second)
@@ -1682,7 +1682,7 @@ func (d *Controller) requestDestinationTunnelMaintenance(runtime *destinationRun
 func (d *Controller) expireGarlicSessions(now uint64) {
 	expireWorkers := parallelism.Workers(len(d.garlicSessions))
 	expireJobs := make(chan *dataplane.GarlicSessionManager)
-	var expireSessions sync.WaitGroup
+	var expireSessions durable.WaitGroup
 	expireSessions.Add(expireWorkers)
 	for range expireWorkers {
 		go func() {

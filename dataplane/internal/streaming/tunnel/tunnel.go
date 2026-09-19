@@ -155,7 +155,7 @@ type TunnelNetwork struct {
 	completionPool sync.Pool
 	deliveryQueues []chan sendRequest
 	closeOnce      sync.Once
-	wg             sync.WaitGroup
+	wg             durable.WaitGroup
 }
 
 // NetworkStats holds connection count and aggregate flow-control metrics.

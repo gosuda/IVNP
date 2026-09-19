@@ -192,7 +192,7 @@ type SSU2Manager struct {
 	err                   error
 	done                  chan struct{}
 	close                 sync.Once
-	wg                    sync.WaitGroup
+	wg                    durable.WaitGroup
 	setupSlots            chan struct{}
 	egressMu              durable.RWMutex
 
