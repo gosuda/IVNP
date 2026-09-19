@@ -191,7 +191,7 @@ func TestTransportMuxDialsAlternateWhenSSU2SessionDegraded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mux.random = bytes.NewReader([]byte{1})
+	mux.random = bytes.NewReader([]byte{1}).Read
 	done := make(chan error, 1)
 	go func() { done <- mux.EnsureSession(context.Background(), peer) }()
 	select {
@@ -237,7 +237,7 @@ func TestTransportMuxSelectsPreferredSSU2BidBelowMinimum(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mux.random = bytes.NewReader([]byte{1})
+	mux.random = bytes.NewReader([]byte{1}).Read
 	done := make(chan error, 1)
 	go func() { done <- mux.EnsureSession(context.Background(), peer) }()
 	<-ssu2.ensureStarted
@@ -254,7 +254,7 @@ func TestTransportMuxSelectsPreferredSSU2BidBelowMinimum(t *testing.T) {
 
 func TestTransportMuxUsesRandomMinimumPeerPreference(t *testing.T) {
 	ssu2 := &muxCountedSessionTransport{muxSessionTransport: newMuxSessionTransport()}
-	mux := &TransportMux{random: bytes.NewReader([]byte{1, 0, 1})}
+	mux := &TransportMux{random: bytes.NewReader([]byte{1, 0, 1}).Read}
 	ipv4 := transportCapabilities{ssu2: ssu2, directSSU2: true}
 	if !mux.preferSSU2(ipv4) {
 		t.Fatal("nonzero random choice did not prefer SSU2 below the IPv4 minimum")
@@ -284,7 +284,7 @@ func TestTransportMuxStartsOnlyWinningNTCP2Bid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mux.random = bytes.NewReader([]byte{0})
+	mux.random = bytes.NewReader([]byte{0}).Read
 	done := make(chan error, 1)
 	go func() { done <- mux.EnsureSession(context.Background(), peer) }()
 	<-ntcp2.ensureStarted
@@ -363,7 +363,7 @@ func TestTransportMuxFallsBackBeforeDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mux.random = bytes.NewReader([]byte{1})
+	mux.random = bytes.NewReader([]byte{1}).Read
 	if err = mux.Send(t.Context(), peer, foundation.I2NPMessage{Payload: []byte("borrowed")}); err != nil {
 		t.Fatalf("Send fallback error = %v", err)
 	}

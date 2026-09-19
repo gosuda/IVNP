@@ -158,6 +158,8 @@ func TestDeterministicRouterMesh(t *testing.T) {
 				}
 			case err = <-acceptErr:
 				t.Fatalf("accept: %v", err)
+			case <-time.After(60 * time.Second):
+				t.Fatal("accept timed out waiting for the dialed stream")
 			}
 		}
 		defer inbound.Close()
@@ -260,6 +262,7 @@ func TestDeterministicRouterMesh(t *testing.T) {
 			Latency:   2 * time.Millisecond,
 			Jitter:    time.Millisecond,
 			DropRate:  0.15,
+			DropEvery: 8,
 			DropProto: simnet.ProtoUDP,
 		})
 
@@ -361,6 +364,8 @@ func TestDeterministicRouterMesh(t *testing.T) {
 				}
 			case err := <-acceptErr:
 				t.Fatalf("rebound accept: %v", err)
+			case <-time.After(60 * time.Second):
+				t.Fatal("rebound accept timed out waiting for the dialed stream")
 			}
 		}
 		defer reboundInbound.Close()
@@ -541,6 +546,7 @@ func TestSimChaosFailureModels(t *testing.T) {
 			Latency:        2 * time.Millisecond,
 			Jitter:         time.Millisecond,
 			DuplicateRate:  0.15,
+			DuplicateEvery: 8,
 			DuplicateDelay: 5 * time.Millisecond,
 			DuplicateCount: 1,
 		})
@@ -595,7 +601,12 @@ func TestSimChaosFailureModels(t *testing.T) {
 			t.Fatalf("initial dial: %v", err)
 		}
 		defer outbound.Close()
-		inbound := <-accepted
+		var inbound net.Conn
+		select {
+		case inbound = <-accepted:
+		case <-time.After(60 * time.Second):
+			t.Fatal("initial accept timed out")
+		}
 		defer inbound.Close()
 		synctest.Wait()
 
@@ -603,9 +614,11 @@ func TestSimChaosFailureModels(t *testing.T) {
 		// 5% entry / 50% exit gives a ~9% steady-state bad probability. Rounds
 		// repeat until the drop counter proves the model engaged; a stalled
 		// round under observed drops still proves UDP carried the stream.
+		sim.net.Advance(100 * time.Millisecond) // flush in-flight deliveries before the counter snapshot
 		dropsBefore := sim.Stats().Dropped
 		sim.Mesh(simnet.LinkConfig{
 			Latency:   2 * time.Millisecond,
+			DropEvery: 13,
 			DropProto: simnet.ProtoUDP,
 			BurstLoss: &simnet.BurstLossConfig{
 				PToBad:   0.05,
@@ -647,6 +660,8 @@ func TestSimChaosFailureModels(t *testing.T) {
 
 		// 3. Unidirectional blackhole: sever all of alice's egress so her data
 		// cannot reach bob over any tunnel path. Bob -> alice stays open.
+		sim.net.Advance(100 * time.Millisecond) // flush burst-loss-era deliveries before reconfig
+		synctest.Wait()
 		sim.Mesh(simnet.LinkConfig{Latency: 2 * time.Millisecond})
 		if stalled {
 			// A stalled round can leave undelivered payload bytes in flight;
@@ -657,7 +672,11 @@ func TestSimChaosFailureModels(t *testing.T) {
 				t.Fatalf("redial after stalled burst-loss round: %v", err)
 			}
 			defer outbound.Close()
-			inbound = <-accepted
+			select {
+			case inbound = <-accepted:
+			case <-time.After(60 * time.Second):
+				t.Fatal("redial accept timed out")
+			}
 			defer inbound.Close()
 		}
 		for _, node := range sim.nodes {
@@ -751,7 +770,12 @@ func BenchmarkSimStreamThroughput(b *testing.B) {
 		b.Fatalf("dial: %v", err)
 	}
 	defer outbound.Close()
-	inbound := <-accepted
+	var inbound net.Conn
+	select {
+	case inbound = <-accepted:
+	case <-time.After(30 * time.Second):
+		b.Fatal("accept timed out")
+	}
 	defer inbound.Close()
 
 	const chunkLen = 1024
@@ -781,6 +805,7 @@ func BenchmarkSimStreamThroughput(b *testing.B) {
 // fleet's identities: the same seeded stream must produce identical router
 // and destination hashes so failures reproduce against the same topology.
 func TestDeterministicFleetIdentities(t *testing.T) {
+	defer foundation.SetDeterministicRandomSource(nil)
 	generate := func(seed uint64) (routerA, routerB, dest Hash) {
 		var raw [32]byte
 		binary.LittleEndian.PutUint64(raw[:8], seed)

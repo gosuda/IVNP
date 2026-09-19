@@ -5,6 +5,7 @@ package ivnp
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/simnet"
@@ -89,9 +91,14 @@ func newSimNet(tb testing.TB, seed uint64) *simNet {
 			seed = s
 		}
 	}
+	tb.Logf("simulation seed %d (reproduce: DST_SEED=%d)", seed, seed)
 	var identitySeed [32]byte
 	binary.LittleEndian.PutUint64(identitySeed[:8], seed)
 	foundation.SetDeterministicRandomSource(rand.NewChaCha8(identitySeed))
+	tunnelSeed := foundation.Hash(sha256.Sum256(append(identitySeed[:], "tunnel"...)))
+	explorerSeed := foundation.Hash(sha256.Sum256(append(identitySeed[:], "explorer"...)))
+	muxSeed := foundation.Hash(sha256.Sum256(append(identitySeed[:], "mux"...)))
+	controlplane.SetDeterministicSeeds(&tunnelSeed, &explorerSeed, &muxSeed)
 	n := simnet.NewNetwork(simnet.Config{Seed: seed})
 	s := &simNet{net: n}
 	tb.Cleanup(func() {
