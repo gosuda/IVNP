@@ -311,6 +311,25 @@ func (s *StreamingTunnelSender) recordFailedLeaseLocked(receipt dataplane.Router
 	s.failedLeases[path] = evidence
 }
 
+// clearFailureMarks drops recorded send and silence evidence for remote after
+// a completed refresh. An identical LeaseSet means the marks measured
+// transient loss rather than a dead remote path; a rotated LeaseSet cannot
+// match their (gateway, tunnelID) keys anyway.
+func (s *StreamingTunnelSender) clearFailureMarks(remote foundation.Hash) {
+	s.remoteMu.Lock()
+	defer s.remoteMu.Unlock()
+	for path := range s.failedRoutes {
+		if path.remote == remote {
+			delete(s.failedRoutes, path)
+		}
+	}
+	for path := range s.failedLeases {
+		if path.remote == remote {
+			delete(s.failedLeases, path)
+		}
+	}
+}
+
 func NewStreamingTunnelSender(config StreamingTunnelSenderConfig) (*StreamingTunnelSender, error) {
 	missingResolution := config.Database == nil || config.Requests == nil
 	missingTunnels := config.Tunnels == nil || config.Pool == nil
@@ -741,6 +760,9 @@ func (s *StreamingTunnelSender) resolveRoute(ctx context.Context, remote foundat
 		} else {
 			break
 		}
+		// The fetched copy is the current truth even when byte-identical to
+		// the cached one: retrying its leases is how recovery is observed.
+		s.clearFailureMarks(remote)
 	}
 	if !found {
 		if s.logger != nil {
@@ -1056,8 +1078,10 @@ func (s *StreamingTunnelSender) refreshRemoteLeaseSet(ctx context.Context, remot
 		return false
 	}
 	select {
-	case _, ok := <-result:
-		return ok
+	case outcome, ok := <-result:
+		// A completed lookup may still carry a terminal error; only fresh
+		// data justifies retrying marked combinations.
+		return ok && outcome.Err == nil
 	case <-ctx.Done():
 		return false
 	}

@@ -14,6 +14,8 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+var errRemoteLeaseVanished = errors.New("remote lease vanished")
+
 func routeControlFixture(t *testing.T, prepare func(context.Context, foundation.Hash) error, localLeases ...foundation.NetworkDatabaseLease) (*StreamingTunnelSender, []dataplane.StreamingTunnelDelivery, *controlPlaneTunnelSender) {
 	t.Helper()
 	local, err := foundation.GenerateLocalAddress()
@@ -782,6 +784,139 @@ func TestSilentLeaseStaysExcludedAcrossCircuitReplacement(t *testing.T) {
 	sender.pool = fresh
 	if err := sender.PrepareDestination(t.Context(), deliveries[0].To); !errors.Is(err, dataplane.TunnelErrCircuitNotFound) {
 		t.Fatalf("dead lease repicked after circuit replacement: %v", err)
+	}
+}
+
+func TestExhaustedRemoteLeaseRefreshClearsSilenceMarks(t *testing.T) {
+	sender, _, _ := routeControlFixture(t, nil)
+	remote, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.ReleaseSensitive()
+	local, err := controlplanenetdb.NewLocalLeaseSet2(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.ReplaceInboundLeases([]foundation.NetworkDatabaseLease{
+		{Gateway: foundation.Hash{10}, TunnelID: 11, EndDate: 90000},
+		{Gateway: foundation.Hash{20}, TunnelID: 21, EndDate: 90000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw := make([]byte, foundation.NetworkDatabaseMaxLeaseSetBytes)
+	n, err := local.MarshalTo(raw, 1000, remote.Sign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := foundation.I2NPDatabaseStoreMessage{Key: remote.Hash(), Type: foundation.I2NPStoreLeaseSet2, Data: raw[:n]}
+	if err := sender.database.HandleDatabaseStore(store, false, 1000); err != nil {
+		t.Fatal(err)
+	}
+	first, err := sender.PrepareHandshake(t.Context(), remote.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.NoResponse()
+	second, err := sender.PrepareHandshake(t.Context(), remote.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.NoResponse()
+	// Every (circuit, lease) pair now carries a silence mark. A completed
+	// refresh returning the identical LeaseSet is proof the marks measured
+	// transient loss, not a stale cache — the leases must be retried.
+	if err := sender.database.AdmitRouterInfo(dataPlaneFloodfill(t), true, 1000); err != nil {
+		t.Fatal(err)
+	}
+	var requests *controlplanenetdb.RequestManager
+	lookupSender := routeLookupSender(func(ctx context.Context, _ controlplanenetdb.RouterRef, message foundation.I2NPMessage) error {
+		if err := sender.database.HandleDatabaseStore(store, false, 1000); err != nil {
+			return err
+		}
+		requests.HandleDatabaseStore(ctx, store)
+		return nil
+	})
+	requests, err = controlplanenetdb.NewRequestManager(sender.database, lookupSender, dataPlaneReplyRoute{}, controlplanenetdb.RequestManagerConfig{Capacity: 4, TimeoutMillis: 60000, Now: func() uint64 { return 1000 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := requests.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	sender.requests = requests
+	if err := sender.PrepareDestination(t.Context(), remote.Hash()); err != nil {
+		t.Fatalf("refresh returning the current lease left it marked: %v", err)
+	}
+	if _, ok := sender.execution.RouteReceipt(remote.Hash()); !ok {
+		t.Fatal("no route installed after identical refresh")
+	}
+}
+
+func TestLeaseLevelExclusionClearsAfterRefresh(t *testing.T) {
+	sender, deliveries, _ := routeControlFixture(t, nil)
+	pool := controlplanetunnel.NewOwnedPool(sender.owner, 2)
+	for _, entry := range sender.pool.Snapshot(1000) {
+		if err := pool.Add(entry, 1000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	second, err := sender.tunnels.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 11, Owner: sender.owner, FirstHop: foundation.Hash{8}, NextTunnelID: 12, ExpiresAt: 95000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sender.tunnels.RemoveCircuit(second) })
+	if err := pool.Add(controlplanetunnel.Entry{ID: 11, Owner: sender.owner, Circuit: second, Direction: controlplanetunnel.Outbound, Expires: 95000}, 1000); err != nil {
+		t.Fatal(err)
+	}
+	sender.pool = pool
+	first, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.NoResponse()
+	retry, err := sender.PrepareHandshake(t.Context(), deliveries[0].To)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry.NoResponse()
+	// Two distinct circuits went silent on the same lease, so the lease
+	// itself is excluded; route-level marks alone no longer describe the
+	// failure. A completed refresh must clear that evidence too.
+	if err := sender.database.AdmitRouterInfo(dataPlaneFloodfill(t), true, 1000); err != nil {
+		t.Fatal(err)
+	}
+	target := deliveries[0].To
+	var requests *controlplanenetdb.RequestManager
+	lookupSender := routeLookupSender(func(ctx context.Context, _ controlplanenetdb.RouterRef, message foundation.I2NPMessage) error {
+		kind, raw, ok := sender.database.StoredLeaseSet(target)
+		if !ok {
+			return errRemoteLeaseVanished
+		}
+		store := foundation.I2NPDatabaseStoreMessage{Key: target, Type: kind, Data: raw}
+		if err := sender.database.HandleDatabaseStore(store, false, 1000); err != nil {
+			return err
+		}
+		requests.HandleDatabaseStore(ctx, store)
+		return nil
+	})
+	requests, err = controlplanenetdb.NewRequestManager(sender.database, lookupSender, dataPlaneReplyRoute{}, controlplanenetdb.RequestManagerConfig{Capacity: 4, TimeoutMillis: 60000, Now: func() uint64 { return 1000 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := requests.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	sender.requests = requests
+	if err := sender.PrepareDestination(t.Context(), target); err != nil {
+		t.Fatalf("refresh did not clear lease-level exclusion: %v", err)
+	}
+	if _, ok := sender.execution.RouteReceipt(target); !ok {
+		t.Fatal("no route installed after lease-level exclusion cleared")
 	}
 }
 
