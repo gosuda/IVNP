@@ -673,7 +673,22 @@ func TestSimChaosFailureModels(t *testing.T) {
 			// replace the pair so the blackhole read cannot observe stale data.
 			_ = outbound.Close()
 			_ = inbound.Close()
-			if outbound, err = source.DialContext(ctx, "i2p", net.JoinHostPort(target.B32(), "8080")); err != nil {
+			// The stall starves tunnel health probes too — wait for both
+			// pools to rebuild and republish before dialing.
+			readyCtx, readyCancel := context.WithTimeout(ctx, 120*time.Second)
+			if readyErr := source.WaitReady(readyCtx); readyErr != nil {
+				readyCancel()
+				t.Fatalf("source tunnels did not recover after burst loss: %v", readyErr)
+			}
+			if readyErr := target.WaitReady(readyCtx); readyErr != nil {
+				readyCancel()
+				t.Fatalf("target tunnels did not recover after burst loss: %v", readyErr)
+			}
+			readyCancel()
+			dialCtx, dialCancel := context.WithTimeout(ctx, 60*time.Second)
+			outbound, err = source.DialContext(dialCtx, "i2p", net.JoinHostPort(target.B32(), "8080"))
+			dialCancel()
+			if err != nil {
 				t.Fatalf("redial after stalled burst-loss round: %v", err)
 			}
 			defer outbound.Close()
