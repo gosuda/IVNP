@@ -78,20 +78,23 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 
 	existing, found := s.peers[hash]
 	if !found {
-		family, v4, v6, ports, tcpPorts, udpPorts := extractRouterAddresses(info)
+		contact := extractRouterAddresses(info)
 		rec := &PeerRecord{
 			Hash:        hash,
 			Raw:         bytes.Clone(raw),
 			PublishedAt: time.UnixMilli(int64(info.Published)),
-			Family:      family,
+			Family:      contact.family,
 			IsFloodfill: foundation.NetworkDatabaseIsFloodfill(info),
-			IPv4:        v4,
-			IPv6:        v6,
-			Ports:       ports,
-			TCPPorts:    tcpPorts,
-			UDPPorts:    udpPorts,
+			IPv4:        contact.ipv4,
+			IPv6:        contact.ipv6,
+			Ports:       contact.ports,
+			TCPPorts:    contact.tcpPorts,
+			UDPPorts:    contact.udpPorts,
+			HasNTCP2:    contact.ntcp2,
+			HasSSU2:     contact.ssu2,
 			Stats: PeerStats{
-				LastSeen: lastSeen,
+				FirstSeen: lastSeen,
+				LastSeen:  lastSeen,
 			},
 		}
 		if now.Sub(lastSeen) < 2*time.Hour {
@@ -130,13 +133,15 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 		existing.PublishedAt = published
 		existing.Raw = bytes.Clone(raw)
 		s.deindexPeerLocked(existing)
-		family, v4, v6, ports, tcpPorts, udpPorts := extractRouterAddresses(info)
-		existing.Family = family
-		existing.IPv4 = v4
-		existing.IPv6 = v6
-		existing.Ports = ports
-		existing.TCPPorts = tcpPorts
-		existing.UDPPorts = udpPorts
+		contact := extractRouterAddresses(info)
+		existing.Family = contact.family
+		existing.IPv4 = contact.ipv4
+		existing.IPv6 = contact.ipv6
+		existing.Ports = contact.ports
+		existing.TCPPorts = contact.tcpPorts
+		existing.UDPPorts = contact.udpPorts
+		existing.HasNTCP2 = contact.ntcp2
+		existing.HasSSU2 = contact.ssu2
 		existing.IsFloodfill = foundation.NetworkDatabaseIsFloodfill(info)
 		existing.Score = calculateScore(existing)
 		s.indexPeerLocked(existing)
@@ -539,9 +544,14 @@ func (s *PeerStore) RecordProbeResult(hash foundation.Hash, success bool, rtt ti
 	now := time.Now()
 	rec.Stats.TotalProbes++
 	rec.Stats.LastProbed = now
+	if now.Sub(rec.Stats.WinStart) > ProbeStatsWindow {
+		rec.Stats.WinStart, rec.Stats.WinProbes, rec.Stats.WinSuccess = now, 0, 0
+	}
+	rec.Stats.WinProbes++
 
 	if success {
 		rec.Stats.SuccessProbes++
+		rec.Stats.WinSuccess++
 		rec.Stats.ConsecutiveFails = 0
 		rec.Stats.IsReachable = true
 		rec.Stats.LastSeen = now
@@ -605,6 +615,16 @@ func (s *PeerStore) LoadFromFile(filePath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, rec := range loaded {
+		if rec.Stats.FirstSeen.IsZero() {
+			rec.Stats.FirstSeen = rec.Stats.LastSeen
+		}
+		if !rec.HasNTCP2 && !rec.HasSSU2 && len(rec.Raw) > 0 {
+			if info, err := foundation.NetworkDatabaseParseRouterInfo(rec.Raw); err == nil {
+				contact := extractRouterAddresses(info)
+				rec.HasNTCP2 = contact.ntcp2
+				rec.HasSSU2 = contact.ssu2
+			}
+		}
 		if prev, found := s.peers[rec.Hash]; found {
 			s.deindexPeerLocked(prev)
 		}
@@ -663,13 +683,19 @@ func calculateScore(rec *PeerRecord) float64 {
 	return score
 }
 
-func extractRouterAddresses(info foundation.NetworkDatabaseRouterInfo) (string, []netip.Addr, []netip.Addr, []uint16, []uint16, []uint16) {
-	family := extractFamily(info)
-	var v4 []netip.Addr
-	var v6 []netip.Addr
-	var ports []uint16
-	var tcpPorts []uint16
-	var udpPorts []uint16
+type routerContactInfo struct {
+	family   string
+	ipv4     []netip.Addr
+	ipv6     []netip.Addr
+	ports    []uint16
+	tcpPorts []uint16
+	udpPorts []uint16
+	ntcp2    bool
+	ssu2     bool
+}
+
+func extractRouterAddresses(info foundation.NetworkDatabaseRouterInfo) routerContactInfo {
+	contact := routerContactInfo{family: extractFamily(info)}
 
 	addresses := info.Addresses()
 	for {
@@ -682,21 +708,28 @@ func extractRouterAddresses(info foundation.NetworkDatabaseRouterInfo) (string, 
 			continue
 		}
 		if ip.Is4() {
-			v4 = append(v4, ip)
+			contact.ipv4 = append(contact.ipv4, ip)
 		} else if ip.Is6() {
-			v6 = append(v6, ip)
+			contact.ipv6 = append(contact.ipv6, ip)
 		}
+		style := strings.ToUpper(string(address.TransportStyle))
 		if port > 0 {
-			ports = append(ports, port)
-			style := strings.ToUpper(string(address.TransportStyle))
+			contact.ports = append(contact.ports, port)
 			if strings.HasPrefix(style, "NTCP") {
-				tcpPorts = append(tcpPorts, port)
+				contact.tcpPorts = append(contact.tcpPorts, port)
 			} else if strings.HasPrefix(style, "SSU") {
-				udpPorts = append(udpPorts, port)
+				contact.udpPorts = append(contact.udpPorts, port)
 			}
 		}
+		// V2 transport gate flags require a dialable host:port on the exact
+		// v2 style; firewalled introducer-only entries do not qualify.
+		if port > 0 && style == "NTCP2" {
+			contact.ntcp2 = true
+		} else if port > 0 && style == "SSU2" {
+			contact.ssu2 = true
+		}
 	}
-	return family, v4, v6, ports, tcpPorts, udpPorts
+	return contact
 }
 
 func extractFamily(info foundation.NetworkDatabaseRouterInfo) string {

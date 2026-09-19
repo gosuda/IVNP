@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"gosuda.org/ivnp/internal/durable"
@@ -26,8 +27,10 @@ type ReseedServer struct {
 	store     *PeerStore
 	startedAt time.Time
 
+	// pkg is swapped atomically once per epoch; readers load an immutable
+	// package pointer so the hot path never takes a lock.
+	pkg       atomic.Pointer[ReseedPackage]
 	mu        durable.RWMutex
-	pkg       ReseedPackage
 	certPEM   []byte
 	pubKeyPEM []byte
 	handler   http.Handler
@@ -59,9 +62,7 @@ func NewReseedServer(cfg ServerConfig, store *PeerStore) *ReseedServer {
 }
 
 func (s *ReseedServer) UpdatePackage(pkg ReseedPackage) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pkg = pkg
+	s.pkg.Store(&pkg)
 }
 
 // SetSigningMaterial installs the reseed certificate and public key after
@@ -94,16 +95,14 @@ func (s *ReseedServer) handleSU3(w http.ResponseWriter, r *http.Request) {
 	if !s.validateNetID(w, r) {
 		return
 	}
-	s.mu.RLock()
-	pkg := s.pkg
-	s.mu.RUnlock()
-
-	if len(pkg.SU3Data) == 0 {
+	pkg := s.pkg.Load()
+	if pkg == nil || len(pkg.SU3Data) == 0 {
 		http.Error(w, "reseed archive not ready", http.StatusServiceUnavailable)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="i2pseeds.su3"`)
 	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(s.cfg.CacheDuration.Seconds())))
 	w.Header().Set("ETag", pkg.ETag)
 
@@ -171,8 +170,11 @@ func (s *ReseedServer) handlePubKey(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *ReseedServer) calculateStats() DetailedStatsResponse {
+	pkg := s.pkg.Load()
+	if pkg == nil {
+		pkg = &ReseedPackage{}
+	}
 	s.mu.RLock()
-	pkg := s.pkg
 	certPEM := s.certPEM
 	pubKeyPEM := s.pubKeyPEM
 	s.mu.RUnlock()
@@ -269,7 +271,7 @@ func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 		packageStats.SU3SizeBytes = len(pkg.SU3Data)
 		packageStats.ETag = pkg.ETag
 		packageStats.LastGeneratedAt = pkg.GeneratedAt
-		packageStats.GenerationMethod = "256 K-Bucket Stratified (Java I2P 256-node Head-Start) + /16 Subnet Filter + Max-5 Bucket Leveling"
+		packageStats.GenerationMethod = "Max-Min XOR Farthest-Point Sampling + /16·/48 Subnet Gate + 10min Epoch Bundle"
 	}
 	packageStats.NextRefreshETA = nextRefreshSec
 	packageStats.RefreshIntervalSeconds = int64(s.cfg.CacheDuration.Seconds())

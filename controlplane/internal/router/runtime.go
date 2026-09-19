@@ -8,6 +8,7 @@ import (
 	"time"
 
 	controlplanenetdb "gosuda.org/ivnp/controlplane/internal/netdb"
+	controlplanereseed "gosuda.org/ivnp/controlplane/internal/reseed"
 	controlplanetunnel "gosuda.org/ivnp/controlplane/internal/tunnel"
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
@@ -105,7 +106,7 @@ type StreamBackend interface {
 // ReseedRunner is reserved for router-owned bootstrap work. It intentionally
 // mirrors reseed.Client without adding a second admission path to netdb.
 type ReseedRunner interface {
-	FetchAny(context.Context, []string, *controlplanenetdb.Database, uint64) (int, error)
+	FetchAny(context.Context, []string, *controlplanenetdb.Database, uint64) (controlplanereseed.ReseedResult, error)
 }
 
 // Config defines optional native transport bindings and bootstrap reseed
@@ -544,7 +545,7 @@ func (r *Router) startReseed(ctx context.Context) <-chan struct{} {
 	r.reseedMu.Unlock()
 
 	r.wg.Go(func() {
-		var admitted int
+		var result controlplanereseed.ReseedResult
 		var err error
 		if len(r.cfg.PriorityReseedEndpoints) > 0 {
 			timeout := r.cfg.PriorityReseedTimeout
@@ -552,12 +553,14 @@ func (r *Router) startReseed(ctx context.Context) <-chan struct{} {
 				timeout = 2 * time.Second
 			}
 			priorityCtx, cancel := context.WithTimeout(ctx, timeout)
-			admitted, err = r.deps.Reseed.FetchAny(priorityCtx, r.cfg.PriorityReseedEndpoints, r.deps.Database, uint64(now.UnixMilli()))
+			result, err = r.deps.Reseed.FetchAny(priorityCtx, r.cfg.PriorityReseedEndpoints, r.deps.Database, uint64(now.UnixMilli()))
 			cancel()
-			if err == nil && admitted > 0 {
+			if err == nil && result.Admitted > 0 {
 				if r.deps.ReseedOutcome != nil {
 					r.deps.ReseedOutcome(nil)
 				}
+				anchors := result.Anchors
+				r.wg.Go(func() { r.verifyReseedAnchors(ctx, anchors) })
 				r.reseedMu.Lock()
 				r.reseedErr = nil
 				r.reseedRunning = false
@@ -570,7 +573,11 @@ func (r *Router) startReseed(ctx context.Context) <-chan struct{} {
 		}
 
 		if len(r.cfg.ReseedEndpoints) > 0 {
-			admitted, err = r.deps.Reseed.FetchAny(ctx, r.cfg.ReseedEndpoints, r.deps.Database, uint64(now.UnixMilli()))
+			result, err = r.deps.Reseed.FetchAny(ctx, r.cfg.ReseedEndpoints, r.deps.Database, uint64(now.UnixMilli()))
+		}
+		if err == nil && result.Admitted > 0 {
+			anchors := result.Anchors
+			r.wg.Go(func() { r.verifyReseedAnchors(ctx, anchors) })
 		}
 		if r.deps.ReseedOutcome != nil {
 			r.deps.ReseedOutcome(err)
@@ -594,6 +601,45 @@ func (r *Router) startReseed(ctx context.Context) <-chan struct{} {
 		r.reseedMu.Unlock()
 	})
 	return done
+}
+
+// verifyReseedAnchors asynchronously probes reseed anchors selected closest to
+// the local hash. Sessions are established with bounded concurrency and a
+// per-anchor timeout; failures are not punished — the verified transport and
+// session state decide future routing quality on their own.
+func (r *Router) verifyReseedAnchors(ctx context.Context, anchors []foundation.Hash) {
+	if len(anchors) == 0 {
+		return
+	}
+	ensurer, ok := r.deps.Transport.(interface {
+		EnsureSession(context.Context, foundation.Hash) error
+	})
+	if !ok {
+		return
+	}
+	slots := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	for _, anchor := range anchors {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return
+		}
+		wg.Add(1)
+		go func(peer foundation.Hash) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			anchorCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			_ = ensurer.EnsureSession(anchorCtx, peer)
+		}(anchor)
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-ctx.Done():
+		}
+	}
+	wg.Wait()
 }
 
 func (r *Router) reseedResult() error {

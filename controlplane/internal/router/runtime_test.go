@@ -9,6 +9,7 @@ import (
 	"time"
 
 	controlplanenetdb "gosuda.org/ivnp/controlplane/internal/netdb"
+	controlplanereseed "gosuda.org/ivnp/controlplane/internal/reseed"
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/stream"
@@ -172,7 +173,7 @@ type fakeReseed struct {
 	release   <-chan struct{}
 	completed chan struct{}
 	err       error
-	fn        func(context.Context, []string, *controlplanenetdb.Database, uint64) (int, error)
+	fn        func(context.Context, []string, *controlplanenetdb.Database, uint64) (controlplanereseed.ReseedResult, error)
 
 	mu        sync.Mutex
 	context   context.Context
@@ -182,7 +183,7 @@ type fakeReseed struct {
 	calls     int
 }
 
-func (r *fakeReseed) FetchAny(ctx context.Context, endpoints []string, database *controlplanenetdb.Database, seenAt uint64) (int, error) {
+func (r *fakeReseed) FetchAny(ctx context.Context, endpoints []string, database *controlplanenetdb.Database, seenAt uint64) (controlplanereseed.ReseedResult, error) {
 	if r.completed != nil {
 		defer close(r.completed)
 	}
@@ -206,10 +207,10 @@ func (r *fakeReseed) FetchAny(ctx context.Context, endpoints []string, database 
 		select {
 		case <-r.release:
 		case <-ctx.Done():
-			return 0, ctx.Err()
+			return controlplanereseed.ReseedResult{}, ctx.Err()
 		}
 	}
-	return 0, r.err
+	return controlplanereseed.ReseedResult{}, r.err
 }
 
 func (r *fakeReseed) call() (context.Context, []string, *controlplanenetdb.Database, uint64) {
@@ -653,11 +654,11 @@ func TestRouterPriorityReseedSuccessSkipsSubsequentReseeds(t *testing.T) {
 	var mu sync.Mutex
 	reseed := &fakeReseed{
 		log: log,
-		fn: func(ctx context.Context, endpoints []string, db *controlplanenetdb.Database, seenAt uint64) (int, error) {
+		fn: func(ctx context.Context, endpoints []string, db *controlplanenetdb.Database, seenAt uint64) (controlplanereseed.ReseedResult, error) {
 			mu.Lock()
 			calls = append(calls, append([]string(nil), endpoints...))
 			mu.Unlock()
-			return 10, nil
+			return controlplanereseed.ReseedResult{Admitted: 10}, nil
 		},
 	}
 	router, _, _ := newReseedRuntimeForTest(t, Config{
@@ -703,14 +704,14 @@ func TestRouterPriorityReseedFailureFallsBackToSubsequentEndpoints(t *testing.T)
 	var mu sync.Mutex
 	reseed := &fakeReseed{
 		log: log,
-		fn: func(ctx context.Context, endpoints []string, db *controlplanenetdb.Database, seenAt uint64) (int, error) {
+		fn: func(ctx context.Context, endpoints []string, db *controlplanenetdb.Database, seenAt uint64) (controlplanereseed.ReseedResult, error) {
 			mu.Lock()
 			calls = append(calls, append([]string(nil), endpoints...))
 			mu.Unlock()
 			if endpoints[0] == priorityURLs[0] {
-				return 0, errPriorityUnavailable
+				return controlplanereseed.ReseedResult{}, errPriorityUnavailable
 			}
-			return 25, nil
+			return controlplanereseed.ReseedResult{Admitted: 25}, nil
 		},
 	}
 	router, _, _ := newReseedRuntimeForTest(t, Config{

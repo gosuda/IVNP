@@ -27,11 +27,12 @@ Autonomous I2P network indexer and reseed server. Actively crawls the live I2P D
                               │ Prober.ProbeAll() (Deficit-prioritized, 48 workers)
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ Stratified K-Bucket Selector (Strict 4-Round Leveling)      │
-│ - Accessible Floodfill Quota (≥ 35%)                        │
-│ - IPv4 /16 Subnet & Router Family Anti-Sybil Constraints    │
-│ - Strict Cap (max 5 peers/bucket) to prevent slot hoarding  │
-│ - 100% Directly Reachable Guarantee (when reachable > 256)  │
+│ 4-Stage Uniform Selector                                    │
+│ - Hard gate: v2 transport, ≥85% probe success (3h),         │
+│   ≥24h uptime, with deterministic relaxation ladder         │
+│ - Subnet gate: 1 per IPv4 /16 and IPv6 /48 + family cap     │
+│ - Max-Min XOR Farthest-Point Sampling (floodfill-first)     │
+│ - First-byte bucket interleave for partial readers          │
 └─────────────────────────────┬───────────────────────────────┘
                               │
                               ▼
@@ -52,12 +53,9 @@ Autonomous I2P network indexer and reseed server. Actively crawls the live I2P D
 3. **Dual Exploration Budget Allocation**:
    - *Expansion Mode* (Reachable < 1024): Deep exploration (48 queries per pass), rapid 60s probe retry for failed peers, newcomer and sparse-bucket probing priority.
    - *Maintenance Mode* (Reachable $\ge$ 1024): Conservative repair (12 queries for sparse buckets), 3m RTT refresh on active nodes, backoff on failing nodes.
-4. **256 K-Bucket Slot Imbalance Resolution**: Prevents node hoarding (e.g. 15 nodes in one bucket while others have 0 or 1):
-   - Prober prioritizes candidates from sparse buckets (< 4 reachable peers).
-   - PeerStore eviction protects sparse buckets (only evicts from buckets with > 4 peers).
-   - Selector enforces strict 4-round bucket leveling ($256 \times 4 = 1024$) with a hard overflow cap of 5 peers per bucket.
-5. **Directly Reachable Package Guarantee**: When verified reachable peers exceed 256, the reseed package strictly contains only directly reachable peers (no dead/unverified node padding). If $\le 256$ (cold-start), candidate peers are admitted up to target to ensure initial network bootstrap.
-6. **Sybil & Eclipse Mitigation**: Peer selection enforces a hard limit of 1 router per IPv4 `/16` subnet and 1 router per declared `family`. The peer store enforces the same contention bounds at admission: a router that tops none of its `/16` subnets or its family is rejected outright, a newly admitted winner evicts the dominated members it displaced, and a periodic sweep removes members whose rank drifted below their group winners.
+4. **Max-Min XOR Uniform Keyspace Coverage**: Instead of fixed prefix bucketing, the selector runs greedy farthest-point sampling over the full 256-bit XOR space — each pick maximizes the minimum distance to already-selected peers, bounding the worst-case covering radius. Floodfills are prioritized (highest-quality floodfill anchors the set, quota filled first, ties broken toward floodfills), then remaining slots draw from the whole qualified pool.
+5. **Hard Qualification Gate + Relaxation Ladder**: Bundle candidates must publish a dialable NTCP2 or SSU2 address, hold ≥85% probe success over a 3h window, and show ≥24h observed uptime. When strict qualification yields fewer than target, the gate relaxes deterministically (uptime → cumulative rate → reachable-only) so cold deployments still serve; below `-min-bundle-peers` the previous epoch bundle keeps serving.
+6. **Sybil & Eclipse Mitigation**: Peer selection enforces a hard limit of 1 router per IPv4 `/16`, IPv6 `/48`, and declared `family`. The peer store enforces the same contention bounds at admission: a router that tops none of its `/16` subnets or its family is rejected outright, a newly admitted winner evicts the dominated members it displaced, and a periodic sweep removes members whose rank drifted below their group winners.
 7. **Confirmed Tunnel Build Acceptance**: Actively monitors tunnel hops from exploratory/transit circuits and rewards verified routers with a composite score bonus (+15 pts).
 
 ---

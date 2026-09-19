@@ -100,14 +100,17 @@ func BuildSU3(peers []PeerRecord, signerID string, privKey *rsa.PrivateKey, now 
 
 // CalculatePackageStats computes distribution, reachability, dual-stack, availability,
 // latency, and generation telemetry for the selected peers in a reseed package.
-func CalculatePackageStats(peers []PeerRecord, su3SizeBytes int, etag string, generatedAt time.Time, requireReachable bool) PackageStats {
+func CalculatePackageStats(peers []PeerRecord, su3SizeBytes int, etag string, generatedAt time.Time, sel SelectionStats) PackageStats {
 	stats := PackageStats{
-		PeerCount:              len(peers),
-		SU3SizeBytes:           su3SizeBytes,
-		ETag:                   etag,
-		LastGeneratedAt:        generatedAt,
-		RequireReachableFilter: requireReachable,
-		GenerationMethod:       "256 K-Bucket Stratified (Java I2P 256-node Head-Start) + /16 Subnet Filter + Max-5 Bucket Leveling",
+		PeerCount:        len(peers),
+		SU3SizeBytes:     su3SizeBytes,
+		ETag:             etag,
+		LastGeneratedAt:  generatedAt,
+		GateLevel:        sel.GateLevel.String(),
+		QualifiedCount:   sel.Qualified,
+		DiversePoolCount: sel.DiversePool,
+		CoverageGapLZ:    sel.CoverageGapLZ,
+		GenerationMethod: "Max-Min XOR Farthest-Point Sampling + /16·/48 Subnet Gate + 10min Epoch Bundle",
 	}
 	if len(peers) == 0 {
 		return stats

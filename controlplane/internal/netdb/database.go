@@ -157,15 +157,22 @@ func routerInfoFresh(info foundation.NetworkDatabaseRouterInfo, nowMillis, maxAg
 
 // AdmitRouterInfo verifies and stores a RouterInfo.
 func (d *Database) AdmitRouterInfo(info foundation.NetworkDatabaseRouterInfo, _ bool, seenAt uint64) error {
-	return d.admitRouterInfo(info, seenAt, RouterInfoMaxAgeMillis)
+	return d.admitRouterInfo(info, seenAt, RouterInfoMaxAgeMillis, true)
 }
 
 // AdmitReseedRouterInfo verifies and stores a reseed RouterInfo.
 func (d *Database) AdmitReseedRouterInfo(info foundation.NetworkDatabaseRouterInfo, seenAt uint64) error {
-	return d.admitRouterInfo(info, seenAt, ReseedRouterInfoMaxAgeMillis)
+	return d.admitRouterInfo(info, seenAt, ReseedRouterInfoMaxAgeMillis, true)
 }
 
-func (d *Database) admitRouterInfo(info foundation.NetworkDatabaseRouterInfo, seenAt, maxAgeMillis uint64) error {
+// AdmitVerifiedReseedRouterInfo stores a reseed RouterInfo whose signature was
+// already verified by the ingestion pipeline. Network and freshness checks
+// still apply.
+func (d *Database) AdmitVerifiedReseedRouterInfo(info foundation.NetworkDatabaseRouterInfo, seenAt uint64) error {
+	return d.admitRouterInfo(info, seenAt, ReseedRouterInfoMaxAgeMillis, false)
+}
+
+func (d *Database) admitRouterInfo(info foundation.NetworkDatabaseRouterInfo, seenAt, maxAgeMillis uint64, verify bool) error {
 	if d.networkID != 0 {
 		id, err := foundation.NetworkDatabaseNetID(info)
 		if err != nil {
@@ -175,13 +182,15 @@ func (d *Database) admitRouterInfo(info foundation.NetworkDatabaseRouterInfo, se
 			return ErrRouterInfoNetworkMismatch
 		}
 	}
-	valid, err := info.Verify()
 	floodfill := foundation.NetworkDatabaseIsFloodfill(info)
-	if err != nil {
-		return err
-	}
-	if !valid {
-		return ErrInvalidSignature
+	if verify {
+		valid, err := info.Verify()
+		if err != nil {
+			return err
+		}
+		if !valid {
+			return ErrInvalidSignature
+		}
 	}
 	if err := routerInfoFresh(info, seenAt, maxAgeMillis); err != nil {
 		return err

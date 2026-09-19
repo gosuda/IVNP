@@ -878,6 +878,8 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			HTTPClient: httpClient, SU3Signers: signers,
 			NetworkID:       uint8(cfg.Network.ID),
 			MaxArchiveBytes: cfg.Reseed.MaxArchiveBytes, MaxRouterInfos: cfg.Reseed.MaxRouterInfos, MaxTotalRouterBytes: cfg.Reseed.MaxTotalBytes,
+			BucketSubnetQuota: cfg.Reseed.BucketSubnetQuota, BucketAdmitLimit: cfg.Reseed.BucketAdmitLimit,
+			VerifyAnchorCount: cfg.Reseed.VerifyAnchorCount,
 		}
 		reseedRunner = client
 	}

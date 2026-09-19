@@ -273,6 +273,24 @@ func TestProberWithRateLimiter(t *testing.T) {
 	}
 }
 
+// qualifiedPeer builds a PeerRecord that passes the strict qualification gate:
+// both v2 transports, reachable, and a 48h observation uptime.
+func qualifiedPeer(hash foundation.Hash, ip string, flood bool) PeerRecord {
+	return PeerRecord{
+		Hash:        hash,
+		Raw:         []byte("raw"),
+		IsFloodfill: flood,
+		IPv4:        []netip.Addr{netip.MustParseAddr(ip)},
+		HasNTCP2:    true,
+		HasSSU2:     true,
+		Stats: PeerStats{
+			IsReachable: true,
+			FirstSeen:   time.Now().Add(-48 * time.Hour),
+			EWMARTT:     50 * time.Millisecond,
+		},
+	}
+}
+
 func TestSelectorFloodfillPriority(t *testing.T) {
 	var peers []PeerRecord
 	for i := 0; i < 20; i++ {
@@ -280,22 +298,14 @@ func TestSelectorFloodfillPriority(t *testing.T) {
 		hash[0] = byte(i % 5)
 		hash[1] = byte(i)
 		isFlood := i%3 == 0 // 1/3 are floodfills
-		peers = append(peers, PeerRecord{
-			Hash:        hash,
-			Raw:         []byte("mock-raw"),
-			IsFloodfill: isFlood,
-			IPv4:        []netip.Addr{netip.MustParseAddr(fmt.Sprintf("192.168.%d.%d", i%3, i))},
-			Stats: PeerStats{
-				IsReachable: true,
-				EWMARTT:     time.Duration(10+i) * time.Millisecond,
-			},
-			Score: float64(100 - i),
-		})
+		p := qualifiedPeer(hash, fmt.Sprintf("192.%d.1.1", i+1), isFlood)
+		p.Stats.EWMARTT = time.Duration(10+i) * time.Millisecond
+		p.Score = float64(100 - i)
+		peers = append(peers, p)
 	}
 
 	cfg := DefaultSelectorConfig()
 	cfg.TargetCount = 6
-	cfg.MaxPerIPv4Subnet16 = 2
 	cfg.PreferFloodfillRatio = 0.5 // request 50% floodfills
 	selected := SelectDiversePeers(peers, cfg)
 
@@ -309,65 +319,44 @@ func TestSelectorFloodfillPriority(t *testing.T) {
 			floodCount++
 		}
 	}
-	if floodCount == 0 {
-		t.Fatal("expected floodfills to be prioritized in selected slots")
+	if floodCount < 3 {
+		t.Fatalf("floodfill count = %d, want >= 3 (50%% quota filled first)", floodCount)
 	}
 }
 
-func TestSelectorBucketLevelingAndCap(t *testing.T) {
-	// 15 peers in bucket 0, 15 in bucket 1, 1 in bucket 2
+func TestSelectorFPSUniformCoverage(t *testing.T) {
+	// 30 clustered peers in first-byte bucket 0 plus one peer each in
+	// buckets 1..20. Farthest-point sampling must spread selection across
+	// the sparse regions instead of stacking the dense cluster.
 	var peers []PeerRecord
-	for i := 0; i < 15; i++ {
-		var h0 [32]byte
-		h0[0] = 0
-		h0[1] = byte(i)
-		peers = append(peers, PeerRecord{
-			Hash:  h0,
-			Raw:   []byte("raw"),
-			IPv4:  []netip.Addr{netip.MustParseAddr(fmt.Sprintf("%d.%d.1.1", 10+i, i))},
-			Stats: PeerStats{IsReachable: true},
-			Score: float64(100 - i),
-		})
-
-		var h1 [32]byte
-		h1[0] = 1
-		h1[1] = byte(i)
-		peers = append(peers, PeerRecord{
-			Hash:  h1,
-			Raw:   []byte("raw"),
-			IPv4:  []netip.Addr{netip.MustParseAddr(fmt.Sprintf("%d.%d.2.2", 40+i, i))},
-			Stats: PeerStats{IsReachable: true},
-			Score: float64(100 - i),
-		})
+	for i := 0; i < 30; i++ {
+		var h foundation.Hash
+		h[0] = 0
+		h[1] = byte(i)
+		peers = append(peers, qualifiedPeer(h, fmt.Sprintf("10.%d.1.1", i+1), false))
 	}
-	var h2 [32]byte
-	h2[0] = 2
-	peers = append(peers, PeerRecord{
-		Hash:  h2,
-		Raw:   []byte("raw"),
-		IPv4:  []netip.Addr{netip.MustParseAddr("80.1.3.3")},
-		Stats: PeerStats{IsReachable: true},
-		Score: 90,
-	})
+	for i := 1; i <= 20; i++ {
+		var h foundation.Hash
+		h[0] = byte(i)
+		h[1] = byte(i * 7)
+		peers = append(peers, qualifiedPeer(h, fmt.Sprintf("20.%d.1.1", i), false))
+	}
 
 	cfg := DefaultSelectorConfig()
-	cfg.TargetCount = 50 // Request more than the 31 available peers
+	cfg.TargetCount = 20
 	selected := SelectDiversePeers(peers, cfg)
 
-	counts := make(map[byte]int)
+	if len(selected) != 20 {
+		t.Fatalf("selected = %d, want 20", len(selected))
+	}
+	sparse := 0
 	for _, p := range selected {
-		counts[p.Hash[0]]++
+		if p.Hash[0] != 0 {
+			sparse++
+		}
 	}
-
-	// Verify no single bucket gets 15 peers (capped at max 5)
-	if counts[0] > 5 {
-		t.Fatalf("bucket 0 count = %d, want <= 5", counts[0])
-	}
-	if counts[1] > 5 {
-		t.Fatalf("bucket 1 count = %d, want <= 5", counts[1])
-	}
-	if counts[2] != 1 {
-		t.Fatalf("bucket 2 count = %d, want 1", counts[2])
+	if sparse < 10 {
+		t.Fatalf("sparse-region picks = %d, want >= 10 of 20", sparse)
 	}
 }
 
@@ -377,28 +366,19 @@ func TestSelectorRequireReachable(t *testing.T) {
 		var h [32]byte
 		h[0] = byte(i % 50)
 		h[1] = byte(i)
-		peers = append(peers, PeerRecord{
-			Hash:  h,
-			Raw:   []byte("raw"),
-			IPv4:  []netip.Addr{netip.MustParseAddr(fmt.Sprintf("%d.%d.1.1", 10+i, i))},
-			Stats: PeerStats{IsReachable: true},
-		})
+		peers = append(peers, qualifiedPeer(h, fmt.Sprintf("%d.%d.1.1", 10+i, i), false))
 	}
 	for i := 100; i < 200; i++ {
 		var h [32]byte
 		h[0] = byte(i % 50)
 		h[1] = byte(i)
-		peers = append(peers, PeerRecord{
-			Hash:  h,
-			Raw:   []byte("raw"),
-			IPv4:  []netip.Addr{netip.MustParseAddr(fmt.Sprintf("%d.%d.1.1", 10+i, i))},
-			Stats: PeerStats{IsReachable: false}, // Unreachable
-		})
+		p := qualifiedPeer(h, fmt.Sprintf("%d.%d.1.1", 10+i, i), false)
+		p.Stats.IsReachable = false // Unreachable
+		peers = append(peers, p)
 	}
 
 	cfg := DefaultSelectorConfig()
 	cfg.TargetCount = 1024
-	cfg.RequireReachable = true
 	selected := SelectDiversePeers(peers, cfg)
 
 	if len(selected) > 100 {
@@ -406,7 +386,7 @@ func TestSelectorRequireReachable(t *testing.T) {
 	}
 	for _, p := range selected {
 		if !p.Stats.IsReachable {
-			t.Fatal("selected unreachable peer when RequireReachable = true")
+			t.Fatal("selected unreachable peer")
 		}
 	}
 }
@@ -416,29 +396,21 @@ func TestSelectorIPv4Subnet16Filter(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		var h [32]byte
 		h[0] = byte(i)
-		peers = append(peers, PeerRecord{
-			Hash:  h,
-			Raw:   []byte("raw"),
-			IPv4:  []netip.Addr{netip.MustParseAddr(fmt.Sprintf("198.51.%d.%d", i+1, i+10))}, // Same /16: 198.51.0.0/16
-			Stats: PeerStats{IsReachable: true},
-			Score: float64(100 - i),
-		})
+		p := qualifiedPeer(h, fmt.Sprintf("198.51.%d.%d", i+1, i+10), false) // Same /16: 198.51.0.0/16
+		p.Score = float64(100 - i)
+		peers = append(peers, p)
 	}
 
 	// Add an outsider peer on another /16
 	var hOther [32]byte
 	hOther[0] = 5
-	peers = append(peers, PeerRecord{
-		Hash:  hOther,
-		Raw:   []byte("raw"),
-		IPv4:  []netip.Addr{netip.MustParseAddr("203.0.113.1")},
-		Stats: PeerStats{IsReachable: true},
-		Score: 50,
-	})
+	p := qualifiedPeer(hOther, "203.0.113.1", false)
+	p.Score = 50
+	peers = append(peers, p)
 
 	cfg := DefaultSelectorConfig()
 	cfg.TargetCount = 2
-	cfg.MaxPerIPv4Subnet16 = 1
+	cfg.MaxPerSubnet = 1
 	selected := SelectDiversePeers(peers, cfg)
 
 	if len(selected) != 2 {
@@ -453,6 +425,129 @@ func TestSelectorIPv4Subnet16Filter(t *testing.T) {
 	}
 	if seen198 != 1 {
 		t.Fatalf("seen /16 subnet count = %d, want 1", seen198)
+	}
+}
+
+func TestSelectorIPv6Subnet48Filter(t *testing.T) {
+	var peers []PeerRecord
+	for i := 0; i < 5; i++ {
+		var h [32]byte
+		h[0] = byte(i)
+		p := qualifiedPeer(h, fmt.Sprintf("198.51.%d.%d", i+1, i+10), false)
+		p.IPv6 = []netip.Addr{netip.MustParseAddr(fmt.Sprintf("2001:db8:1000::%x", i+1))} // same /48
+		peers = append(peers, p)
+	}
+
+	cfg := DefaultSelectorConfig()
+	cfg.TargetCount = 10
+	cfg.ExcludeIPv6Only = false
+	cfg.MaxPerSubnet = 1
+	selected := SelectDiversePeers(peers, cfg)
+
+	// Distinct IPv4 /16s let all five through the v4 key, but the shared
+	// IPv6 /48 must collapse them to a single claimant.
+	if len(selected) != 1 {
+		t.Fatalf("selected = %d, want 1 (shared IPv6 /48 gate)", len(selected))
+	}
+}
+
+func TestSelectorWindowedSuccessGate(t *testing.T) {
+	var peers []PeerRecord
+	for i := 0; i < 10; i++ {
+		var h [32]byte
+		h[0] = byte(i)
+		p := qualifiedPeer(h, fmt.Sprintf("10.%d.1.1", i+1), false)
+		// Windowed success 50%: fails the strict success-rate gate.
+		p.Stats.WinStart = time.Now()
+		p.Stats.WinProbes = 10
+		p.Stats.WinSuccess = 5
+		p.Stats.TotalProbes = 10
+		p.Stats.SuccessProbes = 5
+		peers = append(peers, p)
+	}
+
+	cfg := DefaultSelectorConfig()
+	cfg.TargetCount = 5
+	_, stats := SelectDiversePeersWithStats(peers, cfg)
+	if stats.GateLevel == gateStrict {
+		t.Fatal("50%% windowed success should not pass the strict gate")
+	}
+	// At gateReachable the windowed/cumulative rate is ignored.
+	if len(SelectDiversePeers(peers, cfg)) != 5 {
+		t.Fatal("reachable-level gate should still admit the peers")
+	}
+}
+
+func TestSelectorGateLadderRelaxation(t *testing.T) {
+	// No probes at all and fresh FirstSeen: strict and uptime gates fail,
+	// cumulative-rate passes since there is no failure history.
+	var peers []PeerRecord
+	for i := 0; i < 10; i++ {
+		var h [32]byte
+		h[0] = byte(i)
+		p := qualifiedPeer(h, fmt.Sprintf("10.%d.1.1", i+1), false)
+		p.Stats.FirstSeen = time.Now().Add(-time.Hour) // < 24h uptime
+		peers = append(peers, p)
+	}
+	cfg := DefaultSelectorConfig()
+	cfg.TargetCount = 5
+	_, stats := SelectDiversePeersWithStats(peers, cfg)
+	if stats.GateLevel != gateNoUptime && stats.GateLevel != gateCumulativeRate && stats.GateLevel != gateReachable {
+		t.Fatalf("GateLevel = %v, want a relaxed level", stats.GateLevel)
+	}
+	if len(SelectDiversePeers(peers, cfg)) != 5 {
+		t.Fatal("relaxed ladder should admit fresh reachable peers")
+	}
+}
+
+func TestSelectorFPSAnchorIsFloodfill(t *testing.T) {
+	var peers []PeerRecord
+	for i := 0; i < 20; i++ {
+		var h [32]byte
+		h[0] = byte(i)
+		h[1] = byte(i * 3)
+		p := qualifiedPeer(h, fmt.Sprintf("30.%d.1.1", i+1), i == 7)
+		p.Stats.EWMARTT = time.Duration(10+i) * time.Millisecond
+		p.Score = float64(100 - i)
+		peers = append(peers, p)
+	}
+	// Give the single floodfill the best quality score via long uptime.
+	peers[7].Stats.FirstSeen = time.Now().Add(-900 * time.Hour)
+
+	cfg := DefaultSelectorConfig()
+	cfg.TargetCount = 10
+	selected := SelectDiversePeers(peers, cfg)
+	if len(selected) == 0 {
+		t.Fatal("no peers selected")
+	}
+	found := false
+	for _, p := range selected {
+		if p.IsFloodfill {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("floodfill peer must be selected when prioritized")
+	}
+}
+
+func TestLeadingZerosXOR(t *testing.T) {
+	var a, b foundation.Hash
+	if lz := leadingZerosXOR(a, b); lz != 256 {
+		t.Fatalf("lz equal = %d, want 256", lz)
+	}
+	b[0] = 0x80
+	if lz := leadingZerosXOR(a, b); lz != 0 {
+		t.Fatalf("lz = %d, want 0", lz)
+	}
+	b[0] = 0x01
+	if lz := leadingZerosXOR(a, b); lz != 7 {
+		t.Fatalf("lz = %d, want 7", lz)
+	}
+	b[0] = 0
+	b[1] = 0x40
+	if lz := leadingZerosXOR(a, b); lz != 9 {
+		t.Fatalf("lz = %d, want 9", lz)
 	}
 }
 
@@ -946,7 +1041,8 @@ func TestCalculatePackageStats(t *testing.T) {
 		},
 	}
 
-	stats := CalculatePackageStats(peers, 4096, `"test-etag"`, now, true)
+	sel := SelectionStats{GateLevel: gateStrict, Qualified: 10, DiversePool: 5, CoverageGapLZ: 7}
+	stats := CalculatePackageStats(peers, 4096, `"test-etag"`, now, sel)
 
 	if stats.PeerCount != 3 {
 		t.Fatalf("PeerCount = %d, want 3", stats.PeerCount)
@@ -970,8 +1066,11 @@ func TestCalculatePackageStats(t *testing.T) {
 	if stats.RTT.MinMs != 40 || stats.RTT.MaxMs != 80 || stats.RTT.AvgMs != 60 {
 		t.Fatalf("RTT stats: min=%d, max=%d, avg=%d", stats.RTT.MinMs, stats.RTT.MaxMs, stats.RTT.AvgMs)
 	}
-	if !stats.RequireReachableFilter {
-		t.Fatal("expected RequireReachableFilter = true")
+	if stats.GateLevel != "strict" {
+		t.Fatalf("GateLevel = %q, want strict", stats.GateLevel)
+	}
+	if stats.CoverageGapLZ != 7 {
+		t.Fatalf("CoverageGapLZ = %d, want 7", stats.CoverageGapLZ)
 	}
 	if stats.GenerationMethod == "" {
 		t.Fatal("expected GenerationMethod to be populated")
@@ -982,34 +1081,35 @@ func TestSelectorExcludesIPv6Only(t *testing.T) {
 	v4Addr := netip.MustParseAddr("198.51.100.1")
 	v6Addr := netip.MustParseAddr("2001:db8::1")
 
+	v2 := PeerStats{IsReachable: true, FirstSeen: time.Now().Add(-48 * time.Hour)}
 	peers := []PeerRecord{
 		{
-			Hash: foundation.Hash{1},
-			Raw:  []byte("raw-dual"),
-			IPv4: []netip.Addr{v4Addr},
-			IPv6: []netip.Addr{v6Addr},
-			Stats: PeerStats{
-				IsReachable: true,
-			},
-			Score: 100,
+			Hash:     foundation.Hash{1},
+			Raw:      []byte("raw-dual"),
+			IPv4:     []netip.Addr{v4Addr},
+			IPv6:     []netip.Addr{v6Addr},
+			HasNTCP2: true,
+			HasSSU2:  true,
+			Stats:    v2,
+			Score:    100,
 		},
 		{
-			Hash: foundation.Hash{2},
-			Raw:  []byte("raw-v4only"),
-			IPv4: []netip.Addr{v4Addr},
-			Stats: PeerStats{
-				IsReachable: true,
-			},
-			Score: 90,
+			Hash:     foundation.Hash{2},
+			Raw:      []byte("raw-v4only"),
+			IPv4:     []netip.Addr{netip.MustParseAddr("198.52.100.1")},
+			HasNTCP2: true,
+			HasSSU2:  true,
+			Stats:    v2,
+			Score:    90,
 		},
 		{
-			Hash: foundation.Hash{3},
-			Raw:  []byte("raw-v6only"),
-			IPv6: []netip.Addr{v6Addr},
-			Stats: PeerStats{
-				IsReachable: true,
-			},
-			Score: 95,
+			Hash:     foundation.Hash{3},
+			Raw:      []byte("raw-v6only"),
+			IPv6:     []netip.Addr{v6Addr},
+			HasNTCP2: true,
+			HasSSU2:  true,
+			Stats:    v2,
+			Score:    95,
 		},
 	}
 

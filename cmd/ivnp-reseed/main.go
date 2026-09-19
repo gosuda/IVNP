@@ -62,6 +62,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	tempDir := flags.String("temp-dir", "", "temporary directory for tainted copy state (default os.TempDir())")
 	peersFile := flags.String("peers-file", "", "path to peer cache file (default <data-dir>/reseed-peers.json)")
 	targetPeers := flags.Int("target", 1024, "target number of diverse peers in reseed archive")
+	minBundlePeers := flags.Int("min-bundle-peers", 10, "minimum qualified peers required to publish a new epoch bundle; below this the previous bundle keeps serving")
+	minProbeRate := flags.Float64("min-probe-rate", 0.85, "minimum probe success rate for the strict qualification gate (0-1)")
 	interval := flags.Duration("interval", 10*time.Minute, "refresh interval for harvesting, probing, and packaging")
 	netID := flags.Uint("netid", 2, "I2P network ID")
 	signerID := flags.String("signer-id", envOr("RESEED_SIGNER_ID", "reseed@ivnp.network"), "SU3 signer common name (env RESEED_SIGNER_ID)")
@@ -276,20 +278,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		reachableCount := store.ReachableCount()
 		selectorCfg := DefaultSelectorConfig()
 		selectorCfg.TargetCount = *targetPeers
-		// If directly reachable peer count > 256, strictly include only directly reachable peers
-		// (no artificial padding with dead/unverified nodes up to 1024).
-		// If <= 256 (cold-start), allow candidates to bootstrap.
-		selectorCfg.RequireReachable = (reachableCount > 256)
-		selected := SelectDiversePeers(store.Snapshot(), selectorCfg)
+		selectorCfg.MinBundlePeers = *minBundlePeers
+		selectorCfg.MinProbeSuccessRate = *minProbeRate
+		selected, selStats := SelectDiversePeersWithStats(store.Snapshot(), selectorCfg)
 
 		logger.Info("selected diverse peers",
 			"target", *targetPeers,
 			"selected", len(selected),
 			"reachable_in_store", reachableCount,
-			"require_reachable", selectorCfg.RequireReachable,
+			"min_bundle_peers", *minBundlePeers,
 		)
 
-		if len(selected) > 0 {
+		if len(selected) >= *minBundlePeers {
 			now := time.Now()
 			floodCount := 0
 			for _, p := range selected {
@@ -308,7 +308,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 			sum := sha256.Sum256(su3Bytes)
 			etag := `"` + hex.EncodeToString(sum[:8]) + `"`
-			pkgStats := CalculatePackageStats(selected, len(su3Bytes), etag, now, selectorCfg.RequireReachable)
+			pkgStats := CalculatePackageStats(selected, len(su3Bytes), etag, now, selStats)
 			server.UpdatePackage(ReseedPackage{
 				GeneratedAt:    now,
 				PeerCount:      len(selected),
@@ -362,8 +362,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}()
 	}
 
-	packageTicker := time.NewTicker(*interval)
-	defer packageTicker.Stop()
+	// Epoch-aligned packaging: bundle builds fire on fixed wall-clock
+	// boundaries so every downloader in an epoch receives identical bytes.
+	epochTimer := time.NewTimer(time.Until(nextEpochBoundary(time.Now(), *interval)))
+	defer epochTimer.Stop()
 
 	crawlTicker := time.NewTicker(4 * time.Second)
 	defer crawlTicker.Stop()
@@ -383,12 +385,22 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 0
 		case <-crawlTicker.C:
 			activeCrawlPass(ctx)
-		case <-packageTicker.C:
+		case <-epochTimer.C:
 			if err := refreshPass(ctx); err != nil {
 				logger.Error("periodic refresh pass failed", "error", err)
 			}
+			epochTimer.Reset(time.Until(nextEpochBoundary(time.Now(), *interval)))
 		}
 	}
+}
+
+// nextEpochBoundary returns the next wall-clock multiple of interval so bundle
+// epochs align to fixed clock boundaries (e.g. :00, :10, :20 for 10m).
+func nextEpochBoundary(now time.Time, interval time.Duration) time.Time {
+	if interval <= 0 {
+		interval = 10 * time.Minute
+	}
+	return now.Truncate(interval).Add(interval)
 }
 
 // resolveAdvertisedEndpoint validates the router advertise flags and fills in

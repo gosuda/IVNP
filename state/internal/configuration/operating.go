@@ -152,6 +152,12 @@ type Reseed struct {
 	MaxArchiveBytes   int64
 	MaxRouterInfos    int
 	MaxTotalBytes     int64
+	// BucketSubnetQuota caps admitted RouterInfos per local K-bucket per
+	// subnet (IPv4 /16 or IPv6 /48). BucketAdmitLimit caps admissions per
+	// local K-bucket. VerifyAnchorCount bounds post-reseed floodfill anchors.
+	BucketSubnetQuota int
+	BucketAdmitLimit  int
+	VerifyAnchorCount int
 }
 
 // Listener configures a local RPC, proxy, or SAM listener.
@@ -418,7 +424,7 @@ func defaultOperating(base string) Operating {
 		},
 		NTCP2:  defaultTransport(),
 		SSU2:   defaultTransport(),
-		Reseed: Reseed{Enabled: true, PriorityEndpoints: append([]string(nil), defaultReseedPriorityEndpoints...), PriorityTimeout: 2 * time.Second, Endpoints: append([]string(nil), defaultReseedEndpoints...), Timeout: 30 * time.Second, MaxArchiveBytes: 1 << 20, MaxRouterInfos: 4_000, MaxTotalBytes: 64 << 20},
+		Reseed: Reseed{Enabled: true, PriorityEndpoints: append([]string(nil), defaultReseedPriorityEndpoints...), PriorityTimeout: 2 * time.Second, Endpoints: append([]string(nil), defaultReseedEndpoints...), Timeout: 30 * time.Second, MaxArchiveBytes: 1 << 20, MaxRouterInfos: 4_000, MaxTotalBytes: 64 << 20, BucketSubnetQuota: 2, BucketAdmitLimit: 20, VerifyAnchorCount: 16},
 		SAM: Listener{
 			Enabled: true, Address: Endpoint{Host: "127.0.0.1", Port: 7656}, UDPAddress: Endpoint{Host: "127.0.0.1", Port: 7655},
 			MaxConnections: 128, ReadinessTimeout: 2 * time.Minute, SessionQueue: 64, MaxSessionQueueBytes: 4 << 20, MaxServerQueueBytes: 64 << 20,
@@ -829,6 +835,27 @@ func applyReseed(operating *Operating, values map[entryKey]string) error {
 			return invalid("reseed", "max_total_bytes")
 		}
 		reseed.MaxTotalBytes = parsed
+	}
+	if value, ok := valueOf(values, "reseed", "bucket_subnet_quota"); ok {
+		parsed, err := parseUint(value, 1, 64)
+		if err != nil {
+			return invalid("reseed", "bucket_subnet_quota")
+		}
+		reseed.BucketSubnetQuota = int(parsed)
+	}
+	if value, ok := valueOf(values, "reseed", "bucket_admit_limit"); ok {
+		parsed, err := parseUint(value, 1, 256)
+		if err != nil {
+			return invalid("reseed", "bucket_admit_limit")
+		}
+		reseed.BucketAdmitLimit = int(parsed)
+	}
+	if value, ok := valueOf(values, "reseed", "verify_anchor_count"); ok {
+		parsed, err := parseUint(value, 0, 64)
+		if err != nil {
+			return invalid("reseed", "verify_anchor_count")
+		}
+		reseed.VerifyAnchorCount = int(parsed)
 	}
 	if reseed.MaxTotalBytes < reseed.MaxArchiveBytes {
 		return invalid("reseed", "max_total_bytes")
