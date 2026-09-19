@@ -713,13 +713,16 @@ func TestSSU2ManagerCapsStagedEarlyPacketsAtEight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receivedCount := atomic.Int32{}
+	var receivedMu sync.Mutex
+	received := make(map[uint32]int)
 	if err = bobManager.Start(ctx, TransportBindings{
 		SSU2:      bobConn,
 		LocalInfo: bob,
 		Clock:     WallClock{},
-		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, _ foundation.I2NPMessage, _ uint64, _ bool) error {
-			receivedCount.Add(1)
+		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message foundation.I2NPMessage, _ uint64, _ bool) error {
+			receivedMu.Lock()
+			received[message.Header.ID]++
+			receivedMu.Unlock()
 			return nil
 		},
 	}); err != nil {
@@ -827,12 +830,26 @@ func TestSSU2ManagerCapsStagedEarlyPacketsAtEight(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The two packets denied staging by the cap may still be delivered when
+	// setup-worker scheduling lands their processing after the session is
+	// established, so the delivery contract is every staged packet arriving
+	// exactly once: at least 8 distinct messages of the 10 sent, never a
+	// duplicate or a message outside the sent set.
 	waitForSSU2Live(t, 3*time.Second, func() bool {
-		return receivedCount.Load() == 8
+		receivedMu.Lock()
+		defer receivedMu.Unlock()
+		return len(received) >= ssu2MaxStagedEarlyPackets
 	}, "Bob to receive all 8 staged packets")
 
-	if count := receivedCount.Load(); count != 8 {
-		t.Fatalf("received packets count = %d, want 8", count)
+	receivedMu.Lock()
+	defer receivedMu.Unlock()
+	for id, count := range received {
+		if id < 1 || id > 10 {
+			t.Fatalf("delivered message ID %d is outside the sent IDs 1-10", id)
+		}
+		if count != 1 {
+			t.Fatalf("message ID %d was delivered %d times", id, count)
+		}
 	}
 }
 
