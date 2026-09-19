@@ -271,7 +271,6 @@ func (s *ReseedServer) calculateStats() DetailedStatsResponse {
 		packageStats.SU3SizeBytes = len(pkg.SU3Data)
 		packageStats.ETag = pkg.ETag
 		packageStats.LastGeneratedAt = pkg.GeneratedAt
-		packageStats.GenerationMethod = "Max-Min XOR Farthest-Point Sampling + /16·/48 Subnet Gate + 10min Epoch Bundle"
 	}
 	packageStats.NextRefreshETA = nextRefreshSec
 	packageStats.RefreshIntervalSeconds = int64(s.cfg.CacheDuration.Seconds())

@@ -309,6 +309,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			sum := sha256.Sum256(su3Bytes)
 			etag := `"` + hex.EncodeToString(sum[:8]) + `"`
 			pkgStats := CalculatePackageStats(selected, len(su3Bytes), etag, now, selStats)
+			pkgStats.EpochStartedAt = now.Truncate(*interval)
 			server.UpdatePackage(ReseedPackage{
 				GeneratedAt:    now,
 				PeerCount:      len(selected),

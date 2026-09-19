@@ -111,31 +111,38 @@ type KBucketStats struct {
 }
 
 type PackageStats struct {
-	PeerCount                int       `json:"peer_count"`
-	FloodfillCount           int       `json:"floodfill_count"`
-	FloodfillRatio           float64   `json:"floodfill_ratio"`
-	IPv4OnlyCount            int       `json:"ipv4_only_count"`
-	IPv4OnlyRatio            float64   `json:"ipv4_only_ratio"`
-	DualStackCount           int       `json:"dual_stack_count"`
-	DualStackRatio           float64   `json:"dual_stack_ratio"`
-	IPv6OnlyCount            int       `json:"ipv6_only_count"`
-	IPv6OnlyRatio            float64   `json:"ipv6_only_ratio"`
-	AverageAvailability      float64   `json:"average_availability"`
-	DirectlyReachableCount   int       `json:"directly_reachable_count"`
-	DirectlyReachableRatio   float64   `json:"directly_reachable_ratio"`
-	TunnelBuildAcceptedCount int       `json:"tunnel_build_accepted_count"`
-	TunnelBuildAcceptedRatio float64   `json:"tunnel_build_accepted_ratio"`
-	RTT                      RTTStats  `json:"rtt"`
-	GenerationMethod         string    `json:"generation_method"`
-	GateLevel                string    `json:"gate_level"`
-	QualifiedCount           int       `json:"qualified_count"`
-	DiversePoolCount         int       `json:"diverse_pool_count"`
-	CoverageGapLZ            int       `json:"coverage_gap_lz"`
-	SU3SizeBytes             int       `json:"su3_size_bytes"`
-	ETag                     string    `json:"etag"`
-	LastGeneratedAt          time.Time `json:"last_generated_at"`
-	NextRefreshETA           int64     `json:"next_refresh_eta_seconds"`
-	RefreshIntervalSeconds   int64     `json:"refresh_interval_seconds"`
+	PeerCount                int      `json:"peer_count"`
+	FloodfillCount           int      `json:"floodfill_count"`
+	FloodfillRatio           float64  `json:"floodfill_ratio"`
+	IPv4OnlyCount            int      `json:"ipv4_only_count"`
+	IPv4OnlyRatio            float64  `json:"ipv4_only_ratio"`
+	DualStackCount           int      `json:"dual_stack_count"`
+	DualStackRatio           float64  `json:"dual_stack_ratio"`
+	IPv6OnlyCount            int      `json:"ipv6_only_count"`
+	IPv6OnlyRatio            float64  `json:"ipv6_only_ratio"`
+	AverageAvailability      float64  `json:"average_availability"`
+	DirectlyReachableCount   int      `json:"directly_reachable_count"`
+	DirectlyReachableRatio   float64  `json:"directly_reachable_ratio"`
+	TunnelBuildAcceptedCount int      `json:"tunnel_build_accepted_count"`
+	TunnelBuildAcceptedRatio float64  `json:"tunnel_build_accepted_ratio"`
+	RTT                      RTTStats `json:"rtt"`
+	GateLevel                string   `json:"gate_level"`
+	QualifiedCount           int      `json:"qualified_count"`
+	DiversePoolCount         int      `json:"diverse_pool_count"`
+	CoverageGapLZ            int      `json:"coverage_gap_lz"`
+	// Bundle composition: distribution and uniqueness within the selected set.
+	BucketDistribution     [256]int  `json:"bucket_distribution"`
+	BucketFloodfill        [256]int  `json:"bucket_floodfill"`
+	UniqueIPv4Subnets16    int       `json:"unique_ipv4_subnets_16"`
+	UniqueIPv6Subnets48    int       `json:"unique_ipv6_subnets_48"`
+	UniqueFamilies         int       `json:"unique_families"`
+	V2TransportCount       int       `json:"v2_transport_count"`
+	EpochStartedAt         time.Time `json:"epoch_started_at"`
+	SU3SizeBytes           int       `json:"su3_size_bytes"`
+	ETag                   string    `json:"etag"`
+	LastGeneratedAt        time.Time `json:"last_generated_at"`
+	NextRefreshETA         int64     `json:"next_refresh_eta_seconds"`
+	RefreshIntervalSeconds int64     `json:"refresh_interval_seconds"`
 }
 
 type DetailedStatsResponse struct {

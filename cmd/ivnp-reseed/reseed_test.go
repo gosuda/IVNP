@@ -1035,7 +1035,9 @@ func TestCalculatePackageStats(t *testing.T) {
 		{
 			Hash:        foundation.Hash{1},
 			IsFloodfill: true,
+			Family:      "alpha",
 			IPv4:        []netip.Addr{v4Addr},
+			HasNTCP2:    true,
 			Stats: PeerStats{
 				IsReachable:         true,
 				TotalProbes:         10,
@@ -1047,8 +1049,10 @@ func TestCalculatePackageStats(t *testing.T) {
 		{
 			Hash:        foundation.Hash{2},
 			IsFloodfill: false,
+			Family:      "beta",
 			IPv4:        []netip.Addr{v4Addr},
 			IPv6:        []netip.Addr{v6Addr},
+			HasSSU2:     true,
 			Stats: PeerStats{
 				IsReachable:         true,
 				TotalProbes:         10,
@@ -1101,8 +1105,102 @@ func TestCalculatePackageStats(t *testing.T) {
 	if stats.CoverageGapLZ != 7 {
 		t.Fatalf("CoverageGapLZ = %d, want 7", stats.CoverageGapLZ)
 	}
-	if stats.GenerationMethod == "" {
-		t.Fatal("expected GenerationMethod to be populated")
+	var bucketTotal, bucketFFTotal int
+	for i := 0; i < 256; i++ {
+		bucketTotal += stats.BucketDistribution[i]
+		bucketFFTotal += stats.BucketFloodfill[i]
+		if stats.BucketFloodfill[i] > stats.BucketDistribution[i] {
+			t.Fatalf("BucketFloodfill[%d] = %d exceeds BucketDistribution[%d] = %d",
+				i, stats.BucketFloodfill[i], i, stats.BucketDistribution[i])
+		}
+	}
+	if bucketTotal != stats.PeerCount {
+		t.Fatalf("BucketDistribution sum = %d, want %d", bucketTotal, stats.PeerCount)
+	}
+	if bucketFFTotal != stats.FloodfillCount {
+		t.Fatalf("BucketFloodfill sum = %d, want %d", bucketFFTotal, stats.FloodfillCount)
+	}
+	if stats.BucketDistribution[1] != 1 || stats.BucketDistribution[2] != 1 || stats.BucketDistribution[3] != 1 {
+		t.Fatalf("BucketDistribution[1..3] = %d,%d,%d, want 1,1,1",
+			stats.BucketDistribution[1], stats.BucketDistribution[2], stats.BucketDistribution[3])
+	}
+	if stats.BucketFloodfill[1] != 1 {
+		t.Fatalf("BucketFloodfill[1] = %d, want 1", stats.BucketFloodfill[1])
+	}
+	if stats.UniqueIPv4Subnets16 != 1 {
+		t.Fatalf("UniqueIPv4Subnets16 = %d, want 1", stats.UniqueIPv4Subnets16)
+	}
+	if stats.UniqueIPv6Subnets48 != 1 {
+		t.Fatalf("UniqueIPv6Subnets48 = %d, want 1", stats.UniqueIPv6Subnets48)
+	}
+	if stats.UniqueFamilies != 2 {
+		t.Fatalf("UniqueFamilies = %d, want 2", stats.UniqueFamilies)
+	}
+	if stats.V2TransportCount != 2 {
+		t.Fatalf("V2TransportCount = %d, want 2", stats.V2TransportCount)
+	}
+
+	stats.EpochStartedAt = now.Truncate(10 * time.Minute)
+	raw, err := json.Marshal(stats)
+	if err != nil {
+		t.Fatalf("marshal PackageStats: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal PackageStats: %v", err)
+	}
+	for _, key := range []string{
+		"bucket_distribution", "bucket_floodfill", "unique_ipv4_subnets_16",
+		"unique_ipv6_subnets_48", "unique_families", "v2_transport_count", "epoch_started_at",
+	} {
+		if _, ok := decoded[key]; !ok {
+			t.Fatalf("PackageStats JSON missing key %q", key)
+		}
+	}
+	if dist, ok := decoded["bucket_distribution"].([]any); !ok || len(dist) != 256 {
+		t.Fatalf("bucket_distribution length = %v, want 256", len(dist))
+	}
+}
+
+func TestRenderDashboardBundleSection(t *testing.T) {
+	now := time.Now()
+	stats := DetailedStatsResponse{
+		Version:   "test",
+		NetworkID: 2,
+		Package: PackageStats{
+			PeerCount:           100,
+			GateLevel:           "strict",
+			QualifiedCount:      400,
+			DiversePoolCount:    250,
+			CoverageGapLZ:       7,
+			V2TransportCount:    90,
+			UniqueIPv4Subnets16: 80,
+			EpochStartedAt:      now.Truncate(10 * time.Minute),
+		},
+	}
+	stats.Package.BucketDistribution[7] = 3
+	stats.Package.BucketFloodfill[7] = 2
+
+	var buf bytes.Buffer
+	if err := RenderDashboard(&buf, stats); err != nil {
+		t.Fatalf("RenderDashboard: %v", err)
+	}
+	html := buf.String()
+	for _, id := range []string{
+		`id="gate-badge"`, `id="epoch-window"`, `id="funnel-qualified"`,
+		`id="funnel-diverse"`, `id="funnel-selected"`, `id="bundle-chips"`,
+		`id="b-gap"`, `id="bundle-heatmap-grid"`, `id="d-gate"`, `id="d-epoch"`,
+	} {
+		if !strings.Contains(html, id) {
+			t.Fatalf("dashboard HTML missing %s", id)
+		}
+	}
+	for _, key := range []string{
+		`"epoch_started_at"`, `"bucket_distribution"`, `"gate_level"`, `"coverage_gap_lz"`,
+	} {
+		if !strings.Contains(html, key) {
+			t.Fatalf("dashboard embedded JSON missing %s", key)
+		}
 	}
 }
 

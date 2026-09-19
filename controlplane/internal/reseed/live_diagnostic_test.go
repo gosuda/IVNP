@@ -63,43 +63,23 @@ func TestLivePriorityReseedDiagnostic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var parseFailed, netIDMismatch, stale, future int
 	var candidates []reseedCandidate
+	rejections := map[string]int{}
 	entries := 0
 	for _, file := range reader.File {
 		if file.FileInfo().IsDir() || !strings.HasPrefix(path.Base(file.Name), "routerInfo-") {
 			continue
 		}
 		entries++
-		data, lease, readErr := readRouterInfo(file)
-		if readErr != nil {
-			parseFailed++
+		candidate, reason := collectZipCandidate(file, 2, seenAt)
+		if reason == "" {
+			candidates = append(candidates, candidate)
 			continue
 		}
-		owned := make([]byte, len(data))
-		copy(owned, data)
-		lease.Release()
-		info, parseErr := foundation.NetworkDatabaseParseRouterInfo(owned)
-		if parseErr != nil {
-			parseFailed++
-			continue
-		}
-		if !routerInfoMatchesNetwork(info, 2) {
-			netIDMismatch++
-			continue
-		}
-		if freshErr := controlplanenetdb.ReseedRouterInfoFresh(info, seenAt); freshErr != nil {
-			if info.Published > seenAt {
-				future++
-			} else {
-				stale++
-			}
-			continue
-		}
-		candidates = append(candidates, reseedCandidate{info: info})
+		rejections[reason]++
 	}
 	t.Logf("collection: %d routerInfo entries -> %d candidates (parse-failed=%d, netid-mismatch=%d, stale=%d, future=%d)",
-		entries, len(candidates), parseFailed, netIDMismatch, stale, future)
+		entries, len(candidates), rejections["parse"], rejections["netid"], rejections["stale"], rejections["future"])
 
 	slots := make(map[foundation.Hash]*dedupSlot, len(candidates))
 	duplicates := 0
@@ -117,50 +97,28 @@ func TestLivePriorityReseedDiagnostic(t *testing.T) {
 	database := controlplanenetdb.NewDatabase(local, controlplanenetdb.DefaultBucketCapacity)
 	client := Client{NetworkID: 2}
 
-	sigFailed, noSigFallback, quotaRejected, admitFailed := 0, 0, 0, 0
-	bucketFull, subnetQuota := 0, 0
-	floodfills, v2Only, noV2 := 0, 0, 0
+	outcomes := map[string]int{}
+	sigFailures, floodfills, v2Only, noV2 := 0, 0, 0, 0
 	guard := newIngressGuard(client.bucketSubnetQuota(), client.bucketAdmitLimit())
 	for _, slot := range slots {
-		candidate := slot.best
-		if ok, _ := candidate.info.Verify(); !ok {
-			if slot.count < 2 {
-				sigFailed++
-				noSigFallback++
-				continue
-			}
-			candidate = slot.fallback
-			if ok, _ := candidate.info.Verify(); !ok {
-				sigFailed++
-				continue
-			}
-			sigFailed++
+		category, sigFailed, isFF, hasV2 := classifySlotAdmission(slot, guard, database, local, seenAt)
+		outcomes[category]++
+		if sigFailed {
+			sigFailures++
 		}
-		if foundation.NetworkDatabaseIsFloodfill(candidate.info) {
+		if isFF {
 			floodfills++
 		}
-		if hasV2Transport(candidate.info) {
+		if hasV2 {
 			v2Only++
 		} else {
 			noV2++
 		}
-		bucket := leadingZerosXOR(local, candidate.info.Hash())
-		subnets := ingressSubnetsOf(candidate.info)
-		if !guard.claim(bucket, subnets) {
-			quotaRejected++
-			if guard.bucketUse[bucket] >= guard.bucketLimit {
-				bucketFull++
-			} else {
-				subnetQuota++
-			}
-			continue
-		}
-		if database.AdmitVerifiedReseedRouterInfo(candidate.info, seenAt) != nil {
-			admitFailed++
-		}
 	}
 	t.Logf("admission: sig-failed=%d (no-fallback=%d), quota-rejected=%d (bucket-full=%d, subnet-quota=%d), admit-failed=%d",
-		sigFailed, noSigFallback, quotaRejected, bucketFull, subnetQuota, admitFailed)
+		sigFailures, outcomes["sig-failed-no-fallback"],
+		outcomes["bucket-full"]+outcomes["subnet-quota"], outcomes["bucket-full"], outcomes["subnet-quota"],
+		outcomes["admit-failed"])
 	t.Logf("candidate profile: floodfills=%d, with-v2-transport=%d, no-v2-transport=%d", floodfills, v2Only, noV2)
 	t.Logf("admitted=%d / %d unique", database.Routers().Len(), len(slots))
 
@@ -175,4 +133,64 @@ func TestLivePriorityReseedDiagnostic(t *testing.T) {
 	if result2.Admitted == 0 {
 		t.Fatal("priority reseed bundle admitted zero RouterInfos")
 	}
+}
+
+// collectZipCandidate runs the collection-stage pre-cut on a single ZIP entry:
+// read, parse, netID match, freshness. It returns the candidate on success, or
+// a short rejection reason ("parse", "netid", "stale", "future").
+func collectZipCandidate(file *zip.File, netID uint8, seenAt uint64) (reseedCandidate, string) {
+	data, lease, err := readRouterInfo(file)
+	if err != nil {
+		return reseedCandidate{}, "parse"
+	}
+	owned := make([]byte, len(data))
+	copy(owned, data)
+	lease.Release()
+	info, err := foundation.NetworkDatabaseParseRouterInfo(owned)
+	if err != nil {
+		return reseedCandidate{}, "parse"
+	}
+	if !routerInfoMatchesNetwork(info, netID) {
+		return reseedCandidate{}, "netid"
+	}
+	if err := controlplanenetdb.ReseedRouterInfoFresh(info, seenAt); err != nil {
+		if info.Published > seenAt {
+			return reseedCandidate{}, "future"
+		}
+		return reseedCandidate{}, "stale"
+	}
+	return reseedCandidate{info: info}, ""
+}
+
+// classifySlotAdmission replays the ingestion pipeline against a single dedup
+// slot. It returns a rejection category ("", "sig-failed",
+// "sig-failed-no-fallback", "bucket-full", "subnet-quota", "admit-failed"),
+// whether any signature verification failed, and the admitted candidate's
+// floodfill and v2-transport flags.
+func classifySlotAdmission(slot *dedupSlot, guard *ingressGuard, database *controlplanenetdb.Database, local foundation.Hash, seenAt uint64) (string, bool, bool, bool) {
+	candidate := slot.best
+	sigFailed := false
+	if ok, _ := candidate.info.Verify(); !ok {
+		sigFailed = true
+		if slot.count < 2 {
+			return "sig-failed-no-fallback", true, false, false
+		}
+		candidate = slot.fallback
+		if ok, _ := candidate.info.Verify(); !ok {
+			return "sig-failed", true, false, false
+		}
+	}
+	isFF := foundation.NetworkDatabaseIsFloodfill(candidate.info)
+	hasV2 := hasV2Transport(candidate.info)
+	bucket := leadingZerosXOR(local, candidate.info.Hash())
+	if !guard.claim(bucket, ingressSubnetsOf(candidate.info)) {
+		if guard.bucketUse[bucket] >= guard.bucketLimit {
+			return "bucket-full", sigFailed, isFF, hasV2
+		}
+		return "subnet-quota", sigFailed, isFF, hasV2
+	}
+	if database.AdmitVerifiedReseedRouterInfo(candidate.info, seenAt) != nil {
+		return "admit-failed", sigFailed, isFF, hasV2
+	}
+	return "", sigFailed, isFF, hasV2
 }
