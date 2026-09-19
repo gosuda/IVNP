@@ -1439,22 +1439,47 @@ func TestSSU2OutboundInitiatorCannotBeSupersededOrReleasedDuringParse(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
 	remote := net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:32001"))
 	peer := foundation.Hash{7}
 	pending := &ssu2OutboundPending{
 		peer: peer, remote: remote, initiator: initiator,
+		address:       ssu2PeerAddress{static: [32]byte(remoteStatic.PublicKey().Bytes()), intro: intro},
 		destinationID: 11, sourceID: 12, ready: make(chan struct{}),
 	}
 	endpoint, _ := addrPortKey(remote)
 	manager := &SSU2Manager{networkID: 2,
-		started: true, ctx: context.Background(),
+		started: true, ctx: context.Background(), conn: conn,
 		outbound:     map[foundation.Hash]*ssu2OutboundPending{peer: pending},
 		outboundAddr: map[netip.AddrPort]*ssu2OutboundPending{endpoint: pending},
 		bindings:     TransportBindings{Clock: WallClock{}},
 	}
-	manager.sendSessionRequest(pending, 1)
+	pending.parseMu.Lock()
+	sent := make(chan struct{})
+	go func() {
+		manager.sendSessionRequest(pending, 1)
+		close(sent)
+	}()
+	select {
+	case <-sent:
+		t.Fatal("SessionRequest superseded the Initiator while parse ownership was held")
+	case <-time.After(20 * time.Millisecond):
+	}
 	if pending.initiator != initiator {
-		t.Fatal("SessionRequest transition superseded the one pending Initiator")
+		t.Fatal("pending Initiator was superseded before parse completed")
+	}
+	pending.parseMu.Unlock()
+	select {
+	case <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("SessionRequest send did not complete after parse ownership ended")
+	}
+	if pending.initiator == nil || pending.initiator == initiator {
+		t.Fatal("SessionRequest did not install a fresh Initiator")
 	}
 
 	pending.parseMu.Lock()
@@ -1479,6 +1504,112 @@ func TestSSU2OutboundInitiatorCannotBeSupersededOrReleasedDuringParse(t *testing
 	}
 	if pending.initiator != nil {
 		t.Fatal("terminal pending state retained its Initiator")
+	}
+}
+
+func TestSSU2SessionRequestSupersedesStaleSessionOnNewSourceID(t *testing.T) {
+	aliceConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aliceConn.Close()
+	bobConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bobConn.Close()
+	ctx := t.Context()
+
+	alice, _, _ := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
+	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
+	bobDB := newTransportTestPeers()
+	if err = bobDB.AdmitRouterInfo(alice.Snapshot(), uint64(time.Now().UnixMilli())); err != nil {
+		t.Fatalf("admit Alice RouterInfo: %v", err)
+	}
+	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = bobManager.Start(ctx, TransportBindings{
+		SSU2:      bobConn,
+		LocalInfo: bob,
+		Clock:     WallClock{},
+		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, _ foundation.I2NPMessage, _ uint64, _ bool) error {
+			return nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = bobManager.Close()
+		_ = bobManager.Wait()
+	})
+
+	bobPriv, err := ecdh.X25519().NewPrivateKey(bobStatic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobPub := bobPriv.PublicKey().Bytes()
+
+	// A superseded session still occupies its connection-ID slot while it
+	// drains; a cached NewToken lets a new initiator reuse that destination.
+	stale := &ssu2TransportSession{
+		peer: alice.Hash(), sendID: 200, receiveID: 100,
+		remote:       aliceConn.LocalAddr(),
+		lastActivity: time.Now(),
+		sent:         make(map[uint32]*ssu2SentPacket), fragments: make(map[uint32]*ssu2FragmentAssembly),
+	}
+	bobManager.mu.Lock()
+	bobManager.sessionsByID[stale.receiveID] = stale
+	bobManager.sessionsByPeer[alice.Hash()] = stale
+	bobManager.mu.Unlock()
+
+	initiator, err := dataplanessu2.NewInitiator(bobPub, bobIntro, 100, 300, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dateTime [4]byte
+	binary.BigEndian.PutUint32(dateTime[:], uint32(time.Now().Unix()))
+	requestPayload, err := dataplanessu2.MarshalBlock(nil, dataplanessu2.BlockDateTime, dateTime[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestPayload, err = dataplanessu2.MarshalBlock(requestPayload, dataplanessu2.BlockPadding, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobManager.mu.Lock()
+	token, err := bobManager.newTokenLocked(aliceConn.LocalAddr(), 100, 300)
+	bobManager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestPacket, err := initiator.BuildSessionRequest(make([]byte, dataplanessu2.MaxIPv4PacketLen), requestPayload, 1, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = aliceConn.WriteTo(requestPacket, bobConn.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+
+	createdBuf := make([]byte, dataplanessu2.MaxIPv4PacketLen)
+	_ = aliceConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err := aliceConn.ReadFrom(createdBuf)
+	if err != nil {
+		t.Fatalf("read SessionCreated: %v", err)
+	}
+	if _, _, err = initiator.ParseSessionCreated(createdBuf[:n]); err != nil {
+		t.Fatalf("parse SessionCreated: %v", err)
+	}
+
+	bobManager.mu.RLock()
+	defer bobManager.mu.RUnlock()
+	if bobManager.sessionsByID[stale.receiveID] != nil || bobManager.sessionsByPeer[alice.Hash()] != nil {
+		t.Fatal("stale session kept its connection-ID or peer slot")
+	}
+	pending := bobManager.inbound[100]
+	if pending == nil || pending.sendID != 300 {
+		t.Fatal("new SessionRequest did not install its inbound pending state")
 	}
 }
 

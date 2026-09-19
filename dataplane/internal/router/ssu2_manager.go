@@ -1166,7 +1166,7 @@ func (m *SSU2Manager) EnsureSession(ctx context.Context, peer foundation.Hash) e
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if m.HasSession(peer) {
+	if m.SessionViable(peer) {
 		return nil
 	}
 	select {
@@ -1832,6 +1832,25 @@ func (m *SSU2Manager) establish(ctx context.Context, peer foundation.Hash) (*ssu
 		m.mu.Unlock()
 		return nil, ErrSSU2Session
 	}
+	existing := m.sessionsByPeer[peer]
+	m.mu.Unlock()
+	if existing != nil && !existing.idle(m.now(), m.idleTimeout) {
+		existing.sendMu.Lock()
+		viable := !existing.closing && existing.send != nil && !m.now().Before(existing.degradedUntil)
+		existing.sendMu.Unlock()
+		if viable {
+			return existing, nil
+		}
+		// A degraded session cannot accept new sends. Detach it from the
+		// canonical slot so this establishment supersedes it; it stays in
+		// sessionsByID and keeps draining its congestion window.
+		m.mu.Lock()
+		if m.sessionsByPeer[peer] == existing {
+			delete(m.sessionsByPeer, peer)
+		}
+		m.mu.Unlock()
+	}
+	m.mu.Lock()
 	if session := m.sessionsByPeer[peer]; session != nil {
 		if !session.idle(m.nowLocked(), m.idleTimeout) {
 			m.mu.Unlock()
@@ -2863,23 +2882,31 @@ func (m *SSU2Manager) sendSessionRequestLocked(pending *ssu2OutboundPending, tok
 	m.mu.RLock()
 	active := m.outbound[pending.peer] == pending && !pending.confirming
 	m.mu.RUnlock()
-	if !active || pending.initiator != nil {
+	if !active {
 		return
 	}
+	// A Retry supplies a fresh token that must go out in a new request, and
+	// BuildSessionRequest consumes handshake state, so every send builds its
+	// own initiator; the latest one owns ParseSessionCreated and DataCiphers.
 	initiator, err := dataplanessu2.NewInitiator(pending.address.static[:], pending.address.intro[:], pending.destinationID, pending.sourceID, m.networkID)
 	if err != nil {
 		m.markOutboundFailed(pending, err)
 		return
 	}
-	pending.initiator = initiator
+	previous := pending.initiator
 	m.mu.Lock()
 	if m.outbound[pending.peer] != pending || pending.confirming {
 		m.mu.Unlock()
+		initiator.ReleaseSensitive()
 		m.markOutboundFailed(pending, ErrSSU2Session)
 		return
 	}
+	pending.initiator = initiator
 	pending.phase = "session_request"
 	m.mu.Unlock()
+	if previous != nil {
+		previous.ReleaseSensitive()
+	}
 	packetNumber, err := randomPacketNumber()
 	if err == nil {
 		var payload []byte
@@ -2946,11 +2973,15 @@ func (m *SSU2Manager) sendSessionConfirmed(pending *ssu2OutboundPending) {
 	}
 	m.finishOutboundLocked(pending, nil)
 	sessionCount := len(m.sessionsByPeer)
+	canonical := m.sessionsByPeer[session.peer] == session
 	m.mu.Unlock()
 	if displaced != nil {
 		displaced.ReleaseSensitive()
 	}
 	installed = true
+	if m.logger != nil && !canonical {
+		m.logger.Debug("ssu2 outbound session non-canonical", "peer", routerHashDiagnostic(session.peer), "receive_id", session.receiveID)
+	}
 	if m.metrics != nil {
 		m.metrics.IncTransportConnections()
 		m.metrics.SetTransportSSU2Sessions(uint64(sessionCount))
@@ -2981,7 +3012,15 @@ func (m *SSU2Manager) handleTokenRequest(header dataplanessu2.LongHeader, remote
 
 func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, header dataplanessu2.LongHeader) {
 	m.mu.Lock()
-	if !m.runningLocked() || m.sessionsByID[header.DestinationID] != nil || m.inbound[header.DestinationID] != nil {
+	if !m.runningLocked() {
+		m.mu.Unlock()
+		return
+	}
+	if pending := m.inbound[header.DestinationID]; pending != nil && pending.sendID == header.SourceID {
+		m.mu.Unlock()
+		return
+	}
+	if existing := m.sessionsByID[header.DestinationID]; existing != nil && existing.sendID == header.SourceID {
 		m.mu.Unlock()
 		return
 	}
@@ -3033,12 +3072,47 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 		m.mu.Unlock()
 		pending.releaseSensitive()
 	})
+	var evicted *ssu2TransportSession
+	var stale *ssu2InboundPending
+	defer func() {
+		if stale != nil {
+			stale.timer.Stop()
+			stale.releaseSensitive()
+		}
+		if evicted != nil {
+			evicted.ReleaseSensitive()
+		}
+	}()
 	m.mu.Lock()
-	if !m.runningLocked() || m.sessionsByID[header.DestinationID] != nil || m.inbound[header.DestinationID] != nil {
+	if !m.runningLocked() {
 		m.mu.Unlock()
 		pending.timer.Stop()
 		pending.releaseSensitive()
 		return
+	}
+	if current := m.inbound[header.DestinationID]; current != nil {
+		if current.sendID == header.SourceID {
+			m.mu.Unlock()
+			pending.timer.Stop()
+			pending.releaseSensitive()
+			return
+		}
+		delete(m.inbound, header.DestinationID)
+		stale = current
+	}
+	if current := m.sessionsByID[header.DestinationID]; current != nil {
+		if current.sendID == header.SourceID {
+			m.mu.Unlock()
+			pending.timer.Stop()
+			pending.releaseSensitive()
+			return
+		}
+		// A cached NewToken lets an initiator reuse the destination ID of its
+		// superseded session. The retransmission that built the occupying
+		// session carries the same SourceID; a different SourceID is a new
+		// request and supersedes the stale occupant.
+		m.removeSessionLocked(current)
+		evicted = current
 	}
 	m.inbound[header.DestinationID] = pending
 	retained = true
@@ -3134,12 +3208,19 @@ func (m *SSU2Manager) processSessionConfirmedLocked(packet []byte, pending *ssu2
 		m.mu.Unlock()
 		m.removeInboundHeld(destinationID, pending)
 		session.ReleaseSensitive()
+		if m.logger != nil {
+			m.logger.Debug("ssu2 inbound session install failed", "peer", routerHashDiagnostic(peer.Hash()), "dest", destinationID)
+		}
 		return
 	}
 	delete(m.inbound, destinationID)
+	canonical := m.sessionsByPeer[session.peer] == session
 	m.mu.Unlock()
 	if displaced != nil {
 		displaced.ReleaseSensitive()
+	}
+	if m.logger != nil {
+		m.logger.Debug("ssu2 inbound session installed", "peer", routerHashDiagnostic(session.peer), "receive_id", session.receiveID, "canonical", canonical)
 	}
 	if pending.timer != nil {
 		pending.timer.Stop()
@@ -4191,12 +4272,20 @@ func (m *SSU2Manager) cachedNewTokenLocked(peer foundation.Hash, remote net.Addr
 }
 
 func (m *SSU2Manager) cachedNewTokenDestinationLocked(peer foundation.Hash, remote net.Addr) uint64 {
+	endpoint := remote.String()
+	best := uint64(0)
+	var bestExpiry time.Time
 	for _, lease := range m.newTokens {
-		if lease.peer == peer && lease.endpoint == remote.String() && lease.destination != 0 && lease.expires.After(m.nowLocked()) {
-			return lease.destination
+		if lease.peer != peer || lease.endpoint != endpoint || lease.destination == 0 || !lease.expires.After(m.nowLocked()) {
+			continue
+		}
+		fresher := lease.expires.After(bestExpiry)
+		tieBreak := lease.expires.Equal(bestExpiry) && lease.destination < best
+		if best == 0 || fresher || tieBreak {
+			best, bestExpiry = lease.destination, lease.expires
 		}
 	}
-	return 0
+	return best
 }
 
 func (m *SSU2Manager) consumeTokenLocked(token uint64, remote net.Addr, destinationID, sourceID uint64) bool {

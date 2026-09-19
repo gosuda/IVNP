@@ -103,6 +103,11 @@ func newSimNet(tb testing.TB, seed uint64) *simNet {
 	controlplane.SetDeterministicSeeds(&tunnelSeed, &explorerSeed, &muxSeed, &buildSeed)
 	dataplane.SetDeterministicSeeds(&streamSeed)
 	n := simnet.NewNetwork(simnet.Config{Seed: seed})
+	n.SetHook(func(event simnet.Event) {
+		if event.Kind == simnet.EventQueueDrop {
+			tb.Logf("simnet queue drop: %s -> %s (%d bytes)", event.From, event.To, event.Bytes)
+		}
+	})
 	s := &simNet{net: n}
 	tb.Cleanup(func() {
 		for _, node := range s.nodes {

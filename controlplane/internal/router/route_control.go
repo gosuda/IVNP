@@ -652,6 +652,7 @@ func (s *StreamingTunnelSender) resolveRoute(ctx context.Context, remote foundat
 	var lease foundation.NetworkDatabaseLease
 	var outbound controlplanetunnel.Entry
 	var circuit dataplane.TunnelCircuitInfo
+	var entries []controlplanetunnel.Entry
 	found, exhausted := false, false
 	for pass := 0; ; pass++ {
 		pick := s.leaseNext.Add(1) - 1
@@ -677,7 +678,7 @@ func (s *StreamingTunnelSender) resolveRoute(ctx context.Context, remote foundat
 		if err != nil {
 			return route, err
 		}
-		entries := s.pool.SelectableOutbound(now)
+		entries = s.pool.SelectableOutbound(now)
 		found, exhausted = false, false
 		for attempt := 0; attempt < leaseCount && !found; attempt++ {
 			if attempt != 0 {
@@ -742,6 +743,26 @@ func (s *StreamingTunnelSender) resolveRoute(ctx context.Context, remote foundat
 		}
 	}
 	if !found {
+		if s.logger != nil {
+			matched, marked := 0, 0
+			for _, entry := range entries {
+				if entry.Direction != controlplanetunnel.Outbound || entry.Owner != s.owner {
+					continue
+				}
+				matched++
+				candidate, ok := s.tunnels.InspectCircuit(entry.ID)
+				if !ok || candidate.Token != entry.Circuit || candidate.Owner != s.owner {
+					continue
+				}
+				s.remoteMu.RLock()
+				failedUntil := s.failedRoutes[failedRoutePath{remote: remote, circuit: entry.Circuit, gateway: lease.Gateway, tunnelID: lease.TunnelID}]
+				s.remoteMu.RUnlock()
+				if failedUntil > now {
+					marked++
+				}
+			}
+			s.logger.Debug("route resolve exhausted: circuit not found", "remote", foundation.EncodeI2PBase64(remote[:]), "entries", len(entries), "owner_matched", matched, "failure_marked", marked, "exhausted", exhausted)
+		}
 		return route, dataplane.TunnelErrCircuitNotFound
 	}
 	if route.Legacy {
