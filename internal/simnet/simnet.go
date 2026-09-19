@@ -16,6 +16,8 @@ package simnet
 
 import (
 	"container/heap"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"math/rand/v2"
 	"net"
@@ -132,8 +134,13 @@ type LinkConfig struct {
 	Jitter time.Duration
 	// DropRate is the independent loss probability per packet in [0,1].
 	DropRate float64
-	// DropProto scopes DropRate and BurstLoss to one protocol; zero applies
-	// loss to all packets. UDP datagram loss exercises transport retransmission.
+	// DropEvery drops every Nth proto-matching packet, counted on the link
+	// with no RNG — engagement is guaranteed regardless of scheduling order.
+	// Zero disables.
+	DropEvery uint64
+	// DropProto scopes DropRate, DropEvery, and BurstLoss to one protocol;
+	// zero applies loss to all packets. UDP datagram loss exercises transport
+	// retransmission.
 	DropProto Proto
 	// BurstLoss configures a Gilbert-Elliott burst loss model when non-nil.
 	// It is evaluated alongside DropRate.
@@ -141,6 +148,9 @@ type LinkConfig struct {
 	// DuplicateRate is the independent probability of extra delivered copies
 	// in [0,1].
 	DuplicateRate float64
+	// DuplicateEvery duplicates every Nth packet, counted on the link with
+	// no RNG. Zero disables.
+	DuplicateEvery uint64
 	// DuplicateDelay is the base extra delay added to duplicated packets.
 	// Zero delivers the duplicate concurrently with the original.
 	DuplicateDelay time.Duration
@@ -218,6 +228,8 @@ type linkState struct {
 	txFree   time.Time
 	down     bool
 	burstBad bool
+	sendSeq  uint64
+	dupSeq   uint64
 }
 
 // Host is one node with a single address. Sockets and listeners created on a
@@ -253,7 +265,6 @@ type Network struct {
 	conns     map[*TCPConn]struct{}
 	dialUsed  map[netip.AddrPort]struct{}
 	links     map[[2]netip.Addr]*linkState
-	linkSeq   uint64
 	events    eventHeap
 	seq       uint64
 	closed    bool
@@ -437,8 +448,7 @@ func (n *Network) SetLink(from, to netip.Addr, cfg LinkConfig) {
 	key := [2]netip.Addr{from, to}
 	l, ok := n.links[key]
 	if !ok {
-		n.linkSeq++
-		l = &linkState{rng: rand.New(rand.NewPCG(n.seed, n.linkSeq))}
+		l = n.newLinkState(from, to)
 		n.links[key] = l
 	}
 	l.cfg = cfg
@@ -488,11 +498,24 @@ func (n *Network) linkLocked(from, to netip.Addr) *linkState {
 	key := [2]netip.Addr{from, to}
 	l, ok := n.links[key]
 	if !ok {
-		n.linkSeq++
-		l = &linkState{rng: rand.New(rand.NewPCG(n.seed, n.linkSeq)), cfg: n.cfg.DefaultLink}
+		l = n.newLinkState(from, to)
+		l.cfg = n.cfg.DefaultLink
 		n.links[key] = l
 	}
 	return l
+}
+
+// newLinkState seeds one directed link's sampler from the pair identity, not
+// creation order: sha256(seed‖from‖to) means lazily created links get the
+// same stream as eagerly configured ones regardless of call scheduling.
+func (n *Network) newLinkState(from, to netip.Addr) *linkState {
+	var input [8 + 32]byte
+	binary.BigEndian.PutUint64(input[:8], n.seed)
+	a, b := from.As16(), to.As16()
+	copy(input[8:24], a[:])
+	copy(input[24:40], b[:])
+	sum := sha256.Sum256(input[:])
+	return &linkState{rng: rand.New(rand.NewPCG(n.seed, binary.BigEndian.Uint64(sum[:8])))}
 }
 
 // emitLocked records an event; caller holds n.mu.
@@ -535,14 +558,21 @@ func (n *Network) emitLocked(kind EventKind, proto Proto, from, to netip.AddrPor
 
 // drops reports whether link loss applies to proto.
 func (l *linkState) drops(proto Proto) bool {
-	return (l.cfg.DropRate > 0 || l.cfg.BurstLoss != nil) && (l.cfg.DropProto == 0 || l.cfg.DropProto == proto)
+	return (l.cfg.DropRate > 0 || l.cfg.DropEvery > 0 || l.cfg.BurstLoss != nil) && (l.cfg.DropProto == 0 || l.cfg.DropProto == proto)
 }
 
-// shouldDrop samples packet loss under both Bernoulli DropRate and the
-// Gilbert-Elliott two-state Markov burst loss model. Caller holds n.mu.
+// shouldDrop samples packet loss under the deterministic DropEvery counter,
+// Bernoulli DropRate, and the Gilbert-Elliott two-state Markov burst loss
+// model. Caller holds n.mu.
 func (l *linkState) shouldDrop(proto Proto) bool {
 	if !l.drops(proto) {
 		return false
+	}
+	if l.cfg.DropEvery > 0 {
+		l.sendSeq++
+		if l.sendSeq%l.cfg.DropEvery == 0 {
+			return true
+		}
 	}
 	if l.cfg.BurstLoss != nil {
 		b := l.cfg.BurstLoss
@@ -694,7 +724,15 @@ func (n *Network) sendDatagram(from, to netip.AddrPort, payload []byte) {
 	data := append([]byte(nil), payload...)
 	now := n.now()
 	n.scheduleLocked(now.Add(delay), func() { n.deliverDatagram(from, to, data, false) })
-	if link.cfg.DuplicateRate > 0 && link.rng.Float64() < link.cfg.DuplicateRate {
+	duplicate := false
+	if link.cfg.DuplicateEvery > 0 {
+		link.dupSeq++
+		duplicate = link.dupSeq%link.cfg.DuplicateEvery == 0
+	}
+	if !duplicate && link.cfg.DuplicateRate > 0 && link.rng.Float64() < link.cfg.DuplicateRate {
+		duplicate = true
+	}
+	if duplicate {
 		copies := max(link.cfg.DuplicateCount, 1)
 		for range copies {
 			dupDelay := delay + link.cfg.DuplicateDelay

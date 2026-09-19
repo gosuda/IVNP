@@ -60,6 +60,9 @@ func NewExplorer(config ExplorerConfig) (*Explorer, error) {
 	}
 	if config.Rand == nil {
 		config.Rand = cryptorand.Reader
+		if seed := deterministicExplorerSeed(); seed != nil {
+			config.Rand = newChainedReader(*seed, config.Table.Local())
+		}
 	}
 	minimum := min(explorerSteadyMinimum, config.Table.BucketCapacity())
 	if minimum <= 0 {

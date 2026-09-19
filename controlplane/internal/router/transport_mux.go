@@ -2,9 +2,7 @@ package router
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
-	"io"
 	"net"
 	"sync"
 	"time"
@@ -77,7 +75,7 @@ type TransportMux struct {
 	managerCount int
 	closeOnce    sync.Once
 	closeErr     error
-	random       io.Reader
+	random       func([]byte) (int, error)
 	setupSlots   chan struct{}
 	dataSender   *dataplane.RouterEstablishedSender
 }
@@ -102,7 +100,7 @@ func NewTransportMux(config TransportMuxConfig) (*TransportMux, error) {
 		ntcp2:      config.NTCP2,
 		ssu2:       config.SSU2,
 		metrics:    config.Metrics,
-		random:     rand.Reader,
+		random:     newMuxRandom(config.Database.Routers().Local()),
 		setupSlots: make(chan struct{}, 64),
 		dataSender: dataplane.RouterNewEstablishedSender(providers...),
 	}, nil
@@ -398,7 +396,7 @@ func (m *TransportMux) preferSSU2(capabilities transportCapabilities) bool {
 		return false
 	}
 	var choice [1]byte
-	if _, err := io.ReadFull(m.random, choice[:]); err != nil {
+	if _, err := m.random(choice[:]); err != nil {
 		return false
 	}
 	return choice[0]&3 != 0

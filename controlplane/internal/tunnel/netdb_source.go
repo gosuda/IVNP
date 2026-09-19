@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"slices"
 	"strconv"
+	"sync/atomic"
 
 	controlplanenetdb "gosuda.org/ivnp/controlplane/internal/netdb"
 	"gosuda.org/ivnp/foundation"
@@ -61,6 +62,7 @@ type NetDBOutboundBuildSource struct {
 	tunnelID               func() uint32
 	target                 func(uint64) foundation.Hash
 	selectionKey           foundation.Hash
+	targetSeq              atomic.Uint64
 	eligible               func(foundation.Hash) bool
 	connected              func(foundation.Hash) bool
 	ipRestriction          uint8
@@ -86,7 +88,7 @@ func NewNetDBOutboundBuildSource(config NetDBOutboundBuildSourceConfig) (*NetDBO
 	if config.CandidateLimit != 0 && config.CandidateLimit < config.Hops {
 		return nil, ErrNetDBBuildSourceConfig
 	}
-	selectionKey, err := newPoolSelectionKey(config.SelectionKey)
+	selectionKey, err := newPoolSelectionKey(config.SelectionKey, config.LocalRouter, true)
 	if err != nil {
 		return nil, err
 	}
@@ -173,14 +175,32 @@ func (s *NetDBOutboundBuildSource) selectionTarget(nowMillis uint64) (foundation
 	if s.target != nil {
 		return s.target(nowMillis), nil
 	}
-	var target foundation.Hash
-	_, err := rand.Read(target[:])
-	return target, err
+	return nextSelectionTarget(s.selectionKey, &s.targetSeq), nil
 }
 
-func newPoolSelectionKey(configured foundation.Hash) (foundation.Hash, error) {
+// nextSelectionTarget derives the per-build selection target from the pool
+// key and a monotonic counter: one pool key yields one deterministic target
+// sequence, and production pool keys are crypto-random per boot, so builds
+// keep the same entropy as fresh draws without consuming crypto/rand here.
+func nextSelectionTarget(key foundation.Hash, seq *atomic.Uint64) foundation.Hash {
+	var input [40]byte
+	copy(input[:32], key[:])
+	binary.BigEndian.PutUint64(input[32:40], seq.Add(1))
+	return sha256.Sum256(input[:])
+}
+
+func newPoolSelectionKey(configured, local foundation.Hash, outbound bool) (foundation.Hash, error) {
 	if configured != (foundation.Hash{}) {
 		return configured, nil
+	}
+	if seed := deterministicSelectionSeed(); seed != nil {
+		var input [65]byte
+		copy(input[:32], seed[:])
+		copy(input[32:64], local[:])
+		if outbound {
+			input[64] = 1
+		}
+		return sha256.Sum256(input[:]), nil
 	}
 	var key foundation.Hash
 	_, err := rand.Read(key[:])
@@ -334,6 +354,7 @@ type NetDBInboundBuildSource struct {
 	tunnelID               func() uint32
 	target                 func(uint64) foundation.Hash
 	selectionKey           foundation.Hash
+	targetSeq              atomic.Uint64
 	eligible               func(foundation.Hash) bool
 	connected              func(foundation.Hash) bool
 	ipRestriction          uint8
@@ -359,7 +380,7 @@ func NewNetDBInboundBuildSource(config NetDBInboundBuildSourceConfig) (*NetDBInb
 	if config.CandidateLimit != 0 && config.CandidateLimit < config.Hops {
 		return nil, ErrNetDBBuildSourceConfig
 	}
-	selectionKey, err := newPoolSelectionKey(config.SelectionKey)
+	selectionKey, err := newPoolSelectionKey(config.SelectionKey, config.LocalRouter, false)
 	if err != nil {
 		return nil, err
 	}
@@ -427,9 +448,7 @@ func (s *NetDBInboundBuildSource) selectionTarget(nowMillis uint64) (foundation.
 	if s.target != nil {
 		return s.target(nowMillis), nil
 	}
-	var target foundation.Hash
-	_, err := rand.Read(target[:])
-	return target, err
+	return nextSelectionTarget(s.selectionKey, &s.targetSeq), nil
 }
 
 // NewNetDBBuildStaticKeyLookup binds BuildManager validation to retained,
