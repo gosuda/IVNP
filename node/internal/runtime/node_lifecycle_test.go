@@ -275,6 +275,97 @@ func TestMetricsBearerAuthentication(t *testing.T) {
 	}
 }
 
+func embeddedDaemonConfig(t *testing.T, proxy bool) state.ConfigurationOperating {
+	t.Helper()
+	cfg := state.ConfigurationDefaultOperating()
+	cfg.DataDir, cfg.StateDir, cfg.StatePath, cfg.KeyPath = "", "", "", ""
+	cfg.NTCP2.Enabled, cfg.SSU2.Enabled, cfg.Reseed.Enabled = true, false, false
+	cfg.NTCP2.Bind = state.ConfigurationEndpoint{Host: "127.0.0.1"}
+	cfg.SAM.Enabled, cfg.AddressBook.Enabled, cfg.Control.Enabled = false, false, false
+	cfg.HTTPProxy.Enabled = proxy
+	return cfg
+}
+
+func ephemeralListener(context.Context, string, string) (net.Listener, error) {
+	return net.Listen("tcp", "127.0.0.1:0")
+}
+
+func TestEmbeddedDaemonMaintainsProxyDestination(t *testing.T) {
+	d, err := New(embeddedDaemonConfig(t, true), Options{
+		Embedded: true, Transport: &idleNodeTransport{}, SocketRuntime: nodeSockets{}, Listener: ListenerFunc(ephemeralListener),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("embedded start: %v", err)
+	}
+	defer func() {
+		_ = d.Close()
+		_ = d.Wait()
+	}()
+	if count := d.ActiveDestinationCount(); count != 1 {
+		t.Fatalf("embedded proxy destination count = %d, want 1", count)
+	}
+	dialCtx, dialCancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer dialCancel()
+	conn, dialErr := d.DialI2P(dialCtx, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b32.i2p:80")
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if errors.Is(dialErr, dataplane.RouterErrDefaultDestination) {
+		t.Fatalf("embedded dial still missing a default destination: %v", dialErr)
+	}
+}
+
+func TestEmbeddedDaemonWithoutProxyKeepsZeroDestinations(t *testing.T) {
+	d, err := New(embeddedDaemonConfig(t, false), Options{
+		Embedded: true, Transport: &idleNodeTransport{}, SocketRuntime: nodeSockets{}, Listener: ListenerFunc(ephemeralListener),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("embedded start: %v", err)
+	}
+	defer func() {
+		_ = d.Close()
+		_ = d.Wait()
+	}()
+	if count := d.ActiveDestinationCount(); count != 0 {
+		t.Fatalf("embedded destination count without proxies = %d, want 0", count)
+	}
+}
+
+func TestDaemonDoesNotDuplicatePersistentProxyDestination(t *testing.T) {
+	cfg := nodeTestConfig(t)
+	cfg.Tunnel.Enabled = true
+	cfg.HTTPProxy.Enabled = true
+	cfg.HTTPProxy.Address = state.ConfigurationEndpoint{Host: "127.0.0.1"}
+	d, err := New(cfg, Options{
+		Transport: &idleNodeTransport{}, SocketRuntime: nodeSockets{}, Listener: ListenerFunc(ephemeralListener),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("persistent start: %v", err)
+	}
+	defer func() {
+		_ = d.Close()
+		_ = d.Wait()
+	}()
+	if count := d.ActiveDestinationCount(); count != 1 {
+		t.Fatalf("persistent proxy destination count = %d, want 1", count)
+	}
+}
+
 func nodeTestConfig(t *testing.T) state.ConfigurationOperating {
 	t.Helper()
 	base := t.TempDir()

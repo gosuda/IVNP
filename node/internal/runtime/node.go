@@ -16,6 +16,7 @@ import (
 	"gosuda.org/ivnp/client"
 	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/dataplane"
+	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/observability"
@@ -56,6 +57,8 @@ type Daemon struct {
 	socks5          *client.ClientSOCKS5Proxy
 	metrics         *http.Server
 	metricsListener net.Listener
+	embedded        bool
+	proxyEndpoint   destination.DestinationEndpoint
 	mu              sync.Mutex
 	started         bool
 	closed          bool
@@ -91,7 +94,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 	if listener == nil {
 		listener = nativeListener{}
 	}
-	d := &Daemon{Controller: core, config: cfg, registry: registry, listener: listener, startReady: make(chan struct{})}
+	d := &Daemon{Controller: core, config: cfg, registry: registry, listener: listener, embedded: options.Embedded, startReady: make(chan struct{})}
 	complete := false
 	defer func() {
 		if !complete {
@@ -214,6 +217,9 @@ func (d *Daemon) Start(parent context.Context) error {
 	if err := d.Controller.Start(d.ctx); err != nil {
 		return fail(err)
 	}
+	if err := d.startProxyDestination(); err != nil {
+		return fail(err)
+	}
 	for _, service := range d.services {
 		if err := d.startNodeAllowed(); err != nil {
 			return fail(err)
@@ -266,6 +272,24 @@ func (d *Daemon) Start(parent context.Context) error {
 	return nil
 }
 
+// startProxyDestination gives embedded (memory-mode) daemons a client
+// destination so local proxies have a default streaming session. Persistent
+// daemons already restore their destinations from encrypted state.
+func (d *Daemon) startProxyDestination() error {
+	proxiesEnabled := d.config.HTTPProxy.Enabled || d.config.SOCKS5.Enabled
+	if !d.embedded || !d.config.Tunnel.Enabled || !proxiesEnabled {
+		return nil
+	}
+	endpoint, err := d.DestinationController().CreateDestination(d.ctx, destination.DestinationSpec{Name: "default"})
+	if err != nil {
+		return err
+	}
+	d.mu.Lock()
+	d.proxyEndpoint = endpoint
+	d.mu.Unlock()
+	return nil
+}
+
 func (d *Daemon) startNodeAllowed() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -299,6 +323,13 @@ func (d *Daemon) closeResources() error {
 			result = errors.Join(result, d.metrics.Close())
 		} else if d.metricsListener != nil {
 			result = errors.Join(result, d.metricsListener.Close())
+		}
+		d.mu.Lock()
+		endpoint := d.proxyEndpoint
+		d.proxyEndpoint = nil
+		d.mu.Unlock()
+		if endpoint != nil {
+			result = errors.Join(result, endpoint.Close())
 		}
 		d.closeErr = errors.Join(result, d.Controller.Close())
 	})

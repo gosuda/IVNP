@@ -27,6 +27,10 @@ type LeaseSetPolicy struct {
 // DestinationSpec holds configuration and keys for creating a local destination.
 // The destination controller creates an internal copy of the key material.
 type DestinationSpec struct {
+	// Name labels the created destination runtime; empty derives an anonymous
+	// SAM-style name. The name "default" claims the router's default streaming
+	// session used by dials that do not address a specific destination.
+	Name         string
 	Local        *foundation.LocalDestination
 	Policy       LeaseSetPolicy
 	Tunnels      *TunnelPoolConfig

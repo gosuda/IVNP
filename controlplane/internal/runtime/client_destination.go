@@ -1,6 +1,7 @@
 package noderuntime
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net"
@@ -119,7 +120,7 @@ func (c clientDestinationController) CreateDestination(ctx context.Context, spec
 		}
 	}
 	d.clientRuntimesMu.RUnlock()
-	name := "sam:" + local.B32()
+	name := cmp.Or(spec.Name, "sam:"+local.B32())
 	var durable *state.SecureStateEncryptedLeaseSetPolicy
 	if policy.Kind != DestinationPublicLS2 {
 		durable = policy.durable()

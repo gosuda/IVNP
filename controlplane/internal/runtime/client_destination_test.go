@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -180,6 +181,37 @@ func TestClosingDestinationReservesIdentityUntilUnregistered(t *testing.T) {
 	}
 	if _, err := controller.CreateDestination(t.Context(), destination.DestinationSpec{Local: source}); err != nil {
 		t.Fatalf("reuse identity after close completed: %v", err)
+	}
+}
+
+func TestDestinationSpecNameLabelsRuntime(t *testing.T) {
+	cfg := daemonTestConfig(t)
+	cfg.Tunnel.Enabled = true
+	d, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets), Logger: discardNATLogger()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := d.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	controller := d.DestinationController()
+	named, err := controller.CreateDestination(t.Context(), destination.DestinationSpec{Name: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = named.Close() })
+	if name := named.(*clientDestinationEndpoint).runtime.name; name != "default" {
+		t.Fatalf("named runtime = %q, want default", name)
+	}
+	anonymous, err := controller.CreateDestination(t.Context(), destination.DestinationSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = anonymous.Close() })
+	if name := anonymous.(*clientDestinationEndpoint).runtime.name; !strings.HasPrefix(name, "sam:") {
+		t.Fatalf("anonymous runtime name = %q, want sam: prefix", name)
 	}
 }
 
