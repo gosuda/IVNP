@@ -298,8 +298,17 @@ func (s *WebUIServer) Close() error {
 	var result error
 	if s.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		result = s.server.Shutdown(ctx)
+		graceful := s.server.Shutdown(ctx)
 		cancel()
+		if graceful != nil {
+			// Shutdown can miss a keep-alive connection racing from active to
+			// idle and block for the whole grace window. Force-close finishes
+			// the job, so only a force-close failure is a close failure.
+			result = s.server.Close()
+			if result != nil {
+				result = errors.Join(graceful, result)
+			}
+		}
 	}
 	s.subscribersMu.Lock()
 	for subscriber := range s.subscribers {
