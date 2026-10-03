@@ -2,6 +2,7 @@ package garlicecies
 
 import (
 	"crypto/ecdh"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -1012,7 +1013,7 @@ func (s *session) beginForwardDH() error {
 			s.terminated = true
 			return ErrRatchetTagExhausted
 		}
-		private, err := cryptography.GenerateX25519PrivateKey(nil)
+		private, err := cryptography.GenerateX25519PrivateKey(rand.Reader)
 		if err != nil {
 			return err
 		}
@@ -1087,7 +1088,7 @@ func (m *RatchetManager) receiveForwardKeyLocked(s *session, current *tagSet, ke
 		if localID == 32767 {
 			return ErrRatchetTagExhausted
 		}
-		local, err = cryptography.GenerateX25519PrivateKey(nil)
+		local, err = cryptography.GenerateX25519PrivateKey(rand.Reader)
 		if err != nil {
 			return err
 		}

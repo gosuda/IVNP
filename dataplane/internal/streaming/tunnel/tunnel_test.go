@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -452,6 +453,10 @@ func TestPendingSendLeaseSurvivesConcurrentNetworkClose(t *testing.T) {
 			_ = network.Close()
 			t.Fatal("Write did not publish pending wire")
 		default:
+			// Yield the single P so the Write goroutine can publish; a bare
+			// select-default spin starves it under GOMAXPROCS=1 once sysmon
+			// retakes are disabled by the dst overlay.
+			runtime.Gosched()
 		}
 	}
 
@@ -471,6 +476,7 @@ func TestPendingSendLeaseSurvivesConcurrentNetworkClose(t *testing.T) {
 			network.outboundMu.Unlock()
 			t.Fatal("concurrent close did not release pending owner")
 		default:
+			runtime.Gosched()
 		}
 	}
 	if got := lease.refs.Load(); got != 1 || lease.slab == nil {

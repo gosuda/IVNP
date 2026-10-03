@@ -7,6 +7,20 @@
 // bubble, which parks with waitReasonSynctestWaitGroupWait and lets virtual
 // time advance. Outside a bubble every patched call keeps its stock behavior.
 //
+// Two further patches remove wall-clock inputs to a GOMAXPROCS=1 dst run:
+// runtime/rand.go seeds the global PRNG from a fixed constant (select
+// pollorder shuffles, map iteration starts, and per-m rand state become
+// process-independent), and runtime/proc.go stops sysmon from retaking a P
+// mid-syscall (a retake requeues the returning goroutine onto the global run
+// queue, reordering it relative to the local queue). Matched runs also need
+// GODEBUG=cryptocustomrand=1 — without it Go 1.27's crypto packages bypass a
+// swapped crypto/rand.Reader for the internal DRBG — and GOGC=off to keep GC
+// marker goroutines out of the single P's run queue. Finally,
+// crypto/internal/randutil.MaybeReadByte is neutralized: it steals a byte
+// from custom readers with 50% probability under cryptocustomrand=1, while
+// dst fixtures pass exactly-sized readers that must observe exact
+// consumption.
+//
 // Patches are applied to the *current* GOROOT's sources, so the tool is
 // portable across platforms and Go versions. Every anchor must match exactly
 // once: a Go toolchain update that moves the code fails the tool loudly
@@ -73,8 +87,68 @@ func internal_sync_runtime_SemacquireWaitGroup(addr *uint32, synctestDurable boo
 	}
 	semacquire1(addr, false, semaBlockProfile|semaMutexProfile, 0, reason)
 }
-
 `
+
+	// randSeedAnchor is the stock randinit seeding block that randSeedPatch
+	// replaces, and randSeedConstDecl declares the fixed seed it references.
+	randSeedAnchor = "\tseed := &globalRand.seed\n" +
+		"\tif len(startupRand) >= 16 &&\n" +
+		"\t\t// Check that at least the first two words of startupRand weren't\n" +
+		"\t\t// cleared by any libc initialization.\n" +
+		"\t\t!allZero(startupRand[:8]) && !allZero(startupRand[8:16]) {\n" +
+		"\t\tfor i, c := range startupRand {\n" +
+		"\t\t\tseed[i%len(seed)] ^= c\n" +
+		"\t\t}\n" +
+		"\t} else {\n" +
+		"\t\tif readRandom(seed[:]) != len(seed) || allZero(seed[:]) {\n" +
+		"\t\t\t// readRandom should never fail, but if it does we'd rather\n" +
+		"\t\t\t// not make Go binaries completely unusable, so make up\n" +
+		"\t\t\t// some random data based on the current time.\n" +
+		"\t\t\treadRandomFailed = true\n" +
+		"\t\t\treadTimeRandom(seed[:])\n" +
+		"\t\t}\n" +
+		"\t}\n"
+
+	randSeedPatch = "\tseed := &globalRand.seed\n" +
+		"\t// IVNP dst overlay: pin the runtime PRNG seed so select pollorder\n" +
+		"\t// shuffles (selectgo), map iteration starts (maps_rand), and per-m\n" +
+		"\t// rand state (mrandinit) are identical across processes.\n" +
+		"\tfor i := range seed {\n" +
+		"\t\tseed[i] = ivnpDstRandSeed[i%len(ivnpDstRandSeed)]\n" +
+		"\t}\n"
+
+	randSeedConstDecl = "\n// ivnpDstRandSeed keys the fixed runtime PRNG used by dst overlay builds.\n" +
+		"const ivnpDstRandSeed = \"ivnp-dst-replay-v1\"\n"
+
+	readTimeRandomComment = "// readTimeRandom stretches any entropy in the current time"
+
+	retakeAnchor = "func retake(now int64) uint32 {\n\tn := 0\n"
+
+	retakeGuard = "func retake(now int64) uint32 {\n" +
+		"\t// IVNP dst overlay: sysmon never retakes a P. A P handed off\n" +
+		"\t// mid-syscall requeues the returning goroutine onto the global run\n" +
+		"\t// queue, reordering it relative to the local run queue — a\n" +
+		"\t// wall-clock-dependent input under GOMAXPROCS=1. The remainder of\n" +
+		"\t// this function is unreachable.\n" +
+		"\treturn 0\n" +
+		"\tn := 0\n"
+
+	// randutilMaybeReadByte is the stock body of MaybeReadByte; the
+	// replacement makes it a no-op so pinned test readers see exact
+	// consumption.
+	randutilBody = "\tif rand.Uint64()&1 == 1 {\n" +
+		"\t\treturn\n" +
+		"\t}\n" +
+		"\tvar buf [1]byte\n" +
+		"\tr.Read(buf[:])\n"
+
+	randutilNoOp = "\t// IVNP dst overlay: never steal a byte from custom readers. dst\n" +
+		"\t// fixtures pin entropy to exactly-sized readers; the 50% skip is\n" +
+		"\t// itself nondeterministic consumption.\n"
+
+	randutilImport = "\t\"io\"\n\t\"math/rand/v2\"\n"
+
+	randutilImportPatched = "\t\"io\"\n"
 
 	markerFile = `package sync
 
@@ -123,6 +197,17 @@ func patches() []patch {
 						"\t\t\t\truntime_SemacquireMutex(&m.sema, queueLifo, 2)\n" +
 						"\t\t\t}\n",
 				},
+				{
+					anchor: "\t\t\tstarving = starving || runtime_nanotime()-waitStartTime > starvationThresholdNs\n",
+					replacement: "\t\t\tif durableWait {\n" +
+						"\t\t\t\t// Starvation mode keys off real nanotime, a wall-clock\n" +
+						"\t\t\t\t// input; stay in normal mode inside bubbles so lock handoff\n" +
+						"\t\t\t\t// order is a pure function of the event schedule.\n" +
+						"\t\t\t\tstarving = false\n" +
+						"\t\t\t} else {\n" +
+						"\t\t\t\tstarving = starving || runtime_nanotime()-waitStartTime > starvationThresholdNs\n" +
+						"\t\t\t}\n",
+				},
 			},
 		},
 		{
@@ -147,6 +232,39 @@ func patches() []patch {
 						"\t\t} else {\n" +
 						"\t\t\truntime_SemacquireRWMutex(&rw.writerSem, false, 0)\n" +
 						"\t\t}\n",
+				},
+			},
+		},
+		{
+			file: "runtime/rand.go",
+			edits: []edit{
+				{
+					anchor:      randSeedAnchor,
+					replacement: randSeedPatch,
+				},
+				{
+					anchor:      readTimeRandomComment,
+					replacement: randSeedConstDecl + "\n" + readTimeRandomComment,
+				},
+			},
+		},
+		{
+			file: "runtime/proc.go",
+			edits: []edit{{
+				anchor:      retakeAnchor,
+				replacement: retakeGuard,
+			}},
+		},
+		{
+			file: "crypto/internal/randutil/randutil.go",
+			edits: []edit{
+				{
+					anchor:      randutilImport,
+					replacement: randutilImportPatched,
+				},
+				{
+					anchor:      randutilBody,
+					replacement: randutilNoOp,
 				},
 			},
 		},

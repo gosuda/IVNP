@@ -43,10 +43,15 @@ jobs:
       # logs are free on pass and present when a rare flake finally trips.
       DST_LOG: '1'
       # Serialize scheduling inside the synctest bubble: one P runs goroutines
-      # in runqueue order and async preemption stays off, so same-tick wakeups
-      # replay in program order instead of racing across threads.
+      # in runqueue order, async preemption stays off, and crypto packages
+      # honor the pinned crypto/rand.Reader, so same-tick wakeups replay in
+      # program order instead of racing across threads.
       GOMAXPROCS: '1'
-      GODEBUG: 'asyncpreemptoff=1'
+      GODEBUG: 'asyncpreemptoff=1,cryptocustomrand=1'
+      # Keep GC marker goroutines out of the single P's run queue so
+      # executions replay identically (the dst overlay pins runtime
+      # randomness and neutralizes sysmon P retakes).
+      GOGC: 'off'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
