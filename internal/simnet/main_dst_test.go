@@ -1,6 +1,6 @@
 //go:build dst || synctest
 
-package ivnp
+package simnet
 
 import (
 	"fmt"

@@ -9,6 +9,11 @@ import (
 // Mutex is a capacity-1 channel semaphore for testing under testing/synctest.
 // Unlike sync.Mutex, a queued Lock parks on a channel — durably blocked —
 // so a holder waiting on virtual-time work cannot freeze the simulated clock.
+//
+// Contract: the zero value must be first used inside the synctest bubble that
+// owns it (lazy channel creation is bubble-scoped), and a given instance must
+// not be shared across bubbles. Acquisition order is not FIFO: after an Unlock
+// all queued Lockers race for the semaphore.
 type Mutex struct {
 	once sync.Once
 	sem  chan struct{}

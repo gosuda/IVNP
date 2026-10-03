@@ -171,11 +171,23 @@ func (c *UDPConn) ReadMsgUDPAddrPort(b, oob []byte) (n, oobn, flags int, addr ne
 			return copy(b, d.data), 0, 0, d.from, nil
 		case <-c.closed:
 			stopTimer(timer)
+			// A datagram delivered at the same instant wins over close.
+			select {
+			case d := <-c.in:
+				return copy(b, d.data), 0, 0, d.from, nil
+			default:
+			}
 			return 0, 0, 0, netip.AddrPort{}, ErrClosed
 		case <-gen:
 			stopTimer(timer)
 			continue
 		case <-deadline:
+			// A datagram delivered at the same instant wins over the deadline.
+			select {
+			case d := <-c.in:
+				return copy(b, d.data), 0, 0, d.from, nil
+			default:
+			}
 			return 0, 0, 0, netip.AddrPort{}, timeoutError{op: "read"}
 		}
 	}

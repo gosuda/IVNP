@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"errors"
+	"slices"
 	"sort"
 
 	"gosuda.org/ivnp/dataplane"
@@ -127,7 +128,7 @@ func (p *Pool) Remove(entry Entry) bool {
 	return true
 }
 
-// Clear empties the pool and returns the list of removed tunnel IDs.
+// Clear empties the pool and returns the list of removed tunnel IDs in ascending order.
 func (p *Pool) Clear() []uint32 {
 	if p == nil {
 		return nil
@@ -137,6 +138,7 @@ func (p *Pool) Clear() []uint32 {
 	for id := range p.tunnels {
 		ids = append(ids, id)
 	}
+	slices.Sort(ids)
 	clear(p.tunnels)
 	p.mu.Unlock()
 	return ids
@@ -161,7 +163,8 @@ func (p *Pool) Select(direction Direction, now uint64) (Entry, bool) {
 		}
 		selectSelected := e.Direction == direction && e.Expires > now
 		if selectSelected {
-			selectSelected = (!ok || e.Expires > best.Expires)
+			// Map iteration order must not break ties; lowest ID wins, as in promoteOutboundLocked.
+			selectSelected = (!ok || e.Expires > best.Expires || e.Expires == best.Expires && e.ID < best.ID)
 		}
 		if selectSelected {
 			best, ok = e, true

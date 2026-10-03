@@ -3,6 +3,7 @@
 package ivnp
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -14,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,10 +50,35 @@ const (
 	simHealthProbeFailureThreshold = 1
 )
 
+// dstLogSink captures DST_LOG output in memory. Writing to stderr from
+// inside the synctest bubble is a real syscall: syscall completion timing
+// perturbs same-instant goroutine wakeup order, injecting nondeterminism no
+// seed can pin. The buffer is flushed to stderr at cleanup, outside the
+// simulation timeline.
+type dstLogSink struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *dstLogSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *dstLogSink) flush() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.buf.Len() > 0 {
+		_, _ = s.buf.WriteTo(os.Stderr)
+	}
+}
+
 // simNet hosts a fleet of embedded routers over one simnet.Network.
 type simNet struct {
 	net   *simnet.Network
 	nodes []*simNode
+	log   *dstLogSink // non-nil only when DST_LOG is set
 }
 
 // simNode couples one sim host to one running embedded router.
@@ -86,10 +113,17 @@ type simNodeConfig struct {
 // If DST_SEED or IVNP_DST_SEED is present in the environment, it overrides seed.
 func newSimNet(tb testing.TB, seed uint64) *simNet {
 	tb.Helper()
-	if env := cmp.Or(os.Getenv("DST_SEED"), os.Getenv("IVNP_DST_SEED")); env != "" {
-		if s, err := strconv.ParseUint(env, 10, 64); err == nil {
-			seed = s
+	env := cmp.Or(os.Getenv("DST_SEED"), os.Getenv("IVNP_DST_SEED"))
+	if env != "" {
+		name := "IVNP_DST_SEED"
+		if os.Getenv("DST_SEED") != "" {
+			name = "DST_SEED"
 		}
+		s, err := strconv.ParseUint(env, 10, 64)
+		if err != nil {
+			tb.Fatalf("invalid %s=%q: %v", name, env, err)
+		}
+		seed = s
 	}
 	tb.Logf("simulation seed %d (reproduce: DST_SEED=%d)", seed, seed)
 	var identitySeed [32]byte
@@ -109,12 +143,18 @@ func newSimNet(tb testing.TB, seed uint64) *simNet {
 		}
 	})
 	s := &simNet{net: n}
+	if os.Getenv("DST_LOG") != "" {
+		s.log = &dstLogSink{}
+	}
 	tb.Cleanup(func() {
 		for _, node := range s.nodes {
 			_ = node.router.Close()
 		}
 		if err := n.Close(); err != nil {
 			tb.Errorf("simnet close: %v", err)
+		}
+		if s.log != nil {
+			s.log.flush()
 		}
 		foundation.SetDeterministicRandomSource(nil)
 		controlplane.SetDeterministicSeeds(nil, nil, nil, nil)
@@ -146,8 +186,8 @@ func (s *simNet) AddRouter(tb testing.TB, cfg simNodeConfig) *simNode {
 	}
 	routerCfg := DefaultRouterConfig()
 	routerCfg.Logger = slog.New(slog.DiscardHandler)
-	if os.Getenv("DST_LOG") != "" {
-		routerCfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})).With("node", cfg.Name)
+	if s.log != nil {
+		routerCfg.Logger = slog.New(slog.NewTextHandler(s.log, &slog.HandlerOptions{Level: slog.LevelDebug})).With("node", cfg.Name)
 	}
 	opts := []NetworkOption{
 		WithPublicParticipation(cfg.Participation),

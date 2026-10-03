@@ -9,6 +9,13 @@ import (
 // RWMutex parks contended readers and writers on bubble-local channels so
 // testing/synctest can advance time. Like sync.RWMutex, it must not be copied
 // after first use, and a waiting writer prevents new readers from entering.
+//
+// Contract: the zero value must be first used inside the synctest bubble that
+// owns it (lazy channel creation is bubble-scoped), and a given instance must
+// not be shared across bubbles. Acquisition order is not FIFO: waiters race
+// after a broadcast wakeup, and TryRLock may succeed while a writer waits
+// only when no writer is queued — reader/writer barging matches sync.RWMutex's
+// TryRLock caveat rather than strict queue fairness.
 type RWMutex struct {
 	mu      Mutex
 	readers int

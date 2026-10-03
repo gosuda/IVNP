@@ -5,6 +5,11 @@ package durable
 // WaitGroup mirrors sync.WaitGroup but parks Wait on a channel — durably
 // blocked — so testing/synctest can advance the fake clock while a goroutine
 // joins workers that are themselves waiting on virtual-time work.
+//
+// Contract: the zero value must be first used inside the synctest bubble that
+// owns it (lazy channel creation is bubble-scoped), and a given instance must
+// not be shared across bubbles. Completion wakeups broadcast, so concurrent
+// Waiters race; there is no FIFO handoff.
 // Invariant: drained is non-nil exactly while count > 0.
 type WaitGroup struct {
 	mu      Mutex
