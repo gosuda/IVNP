@@ -4,10 +4,10 @@ import (
 	"errors"
 	"slices"
 	"sort"
+	"sync"
 
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 )
 
 var (
@@ -43,7 +43,7 @@ type Entry struct {
 
 // Pool stores active tunnel descriptors with capacity bounds and expiration tracking.
 type Pool struct {
-	mu             durable.RWMutex
+	mu             sync.RWMutex
 	max            int
 	owner          foundation.Hash
 	tunnels        map[uint32]Entry

@@ -13,7 +13,6 @@ import (
 	dataplanestreamingtunnel "gosuda.org/ivnp/dataplane/internal/streaming/tunnel"
 	dataplanetunnel "gosuda.org/ivnp/dataplane/internal/tunnel"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/observability"
@@ -45,7 +44,7 @@ type PreparedRouteSender struct {
 	tunnels       PreparedTunnelWriter
 	now           func() uint64
 	nextID        MessageIDSource
-	lifecycleMu   durable.RWMutex
+	lifecycleMu   sync.RWMutex
 	released      bool
 	limiter       *DestinationBandwidthLimiter
 	scratch       chan *streamingSenderScratch

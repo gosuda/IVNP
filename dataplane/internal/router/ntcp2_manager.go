@@ -20,7 +20,6 @@ import (
 
 	dataplanentcp2 "gosuda.org/ivnp/dataplane/internal/transport/ntcp2"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/observability"
@@ -85,7 +84,7 @@ type NTCP2Manager struct {
 	idleTimeout        time.Duration
 	maxClockSkew       time.Duration
 	maxSessions        int
-	mu                 durable.RWMutex
+	mu                 sync.RWMutex
 	started            bool
 	listener           net.Listener
 	bindings           TransportBindings
@@ -94,7 +93,7 @@ type NTCP2Manager struct {
 	err                error
 	done               chan struct{}
 	close              sync.Once
-	wg                 durable.WaitGroup
+	wg                 sync.WaitGroup
 	pending            chan struct{}
 	sessions           map[foundation.Hash]*dataplanentcp2.Session
 	sessionsInbound    map[foundation.Hash]bool

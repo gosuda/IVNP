@@ -20,7 +20,6 @@ import (
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/observability"
 )
 
@@ -210,7 +209,7 @@ type BuildManager struct {
 	creators         map[*creatorAttempt]struct{}
 	claims           map[*creatorClaim]struct{}
 
-	lifecycleMu     durable.RWMutex
+	lifecycleMu     sync.RWMutex
 	mu              sync.Mutex
 	pending         map[uint32]*pendingOutboundBuild
 	pendingInbound  map[uint32]*pendingInboundBuild

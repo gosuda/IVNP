@@ -17,7 +17,6 @@ import (
 	dataplanestreaming "gosuda.org/ivnp/dataplane/internal/streaming"
 	dataplanestreamingtunnel "gosuda.org/ivnp/dataplane/internal/streaming/tunnel"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/observability"
 )
 
@@ -75,9 +74,9 @@ type GarlicReceiverConfig struct {
 type GarlicReceiver struct {
 	service        *Service
 	destinations   map[foundation.Hash]*garlicDestinationState
-	lifecycleMu    durable.RWMutex
+	lifecycleMu    sync.RWMutex
 	released       bool
-	destinationsMu durable.RWMutex
+	destinationsMu sync.RWMutex
 	replyKeys      *dataplanegarlic.ReplyKeyRegistry
 	now            func() uint64
 	metrics        *observability.Registry

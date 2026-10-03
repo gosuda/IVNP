@@ -7,10 +7,16 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"gosuda.org/ivnp/internal/simnet"
 )
+
+// Dst tests require the durable-semaphore overlay (tools/dstoverlay): stock
+// sync lock waits are not idle in a synctest bubble, so without -overlay the
+// virtual clock freezes. This reference fails compilation without the overlay.
+var _ = sync.DurableMutexOverlay
 
 // TestMain serializes goroutine scheduling for deterministic simulation: one
 // P runs runnable goroutines in runqueue order rather than racing them across

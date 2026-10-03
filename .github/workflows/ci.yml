@@ -53,10 +53,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Generate durable-sync overlay
+        # Patches the current GOROOT's sync primitives so lock waits inside a
+        # synctest bubble park durably and the virtual clock can advance.
+        run: go run ./tools/dstoverlay -write "$RUNNER_TEMP/dst_overlay.json" -dir "$RUNNER_TEMP/dst_overlay_src"
       - name: Run deterministic mesh and chaos tests
-        run: go test -count=1 -tags dst -run 'TestSim|TestDeterministic' .
+        run: go test -count=1 -tags dst -overlay="$RUNNER_TEMP/dst_overlay.json" -run 'TestSim|TestDeterministic' .
       - name: Run simulation-tagged unit tests
-        run: go test -count=1 -tags dst ./internal/simnet ./internal/durable ./dataplane/internal/streaming/tunnel ./dataplane/internal/router ./controlplane/internal/router
+        run: go test -count=1 -tags dst -overlay="$RUNNER_TEMP/dst_overlay.json" ./internal/simnet ./dataplane/internal/streaming/tunnel ./dataplane/internal/router ./controlplane/internal/router
 
   cross-platform:
     name: ${{ matrix.os }} / ${{ matrix.arch }}

@@ -17,7 +17,6 @@ import (
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/observability"
 	"gosuda.org/ivnp/state"
@@ -92,7 +91,7 @@ func (p DestinationPolicy) durable() *state.SecureStateEncryptedLeaseSetPolicy {
 }
 
 type destinationBuildReplyRegistry struct {
-	mu       durable.RWMutex
+	mu       sync.RWMutex
 	next     uint64
 	handlers []destinationBuildReplyRegistration
 }
@@ -159,7 +158,7 @@ func (r *destinationBuildReplyRegistry) HandleReply(message foundation.I2NPMessa
 }
 
 type destinationRequestRegistry struct {
-	mu       durable.RWMutex
+	mu       sync.RWMutex
 	next     uint64
 	handlers []destinationRequestRegistration
 }
@@ -246,7 +245,7 @@ func (r *destinationRequestRegistry) Close() error {
 }
 
 type destinationPublisherRegistry struct {
-	mu         durable.RWMutex
+	mu         sync.RWMutex
 	next       uint64
 	publishers []destinationPublisherRegistration
 }
@@ -301,7 +300,7 @@ func (r *destinationPublisherRegistry) Maintain(ctx context.Context) (int, error
 		sent int
 		err  error
 	}, len(publishers))
-	var group durable.WaitGroup
+	var group sync.WaitGroup
 	group.Add(workers)
 	for range workers {
 		go func() {

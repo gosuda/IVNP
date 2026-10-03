@@ -19,7 +19,6 @@ import (
 	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 )
 
 const embeddedTestTimeout = 20 * time.Second
@@ -27,7 +26,7 @@ const embeddedTestTimeout = 20 * time.Second
 var errMemoryIdentityPublication = errors.New("memory network requires control-plane identity publication")
 
 type embeddedMemoryNetwork struct {
-	mu        durable.RWMutex
+	mu        sync.RWMutex
 	endpoints map[foundation.Hash]*embeddedMemoryTransport
 	flood     foundation.Hash
 	floodDB   *controlplane.NetworkDatabase

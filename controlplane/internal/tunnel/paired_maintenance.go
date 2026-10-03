@@ -8,7 +8,6 @@ import (
 
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 )
 
 var (
@@ -72,7 +71,7 @@ type PairedPoolMaintainer struct {
 	maintenanceMu          sync.Mutex
 	inboundSourceMu        sync.Mutex
 	outboundSourceMu       sync.Mutex
-	lifecycleMu            durable.RWMutex
+	lifecycleMu            sync.RWMutex
 	ctx                    context.Context
 	cancel                 context.CancelFunc
 	pairIndex              atomic.Uint64

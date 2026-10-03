@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 )
 
@@ -76,7 +75,7 @@ type LookupResponder struct {
 	started bool
 	closed  bool
 	cancel  context.CancelFunc
-	wg      durable.WaitGroup
+	wg      sync.WaitGroup
 	err     error
 }
 

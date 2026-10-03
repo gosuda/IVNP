@@ -22,7 +22,6 @@ import (
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
 	"gosuda.org/ivnp/interfaces/stream"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/internal/pool"
 )
@@ -135,7 +134,7 @@ type TunnelNetwork struct {
 	handshakeTimeout     time.Duration
 	handshakeObserver    HandshakeObserver
 
-	mu             durable.RWMutex
+	mu             sync.RWMutex
 	listeners      map[uint16]*tunnelListener
 	byID           map[uint32]*tunnelConn
 	outboundPorts  map[uint16]int
@@ -148,14 +147,14 @@ type TunnelNetwork struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	done           chan struct{}
-	outboundMu     durable.RWMutex
+	outboundMu     sync.RWMutex
 	outbound       chan sendRequest
 	retryUpdates   chan *tunnelConn
 	cleanup        chan struct{}
 	completionPool sync.Pool
 	deliveryQueues []chan sendRequest
 	closeOnce      sync.Once
-	wg             durable.WaitGroup
+	wg             sync.WaitGroup
 }
 
 // NetworkStats holds connection count and aggregate flow-control metrics.
