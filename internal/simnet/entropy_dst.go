@@ -6,9 +6,11 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"os"
 	"strconv"
+	"sync"
 )
 
 // PinSessionEntropy points the crypto/rand global reader at a seeded ChaCha8
@@ -24,8 +26,22 @@ func PinSessionEntropy(seed uint64) (restore func()) {
 	previous := cryptorand.Reader
 	var raw [32]byte
 	binary.LittleEndian.PutUint64(raw[:8], seed)
-	cryptorand.Reader = rand.NewChaCha8(raw)
+	cryptorand.Reader = &lockedReader{r: rand.NewChaCha8(raw)}
 	return func() { cryptorand.Reader = previous }
+}
+
+// lockedReader serializes draws because readers such as math/rand/v2.ChaCha8
+// are not safe for concurrent use, while handshakes read crypto/rand from
+// several goroutines at once.
+type lockedReader struct {
+	mu sync.Mutex
+	r  io.Reader
+}
+
+func (l *lockedReader) Read(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.r.Read(p)
 }
 
 // SessionEntropySeed resolves the session-entropy seed from DST_SEED or
