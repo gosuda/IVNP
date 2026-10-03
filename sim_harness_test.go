@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -113,22 +112,19 @@ type simNodeConfig struct {
 // If DST_SEED or IVNP_DST_SEED is present in the environment, it overrides seed.
 func newSimNet(tb testing.TB, seed uint64) *simNet {
 	tb.Helper()
-	env := cmp.Or(os.Getenv("DST_SEED"), os.Getenv("IVNP_DST_SEED"))
-	if env != "" {
-		name := "IVNP_DST_SEED"
-		if os.Getenv("DST_SEED") != "" {
-			name = "DST_SEED"
-		}
-		s, err := strconv.ParseUint(env, 10, 64)
-		if err != nil {
-			tb.Fatalf("invalid %s=%q: %v", name, env, err)
-		}
-		seed = s
+	resolved, err := simnet.SessionEntropySeed(seed)
+	if err != nil {
+		tb.Fatal(err)
 	}
+	seed = resolved
 	tb.Logf("simulation seed %d (reproduce: DST_SEED=%d)", seed, seed)
 	var identitySeed [32]byte
 	binary.LittleEndian.PutUint64(identitySeed[:8], seed)
 	foundation.SetDeterministicRandomSource(rand.NewChaCha8(identitySeed))
+	// Session-level handshake entropy reads crypto/rand, a syscall inside the
+	// bubble whose completion timing decides same-instant wakeup order. Pin it
+	// to the same seed so the whole fleet replays, not just the topology.
+	restoreEntropy := simnet.PinSessionEntropy(seed)
 	tunnelSeed := foundation.Hash(sha256.Sum256(append(identitySeed[:], "tunnel"...)))
 	explorerSeed := foundation.Hash(sha256.Sum256(append(identitySeed[:], "explorer"...)))
 	muxSeed := foundation.Hash(sha256.Sum256(append(identitySeed[:], "mux"...)))
@@ -159,6 +155,7 @@ func newSimNet(tb testing.TB, seed uint64) *simNet {
 		foundation.SetDeterministicRandomSource(nil)
 		controlplane.SetDeterministicSeeds(nil, nil, nil, nil)
 		dataplane.SetDeterministicSeeds(nil)
+		restoreEntropy()
 	})
 	return s
 }

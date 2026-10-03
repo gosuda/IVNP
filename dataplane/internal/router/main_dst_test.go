@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"gosuda.org/ivnp/internal/simnet"
 )
 
 // TestMain serializes goroutine scheduling for deterministic simulation: one
@@ -21,6 +23,14 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "dst tests require GODEBUG=asyncpreemptoff=1")
 		os.Exit(1)
 	}
+	seed, err := simnet.SessionEntropySeed(42)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	// Handshake key generation draws crypto/rand: an entropy syscall inside
+	// the bubble whose completion timing perturbs same-instant wakeup order.
+	simnet.PinSessionEntropy(seed)
 	runtime.GOMAXPROCS(1)
 	os.Exit(m.Run())
 }
