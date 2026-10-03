@@ -121,9 +121,19 @@ func TestDefaultAddressBookHasVerifiedRemoteSubscription(t *testing.T) {
 	if !cfg.AddressBook.Enabled {
 		t.Fatal("default hosts resolver is disabled")
 	}
-	const officialHosts = "https://raw.githubusercontent.com/i2p/i2p.i2p/master/installer/resources/hosts.txt"
-	if len(cfg.AddressBook.Subscriptions) != 1 || cfg.AddressBook.Subscriptions[0] != officialHosts {
-		t.Fatalf("default addressbook subscriptions = %#v", cfg.AddressBook.Subscriptions)
+	expectedSubscriptions := []string{
+		"http://reg.i2p/export/hosts.txt",
+		"http://identiguy.i2p/hosts.txt",
+		"http://stats.i2p/cgi-bin/newhosts.txt",
+		"https://raw.githubusercontent.com/i2p/i2p.i2p/master/installer/resources/hosts.txt",
+	}
+	if len(cfg.AddressBook.Subscriptions) != len(expectedSubscriptions) {
+		t.Fatalf("default addressbook subscriptions count = %d, want %d: %#v", len(cfg.AddressBook.Subscriptions), len(expectedSubscriptions), cfg.AddressBook.Subscriptions)
+	}
+	for i, sub := range expectedSubscriptions {
+		if cfg.AddressBook.Subscriptions[i] != sub {
+			t.Errorf("subscription[%d] = %q, want %q", i, cfg.AddressBook.Subscriptions[i], sub)
+		}
 	}
 	localOnly, err := ParseOperating("[addressbook]\nsubscriptions =\n", "/etc/ivnp/ivnp.conf")
 	if err != nil {

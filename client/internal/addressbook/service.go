@@ -2,6 +2,7 @@
 package addressbook
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"maps"
@@ -115,6 +116,7 @@ func validateSubscriptions(subscriptions []string) error {
 }
 
 func (s *Service) loadLocalHosts() error {
+	s.ensureDefaultHostsFile()
 	for _, path := range []string{s.config.PrivateHostsPath, s.config.UserHostsPath, s.config.HostsPath} {
 		entries, err := loadHostsFile(path, s.config.MaxFileBytes, s.config.MaxEntries)
 		if err != nil {
@@ -126,7 +128,35 @@ func (s *Service) loadLocalHosts() error {
 			}
 		}
 	}
+	for name, destination := range defaultBootstrapHosts {
+		if _, exists := s.local[name]; !exists {
+			if len(s.local) < s.config.MaxEntries {
+				s.local[name] = destination
+			}
+		}
+	}
 	return nil
+}
+
+func (s *Service) ensureDefaultHostsFile() {
+	if s.config.HostsPath == "" {
+		return
+	}
+	if _, err := os.Stat(s.config.HostsPath); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.config.HostsPath), 0o750); err != nil {
+		return
+	}
+	var buf bytes.Buffer
+	buf.WriteString("# IVNP Default Core Bootstrap Hosts\n")
+	for _, name := range bootstrapHostNames {
+		buf.WriteString(name)
+		buf.WriteString("=")
+		buf.WriteString(defaultBootstrapHosts[name])
+		buf.WriteString("\n")
+	}
+	_ = os.WriteFile(s.config.HostsPath, buf.Bytes(), 0o600)
 }
 
 func (s *Service) restoreState() error {

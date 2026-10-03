@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/netip"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -106,6 +108,10 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 		if core.TaintedDir() != "" && addressBookStatePath != "" {
 			addressBookStatePath = filepath.Join(core.TaintedDir(), filepath.Base(addressBookStatePath))
 		}
+		addressBookHTTPClient := options.HTTPClient
+		if addressBookHTTPClient == nil {
+			addressBookHTTPClient = &http.Client{Transport: newAddressBookTransport(core, d)}
+		}
 		d.addressBook, err = client.AddressBookNewService(client.AddressBookConfig{
 			PrivateHostsPath: cfg.AddressBook.PrivateHostsPath, UserHostsPath: cfg.AddressBook.UserHostsPath,
 			HostsPath: cfg.AddressBook.HostsPath, StatePath: addressBookStatePath,
@@ -113,7 +119,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			RefreshInterval: cfg.AddressBook.RefreshInterval, RetryInterval: cfg.AddressBook.RetryInterval,
 			RequestTimeout: cfg.AddressBook.RequestTimeout, MaxEntries: cfg.AddressBook.MaxEntries,
 			MaxFileBytes: cfg.AddressBook.MaxFileBytes, MaxResponseBytes: cfg.AddressBook.MaxResponseBytes,
-			MaxRedirects: cfg.AddressBook.MaxRedirects, HTTPClient: options.HTTPClient,
+			MaxRedirects: cfg.AddressBook.MaxRedirects, HTTPClient: addressBookHTTPClient,
 		})
 		if err != nil {
 			return nil, err
@@ -233,6 +239,14 @@ func (d *Daemon) Start(parent context.Context) error {
 				return observability.HealthOK
 			}
 			return observability.HealthUnavailable
+		}, observability.HandlerConfig{
+			Readiness: func(ctx context.Context) observability.HealthStatus {
+				clientStatus, _ := d.ClientStatus(ctx)
+				if clientStatus.Ready {
+					return observability.HealthOK
+				}
+				return observability.HealthUnavailable
+			},
 		})
 		if d.config.Metrics.BearerToken != "" {
 			handler = observability.RequireBearer(handler, d.config.Metrics.BearerToken)
@@ -413,4 +427,33 @@ func loopbackEndpoint(endpoint state.ConfigurationEndpoint) bool {
 	}
 	address, err := netip.ParseAddr(endpoint.Host)
 	return err == nil && address.IsLoopback()
+}
+
+func newAddressBookTransport(core *controlplane.Controller, d *Daemon) *http.Transport {
+	return &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, portStr, err := net.SplitHostPort(addr)
+			if err != nil {
+				host = addr
+				portStr = "80"
+			}
+			port, _ := strconv.Atoi(portStr)
+			if port <= 0 {
+				port = 80
+			}
+			if strings.HasSuffix(strings.ToLower(host), ".i2p") {
+				target := host
+				if d.addressBook != nil {
+					if resolved, resErr := d.addressBook.ResolveDestination(ctx, host); resErr == nil && resolved != "" {
+						target = resolved
+					}
+				}
+				return core.DialI2P(ctx, net.JoinHostPort(target, strconv.Itoa(port)))
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		},
+		DisableCompression: false,
+		ForceAttemptHTTP2:  true,
+	}
 }

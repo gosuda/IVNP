@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +16,12 @@ const (
 	MetricsPath = "/metrics"
 	// HealthPath is the JSON health check endpoint.
 	HealthPath = "/healthz"
+	// LivePath is the Kubernetes liveness check endpoint alias.
+	LivePath = "/livez"
+	// ReadyPath is the Kubernetes readiness check endpoint.
+	ReadyPath = "/readyz"
+	// VarzPath is the JSON variables / metrics inspection endpoint.
+	VarzPath = "/varz"
 
 	prometheusContentType = "text/plain; version=0.0.4; charset=utf-8"
 	jsonContentType       = "application/json; charset=utf-8"
@@ -39,21 +46,31 @@ const DefaultHealthTimeout = time.Second
 // HandlerConfig configures the observability HTTP handler.
 type HandlerConfig struct {
 	HealthTimeout time.Duration
+	Readiness     StatusFunc
 }
 
-// NewHandler creates an http.Handler exposing /metrics and /healthz.
+// NewHandler creates an http.Handler exposing /metrics, /healthz, /livez, /readyz, and /varz.
 func NewHandler(registry *Registry, status StatusFunc, configs ...HandlerConfig) http.Handler {
 	healthTimeout := DefaultHealthTimeout
-	if len(configs) != 0 && configs[0].HealthTimeout > 0 {
-		healthTimeout = configs[0].HealthTimeout
+	var readiness StatusFunc
+	if len(configs) != 0 {
+		if configs[0].HealthTimeout > 0 {
+			healthTimeout = configs[0].HealthTimeout
+		}
+		readiness = configs[0].Readiness
 	}
-	return handler{registry: registry, status: status, healthTimeout: healthTimeout}
+	return handler{registry: registry, status: status, readiness: readiness, healthTimeout: healthTimeout}
 }
 
-// RequireBearer wraps an http.Handler with constant-time Bearer token authentication.
+// RequireBearer wraps an http.Handler with constant-time Bearer token authentication,
+// while whitelisting public probe endpoints (/healthz, /livez, /readyz, /varz).
 func RequireBearer(next http.Handler, token string) http.Handler {
 	expected := sha256.Sum256([]byte(token))
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if isPublicProbePath(request.URL.Path) {
+			next.ServeHTTP(w, request)
+			return
+		}
 		scheme, provided, hasScheme := strings.Cut(request.Header.Get("Authorization"), " ")
 		actual := sha256.Sum256([]byte(provided))
 		matches := subtle.ConstantTimeCompare(actual[:], expected[:]) == 1
@@ -67,9 +84,14 @@ func RequireBearer(next http.Handler, token string) http.Handler {
 	})
 }
 
+func isPublicProbePath(path string) bool {
+	return path == HealthPath || path == LivePath || path == ReadyPath || path == VarzPath
+}
+
 type handler struct {
 	registry      *Registry
 	status        StatusFunc
+	readiness     StatusFunc
 	healthTimeout time.Duration
 }
 
@@ -77,11 +99,54 @@ func (h handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	switch request.URL.Path {
 	case MetricsPath:
 		h.serveMetrics(w, request)
-	case HealthPath:
+	case HealthPath, LivePath:
 		h.serveHealth(w, request)
+	case ReadyPath:
+		h.serveReady(w, request)
+	case VarzPath:
+		h.serveVarz(w, request)
 	default:
 		http.NotFound(w, request)
 	}
+}
+
+func (h handler) serveReady(w http.ResponseWriter, request *http.Request) {
+	if !requireGet(w, request) {
+		return
+	}
+	status := HealthUnavailable
+	check := h.readiness
+	if check == nil {
+		check = h.status
+	}
+	if check != nil {
+		statusContext, cancel := context.WithTimeout(request.Context(), h.healthTimeout)
+		defer cancel()
+		status = check(statusContext)
+		if statusContext.Err() != nil {
+			status = HealthUnavailable
+		}
+	}
+	code, body := healthResponse(status)
+	w.Header().Set("Content-Type", jsonContentType)
+	w.WriteHeader(code)
+	_, _ = w.Write(body)
+}
+
+func (h handler) serveVarz(w http.ResponseWriter, request *http.Request) {
+	if !requireGet(w, request) {
+		return
+	}
+	snapshot := h.registry.Snapshot()
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		http.Error(w, "cannot serialize metrics", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", jsonContentType)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+	_, _ = w.Write([]byte("\n"))
 }
 
 func requireGet(w http.ResponseWriter, request *http.Request) bool {

@@ -25,11 +25,18 @@ type (
 	ProcessSnapshot     = registry.ProcessSnapshot
 	TunnelOwner         = registry.TunnelOwner
 	TunnelDirection     = registry.TunnelDirection
+	HandlerConfig       = registry.HandlerConfig
 )
 
 const (
 	HealthOK                = registry.HealthOK
+	HealthDegraded          = registry.HealthDegraded
 	HealthUnavailable       = registry.HealthUnavailable
+	MetricsPath             = registry.MetricsPath
+	HealthPath              = registry.HealthPath
+	LivePath                = registry.LivePath
+	ReadyPath               = registry.ReadyPath
+	VarzPath                = registry.VarzPath
 	TunnelOwnerExploratory  = registry.TunnelOwnerExploratory
 	TunnelOwnerClient       = registry.TunnelOwnerClient
 	TunnelDirectionInbound  = registry.TunnelDirectionInbound

@@ -82,6 +82,7 @@ func TestWebUIAccessPolicy(t *testing.T) {
 		name         string
 		address      string
 		token        string
+		disableAuth  bool
 		wantLoopback bool
 		wantError    bool
 	}{
@@ -90,14 +91,16 @@ func TestWebUIAccessPolicy(t *testing.T) {
 		{name: "IPv6 loopback", address: "[::1]:7070", wantLoopback: true},
 		{name: "explicit wildcard with token", address: "0.0.0.0:7070", token: "0123456789abcdef", wantLoopback: false},
 		{name: "wildcard without token", address: "0.0.0.0:7070", wantError: true},
-		{name: "specific LAN address", address: "192.168.1.20:7070", token: "0123456789abcdef", wantError: true},
-		{name: "IPv6 wildcard", address: "[::]:7070", token: "0123456789abcdef", wantError: true},
+		{name: "wildcard with disableAuth", address: "0.0.0.0:7070", disableAuth: true, wantLoopback: false},
+		{name: "specific LAN address with token", address: "192.168.1.20:7070", token: "0123456789abcdef", wantLoopback: false},
+		{name: "specific LAN address with disableAuth", address: "192.168.1.20:7070", disableAuth: true, wantLoopback: false},
+		{name: "IPv6 wildcard with token", address: "[::]:7070", token: "0123456789abcdef", wantLoopback: false},
 		{name: "missing port", address: "127.0.0.1", wantError: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			policy, err := parseWebUIAccessPolicy(test.address, test.token)
+			policy, err := parseWebUIAccessPolicy(test.address, test.token, test.disableAuth)
 			if (err != nil) != test.wantError {
 				t.Fatalf("parseWebUIAccessPolicy(%q) error = %v, wantError %v", test.address, err, test.wantError)
 			}
@@ -443,5 +446,76 @@ func TestWebUIConfigUpdatePersistsAndReportsApplyMode(t *testing.T) {
 	}
 	if persisted.Log.Level != "debug" || persisted.Tunnel.Hops != 4 {
 		t.Fatalf("persisted config = log %q, hops %d", persisted.Log.Level, persisted.Tunnel.Hops)
+	}
+}
+
+func TestWebUIProbeEndpoints(t *testing.T) {
+	server := newTestWebUIServer(t, WebUIConfig{
+		ListenAddress: "127.0.0.1:0",
+		BearerToken:   "0123456789abcdef",
+	})
+	baseURL := startTestWebUIServer(t, server)
+
+	// Node is not running yet in test harness, so healthz and readyz return 503 unavailable
+	for _, probe := range []string{"/healthz", "/livez", "/readyz"} {
+		response, err := http.Get(baseURL + probe)
+		if err != nil {
+			t.Fatalf("GET %s error = %v", probe, err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("GET %s status = %d, want 503, body %s", probe, response.StatusCode, body)
+		}
+		if !strings.Contains(string(body), "unavailable") {
+			t.Fatalf("GET %s expected unavailable, got %s", probe, body)
+		}
+	}
+
+	// Varz returns 200 with JSON metrics even without bearer token
+	response, err := http.Get(baseURL + "/varz")
+	if err != nil {
+		t.Fatalf("GET /varz error = %v", err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET /varz status = %d, want 200, body %s", response.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "bandwidth") {
+		t.Fatalf("GET /varz expected bandwidth metrics, got %s", body)
+	}
+}
+
+func TestWebUIConfigInMemoryConflict(t *testing.T) {
+	node, _, level := createTestNode(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: level}))
+	server, err := NewWebUIServer(WebUIConfig{
+		ListenAddress: "127.0.0.1:0",
+		ConfigPath:    "",
+	}, node, logger, level)
+	if err != nil {
+		t.Fatalf("create WebUI server: %v", err)
+	}
+	baseURL := startTestWebUIServer(t, server)
+
+	response, err := http.Get(baseURL + "/api/config")
+	if err != nil {
+		t.Fatalf("GET /api/config: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/config status = %d, want 200", response.StatusCode)
+	}
+
+	payload := `{"log":{"level":"debug"}}`
+	response, err = http.Post(baseURL+"/api/config", "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST /api/config: %v", err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("POST /api/config status = %d, want 409, body: %s", response.StatusCode, body)
 	}
 }

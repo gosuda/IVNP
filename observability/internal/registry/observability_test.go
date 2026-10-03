@@ -274,6 +274,32 @@ func TestHandlerContentTypesAndHealthMapping(t *testing.T) {
 	if got := metrics.Header().Get("Content-Type"); got != prometheusContentType {
 		t.Fatalf("metrics Content-Type = %q, want %q", got, prometheusContentType)
 	}
+
+	livez := httptest.NewRecorder()
+	NewHandler(NewRegistry(), func(context.Context) HealthStatus { return HealthOK }).ServeHTTP(livez, httptest.NewRequest(http.MethodGet, LivePath, nil))
+	if livez.Code != http.StatusOK || !strings.Contains(livez.Body.String(), "ok") {
+		t.Fatalf("livez code = %d, body = %q", livez.Code, livez.Body.String())
+	}
+
+	readyz := httptest.NewRecorder()
+	NewHandler(NewRegistry(), nil, HandlerConfig{Readiness: func(context.Context) HealthStatus { return HealthOK }}).ServeHTTP(readyz, httptest.NewRequest(http.MethodGet, ReadyPath, nil))
+	if readyz.Code != http.StatusOK || !strings.Contains(readyz.Body.String(), "ok") {
+		t.Fatalf("readyz code = %d, body = %q", readyz.Code, readyz.Body.String())
+	}
+
+	varz := httptest.NewRecorder()
+	reg := NewRegistry()
+	reg.SetTransportNTCP2Sessions(5)
+	NewHandler(reg, nil).ServeHTTP(varz, httptest.NewRequest(http.MethodGet, VarzPath, nil))
+	if varz.Code != http.StatusOK {
+		t.Fatalf("varz status = %d, want %d", varz.Code, http.StatusOK)
+	}
+	if got := varz.Header().Get("Content-Type"); got != jsonContentType {
+		t.Fatalf("varz Content-Type = %q, want %q", got, jsonContentType)
+	}
+	if !strings.Contains(varz.Body.String(), `"NTCP2Sessions": 5`) {
+		t.Fatalf("varz body does not contain expected session count: %s", varz.Body.String())
+	}
 }
 
 func TestHandlerHealthTimeoutCancelsStatusAndReturnsUnavailable(t *testing.T) {
@@ -318,6 +344,16 @@ func TestRequireBearerRejectsMissingAndAcceptsMatchingToken(t *testing.T) {
 		}
 		if response.Code != want {
 			t.Fatalf("authorization %q status = %d, want %d", authorization, response.Code, want)
+		}
+	}
+
+	// Verify probe endpoints bypass bearer auth
+	for _, probePath := range []string{HealthPath, LivePath, ReadyPath, VarzPath} {
+		request := httptest.NewRequest(http.MethodGet, probePath, nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("probe %q code = %d, want 204 (bypassed)", probePath, response.Code)
 		}
 	}
 }

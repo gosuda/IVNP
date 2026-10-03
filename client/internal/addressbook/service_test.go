@@ -78,13 +78,15 @@ func TestLocalPrecedenceNormalizationAndSubscriptionRefresh(t *testing.T) {
 }
 
 func TestSubscriptionTransportPolicy(t *testing.T) {
-	for _, raw := range []string{"http://example.com/hosts.txt", "http://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxyz234567.b32.i2p/hosts.txt", "ftp://host.i2p/hosts.txt", "https://user:pass@example.com/hosts.txt"} {
+	for _, raw := range []string{"http://example.com/hosts.txt", "ftp://host.i2p/hosts.txt", "https://user:pass@example.com/hosts.txt"} {
 		if _, err := subscriptionURL(raw); err == nil {
 			t.Fatalf("subscriptionURL(%q) accepted", raw)
 		}
 	}
-	if _, err := subscriptionURL("https://example.com/hosts.txt"); err != nil {
-		t.Fatal(err)
+	for _, raw := range []string{"https://example.com/hosts.txt", "http://reg.i2p/export/hosts.txt", "http://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxyz234567.b32.i2p/hosts.txt", "http://127.0.0.1/hosts.txt", "http://localhost/hosts.txt"} {
+		if _, err := subscriptionURL(raw); err != nil {
+			t.Fatalf("subscriptionURL(%q) rejected: %v", raw, err)
+		}
 	}
 }
 
@@ -103,5 +105,43 @@ func waitForAddressbookCondition(t *testing.T, timeout time.Duration, condition 
 			t.Fatal(name + " did not complete")
 		case <-ticker.C:
 		}
+	}
+}
+
+func TestBootstrapHostsResolveOnColdStart(t *testing.T) {
+	dir := t.TempDir()
+	hostsPath := filepath.Join(dir, "hosts.txt")
+	service, err := NewService(Config{
+		HostsPath: hostsPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, host := range []string{"reg.i2p", "stats.i2p", "identiguy.i2p", "exit.stormycloud.i2p", "i2p-projekt.i2p", "zzz.i2p"} {
+		dest, resErr := service.ResolveDestination(context.Background(), host)
+		if resErr != nil {
+			t.Errorf("ResolveDestination(%q) failed: %v", host, resErr)
+		}
+		if dest == "" {
+			t.Errorf("ResolveDestination(%q) returned empty destination", host)
+		}
+	}
+
+	if _, err := os.Stat(hostsPath); err != nil {
+		t.Fatalf("ensureDefaultHostsFile did not create hosts.txt: %v", err)
+	}
+}
+
+func TestCanonicalDestinationSupportsB32(t *testing.T) {
+	validB32Addr := "shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p"
+	canonical, ok := canonicalDestination(validB32Addr)
+	if !ok || canonical != validB32Addr {
+		t.Errorf("canonicalDestination(%q) = (%q, %t), want (%q, true)", validB32Addr, canonical, ok, validB32Addr)
+	}
+
+	invalidB32Addr := "short.b32.i2p"
+	if _, ok := canonicalDestination(invalidB32Addr); ok {
+		t.Errorf("canonicalDestination(%q) accepted invalid length", invalidB32Addr)
 	}
 }

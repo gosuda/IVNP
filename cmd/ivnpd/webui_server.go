@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +46,7 @@ type WebUIConfig struct {
 	ListenAddress string
 	BearerToken   string
 	ConfigPath    string
+	DisableAuth   bool
 }
 
 type webUIAccessPolicy struct {
@@ -100,12 +103,20 @@ func NewWebUIServer(cfg WebUIConfig, node *node.Subsystem, logger *slog.Logger, 
 	if cfg.ListenAddress == "" {
 		cfg.ListenAddress = defaultWebUIListenAddress
 	}
-	policy, err := parseWebUIAccessPolicy(cfg.ListenAddress, cfg.BearerToken)
-	if err != nil {
-		return nil, err
-	}
 	if logger == nil {
 		logger = slog.Default()
+	}
+	host, _, splitErr := net.SplitHostPort(cfg.ListenAddress)
+	if splitErr == nil && !cfg.DisableAuth && cfg.BearerToken == "" && !isLoopbackHost(host) {
+		tokenBytes := make([]byte, 16)
+		if _, err := rand.Read(tokenBytes); err == nil {
+			cfg.BearerToken = hex.EncodeToString(tokenBytes)
+			logger.Info("WebUI authentication token generated", "token", cfg.BearerToken)
+		}
+	}
+	policy, err := parseWebUIAccessPolicy(cfg.ListenAddress, cfg.BearerToken, cfg.DisableAuth)
+	if err != nil {
+		return nil, err
 	}
 	return &WebUIServer{
 		config:          cfg,
@@ -121,10 +132,14 @@ func NewWebUIServer(cfg WebUIConfig, node *node.Subsystem, logger *slog.Logger, 
 	}, nil
 }
 
-func parseWebUIAccessPolicy(listenAddress, bearerToken string) (webUIAccessPolicy, error) {
+func parseWebUIAccessPolicy(listenAddress, bearerToken string, disableAuth ...bool) (webUIAccessPolicy, error) {
+	noAuth := len(disableAuth) > 0 && disableAuth[0]
 	host, _, err := net.SplitHostPort(listenAddress)
 	if err != nil {
 		return webUIAccessPolicy{}, fmt.Errorf("webui: listen address must include host and port: %w", err)
+	}
+	if noAuth {
+		return webUIAccessPolicy{loopback: false, listenHost: host, requireAuth: false}, nil
 	}
 	if strings.EqualFold(host, "localhost") {
 		return webUIAccessPolicy{loopback: true, listenHost: "localhost", requireAuth: bearerToken != ""}, nil
@@ -133,13 +148,21 @@ func parseWebUIAccessPolicy(listenAddress, bearerToken string) (webUIAccessPolic
 	if ip != nil && ip.IsLoopback() {
 		return webUIAccessPolicy{loopback: true, listenHost: host, requireAuth: bearerToken != ""}, nil
 	}
-	if host != "0.0.0.0" {
-		return webUIAccessPolicy{}, fmt.Errorf("webui: listen host %q is not allowed; use localhost, a loopback address, or explicit 0.0.0.0", host)
+	if ip == nil && host != "0.0.0.0" {
+		return webUIAccessPolicy{}, fmt.Errorf("webui: listen host %q is not a valid IP or hostname", host)
 	}
 	if len(bearerToken) < 16 {
 		return webUIAccessPolicy{}, errWebUITokenRequired
 	}
-	return webUIAccessPolicy{listenHost: host, requireAuth: true}, nil
+	return webUIAccessPolicy{loopback: false, listenHost: host, requireAuth: true}, nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Start opens the listener and starts the telemetry stream.
@@ -179,6 +202,10 @@ func (s *WebUIServer) Start(parent context.Context) error {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/livez", s.handleHealth)
+	mux.HandleFunc("/readyz", s.handleReady)
+	mux.HandleFunc("/varz", s.handleVarz)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/metrics", s.handleMetrics)
 	mux.HandleFunc("/api/tunnels", s.handleTunnels)
@@ -284,9 +311,60 @@ func (s *WebUIServer) Close() error {
 	return result
 }
 
+func isPublicProbePath(path string) bool {
+	return path == "/healthz" || path == "/livez" || path == "/readyz" || path == "/varz"
+}
+
+func (s *WebUIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if s.node != nil && s.node.Status().Running {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{\"status\":\"ok\"}\n"))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte("{\"status\":\"unavailable\"}\n"))
+}
+
+func (s *WebUIServer) handleReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if s.node != nil {
+		clientStatus, _ := s.node.ClientStatus(r.Context())
+		if clientStatus.Ready {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("{\"status\":\"ok\"}\n"))
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte("{\"status\":\"unavailable\"}\n"))
+}
+
+func (s *WebUIServer) handleVarz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	writeJSONResponse(w, http.StatusOK, s.currentMetricsResponse())
+}
+
 func (s *WebUIServer) wrapMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.setSecurityHeaders(w)
+		if isPublicProbePath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if s.policy.loopback && !remoteIsLoopback(r.RemoteAddr) {
 			http.Error(w, "loopback clients only", http.StatusForbidden)
 			return

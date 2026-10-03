@@ -25,10 +25,16 @@ func subscriptionURL(raw string) (*url.URL, error) {
 	if err != nil || u.User != nil || u.Fragment != "" || u.Host == "" {
 		return nil, ErrConfig
 	}
-	if !strings.EqualFold(u.Scheme, "https") {
-		return nil, ErrConfig
+	if strings.EqualFold(u.Scheme, "https") {
+		return u, nil
 	}
-	return u, nil
+	if strings.EqualFold(u.Scheme, "http") {
+		host := u.Hostname()
+		if strings.HasSuffix(strings.ToLower(host), ".i2p") || strings.EqualFold(host, "localhost") || host == "127.0.0.1" || host == "::1" {
+			return u, nil
+		}
+	}
+	return nil, ErrConfig
 }
 
 func (s *Service) refresh(parent context.Context) error {

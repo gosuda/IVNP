@@ -46,8 +46,28 @@ func validNameCharacter(character byte) bool {
 		character == '-'
 }
 
+func validB32Character(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= '2' && c <= '7')
+}
+
+func validB32(host string) bool {
+	before, ok := strings.CutSuffix(strings.ToLower(host), ".b32.i2p")
+	if !ok || len(before) != 52 {
+		return false
+	}
+	for i := range len(before) {
+		if !validB32Character(before[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 func canonicalDestination(value string) (string, bool) {
 	value = strings.TrimSpace(value)
+	if validB32(value) {
+		return strings.ToLower(value), true
+	}
 	identity, err := foundation.ParseDestination([]byte(value))
 	if err != nil {
 		return "", false

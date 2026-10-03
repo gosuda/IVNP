@@ -397,6 +397,9 @@ var defaultReseedEndpoints = []string{
 var defaultHTTPOutproxies = []string{"exit.stormycloud.i2p"}
 
 var defaultAddressBookSubscriptions = []string{
+	"http://reg.i2p/export/hosts.txt",
+	"http://identiguy.i2p/hosts.txt",
+	"http://stats.i2p/cgi-bin/newhosts.txt",
 	"https://raw.githubusercontent.com/i2p/i2p.i2p/master/installer/resources/hosts.txt",
 }
 
