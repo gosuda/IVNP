@@ -1,8 +1,9 @@
 package tunnel
 
 import (
+	"sync"
+
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 )
 
 const (
@@ -76,7 +77,7 @@ type transportProfileState struct {
 // is intentionally integral and deterministic: successful probes improve a
 // score, failures cost twice as much, and lower mean latency wins ties.
 type PeerProfiles struct {
-	mu        durable.RWMutex
+	mu        sync.RWMutex
 	maxPeers  int
 	window    int
 	peers     map[foundation.Hash]peerProfileState

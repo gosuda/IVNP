@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,13 @@ func TestNetworkPlanEntryRules(t *testing.T) {
 	bad.Name = "corp-net"
 	if _, _, err := networkPlan(RouterConfig{Networks: []NetworkConfig{bad}}); err == nil {
 		t.Fatal("entry with a hyphenated name was accepted")
+	}
+
+	// Non-ASCII digits must not be accepted under [a-zA-Z0-9_].
+	bad = DefaultI2PNetwork()
+	bad.Name = "corp\u0663" // Arabic-Indic digit 3
+	if _, _, err := networkPlan(RouterConfig{Networks: []NetworkConfig{bad}}); err == nil {
+		t.Fatal("entry with non-ASCII digit was accepted")
 	}
 
 	// A custom public-network name is valid.
@@ -216,6 +224,23 @@ func TestNetworkSpecsCarryPeerAdmissionPerContext(t *testing.T) {
 	}
 	if specs[1].Options.PeerAdmission == nil {
 		t.Fatal("dedicated context lost the configured admission callback")
+	}
+}
+
+func TestValidateBootstrapReportsPriorityIndex(t *testing.T) {
+	b := BootstrapConfig{
+		ReseedTimeout:         time.Second,
+		PriorityReseedTimeout: time.Second,
+		ReseedURLs:            []string{"https://reseed1.example.com/?netid=77"},
+		PriorityReseedURLs:    []string{"https://priority0.example.com/?netid=77", "https://priority1.example.com/?netid=99"},
+	}
+	err := validateBootstrap("Networks[0].Bootstrap", b, 77)
+	if err == nil {
+		t.Fatal("incompatible priority netid accepted")
+	}
+	want := "Networks[0].Bootstrap.PriorityReseedURLs[1]"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %v, want to contain %q", err, want)
 	}
 }
 

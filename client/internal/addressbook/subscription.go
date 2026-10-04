@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 )
 
@@ -83,7 +83,7 @@ func (s *Service) refresh(parent context.Context) error {
 		fetches[index] = fetchJob{raw: raw, haveSnapshot: haveSnapshot, etag: etags[raw], modified: modified[raw]}
 	}
 	workers := parallelism.Workers(len(fetches))
-	var group durable.WaitGroup
+	var group sync.WaitGroup
 	group.Add(workers)
 	for range workers {
 		go func() {

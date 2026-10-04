@@ -11,7 +11,6 @@ import (
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/internal/durable"
 )
 
 var errUnknownSubsession = errors.New("sam: unknown subsession")
@@ -77,7 +76,7 @@ type samSession struct {
 	acceptCancellations atomic.Uint64
 	once                sync.Once
 	closeErr            error
-	wg                  durable.WaitGroup
+	wg                  sync.WaitGroup
 }
 
 func newRootSession(server *Server, id string, style sessionStyle, endpoint destination.DestinationEndpoint, control *serverConnection, fromPort, toPort, listenPort uint16, protocol, listenProtocol uint8, rawHeader bool, udpTarget *net.UDPAddr, offline *foundation.OfflineSignature) *samSession {

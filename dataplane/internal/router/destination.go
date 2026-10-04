@@ -9,7 +9,6 @@ import (
 	dataplanestreamingtunnel "gosuda.org/ivnp/dataplane/internal/streaming/tunnel"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/internal/durable"
 )
 
 var (
@@ -24,7 +23,7 @@ var (
 // transport sockets. Each session owns exactly one streaming endpoint and its
 // key material stays scoped to that endpoint until Destroy or Close.
 type DestinationManager struct {
-	mu        durable.RWMutex
+	mu        sync.RWMutex
 	sessions  map[foundation.Hash]*DestinationSession
 	defaultID foundation.Hash
 	closed    bool
@@ -52,7 +51,7 @@ type DestinationSession struct {
 	release func()
 	once    sync.Once
 
-	routeMu durable.RWMutex
+	routeMu sync.RWMutex
 	routes  map[destination.DestinationRoute]*destinationSubscription
 }
 

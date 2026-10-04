@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/pool"
 	"gosuda.org/ivnp/observability"
 )
@@ -55,7 +54,7 @@ type leaseExpiry struct {
 // Database stores verified RouterInfos and LeaseSets with memory bounds and TTL expiration.
 type Database struct {
 	routers          *Table
-	leasesMu         durable.RWMutex
+	leasesMu         sync.RWMutex
 	leases           map[foundation.Hash]leaseEntry
 	leaseExpiries    []leaseExpiry
 	leaseExpiryIndex map[foundation.Hash]int

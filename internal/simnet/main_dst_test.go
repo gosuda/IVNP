@@ -1,6 +1,6 @@
 //go:build dst || synctest
 
-package ivnp
+package simnet
 
 import (
 	"fmt"
@@ -22,9 +22,6 @@ var _ = sync.DurableMutexOverlay
 // GODEBUG settings can only be applied at process start — run dst tests as:
 //
 //	GODEBUG=asyncpreemptoff=1,cryptocustomrand=1 GOGC=off go test -tags dst -overlay=...
-//
-// GOGC=off keeps GC marker goroutines out of the single P's run queue; it is
-// required for byte-identical replay and recommended for every dst run.
 func TestMain(m *testing.M) {
 	godebug := os.Getenv("GODEBUG")
 	for _, setting := range []string{"asyncpreemptoff=1", "cryptocustomrand=1"} {

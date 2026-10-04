@@ -44,13 +44,14 @@ type EmbeddedRouter struct {
 // NewEmbeddedRouter uses ctx only during construction. Persistent state is opt-in
 // through StatePath and KeyPath; an empty pair selects memory-only storage.
 func NewEmbeddedRouter(ctx context.Context, cfg state.ConfigurationOperating, options controlplane.ControllerOptions) (*EmbeddedRouter, error) {
-	return NewEmbeddedRouterNetworks(ctx, []NetworkSpec{{Name: "i2p", Operating: cfg, Options: options}})
+	return NewEmbeddedRouterNetworks(ctx, []NetworkSpec{{Name: "i2p", Operating: cfg, Options: options}}, "i2p")
 }
 
 // NewEmbeddedRouterNetworks composes one control-plane context per spec. Every
 // context is a complete I2P protocol instance; the public network is simply a
-// context with netId 2 and the standard transports and reseeders.
-func NewEmbeddedRouterNetworks(ctx context.Context, specs []NetworkSpec) (*EmbeddedRouter, error) {
+// context with netId 2 and the standard transports and reseeders. def names
+// the spec serving unqualified operations; it must match one of the specs.
+func NewEmbeddedRouterNetworks(ctx context.Context, specs []NetworkSpec, def string) (*EmbeddedRouter, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -61,7 +62,7 @@ func NewEmbeddedRouterNetworks(ctx context.Context, specs []NetworkSpec) (*Embed
 	router := &EmbeddedRouter{
 		contexts: make(map[string]*controlplane.Controller, len(specs)),
 		order:    make([]string, 0, len(specs)),
-		def:      specs[0].Name,
+		def:      def,
 		cancel:   cancel,
 	}
 	stop := context.AfterFunc(ctx, cancel)
@@ -83,6 +84,9 @@ func NewEmbeddedRouterNetworks(ctx context.Context, specs []NetworkSpec) (*Embed
 		if err = controller.Start(lifetime); err != nil {
 			return nil, errors.Join(fmt.Errorf("node: network %q: %w", spec.Name, err), router.Close())
 		}
+	}
+	if router.contexts[def] == nil {
+		return nil, errors.Join(fmt.Errorf("node: default network %q is not a configured network", def), router.Close())
 	}
 	stopped := stop()
 	if err := ctx.Err(); err != nil || !stopped {

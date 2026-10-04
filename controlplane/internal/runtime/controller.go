@@ -30,7 +30,6 @@ import (
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/observability"
@@ -183,7 +182,7 @@ type destinationRuntime struct {
 	session                 *dataplane.RouterDestinationSession
 	unregister              []func()
 	once                    sync.Once
-	maintenanceMu           durable.Mutex
+	maintenanceMu           sync.Mutex
 	released                atomic.Bool
 	onRelease               func(*destinationRuntime)
 	now                     func() uint64
@@ -370,12 +369,12 @@ type Controller struct {
 	destinationFactory     *destinationRuntimeFactory
 	releaseRouterInfoSeeds func()
 	closeNativeTransports  func() error
-	maintenanceWG          durable.WaitGroup
+	maintenanceWG          sync.WaitGroup
 	buildReplies           *destinationBuildReplyRegistry
 	requestHandlers        *destinationRequestRegistry
 	destinationPublishers  *destinationPublisherRegistry
 	clientRuntimes         []*destinationRuntime
-	clientRuntimesMu       durable.RWMutex
+	clientRuntimesMu       sync.RWMutex
 	destinationMu          sync.Mutex
 	maintenanceDone        chan struct{}
 	explorationDone        chan struct{}
@@ -397,7 +396,7 @@ type Controller struct {
 	err          error
 	teardownOnce sync.Once
 	teardownErr  error
-	wg           durable.WaitGroup
+	wg           sync.WaitGroup
 }
 
 // NewController initializes a Daemon with the given configuration and optional runtime overrides.
@@ -1527,7 +1526,7 @@ func (d *Controller) destinationMaintenanceLoop() {
 
 func (d *Controller) maintainDestination(runtime *destinationRuntime) {
 	var maintenanceErr, publicationErr error
-	var publicationTask durable.WaitGroup
+	var publicationTask sync.WaitGroup
 	if runtime.publisher != nil {
 		publicationTask.Go(func() {
 			publicationContext, publicationCancel := context.WithTimeout(d.ctx, 30*time.Second)
@@ -1682,7 +1681,7 @@ func (d *Controller) requestDestinationTunnelMaintenance(runtime *destinationRun
 func (d *Controller) expireGarlicSessions(now uint64) {
 	expireWorkers := parallelism.Workers(len(d.garlicSessions))
 	expireJobs := make(chan *dataplane.GarlicSessionManager)
-	var expireSessions durable.WaitGroup
+	var expireSessions sync.WaitGroup
 	expireSessions.Add(expireWorkers)
 	for range expireWorkers {
 		go func() {

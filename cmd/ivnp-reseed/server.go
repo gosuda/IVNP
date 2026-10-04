@@ -9,10 +9,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
-
-	"gosuda.org/ivnp/internal/durable"
 )
 
 type ServerConfig struct {
@@ -30,7 +29,7 @@ type ReseedServer struct {
 	// pkg is swapped atomically once per epoch; readers load an immutable
 	// package pointer so the hot path never takes a lock.
 	pkg       atomic.Pointer[ReseedPackage]
-	mu        durable.RWMutex
+	mu        sync.RWMutex
 	certPEM   []byte
 	pubKeyPEM []byte
 	handler   http.Handler

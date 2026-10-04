@@ -3,6 +3,7 @@ package ivnp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -10,7 +11,6 @@ import (
 
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/internal/durable"
 )
 
 const (
@@ -42,7 +42,7 @@ type packetSocket struct {
 	closeErr                    error
 	readDeadline, writeDeadline time.Time
 	operations                  map[*packetOperation]struct{}
-	active                      durable.WaitGroup
+	active                      sync.WaitGroup
 }
 
 // packetTarget splits a packet network name into a bound endpoint and a wire
@@ -89,24 +89,62 @@ func (d *Destination) packetTarget(network string) (destination.DestinationEndpo
 func (d *Destination) ListenPacket(network, address string) (*PacketConn, error) {
 	return d.ListenPacketContext(context.Background(), network, address)
 }
+
+// ListenPacketContext serves the authenticated-source datagram protocols
+// (17, datagram1; 19, datagram2) only; see listenPacket.
 func (d *Destination) ListenPacketContext(ctx context.Context, network, address string) (*PacketConn, error) {
-	s, err := d.listenPacket(ctx, network, address)
+	s, err := d.listenPacket(ctx, network, address, packetAuthSource)
 	if err != nil {
 		return nil, err
 	}
 	return &PacketConn{socket: s}, nil
 }
+
 func (d *Destination) ListenUnauthPacket(network, address string) (*UnauthPacketConn, error) {
 	return d.ListenUnauthPacketContext(context.Background(), network, address)
 }
+
+// ListenUnauthPacketContext serves the claimed-source datagram protocols
+// (18, raw; 20, datagram3) only; see listenPacket.
 func (d *Destination) ListenUnauthPacketContext(ctx context.Context, network, address string) (*UnauthPacketConn, error) {
-	s, err := d.listenPacket(ctx, network, address)
+	s, err := d.listenPacket(ctx, network, address, packetClaimedSource)
 	if err != nil {
 		return nil, err
 	}
 	return &UnauthPacketConn{socket: s}, nil
 }
-func (d *Destination) listenPacket(ctx context.Context, network, address string) (_ *packetSocket, err error) {
+
+// packetSourceClass selects which datagram protocol family a constructor
+// accepts, keeping network selection orthogonal to authentication semantics.
+type packetSourceClass uint8
+
+const (
+	packetAuthSource packetSourceClass = iota
+	packetClaimedSource
+)
+
+func (c packetSourceClass) allows(protocol uint8) bool {
+	if c == packetAuthSource {
+		return protocol == 17 || protocol == 19
+	}
+	return protocol == 18 || protocol == 20
+}
+
+func (c packetSourceClass) String() string {
+	if c == packetAuthSource {
+		return "ListenPacket"
+	}
+	return "ListenUnauthPacket"
+}
+
+func packetOtherClass(c packetSourceClass) string {
+	if c == packetAuthSource {
+		return "ListenUnauthPacket"
+	}
+	return "ListenPacket"
+}
+
+func (d *Destination) listenPacket(ctx context.Context, network, address string, class packetSourceClass) (_ *packetSocket, err error) {
 	if ctx == nil {
 		panic("nil context")
 	}
@@ -129,6 +167,9 @@ func (d *Destination) listenPacket(ctx context.Context, network, address string)
 	ep, protocol, err := d.packetTarget(network)
 	if err != nil {
 		return nil, err
+	}
+	if !class.allows(protocol) {
+		return nil, fmt.Errorf("datagram protocol %d is not served by %s: use the %s constructor", protocol, class, packetOtherClass(class))
 	}
 	local, err = parseBindAddress(d.hash, address)
 	if err != nil {

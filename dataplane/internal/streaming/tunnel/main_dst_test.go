@@ -1,6 +1,6 @@
 //go:build dst || synctest
 
-package ivnp
+package streamingtunnel
 
 import (
 	"fmt"
@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"gosuda.org/ivnp/internal/simnet"
 )
 
 // Dst tests require the durable-semaphore overlay (tools/dstoverlay): stock
@@ -22,9 +24,6 @@ var _ = sync.DurableMutexOverlay
 // GODEBUG settings can only be applied at process start — run dst tests as:
 //
 //	GODEBUG=asyncpreemptoff=1,cryptocustomrand=1 GOGC=off go test -tags dst -overlay=...
-//
-// GOGC=off keeps GC marker goroutines out of the single P's run queue; it is
-// required for byte-identical replay and recommended for every dst run.
 func TestMain(m *testing.M) {
 	godebug := os.Getenv("GODEBUG")
 	for _, setting := range []string{"asyncpreemptoff=1", "cryptocustomrand=1"} {
@@ -33,6 +32,14 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 	}
+	seed, err := simnet.SessionEntropySeed(42)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	// Handshake key generation draws crypto/rand: an entropy syscall inside
+	// the bubble whose completion timing perturbs same-instant wakeup order.
+	simnet.PinSessionEntropy(seed)
 	runtime.GOMAXPROCS(1)
 	os.Exit(m.Run())
 }

@@ -22,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/node"
 	"gosuda.org/ivnp/state"
 )
@@ -81,10 +80,10 @@ type WebUIServer struct {
 	tokenHash     [32]byte
 	scriptSources string
 
-	configMu        durable.RWMutex
+	configMu        sync.RWMutex
 	persistedConfig state.ConfigurationOperating
 
-	trafficMu durable.RWMutex
+	trafficMu sync.RWMutex
 	traffic   trafficSample
 
 	subscribersMu sync.Mutex

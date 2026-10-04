@@ -16,6 +16,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -43,20 +45,31 @@ jobs:
       # logs are free on pass and present when a rare flake finally trips.
       DST_LOG: '1'
       # Serialize scheduling inside the synctest bubble: one P runs goroutines
-      # in runqueue order and async preemption stays off, so same-tick wakeups
-      # replay in program order instead of racing across threads.
+      # in runqueue order, async preemption stays off, and crypto packages
+      # honor the pinned crypto/rand.Reader, so same-tick wakeups replay in
+      # program order instead of racing across threads.
       GOMAXPROCS: '1'
-      GODEBUG: 'asyncpreemptoff=1'
+      GODEBUG: 'asyncpreemptoff=1,cryptocustomrand=1'
+      # Keep GC marker goroutines out of the single P's run queue so
+      # executions replay identically (the dst overlay pins runtime
+      # randomness and neutralizes sysmon P retakes).
+      GOGC: 'off'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
+      - name: Generate durable-sync overlay
+        # Patches the current GOROOT's sync primitives so lock waits inside a
+        # synctest bubble park durably and the virtual clock can advance.
+        run: go run ./tools/dstoverlay -write "$RUNNER_TEMP/dst_overlay.json" -dir "$RUNNER_TEMP/dst_overlay_src"
       - name: Run deterministic mesh and chaos tests
-        run: go test -count=1 -tags dst -run 'TestSim|TestDeterministic' .
+        run: go test -count=1 -tags dst -overlay="$RUNNER_TEMP/dst_overlay.json" -run 'TestSim|TestDeterministic' .
       - name: Run simulation-tagged unit tests
-        run: go test -count=1 -tags dst ./internal/simnet ./internal/durable ./dataplane/internal/streaming/tunnel ./dataplane/internal/router ./controlplane/internal/router
+        run: go test -count=1 -tags dst -overlay="$RUNNER_TEMP/dst_overlay.json" ./internal/simnet ./dataplane/internal/streaming/tunnel ./dataplane/internal/router ./controlplane/internal/router
 
   cross-platform:
     name: ${{ matrix.os }} / ${{ matrix.arch }}
@@ -79,6 +92,8 @@ jobs:
       CGO_ENABLED: '0'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

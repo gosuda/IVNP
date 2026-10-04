@@ -25,7 +25,6 @@ import (
 
 	dataplanessu2 "gosuda.org/ivnp/dataplane/internal/transport/ssu2"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/ingress"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/observability"
@@ -181,7 +180,7 @@ type SSU2Manager struct {
 	publishPeerTestResult func(context.Context, PeerTestResult)
 	signControl           func([]byte) ([]byte, error)
 	introductionEndpoint  func() (netip.AddrPort, error)
-	mu                    durable.RWMutex
+	mu                    sync.RWMutex
 	started               bool
 	conn                  UDPSocket
 	ipv6Available         atomic.Bool
@@ -192,9 +191,9 @@ type SSU2Manager struct {
 	err                   error
 	done                  chan struct{}
 	close                 sync.Once
-	wg                    durable.WaitGroup
+	wg                    sync.WaitGroup
 	setupSlots            chan struct{}
-	egressMu              durable.RWMutex
+	egressMu              sync.RWMutex
 
 	receiveFree chan *ssu2ReceiveBatch
 	authQueue   chan ssu2ReceiveJob
@@ -244,7 +243,7 @@ type SSU2Manager struct {
 	relayForwards       map[uint32]ssu2RelayForward
 	deferredRelayIntros map[uint32]ssu2DeferredRelayIntro
 	relayStoreJobs      chan ssu2RelayStoreJob
-	routerInfoStoresMu  durable.RWMutex
+	routerInfoStoresMu  sync.RWMutex
 	routerInfoStores    map[foundation.Hash]ssu2RouterInfoStoreSnapshot
 	reporter            ingress.Reporter
 	admitPeer           PeerAdmissionFunc
@@ -403,11 +402,11 @@ type ssu2TransportSession struct {
 	sendID     uint64
 	receiveID  uint64
 	inbound    bool
-	remoteMu   durable.RWMutex
+	remoteMu   sync.RWMutex
 	remote     net.Addr
 	send       *dataplanessu2.DataCipher
 	receive    *dataplanessu2.DataCipher
-	lifetimeMu durable.RWMutex
+	lifetimeMu sync.RWMutex
 
 	sendMu                sync.Mutex
 	packetMu              ssu2SendMutex

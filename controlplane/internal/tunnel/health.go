@@ -8,7 +8,6 @@ import (
 
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 )
 
 var (
@@ -82,7 +81,7 @@ type Health struct {
 	failureThreshold uint8
 	requireActivity  bool
 
-	lifecycleMu durable.RWMutex
+	lifecycleMu sync.RWMutex
 	mu          sync.Mutex
 	nextID      uint32
 	pending     map[uint32]pendingProbe

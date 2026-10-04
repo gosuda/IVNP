@@ -16,7 +16,6 @@ import (
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/observability"
 )
 
@@ -71,15 +70,15 @@ type StreamingTunnelSender struct {
 	awaitControl         func(context.Context) error
 	tunnels              *dataplane.TunnelRuntime
 	replySlots           chan struct{}
-	replies              durable.WaitGroup
+	replies              sync.WaitGroup
 	replyGates           map[foundation.Hash]*ratchetReplyGate
 	replyGateCapacity    int
 	logger               *slog.Logger
 	now                  func() uint64
-	lifecycleMu          durable.RWMutex
+	lifecycleMu          sync.RWMutex
 	released             bool
-	remoteMu             durable.RWMutex
-	replyPolicyMu        durable.RWMutex
+	remoteMu             sync.RWMutex
+	replyPolicyMu        sync.RWMutex
 	remoteELS            map[foundation.Hash]RemoteELSContext
 	generation           uint64
 	policyGeneration     uint64
@@ -92,7 +91,7 @@ type StreamingTunnelSender struct {
 	preparationTimeout   time.Duration
 	preparationCtx       context.Context
 	cancelPreparation    context.CancelFunc
-	preparing            durable.WaitGroup
+	preparing            sync.WaitGroup
 	seedMu               sync.Mutex
 	seedCache            [streamingSeedCacheCapacity]streamingSeedCacheEntry
 	seedNext             uint8

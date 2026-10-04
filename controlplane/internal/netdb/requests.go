@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/observability"
 )
@@ -152,8 +151,8 @@ type RequestManager struct {
 	mu      sync.Mutex
 	pending map[requestKey]*pendingRequest
 	closed  bool
-	active  durable.WaitGroup
-	workers durable.WaitGroup
+	active  sync.WaitGroup
+	workers sync.WaitGroup
 	jobs    chan sendWork
 	ctx     context.Context
 	cancel  context.CancelFunc

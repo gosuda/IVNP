@@ -9,7 +9,6 @@ import (
 
 	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/foundation"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/internal/parallelism"
 )
 
@@ -46,7 +45,7 @@ type outboundPeer struct {
 
 // SessionManager tracks outbound/inbound session tags and keys for ElGamal/AES garlic encryption.
 type SessionManager struct {
-	lifecycleMu durable.RWMutex
+	lifecycleMu sync.RWMutex
 	randomMu    sync.Mutex
 	inbound     *TagStore
 	shards      []sessionManagerShard

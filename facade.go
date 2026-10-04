@@ -18,7 +18,6 @@ import (
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
-	"gosuda.org/ivnp/internal/durable"
 	"gosuda.org/ivnp/node"
 )
 
@@ -50,7 +49,7 @@ type Router struct {
 	mu               sync.Mutex
 	closed           bool
 	children         map[*Destination]struct{}
-	creating         durable.WaitGroup
+	creating         sync.WaitGroup
 	closeOnce        sync.Once
 	closeErr         error
 }
@@ -71,7 +70,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) (*Router, error) {
 // newRouter keeps host transport injection at the composition boundary for
 // deterministic embedding scenarios without exporting daemon options.
 func newRouter(ctx context.Context, cfg RouterConfig, specs []node.NetworkSpec, def string) (*Router, error) {
-	core, err := node.NewEmbeddedRouterNetworks(ctx, specs)
+	core, err := node.NewEmbeddedRouterNetworks(ctx, specs, def)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +276,7 @@ type Destination struct {
 	mu          sync.Mutex
 	closed      bool
 	resources   map[io.Closer]struct{}
-	operations  durable.WaitGroup
+	operations  sync.WaitGroup
 	closeOnce   sync.Once
 	closeErr    error
 }

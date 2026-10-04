@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,6 +56,13 @@ func (l *TCPListener) Accept() (net.Conn, error) {
 	case c := <-l.pending:
 		return c, nil
 	case <-l.closed:
+		// A dial completing at the same instant as close wins: drain
+		// pending before reporting ErrClosed.
+		select {
+		case c := <-l.pending:
+			return c, nil
+		default:
+		}
 		return nil, ErrClosed
 	}
 }
@@ -135,15 +143,24 @@ func (h *Host) DialTCP(ctx context.Context, remote netip.AddrPort) (net.Conn, er
 	}
 	res := &dialResult{done: make(chan struct{})}
 	n.scheduleSYN(h, remote, res)
-	select {
-	case <-res.done:
+	dialOutcome := func() (net.Conn, error) {
 		if errors.Is(res.err, ErrConnRefused) {
 			// Match the stdlib: a refused stream dial surfaces as a
 			// *net.OpError dial failure, which transport callers classify.
 			return nil, &net.OpError{Op: "dial", Net: "tcp", Addr: net.TCPAddrFromAddrPort(remote), Err: res.err}
 		}
 		return res.conn, res.err
+	}
+	select {
+	case <-res.done:
+		return dialOutcome()
 	case <-ctx.Done():
+		// Dial wins when the SYN completes at the same instant ctx fires.
+		select {
+		case <-res.done:
+			return dialOutcome()
+		default:
+		}
 		res.canceled.Store(true)
 		// The dial may have completed in the same instant the context
 		// fired: completeSYN registers res.conn under n.mu, so claiming
@@ -347,7 +364,11 @@ func (c *TCPConn) Write(b []byte) (int, error) {
 			stopTimer(timer)
 			return written, io.ErrClosedPipe
 		case <-deadline:
-			return written, timeoutError{op: "write"}
+			stopTimer(timer)
+			// Peer space freed at the same instant as the deadline lets
+			// the write proceed; the loop head re-checks space, and
+			// re-arming the expired deadline still yields the timeout.
+			continue
 		}
 	}
 	return written, nil
@@ -405,9 +426,15 @@ func (c *TCPConn) Read(b []byte) (int, error) {
 			continue
 		case <-c.closed:
 			stopTimer(timer)
-			return 0, ErrClosed
+			// Data, EOF, or reset landing at the same instant as close
+			// wins: the loop head re-checks them in that order.
+			continue
 		case <-deadline:
-			return 0, timeoutError{op: "read"}
+			stopTimer(timer)
+			// Data landing at the same instant as the deadline wins; the
+			// loop head re-checks, and re-arming the expired deadline
+			// still yields the timeout.
+			continue
 		}
 	}
 }
@@ -616,6 +643,12 @@ func (n *Network) ResetLink(a, b netip.Addr) {
 			doomed = append(doomed, c)
 		}
 	}
+	slices.SortFunc(doomed, func(a, b *TCPConn) int {
+		if c := a.local.Compare(b.local); c != 0 {
+			return c
+		}
+		return a.remote.Compare(b.remote)
+	})
 	n.mu.Unlock()
 	for _, c := range doomed {
 		c.reset()

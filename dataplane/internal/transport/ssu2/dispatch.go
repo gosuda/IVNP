@@ -5,8 +5,6 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
-
-	"gosuda.org/ivnp/internal/durable"
 )
 
 const (
@@ -32,7 +30,7 @@ type Dispatcher struct {
 	handler PacketHandler
 	closed  atomic.Bool
 	once    sync.Once
-	wg      durable.WaitGroup
+	wg      sync.WaitGroup
 }
 
 // NewDispatcher creates a Dispatcher with worker routines and preallocated slot buffers.

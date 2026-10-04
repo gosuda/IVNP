@@ -22,7 +22,9 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
+	"testing/synctest"
 	"time"
 )
 
@@ -399,6 +401,9 @@ func (n *Network) Close() error {
 	for _, l := range n.tcp {
 		tcp = append(tcp, l)
 	}
+	// Map iteration order must not sequence teardown; sort for a fixed order.
+	slices.SortFunc(udp, func(a, b *UDPConn) int { return a.addr.Compare(b.addr) })
+	slices.SortFunc(tcp, func(a, b *TCPListener) int { return a.addr.Compare(b.addr) })
 	conns := n.connsLocked()
 	n.mu.Unlock()
 	close(n.done)
@@ -422,12 +427,19 @@ func (n *Network) Stats() Stats {
 	return n.stats
 }
 
-// connsLocked snapshots live connections; caller holds n.mu.
+// connsLocked snapshots live connections in (local, remote) order; caller
+// holds n.mu. Sorting keeps Close and ResetLink wake sequencing map-order free.
 func (n *Network) connsLocked() []*TCPConn {
 	out := make([]*TCPConn, 0, len(n.conns))
 	for c := range n.conns {
 		out = append(out, c)
 	}
+	slices.SortFunc(out, func(a, b *TCPConn) int {
+		if c := a.local.Compare(b.local); c != 0 {
+			return c
+		}
+		return a.remote.Compare(b.remote)
+	})
 	return out
 }
 
@@ -679,9 +691,22 @@ func (n *Network) step() bool {
 
 // Advance parks the caller for d on the ambient clock. Inside a
 // testing/synctest bubble this is the fake clock: virtual time jumps to the
-// next pending timer, running scheduled deliveries without wall-clock waits.
+// next pending timer, running scheduled deliveries without wall-clock waits,
+// and synctest.Wait then lets every goroutine woken by the elapsed timers run
+// to its next block before Advance returns, so callers never sample
+// mid-flight state. Outside a bubble (benchmarks) Wait is not permitted and
+// this degrades to a plain sleep.
 func (n *Network) Advance(d time.Duration) {
 	time.Sleep(d)
+	waitIfBubble()
+}
+
+// waitIfBubble runs synctest.Wait when the caller is inside a bubble. The
+// runtime rejects Wait from outside a bubble, where the preceding sleep
+// already sufficed; swallowing that rejection is the degradation path.
+func waitIfBubble() {
+	defer func() { _ = recover() }()
+	synctest.Wait()
 }
 
 // waitDelay parks until the timer fires, a new event wakes the scheduler, or

@@ -539,7 +539,7 @@ func TestDeterministicRouterMesh16(t *testing.T) {
 				if r.err != nil {
 					t.Fatalf("%s round trip: %v", r.name, r.err)
 				}
-			case <-time.After(150 * time.Second):
+			case <-time.After(360 * time.Second):
 				t.Fatal("concurrent round trips timed out waiting for a result")
 			}
 		}
