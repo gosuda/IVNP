@@ -18,6 +18,8 @@ jobs:
       GOWORK: 'off'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

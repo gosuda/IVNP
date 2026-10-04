@@ -70,7 +70,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) (*Router, error) {
 // newRouter keeps host transport injection at the composition boundary for
 // deterministic embedding scenarios without exporting daemon options.
 func newRouter(ctx context.Context, cfg RouterConfig, specs []node.NetworkSpec, def string) (*Router, error) {
-	core, err := node.NewEmbeddedRouterNetworks(ctx, specs)
+	core, err := node.NewEmbeddedRouterNetworks(ctx, specs, def)
 	if err != nil {
 		return nil, err
 	}

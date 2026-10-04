@@ -468,7 +468,9 @@ func (l *streamListener) Close() error {
 }
 
 // mergedListener multiplexes Accept across one listener per bound network so
-// an unqualified Listen serves every network the destination is bound to.
+// an unqualified Listen serves every network the destination is bound to. A
+// failed sub-listener retires independently: healthy networks keep serving,
+// and a terminal error surfaces only once no sub-listener remains active.
 type mergedListener struct {
 	owner *Destination
 	subs  []*streamListener
@@ -497,20 +499,16 @@ func newMergedListener(owner *Destination, subs []*streamListener) *mergedListen
 	return l
 }
 
+// feed forwards accepted connections until the sub-listener fails. The error
+// is buffered for Accept only when this is the last active sub-listener;
+// otherwise the failure is contained to its own network.
 func (l *mergedListener) feed(sub *streamListener) {
-	defer func() {
-		if l.alive.Add(-1) == 0 {
-			close(l.ch)
-		}
-	}()
+	var err error
 	for {
-		conn, err := sub.Accept()
+		var conn net.Conn
+		conn, err = sub.Accept()
 		if err != nil {
-			select {
-			case l.ch <- acceptResult{err: err}:
-			case <-l.done:
-			}
-			return
+			break
 		}
 		select {
 		case l.ch <- acceptResult{conn: conn}:
@@ -519,6 +517,19 @@ func (l *mergedListener) feed(sub *streamListener) {
 			return
 		}
 	}
+	defer func() {
+		if l.alive.Add(-1) == 0 {
+			// err is nil when this feed exited because Close drained it;
+			// only a genuine accept failure is a terminal error.
+			if err != nil {
+				select {
+				case l.ch <- acceptResult{err: err}:
+				case <-l.done:
+				}
+			}
+			close(l.ch)
+		}
+	}()
 }
 
 func (l *mergedListener) Accept() (net.Conn, error) {
@@ -531,13 +542,26 @@ func (l *mergedListener) Accept() (net.Conn, error) {
 
 func (l *mergedListener) Addr() net.Addr { return l.addr }
 
+// Close stops every sub-listener and drains connections already buffered in
+// the accept channel; they were accepted from the OS and must not leak. It is
+// idempotent and reports the joined sub-listener close errors.
 func (l *mergedListener) Close() error {
+	var err error
 	l.once.Do(func() {
 		close(l.done)
+		errs := make([]error, 0, len(l.subs))
 		for _, sub := range l.subs {
-			_ = sub.Listener.Close()
+			errs = append(errs, sub.Listener.Close())
 		}
+		// Range until the last feed goroutine closes ch: every buffered
+		// accepted connection was taken from the OS and must not leak.
+		for r := range l.ch {
+			if r.conn != nil {
+				errs = append(errs, r.conn.Close())
+			}
+		}
+		err = errors.Join(errs...)
 		l.owner.unregisterResource(l)
 	})
-	return nil
+	return err
 }

@@ -83,20 +83,23 @@ type GarlicReceiver struct {
 	logger         *slog.Logger
 	staticPrivate  [32]byte
 	hasStatic      bool
-	replyScratch   sync.Pool
+	replyScratch   *sync.Pool
 }
 
 func (r *GarlicReceiver) MatchesService(service *Service) bool {
 	return r.service == service
 }
 
-// getReplyScratch borrows a reply-decrypt buffer from the pool, allocating one
-// lazily on a cold pool so idle receivers hold no scratch memory.
-func (r *GarlicReceiver) getReplyScratch() *[foundation.I2NPI2PDMaxPayload]byte {
-	if v, ok := r.replyScratch.Get().(*[foundation.I2NPI2PDMaxPayload]byte); ok {
-		return v
+// getReplyScratch borrows a reply-decrypt buffer plus the pool it came from.
+// The caller holds the lifecycle read lock, so the field read is synchronized;
+// returning the captured pointer lets Put run after unlocking without racing
+// ReleaseSensitive replacing the field.
+func (r *GarlicReceiver) getReplyScratch() (*[foundation.I2NPI2PDMaxPayload]byte, *sync.Pool) {
+	pool := r.replyScratch
+	if v, ok := pool.Get().(*[foundation.I2NPI2PDMaxPayload]byte); ok {
+		return v, pool
 	}
-	return new([foundation.I2NPI2PDMaxPayload]byte)
+	return new([foundation.I2NPI2PDMaxPayload]byte), pool
 }
 
 type garlicReceiveScratch struct {
@@ -177,6 +180,7 @@ func NewGarlicReceiver(config GarlicReceiverConfig) (*GarlicReceiver, error) {
 	receiver := &GarlicReceiver{
 		service: config.Service, destinations: make(map[foundation.Hash]*garlicDestinationState, len(config.Destinations)),
 		replyKeys: config.ReplyKeys, now: config.Now, metrics: config.Metrics, logger: config.Logger, hasStatic: len(config.StaticPrivate) == 32,
+		replyScratch: new(sync.Pool),
 	}
 	copy(receiver.staticPrivate[:], config.StaticPrivate)
 	for hash, destination := range config.Destinations {
@@ -248,9 +252,10 @@ func (r *GarlicReceiver) ReleaseSensitive() {
 	r.destinationsMu.Unlock()
 	clear(r.staticPrivate[:])
 	// Every acquire path below clears its reply buffer before returning it to
-	// the pool, even on error, so dropping the pool here is safe; the GC
-	// reclaims its contents once unreferenced.
-	r.replyScratch = sync.Pool{}
+	// the pool, even on error, so dropping the pool here is safe; handlers
+	// capture the pool pointer under the read lock, so replacing the field
+	// cannot race their Put — the GC reclaims the retired pool.
+	r.replyScratch = nil
 	r.hasStatic = false
 	r.lifecycleMu.Unlock()
 
@@ -333,7 +338,7 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 			if plainLen > foundation.I2NPI2PDMaxPayload {
 				return foundation.I2NPErrPayloadTooLarge
 			}
-			scratch := r.getReplyScratch()
+			scratch, scratchPool := r.getReplyScratch()
 			reply, unwrapErr := dataplanegarlicecies.OpenOneTimeReplyExistingSession(scratch[:plainLen], key.Key, key.Tag, outer.Encrypted)
 			unlock()
 			if unwrapErr == nil {
@@ -348,26 +353,26 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 			}
 
 			clear(scratch[:plainLen])
-			r.replyScratch.Put(scratch)
+			scratchPool.Put(scratch)
 			return unwrapErr
 		}
 	}
 	if r.hasStatic {
 		plainLen := len(outer.Encrypted) - 32 - 16
 		if plainLen > 0 && plainLen <= foundation.I2NPI2PDMaxPayload {
-			scratch := r.getReplyScratch()
+			scratch, scratchPool := r.getReplyScratch()
 			inner, openErr := dataplanegarlicecies.OpenRouterMessage(scratch[:plainLen], r.staticPrivate[:], outer.Encrypted, now)
 			if openErr == nil {
 				unlock()
 				openErr = r.service.
 					handleI2NP(inner, now, false, source)
 				clear(scratch[:plainLen])
-				r.replyScratch.Put(scratch)
+				scratchPool.Put(scratch)
 				return openErr
 			}
 
 			clear(scratch[:plainLen])
-			r.replyScratch.Put(scratch)
+			scratchPool.Put(scratch)
 		}
 	}
 	for _, destination := range destinations {

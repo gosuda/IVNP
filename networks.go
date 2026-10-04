@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/dataplane"
@@ -346,7 +345,8 @@ func validNetworkName(name string) bool {
 	}
 	for _, r := range name {
 		alpha := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
-		if !alpha && !unicode.IsDigit(r) && r != '_' {
+		digit := r >= '0' && r <= '9'
+		if !alpha && !digit && r != '_' {
 			return false
 		}
 	}
@@ -404,15 +404,24 @@ func validateBootstrap(field string, b BootstrapConfig, netID uint32) error {
 		return invalidConfig(field + ".PriorityReseedURLs")
 	}
 	requiredQuery := "netid=" + strconv.FormatUint(uint64(netID), 10)
-	for i, text := range append(append([]string(nil), b.ReseedURLs...), b.PriorityReseedURLs...) {
+	if err := validateReseedURLs(field+".ReseedURLs", b.ReseedURLs, requiredQuery); err != nil {
+		return err
+	}
+	return validateReseedURLs(field+".PriorityReseedURLs", b.PriorityReseedURLs, requiredQuery)
+}
+
+// validateReseedURLs checks one reseed URL slice, reporting failures against
+// the slice's own field name and index.
+func validateReseedURLs(field string, urls []string, requiredQuery string) error {
+	for i, text := range urls {
 		u, err := url.Parse(text)
 		if err != nil {
-			return invalidConfig(field + ".ReseedURLs[" + strconv.Itoa(i) + "]")
+			return invalidConfig(field + "[" + strconv.Itoa(i) + "]")
 		}
 		validEndpoint := len(text) <= 512 && u.Scheme == "https" && u.Hostname() != ""
 		forbiddenParts := u.User != nil || u.Fragment != "" || u.ForceQuery
 		if !validEndpoint || forbiddenParts || u.RawQuery != requiredQuery {
-			return invalidConfig(field + ".ReseedURLs[" + strconv.Itoa(i) + "]")
+			return invalidConfig(field + "[" + strconv.Itoa(i) + "]")
 		}
 	}
 	return nil

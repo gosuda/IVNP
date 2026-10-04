@@ -1072,3 +1072,49 @@ func TestGarlicReceiverNestedGarlicDeadlockFree(t *testing.T) {
 		}
 	})
 }
+
+// TestGarlicReceiverReleaseSensitiveReplyScratchRace exercises concurrent
+// HandleGarlicFrom and ReleaseSensitive under -race: Put on the reply-scratch
+// pool must not race the field reassignment/cleanup.
+func TestGarlicReceiverReleaseSensitiveReplyScratchRace(t *testing.T) {
+	for range 100 {
+		now := uint64(1_000_000)
+		registry := dataplanegarlic.NewReplyKeyRegistry(128)
+		receiver, err := NewGarlicReceiver(GarlicReceiverConfig{
+			Service:   NewService(Sinks{}),
+			ReplyKeys: registry,
+			Now:       func() uint64 { return now },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		tag := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+		_ = registry.RegisterGarlicReplyKey(dataplanegarlic.GarlicReplyKey{
+			Tag:       tag,
+			Key:       [32]byte{42},
+			ExpiresAt: now + 10_000,
+		})
+
+		outer := make([]byte, 4+8+32)
+		binary.BigEndian.PutUint32(outer[:4], uint32(8+32))
+		copy(outer[4:12], tag[:])
+		msg := foundation.I2NPMessage{
+			Header:  foundation.I2NPHeader{Type: foundation.I2NPGarlic},
+			Payload: outer,
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = receiver.HandleGarlicFrom(I2NPSource{}, msg)
+		}()
+		go func() {
+			defer wg.Done()
+			receiver.ReleaseSensitive()
+		}()
+		wg.Wait()
+		receiver.ReleaseSensitive()
+	}
+}
