@@ -140,3 +140,81 @@ func TestJavaKBucketSplitReinsertionRejectsTerminalOverflow(t *testing.T) {
 		t.Fatalf("terminal members = %d, want RejectTrimmer cap 5", len(terminal.members))
 	}
 }
+
+func TestFloodfillCountTracksEveryMutation(t *testing.T) {
+	var local foundation.Hash
+	table := NewTable(local, 2)
+	assertCount := func(want int, context string) {
+		t.Helper()
+		if got := table.FloodfillCount(); got != want {
+			t.Fatalf("%s: FloodfillCount = %d, want %d", context, got, want)
+		}
+	}
+
+	first, second, third := routerWithSeed(1), routerWithSeed(2), routerWithSeed(3)
+	first.Published, second.Published, third.Published = 10, 10, 10
+
+	// Insertion.
+	table.StoreVerified(first, true, 10)
+	table.StoreVerified(second, false, 10)
+	assertCount(1, "after insertions")
+
+	// Update that flips the floodfill flag on an existing entry.
+	upgraded := second
+	upgraded.Published = 20
+	table.StoreVerified(upgraded, true, 20)
+	assertCount(2, "after floodfill upgrade")
+
+	// Update that clears the floodfill flag on an existing entry.
+	downgraded := first
+	downgraded.Published = 30
+	table.StoreVerified(downgraded, false, 30)
+	assertCount(1, "after floodfill downgrade")
+
+	// Stale updates must not change the counter.
+	stale := first
+	stale.Published = 5
+	table.StoreVerified(stale, true, 40)
+	assertCount(1, "after stale update")
+
+	// Removal.
+	if !table.Remove(second.Hash()) {
+		t.Fatal("Remove reported missing entry")
+	}
+	assertCount(0, "after remove of floodfill")
+	if table.Remove(second.Hash()) {
+		t.Fatal("Remove of absent entry succeeded")
+	}
+	assertCount(0, "after double remove")
+
+	// Expiration.
+	table.StoreVerified(third, true, 10)
+	assertCount(1, "before expire")
+	if removed := table.Expire(20); removed != 1 {
+		t.Fatalf("Expire removed %d, want 1", removed)
+	}
+	assertCount(0, "after expire")
+
+	// RouterLimit eviction: evictOldestLocked removes the lowest-lastSeen
+	// entry, here a floodfill, so the counter must drop with it.
+	limitA, limitB, limitC := routerWithSeed(4), routerWithSeed(5), routerWithSeed(6)
+	limitA.Published, limitB.Published, limitC.Published = 10, 20, 30
+	table.StoreVerified(limitA, true, 10)
+	table.StoreVerified(limitB, true, 20)
+	table.StoreVerified(limitC, false, 30)
+	assertCount(2, "before limit eviction")
+	table.SetRouterLimit(2) // evicts limitA (10) and limitB (20), both floodfills
+	assertCount(0, "after limit eviction")
+
+	// Counter must always agree with a full-table scan.
+	_, refs := table.Snapshot()
+	scan := 0
+	for _, ref := range refs {
+		if ref.Floodfill {
+			scan++
+		}
+	}
+	if scan != table.FloodfillCount() {
+		t.Fatalf("counter = %d, scan = %d", table.FloodfillCount(), scan)
+	}
+}

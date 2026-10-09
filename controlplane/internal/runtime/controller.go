@@ -1720,16 +1720,10 @@ func (d *Controller) refreshObservability() {
 	if d == nil || d.registry == nil {
 		return
 	}
-	_, routerRefs := d.database.Routers().Snapshot()
-	routers := uint64(len(routerRefs))
-	floodfills := uint64(0)
-	for _, router := range routerRefs {
-		if router.Floodfill {
-			floodfills++
-		}
-	}
-	d.registry.SetNetDBRouters(routers)
-	d.registry.SetNetDBFloodfills(floodfills)
+	routers := d.database.Routers().Len()
+	floodfills := d.database.Routers().FloodfillCount()
+	d.registry.SetNetDBRouters(uint64(routers))
+	d.registry.SetNetDBFloodfills(uint64(floodfills))
 	if d.registry.Snapshot().Bootstrap.Stage < 3 && routers >= 50 && d.bootstrapPoolsStarted.CompareAndSwap(bootstrapPoolsIdle, bootstrapPoolsStarted) {
 		d.requestAllTunnelMaintenance()
 	}
