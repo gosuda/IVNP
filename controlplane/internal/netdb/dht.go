@@ -40,6 +40,7 @@ type Table struct {
 	routers       map[foundation.Hash]routerEntry
 	routing       kBucketSet
 	generation    uint64
+	floodfills    int
 	selectionPool chan *routerSelectionBuffer
 	routerLimit   int
 }
@@ -73,6 +74,7 @@ func (t *Table) SetRouterLimit(limit int) {
 func (t *Table) evictOldestLocked() {
 	var oldest foundation.Hash
 	var oldestSeen uint64
+	oldestFloodfill := false
 	found := false
 	for hash, entry := range t.routers {
 		replace := !found || entry.lastSeen < oldestSeen
@@ -80,12 +82,15 @@ func (t *Table) evictOldestLocked() {
 			replace = distanceLess(t.local, oldest, hash)
 		}
 		if replace {
-			oldest, oldestSeen, found = hash, entry.lastSeen, true
+			oldest, oldestSeen, oldestFloodfill, found = hash, entry.lastSeen, entry.floodfill, true
 		}
 	}
 	if found {
 		delete(t.routers, oldest)
 		t.routing.remove(t.local, oldest)
+		if oldestFloodfill {
+			t.floodfills--
+		}
 		t.generation++
 	}
 }
@@ -93,6 +98,16 @@ func (t *Table) evictOldestLocked() {
 func (t *Table) Len() int {
 	t.mu.RLock()
 	n := len(t.routers)
+	t.mu.RUnlock()
+	return n
+}
+
+// FloodfillCount returns how many retained RouterInfos advertise floodfill
+// capability. Maintained incrementally so periodic telemetry never needs a
+// full-table snapshot.
+func (t *Table) FloodfillCount() int {
+	t.mu.RLock()
+	n := t.floodfills
 	t.mu.RUnlock()
 	return n
 }
@@ -248,6 +263,13 @@ func (t *Table) StoreVerified(info foundation.NetworkDatabaseRouterInfo, floodfi
 		if old.info.Published >= info.Published {
 			return
 		}
+		if old.floodfill != floodfill {
+			if floodfill {
+				t.floodfills++
+			} else {
+				t.floodfills--
+			}
+		}
 		old.info, old.floodfill = info, floodfill
 		if seenAt > old.lastSeen {
 			old.lastSeen = seenAt
@@ -261,17 +283,24 @@ func (t *Table) StoreVerified(info foundation.NetworkDatabaseRouterInfo, floodfi
 	}
 	t.routing.add(t.local, hash, seenAt)
 	t.routers[hash] = routerEntry{info: info, floodfill: floodfill, lastSeen: seenAt}
+	if floodfill {
+		t.floodfills++
+	}
 	t.generation++
 }
 
 func (t *Table) Remove(hash foundation.Hash) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if _, exists := t.routers[hash]; !exists {
+	entry, exists := t.routers[hash]
+	if !exists {
 		return false
 	}
 	delete(t.routers, hash)
 	t.routing.remove(t.local, hash)
+	if entry.floodfill {
+		t.floodfills--
+	}
 	t.generation++
 	return true
 }
@@ -297,6 +326,9 @@ func (t *Table) Expire(cutoff uint64) int {
 			}
 			delete(t.routers, candidate.Hash)
 			t.routing.remove(t.local, candidate.Hash)
+			if entry.floodfill {
+				t.floodfills--
+			}
 			batchRemoved++
 		}
 		if batchRemoved != 0 {
