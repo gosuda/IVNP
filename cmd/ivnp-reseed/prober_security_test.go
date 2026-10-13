@@ -53,9 +53,9 @@ func TestProberPreservesRouterAddressPairs(t *testing.T) {
 
 func TestProbePeerAttemptCap(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		endpoints  int
-		wantDials  int
+		name      string
+		endpoints int
+		wantDials int
 	}{
 		{name: "none", endpoints: 0, wantDials: 0},
 		{name: "at-limit", endpoints: maxProbeAttemptsPerPeer, wantDials: maxProbeAttemptsPerPeer},
