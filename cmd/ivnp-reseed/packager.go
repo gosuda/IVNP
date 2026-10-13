@@ -26,19 +26,19 @@ const (
 	su3MinimumVersion    = 16
 	su3FileTypeZIP       = 0
 	su3ContentTypeReseed = 3
-	maxCachedSU3Bytes     = 16 << 20
-	maxCachedRouterInfos  = controlplane.ReseedDefaultMaxRouterInfos
-	maxRouterInfoBytes    = 64 << 10
-	maxTotalRouterBytes   = controlplane.ReseedDefaultMaxTotalRouterBytes
+	maxCachedSU3Bytes    = 16 << 20
+	maxCachedRouterInfos = controlplane.ReseedDefaultMaxRouterInfos
+	maxRouterInfoBytes   = 64 << 10
+	maxTotalRouterBytes  = controlplane.ReseedDefaultMaxTotalRouterBytes
 )
 
 var (
-	ErrInvalidPrivateKey = errors.New("packager: invalid private key")
-	ErrInvalidSignerID   = errors.New("packager: invalid signer ID length")
-	ErrInvalidSignature  = errors.New("packager: invalid archive signature")
-	errSU3TooShort       = errors.New("packager: su3 archive too short")
-	errCachedSU3TooLarge    = errors.New("packager: cached su3 exceeds size limit")
-	errInvalidSU3PublicKey  = errors.New("packager: invalid su3 public key")
+	ErrInvalidPrivateKey   = errors.New("packager: invalid private key")
+	ErrInvalidSignerID     = errors.New("packager: invalid signer ID length")
+	ErrInvalidSignature    = errors.New("packager: invalid archive signature")
+	errSU3TooShort         = errors.New("packager: su3 archive too short")
+	errCachedSU3TooLarge   = errors.New("packager: cached su3 exceeds size limit")
+	errInvalidSU3PublicKey = errors.New("packager: invalid su3 public key")
 	errSU3TooManyEntries   = errors.New("packager: too many su3 zip entries")
 	errSU3EntryTooLarge    = errors.New("packager: su3 zip entry exceeds size limit")
 	errSU3TotalTooLarge    = errors.New("packager: total su3 router info bytes exceed limit")
