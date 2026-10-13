@@ -82,6 +82,7 @@ type StoreFlooder struct {
 	closed    bool
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
+	cleanup   sync.Once
 	recent    map[[32]byte]uint64
 	keyFloods map[foundation.Hash]storeFloodCount
 	// sourceJobs counts both queued and active jobs, protected by mu.
@@ -400,12 +401,14 @@ func (f *StoreFlooder) Close() error {
 	}
 	f.mu.Unlock()
 	f.wg.Wait()
-	f.drain()
-	f.mu.Lock()
-	clear(f.recent)
-	clear(f.keyFloods)
-	clear(f.sourceJobs)
-	f.mu.Unlock()
+	f.cleanup.Do(func() {
+		f.drain()
+		f.mu.Lock()
+		clear(f.recent)
+		clear(f.keyFloods)
+		clear(f.sourceJobs)
+		f.mu.Unlock()
+	})
 	return nil
 }
 
