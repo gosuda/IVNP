@@ -42,7 +42,7 @@ var (
 	ConfigurationLoadOperating           = configuration.LoadOperating
 	ConfigurationLoadOrCreateOperating   = configuration.LoadOrCreateOperating
 	ConfigurationParseOperating          = configuration.ParseOperating
-	FilesystemStoreCopyOwnedFileIfExists = filesystemstore.CopyOwnedFileIfExists
+	FilesystemStoreCopyPrivateBoundedIfExists = filesystemstore.CopyPrivateBoundedIfExists
 	FilesystemStoreErrTooLarge           = filesystemstore.ErrTooLarge
 	FilesystemStoreOpenRegular           = filesystemstore.OpenRegular
 	FilesystemStoreReadBoundedFile       = filesystemstore.ReadBoundedFile

@@ -3,21 +3,20 @@ package filesystemstore
 import (
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 )
 
-// CopyOwnedFileIfExists atomically copies an owned regular file to an owner-only
-// destination. Private sources must meet state storage's file and directory policy.
-// Missing sources are skipped; maxBytes must be nonnegative.
-func CopyOwnedFileIfExists(srcPath, dstPath string, maxBytes int64, private bool) error {
-	if maxBytes < 0 {
+// CopyPrivateBoundedIfExists atomically copies an owner-only regular file into
+// a private destination, rejecting symlinks, hard links and unsafe directories.
+// Missing sources are skipped; maxBytes must be in [0, math.MaxInt64).
+func CopyPrivateBoundedIfExists(srcPath, dstPath string, maxBytes int64) error {
+	if maxBytes < 0 || maxBytes == math.MaxInt64 {
 		return os.ErrInvalid
 	}
-	if private {
-		if err := EnsurePrivateDir(filepath.Dir(srcPath)); err != nil {
-			return err
-		}
+	if err := EnsurePrivateDir(filepath.Dir(srcPath)); err != nil {
+		return err
 	}
 	source, info, err := OpenRegular(srcPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -28,12 +27,7 @@ func CopyOwnedFileIfExists(srcPath, dstPath string, maxBytes int64, private bool
 	}
 	defer source.Close()
 
-	if private {
-		err = ValidatePrivateFile(source)
-	} else {
-		err = ValidateOwnedFile(source)
-	}
-	if err != nil {
+	if err := ValidatePrivateFile(source); err != nil {
 		return err
 	}
 	if info.Size() > maxBytes {

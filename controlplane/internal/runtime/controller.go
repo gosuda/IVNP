@@ -498,28 +498,28 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 
 		stateBase := filepath.Base(masterStatePath)
 		workingStatePath = filepath.Join(taintedDir, stateBase)
-		if cpErr := state.FilesystemStoreCopyOwnedFileIfExists(masterStatePath, workingStatePath, stateCopyLimit, true); cpErr != nil {
+		if cpErr := state.FilesystemStoreCopyPrivateBoundedIfExists(masterStatePath, workingStatePath, stateCopyLimit); cpErr != nil {
 			return fmt.Errorf("daemon: failed to copy state file for tainted mode: %w", cpErr)
 		}
 
 		if masterKeyPath != "" {
 			keyBase := filepath.Base(masterKeyPath)
 			workingKeyPath = filepath.Join(taintedDir, keyBase)
-			if cpErr := state.FilesystemStoreCopyOwnedFileIfExists(masterKeyPath, workingKeyPath, 32, true); cpErr != nil {
+			if cpErr := state.FilesystemStoreCopyPrivateBoundedIfExists(masterKeyPath, workingKeyPath, 32); cpErr != nil {
 				return fmt.Errorf("daemon: failed to copy keys file for tainted mode: %w", cpErr)
 			}
 		}
 
 		if masterNetdbDir != "" {
-			if cpErr := state.FilesystemStoreCopyOwnedFileIfExists(filepath.Join(masterNetdbDir, "netdb.routers"), filepath.Join(taintedDir, "netdb.routers"), routerSnapshotCopyLimit, false); cpErr != nil {
+			if cpErr := state.FilesystemStoreCopyPrivateBoundedIfExists(filepath.Join(masterNetdbDir, "netdb.routers"), filepath.Join(taintedDir, "netdb.routers"), routerSnapshotCopyLimit); cpErr != nil {
 				return fmt.Errorf("daemon: failed to copy NetDB routers snapshot for tainted mode: %w", cpErr)
 			}
-			if cpErr := state.FilesystemStoreCopyOwnedFileIfExists(filepath.Join(masterNetdbDir, "netdb.responders"), filepath.Join(taintedDir, "netdb.responders"), netdb.DefaultResponderSnapshotMaxBytes, false); cpErr != nil {
+			if cpErr := state.FilesystemStoreCopyPrivateBoundedIfExists(filepath.Join(masterNetdbDir, "netdb.responders"), filepath.Join(taintedDir, "netdb.responders"), netdb.DefaultResponderSnapshotMaxBytes); cpErr != nil {
 				return fmt.Errorf("daemon: failed to copy NetDB responders snapshot for tainted mode: %w", cpErr)
 			}
 		}
 		if cfg.AddressBook.StatePath != "" {
-			if cpErr := state.FilesystemStoreCopyOwnedFileIfExists(cfg.AddressBook.StatePath, filepath.Join(taintedDir, filepath.Base(cfg.AddressBook.StatePath)), cfg.AddressBook.MaxFileBytes, false); cpErr != nil {
+			if cpErr := state.FilesystemStoreCopyPrivateBoundedIfExists(cfg.AddressBook.StatePath, filepath.Join(taintedDir, filepath.Base(cfg.AddressBook.StatePath)), cfg.AddressBook.MaxFileBytes); cpErr != nil {
 				return fmt.Errorf("daemon: failed to copy address book for tainted mode: %w", cpErr)
 			}
 		}
@@ -3048,7 +3048,7 @@ func (d *Controller) tryPromoteToMaster() (bool, error) {
 
 	if d.config.AddressBook.StatePath != "" && d.taintedDir != "" {
 		taintedAB := filepath.Join(d.taintedDir, filepath.Base(d.config.AddressBook.StatePath))
-		if cpErr := state.FilesystemStoreCopyOwnedFileIfExists(taintedAB, d.config.AddressBook.StatePath, d.config.AddressBook.MaxFileBytes, false); cpErr != nil {
+		if cpErr := state.FilesystemStoreCopyPrivateBoundedIfExists(taintedAB, d.config.AddressBook.StatePath, d.config.AddressBook.MaxFileBytes); cpErr != nil {
 			_ = masterLock.Close()
 			_ = masterStore.Close()
 			return false, fmt.Errorf("daemon: failed to copy address book during promotion: %w", cpErr)

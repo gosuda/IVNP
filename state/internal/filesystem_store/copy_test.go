@@ -7,14 +7,14 @@ import (
 	"testing"
 )
 
-func TestCopyOwnedFileIfExistsBoundsAndMissing(t *testing.T) {
+func TestCopyPrivateBoundedIfExistsBoundsAndMissing(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "source")
 	dst := filepath.Join(dir, "target")
 	if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := CopyOwnedFileIfExists(src, dst, 4, true); err != nil {
+	if err := CopyPrivateBoundedIfExists(src, dst, 4); err != nil {
 		t.Fatal(err)
 	}
 	if content, err := os.ReadFile(dst); err != nil || string(content) != "old" {
@@ -23,13 +23,13 @@ func TestCopyOwnedFileIfExistsBoundsAndMissing(t *testing.T) {
 	if err := os.WriteFile(src, []byte("12345"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := CopyOwnedFileIfExists(src, dst, 4, true); !errors.Is(err, ErrTooLarge) {
+	if err := CopyPrivateBoundedIfExists(src, dst, 4); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("oversize source = %v, want ErrTooLarge", err)
 	}
 	if content, err := os.ReadFile(dst); err != nil || string(content) != "old" {
 		t.Fatalf("oversize source changed destination: %q, %v", content, err)
 	}
-	if err := CopyOwnedFileIfExists(src, dst, 5, true); err != nil {
+	if err := CopyPrivateBoundedIfExists(src, dst, 5); err != nil {
 		t.Fatal(err)
 	}
 	content, err := os.ReadFile(dst)
@@ -46,10 +46,10 @@ func TestCopyOwnedFileIfExistsBoundsAndMissing(t *testing.T) {
 	if err := destination.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := CopyOwnedFileIfExists(src, filepath.Join(dir, "absent", "target"), 5, true); !errors.Is(err, os.ErrNotExist) {
+	if err := CopyPrivateBoundedIfExists(src, filepath.Join(dir, "absent", "target"), 5); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing destination directory = %v", err)
 	}
-	if err := CopyOwnedFileIfExists(src, dst, -1, true); !errors.Is(err, os.ErrInvalid) {
+	if err := CopyPrivateBoundedIfExists(src, dst, -1); !errors.Is(err, os.ErrInvalid) {
 		t.Fatalf("negative bound = %v", err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -63,7 +63,7 @@ func TestCopyOwnedFileIfExistsBoundsAndMissing(t *testing.T) {
 	}
 }
 
-func TestCopyOwnedFileIfExistsRejectsSymlinkAndDirectory(t *testing.T) {
+func TestCopyPrivateBoundedIfExistsRejectsSymlinkAndDirectory(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "source")
 	link := filepath.Join(dir, "link")
@@ -77,10 +77,10 @@ func TestCopyOwnedFileIfExistsRejectsSymlinkAndDirectory(t *testing.T) {
 	if err := os.Symlink(src, link); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	if err := CopyOwnedFileIfExists(link, dst, 10, true); err == nil {
+	if err := CopyPrivateBoundedIfExists(link, dst, 10); err == nil {
 		t.Fatal("symlink source was accepted")
 	}
-	if err := CopyOwnedFileIfExists(dir, dst, 10, false); !errors.Is(err, ErrInvalidFile) {
+	if err := CopyPrivateBoundedIfExists(dir, dst, 10); !errors.Is(err, ErrInvalidFile) {
 		t.Fatalf("directory source = %v, want ErrInvalidFile", err)
 	}
 	if content, err := os.ReadFile(dst); err != nil || string(content) != "old" {
@@ -88,7 +88,7 @@ func TestCopyOwnedFileIfExistsRejectsSymlinkAndDirectory(t *testing.T) {
 	}
 }
 
-func TestCopyOwnedFileIfExistsDoesNotFollowDestinationSymlink(t *testing.T) {
+func TestCopyPrivateBoundedIfExistsDoesNotFollowDestinationSymlink(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "source")
 	victim := filepath.Join(dir, "victim")
@@ -102,7 +102,7 @@ func TestCopyOwnedFileIfExistsDoesNotFollowDestinationSymlink(t *testing.T) {
 	if err := os.Symlink(victim, dst); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	if err := CopyOwnedFileIfExists(src, dst, 4, true); err != nil {
+	if err := CopyPrivateBoundedIfExists(src, dst, 4); err != nil {
 		t.Fatal(err)
 	}
 	if content, err := os.ReadFile(victim); err != nil || string(content) != "untouched" {
