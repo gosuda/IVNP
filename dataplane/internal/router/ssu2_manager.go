@@ -237,6 +237,7 @@ type SSU2Manager struct {
 	publishedRevision   uint64
 	relayPublishMu      sync.Mutex
 	newTokens           map[string]ssu2NewTokenLease
+	issuedNewTokens     map[uint64]ssu2IssuedNewTokenLease
 	peerTests           map[uint32]*ssu2PeerTestState
 	symmetricEvidence   map[string]ssu2PeerTestEvidence
 	relayRequests       map[uint32]*ssu2RelayRequest
@@ -811,6 +812,11 @@ type ssu2NewTokenLease struct {
 	expires     time.Time
 }
 
+type ssu2IssuedNewTokenLease struct {
+	endpoint netip.AddrPort
+	expires  time.Time
+}
+
 // ssu2PeerTestState records only authenticated observations. It is bounded by
 type ssu2PeerTestState struct {
 	nonce            uint32
@@ -936,6 +942,7 @@ func NewSSU2Manager(config SSU2ManagerConfig) (*SSU2Manager, error) {
 		advertisedRelays:      make(map[foundation.Hash]ssu2RelayTagLease),
 		relayTagPending:       make(map[foundation.Hash]time.Time),
 		newTokens:             make(map[string]ssu2NewTokenLease),
+		issuedNewTokens:       make(map[uint64]ssu2IssuedNewTokenLease),
 		peerTests:             make(map[uint32]*ssu2PeerTestState),
 		symmetricEvidence:     make(map[string]ssu2PeerTestEvidence),
 		relayRequests:         make(map[uint32]*ssu2RelayRequest),
@@ -1091,6 +1098,7 @@ func (m *SSU2Manager) Close() error {
 		clear(m.relayTagPending)
 		m.relayRevision++
 		clear(m.newTokens)
+		clear(m.issuedNewTokens)
 		clear(m.symmetricEvidence)
 		for _, state := range m.peerTests {
 			if state.timer != nil {
@@ -4100,28 +4108,61 @@ func newTokenCacheKey(peer foundation.Hash, remote net.Addr, destination uint64)
 	return string(peer[:]) + "|" + remote.String() + "|" + strconv.FormatUint(destination, 10)
 }
 
+// newNewTokenLocked issues a unique, single-use token for this UDP endpoint.
+// The outstanding-token cache is bounded even under rapid session churn.
 func (m *SSU2Manager) newNewTokenLocked(remote net.Addr) (dataplanessu2.NewToken, error) {
-	token, err := m.retryToken(remote, 0, 0, m.tokenBucket(m.nowLocked()))
-	if err != nil {
-		return dataplanessu2.NewToken{}, err
+	endpoint, ok := addrPortKey(remote)
+	if !ok || endpoint.Port() == 0 {
+		return dataplanessu2.NewToken{}, ErrSSU2Session
 	}
-	return dataplanessu2.NewToken{Token: token, Expiration: uint32(m.nowLocked().Add(m.tokenLifetime).Unix())}, nil
+	now := m.nowLocked()
+	if len(m.issuedNewTokens) >= ssu2MaxNewTokens {
+		for token, lease := range m.issuedNewTokens {
+			if !lease.expires.After(now) {
+				delete(m.issuedNewTokens, token)
+			}
+		}
+		if len(m.issuedNewTokens) >= ssu2MaxNewTokens {
+			return dataplanessu2.NewToken{}, ErrSSU2Session
+		}
+	}
+	var random [8]byte
+	for range 3 {
+		if _, err := rand.Read(random[:]); err != nil {
+			return dataplanessu2.NewToken{}, err
+		}
+		token := binary.BigEndian.Uint64(random[:])
+		if token == 0 {
+			continue
+		}
+		if _, exists := m.issuedNewTokens[token]; exists {
+			continue
+		}
+		expires := now.Add(m.tokenLifetime)
+		m.issuedNewTokens[token] = ssu2IssuedNewTokenLease{endpoint: endpoint, expires: expires}
+		return dataplanessu2.NewToken{Token: token, Expiration: uint32(expires.Unix())}, nil
+	}
+	return dataplanessu2.NewToken{}, ErrSSU2Session
 }
 
 func (m *SSU2Manager) consumeNewTokenLocked(token uint64, remote net.Addr) bool {
-	if token == 0 {
+	endpoint, ok := addrPortKey(remote)
+	if token == 0 || !ok || endpoint.Port() == 0 {
 		return false
 	}
-	bucket := m.tokenBucket(m.nowLocked())
-	expected, err := m.retryToken(remote, 0, 0, bucket)
-	if err == nil && hmac.Equal(u64Bytes(token), u64Bytes(expected)) {
-		return true
-	}
-	if bucket == 0 {
+	lease, exists := m.issuedNewTokens[token]
+	if !exists {
 		return false
 	}
-	expected, err = m.retryToken(remote, 0, 0, bucket-1)
-	return err == nil && hmac.Equal(u64Bytes(token), u64Bytes(expected))
+	if !lease.expires.After(m.nowLocked()) {
+		delete(m.issuedNewTokens, token)
+		return false
+	}
+	if lease.endpoint != endpoint {
+		return false
+	}
+	delete(m.issuedNewTokens, token)
+	return true
 }
 
 func (m *SSU2Manager) expireExtensions(now time.Time) {
@@ -4169,6 +4210,11 @@ func (m *SSU2Manager) expireExtensions(now time.Time) {
 			delete(m.newTokens, key)
 		}
 	}
+	for token, lease := range m.issuedNewTokens {
+		if !lease.expires.After(now) {
+			delete(m.issuedNewTokens, token)
+		}
+	}
 	for nonce, state := range m.peerTests {
 		if !state.expires.After(now) {
 			expiredTests = append(expiredTests, struct {
@@ -4196,12 +4242,6 @@ func (m *SSU2Manager) expireExtensions(now time.Time) {
 	for _, expired := range expiredTests {
 		m.expirePeerTest(expired.nonce, expired.state)
 	}
-}
-
-func u64Bytes(value uint64) []byte {
-	var bytes [8]byte
-	binary.BigEndian.PutUint64(bytes[:], value)
-	return bytes[:]
 }
 
 func (m *SSU2Manager) sendNewToken(session *ssu2TransportSession) error {
@@ -4353,11 +4393,29 @@ func (m *SSU2Manager) retryToken(remote net.Addr, destinationID, sourceID, bucke
 // is removed from sessionsByID and returned so callers can release it after
 // dropping m.mu.
 func (m *SSU2Manager) installSessionLocked(session *ssu2TransportSession) (displaced *ssu2TransportSession, ok bool) {
-	if !m.runningLocked() || m.sessionsByID[session.receiveID] != nil {
+	if !m.runningLocked() || m.sessionsByID[session.receiveID] != nil || len(m.sessionsByID) > m.maxSessions {
 		return nil, false
 	}
 	previous := m.sessionsByPeer[session.peer]
-	if previous == nil && len(m.sessionsByID) >= m.maxSessions {
+	keepPrevious := previous != nil &&
+		previous.inbound == preferInboundSession(m.bindings.LocalInfo, session.peer) &&
+		previous.inbound != session.inbound
+	if previous == nil || keepPrevious {
+		// These handshakes add an ID even if a canonical peer already exists.
+		if len(m.sessionsByID) >= m.maxSessions {
+			return nil, false
+		}
+		liveForPeer := 0
+		for _, existing := range m.sessionsByID {
+			if existing.peer == session.peer {
+				liveForPeer++
+				if liveForPeer >= 2 {
+					return nil, false
+				}
+			}
+		}
+	} else if m.sessionsByID[previous.receiveID] != previous {
+		// A replacement can reuse a full global slot only if it removes it.
 		return nil, false
 	}
 	m.sessionsByID[session.receiveID] = session
@@ -4365,7 +4423,7 @@ func (m *SSU2Manager) installSessionLocked(session *ssu2TransportSession) (displ
 		m.sessionsByPeer[session.peer] = session
 		return nil, true
 	}
-	if previous.inbound == preferInboundSession(m.bindings.LocalInfo, session.peer) && previous.inbound != session.inbound {
+	if keepPrevious {
 		return nil, true
 	}
 	delete(m.sessionsByID, previous.receiveID)
