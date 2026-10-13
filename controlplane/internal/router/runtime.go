@@ -294,7 +294,9 @@ func New(cfg Config, deps Dependencies) (*Router, error) {
 		controlSinks.DatabaseStoreExpected = deps.RequestHandler.ExpectsDatabaseStore
 	}
 	if deps.LookupResponder != nil {
-		controlSinks.DatabaseLookup = deps.LookupResponder.Enqueue
+		controlSinks.DatabaseLookup = func(source dataplane.RouterI2NPSource, lookup foundation.I2NPDatabaseLookupMessage) error {
+			return deps.LookupResponder.Enqueue(controlplanenetdb.LookupSource{Peer: source.Peer, Direct: source.Direct}, lookup)
+		}
 	}
 	if deps.StoreFlooder != nil {
 		controlSinks.DatabaseStoreFlood = func(source dataplane.RouterI2NPSource, store foundation.I2NPDatabaseStoreMessage) error {

@@ -50,6 +50,7 @@ type (
 	NetworkDatabaseLocalRouterInfoConfig                = netdb.LocalRouterInfoConfig
 	NetworkDatabaseLookupReplyWrapper                   = netdb.LookupReplyWrapper
 	NetworkDatabaseLookupResponder                      = netdb.LookupResponder
+	NetworkDatabaseLookupSource                         = netdb.LookupSource
 	NetworkDatabaseLookupResponderConfig                = netdb.LookupResponderConfig
 	NetworkDatabaseLookupResult                         = netdb.LookupResult
 	NetworkDatabaseLookupType                           = netdb.LookupType
@@ -267,6 +268,8 @@ var (
 	NetworkDatabaseErrLookupResponderClosed                  = netdb.ErrLookupResponderClosed
 	NetworkDatabaseErrLookupResponderConfig                  = netdb.ErrLookupResponderConfig
 	NetworkDatabaseErrLookupResponderFull                    = netdb.ErrLookupResponderFull
+	NetworkDatabaseErrLookupResponderReplyRoute              = netdb.ErrLookupResponderReplyRoute
+	NetworkDatabaseErrLookupResponderSourceFull              = netdb.ErrLookupResponderSourceFull
 	NetworkDatabaseErrNoFloodfill                            = netdb.ErrNoFloodfill
 	NetworkDatabaseErrPublicationTokenExhausted              = netdb.ErrPublicationTokenExhausted
 	NetworkDatabaseErrRequestExpired                         = netdb.ErrRequestExpired
