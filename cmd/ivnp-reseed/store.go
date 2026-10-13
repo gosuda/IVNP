@@ -5,6 +5,8 @@ import (
 	"cmp"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"slices"
@@ -14,6 +16,14 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/state"
+)
+
+const maxPeerCacheBytes = 64 << 20
+
+var (
+	errInvalidPeerCache        = errors.New("reseed: invalid peer cache")
+	errPeerCacheTooManyRecords = errors.New("reseed: too many cached peers")
 )
 
 // PeerStore provides thread-safe, memory-bounded peer indexing and snapshot persistence.
@@ -585,9 +595,9 @@ func (s *PeerStore) Snapshot() []PeerRecord {
 
 func (s *PeerStore) SaveToFile(filePath string) error {
 	s.mu.RLock()
-	records := make([]*PeerRecord, 0, len(s.peers))
+	records := make([]PeerRecord, 0, len(s.peers))
 	for _, rec := range s.peers {
-		records = append(records, rec)
+		records = append(records, *rec)
 	}
 	s.mu.RUnlock()
 
@@ -595,41 +605,114 @@ func (s *PeerStore) SaveToFile(filePath string) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(filePath, data, 0600)
+	return state.FilesystemStoreWriteAtomic(filePath, data, 0o600, maxPeerCacheBytes)
 }
 
-func (s *PeerStore) LoadFromFile(filePath string) error {
-	data, err := os.ReadFile(filePath)
+// LoadFromFile restores only verified, fresh RouterInfos. Cached reachability
+// observations are not evidence of a live peer and must be probed again.
+func (s *PeerStore) LoadFromFile(filePath string, networkID uint32) error {
+	file, _, err := state.FilesystemStoreOpenRegular(filePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("open peer cache: %w", err)
+	}
+	defer file.Close()
+	if err := state.FilesystemStoreValidatePrivateAccess(file); err != nil {
+		return fmt.Errorf("validate peer cache permissions: %w", err)
+	}
+	data, err := state.FilesystemStoreReadBoundedFile(file, maxPeerCacheBytes)
+	if err != nil {
+		return fmt.Errorf("read peer cache: %w", err)
 	}
 
-	var loaded []*PeerRecord
-	if err := json.Unmarshal(data, &loaded); err != nil {
-		return err
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('[') {
+		return fmt.Errorf("%w: expected array", errInvalidPeerCache)
+	}
+
+	cfg := DefaultSelectorConfig()
+	now := time.Now()
+	nowMillis := uint64(now.UnixMilli())
+	maxAgeMillis := uint64(cfg.MaxInfoAge.Milliseconds())
+	maxFutureMillis := uint64(cfg.MaxInfoFuture.Milliseconds())
+	loaded := make([]*PeerRecord, 0, min(s.maxPeers, 256))
+	for count := 0; decoder.More(); count++ {
+		if count >= s.maxPeers {
+			return errPeerCacheTooManyRecords
+		}
+		var cached PeerRecord
+		if err := decoder.Decode(&cached); err != nil {
+			return fmt.Errorf("%w: decode record %d: %v", errInvalidPeerCache, count, err)
+		}
+		if len(cached.Raw) == 0 || len(cached.Raw) > foundation.NetworkDatabaseMaxRouterInfoBytes {
+			continue
+		}
+		info, err := foundation.NetworkDatabaseParseRouterInfo(cached.Raw)
+		if err != nil || info.Hash() != cached.Hash {
+			continue
+		}
+		valid, err := info.Verify()
+		if err != nil || !valid {
+			continue
+		}
+		netID, err := foundation.NetworkDatabaseNetID(info)
+		if err != nil || netID != networkID {
+			continue
+		}
+		if info.Published > nowMillis {
+			if info.Published-nowMillis > maxFutureMillis {
+				continue
+			}
+		} else if nowMillis-info.Published > maxAgeMillis {
+			continue
+		}
+
+		contact := extractRouterAddresses(info)
+		rec := &PeerRecord{
+			Hash:        info.Hash(),
+			Raw:         cached.Raw,
+			PublishedAt: time.UnixMilli(int64(info.Published)),
+			IsFloodfill: foundation.NetworkDatabaseIsFloodfill(info),
+			Family:      contact.family,
+			IPv4:        contact.ipv4,
+			IPv6:        contact.ipv6,
+			Ports:       contact.ports,
+			TCPPorts:    contact.tcpPorts,
+			UDPPorts:    contact.udpPorts,
+			HasNTCP2:    contact.ntcp2,
+			HasSSU2:     contact.ssu2,
+			Stats:       PeerStats{FirstSeen: now},
+		}
+		rec.Score = calculateScore(rec)
+		loaded = append(loaded, rec)
+	}
+	token, err = decoder.Token()
+	if err != nil || token != json.Delim(']') {
+		return fmt.Errorf("%w: expected closing bracket", errInvalidPeerCache)
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("%w: trailing content", errInvalidPeerCache)
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, rec := range loaded {
-		if rec.Stats.FirstSeen.IsZero() {
-			rec.Stats.FirstSeen = rec.Stats.LastSeen
+		if rec.Hash == s.localHash && s.localHash != (foundation.Hash{}) {
+			continue
 		}
-		if !rec.HasNTCP2 && !rec.HasSSU2 && len(rec.Raw) > 0 {
-			if info, err := foundation.NetworkDatabaseParseRouterInfo(rec.Raw); err == nil {
-				contact := extractRouterAddresses(info)
-				rec.HasNTCP2 = contact.ntcp2
-				rec.HasSSU2 = contact.ssu2
-			}
+		if _, found := s.peers[rec.Hash]; found || len(s.peers) >= s.maxPeers {
+			continue
 		}
-		if prev, found := s.peers[rec.Hash]; found {
-			s.deindexPeerLocked(prev)
+		if hasGroup, tops := s.topsAnyContentionLocked(rec); hasGroup && !tops {
+			continue
 		}
 		s.peers[rec.Hash] = rec
 		s.indexPeerLocked(rec)
+		s.evictDominatedLocked(rec)
 	}
 	return nil
 }
