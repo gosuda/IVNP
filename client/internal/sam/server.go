@@ -312,7 +312,7 @@ func (s *Server) serveConnection(raw net.Conn) (result error) {
 		_ = connection.writeLine("HELLO REPLY RESULT=NOVERSION")
 		return ErrProtocol
 	}
-	if err = connection.writeLine("HELLO REPLY RESULT=OK VERSION=3.3 IVNP_PREPARE=1"); err != nil {
+	if err = connection.writeLine("HELLO REPLY RESULT=OK VERSION=3.3 IVNP_PREPARE=1 IVNP_AUTH=1"); err != nil {
 		return err
 	}
 	_ = raw.SetReadDeadline(time.Time{})
@@ -515,6 +515,15 @@ func (s *Server) session(id string) *samSession {
 	defer s.mu.RUnlock()
 	return s.sessions[id]
 }
+// authorizedSession enforces ownership for all session-ID command paths.
+func (s *Server) authorizedSession(connection *serverConnection, id, token string) *samSession {
+	session := s.session(id)
+	if !session.authorized(connection, token) {
+		return nil
+	}
+	return session
+}
+
 func (s *Server) removeSession(session *samSession) {
 	s.mu.Lock()
 	if s.sessions[session.id] == session {

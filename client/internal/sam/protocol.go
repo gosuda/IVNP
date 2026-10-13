@@ -3,6 +3,7 @@ package sam
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"encoding/base32"
 	"errors"
 	"fmt"
@@ -82,6 +83,14 @@ func (s *Server) dispatch(ctx context.Context, connection *serverConnection, cmd
 		return false, connection.writeLine("NAMING REPLY RESULT=OK NAME=" + quoteToken(name) + " VALUE=" + value)
 	case "SESSION CREATE":
 		return false, s.createSession(ctx, connection, cmd)
+	case "SESSION AUTH":
+		if !onlyOptions(cmd.values) {
+			return false, connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_OPTIONS")
+		}
+		if connection.root == nil {
+			return false, connection.writeLine("SESSION STATUS RESULT=INVALID_ID")
+		}
+		return false, connection.writeLine("SESSION STATUS RESULT=OK IVNP_AUTH=" + connection.root.authString())
 	case "SESSION ADD":
 		return false, s.addSubsession(connection, cmd)
 	case "SESSION REMOVE":
@@ -197,6 +206,11 @@ func (s *Server) createSession(ctx context.Context, connection *serverConnection
 		}
 	}
 	root := newRootSession(s, id, style, endpoint, connection, fromPort, toPort, listenPort, protocol, listenProtocol, rawHeader, udpTarget, offline)
+	if _, err = rand.Read(root.auth[:]); err != nil {
+		root.cancel()
+		cleanupErr := s.destroyDestination(endpoint)
+		return errors.Join(connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=AUTH_UNAVAILABLE"), cleanupErr)
+	}
 	if err = s.addRoot(root); err != nil {
 		cleanupErr := s.destroyDestination(endpoint)
 		result := "I2P_ERROR"

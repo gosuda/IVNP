@@ -96,11 +96,12 @@ func TestStreamAcceptAttachmentsAreFIFO(t *testing.T) {
 	if line := readSAMLine(t, controlReader); line[:24] != "SESSION STATUS RESULT=OK" {
 		t.Fatal(line)
 	}
+	auth := samSessionAuth(t, control, controlReader)
 	endpoint := <-controller.endpoint
 
 	firstAttachment, firstReader := samDial(t, server.Addr().String())
 	defer firstAttachment.Close()
-	_, _ = io.WriteString(firstAttachment, "STREAM ACCEPT ID=fifo\n")
+	_, _ = io.WriteString(firstAttachment, "STREAM ACCEPT ID=fifo IVNP_AUTH="+auth+"\n")
 	waitForSAMCondition(t, time.Second, func() bool {
 		server.mu.RLock()
 		session := server.sessions["fifo"]
@@ -109,7 +110,7 @@ func TestStreamAcceptAttachmentsAreFIFO(t *testing.T) {
 	}, "first FIFO accept request admission")
 	secondAttachment, secondReader := samDial(t, server.Addr().String())
 	defer secondAttachment.Close()
-	_, _ = io.WriteString(secondAttachment, "STREAM ACCEPT ID=fifo\n")
+	_, _ = io.WriteString(secondAttachment, "STREAM ACCEPT ID=fifo IVNP_AUTH="+auth+"\n")
 	waitForSAMCondition(t, time.Second, func() bool {
 		server.mu.RLock()
 		session := server.sessions["fifo"]
@@ -154,10 +155,11 @@ func TestStreamAcceptDeadFirstAttachmentDoesNotConsumeInbound(t *testing.T) {
 	if line := readSAMLine(t, controlReader); line[:24] != "SESSION STATUS RESULT=OK" {
 		t.Fatal(line)
 	}
+	auth := samSessionAuth(t, control, controlReader)
 	endpoint := <-controller.endpoint
 
 	first, _ := samDial(t, server.Addr().String())
-	_, _ = io.WriteString(first, "STREAM ACCEPT ID=dead-first\n")
+	_, _ = io.WriteString(first, "STREAM ACCEPT ID=dead-first IVNP_AUTH="+auth+"\n")
 	waitForSAMCondition(t, time.Second, func() bool {
 		server.mu.RLock()
 		session := server.sessions["dead-first"]
@@ -174,7 +176,7 @@ func TestStreamAcceptDeadFirstAttachmentDoesNotConsumeInbound(t *testing.T) {
 
 	second, secondReader := samDial(t, server.Addr().String())
 	defer second.Close()
-	_, _ = io.WriteString(second, "STREAM ACCEPT ID=dead-first\n")
+	_, _ = io.WriteString(second, "STREAM ACCEPT ID=dead-first IVNP_AUTH="+auth+"\n")
 	inbound, peer := net.Pipe()
 	defer peer.Close()
 	endpoint.listener.incoming <- &metadataConn{Conn: inbound, remote: []byte("LIVE"), from: 31, to: 41}

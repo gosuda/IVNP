@@ -308,6 +308,7 @@ func TestEmbeddedServerLiveLoopbackStylesAndRecovery(t *testing.T) {
 	if line := readSAMLine(t, streamReader); !strings.Contains(line, "RESULT=OK DESTINATION=") {
 		t.Fatalf("stream create = %q", line)
 	}
+	auth := samSessionAuth(t, streamControl, streamReader)
 	_, _ = io.WriteString(streamControl, "BROKEN \"unterminated\nPING still-alive\n")
 	if line := readSAMLine(t, streamReader); !strings.Contains(line, "MALFORMED_COMMAND") {
 		t.Fatalf("malformed = %q", line)
@@ -318,7 +319,7 @@ func TestEmbeddedServerLiveLoopbackStylesAndRecovery(t *testing.T) {
 
 	attachment, attachmentReader := samDial(t, address)
 	defer attachment.Close()
-	_, _ = io.WriteString(attachment, "STREAM CONNECT ID=stream DESTINATION=peer.i2p TO_PORT=80\n")
+	_, _ = io.WriteString(attachment, "STREAM CONNECT ID=stream DESTINATION=peer.i2p TO_PORT=80 IVNP_AUTH="+auth+"\n")
 	if line := readSAMLine(t, attachmentReader); line != "STREAM STATUS RESULT=OK" {
 		t.Fatalf("connect = %q", line)
 	}

@@ -54,6 +54,7 @@ type Network struct {
 	mu                sync.Mutex
 	control           *control
 	privateDest       string
+	authToken         string
 	publicDest        string
 	local             samAddr
 	listener          *listener
@@ -161,7 +162,25 @@ func (n *Network) Start(ctx context.Context) error {
 		control.Close()
 		return err
 	}
-	n.control, n.privateDest, n.publicDest, n.local = control, privateDest, publicDest, addr
+	var auth string
+	if control.authSupported {
+		authFields, authErr := control.commandContext(ctx, "SESSION AUTH")
+		if authErr != nil {
+			control.Close()
+			return authErr
+		}
+		auth = authFields["IVNP_AUTH"]
+		if authFields["RESULT"] != "OK" || len(auth) != 2*sessionAuthSize {
+			control.Close()
+			return ErrProtocol
+		}
+		var decoded [sessionAuthSize]byte
+		if _, err = hex.Decode(decoded[:], []byte(auth)); err != nil {
+			control.Close()
+			return ErrProtocol
+		}
+	}
+	n.control, n.privateDest, n.publicDest, n.local, n.authToken = control, privateDest, publicDest, addr, auth
 	if compareVersion(control.version, [2]int{3, 2}) >= 0 {
 		n.keepaliveDone = make(chan struct{})
 		go n.keepalive(control, n.keepaliveDone)
@@ -200,14 +219,22 @@ func (n *Network) DialI2P(ctx context.Context, address string) (net.Conn, error)
 	if err != nil {
 		return nil, err
 	}
-	if err = n.running(); err != nil {
+	auth, err := n.running()
+	if err != nil {
 		return nil, err
 	}
 	control, err := n.open(ctx)
 	if err != nil {
 		return nil, err
 	}
+	if auth != "" && !control.authSupported {
+		control.Close()
+		return nil, ErrProtocol
+	}
 	line := "STREAM CONNECT ID=" + n.cfg.ID + " DESTINATION=" + host + " TO_PORT=" + strconv.Itoa(port)
+	if auth != "" {
+		line += " IVNP_AUTH=" + auth
+	}
 	fields, err := control.commandContext(ctx, line)
 	if err != nil {
 		control.Close()
@@ -228,7 +255,7 @@ func (n *Network) ListenI2P(ctx context.Context, address string) (net.Listener, 
 	if err != nil {
 		return nil, err
 	}
-	if err = n.running(); err != nil {
+	if _, err = n.running(); err != nil {
 		return nil, err
 	}
 	if err = ctx.Err(); err != nil {
@@ -267,7 +294,7 @@ func (n *Network) Close() error {
 	listener := n.listener
 	control := n.control
 	keepaliveDone := n.keepaliveDone
-	n.listener, n.control, n.privateDest, n.publicDest, n.keepaliveDone = nil, nil, "", "", nil
+	n.listener, n.control, n.privateDest, n.publicDest, n.authToken, n.keepaliveDone = nil, nil, "", "", "", nil
 	close(n.done)
 	n.mu.Unlock()
 	var err error
@@ -302,16 +329,16 @@ func (n *Network) keepalive(control *control, stopped chan struct{}) {
 	}
 }
 
-func (n *Network) running() error {
+func (n *Network) running() (string, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.closed {
-		return ErrClosed
+		return "", ErrClosed
 	}
 	if n.control == nil {
-		return ErrUnavailable
+		return "", ErrUnavailable
 	}
-	return nil
+	return n.authToken, nil
 }
 
 func (n *Network) open(ctx context.Context) (*control, error) {
@@ -335,6 +362,7 @@ func (n *Network) open(ctx context.Context) (*control, error) {
 	}
 	control.version = version
 	control.prepareDestination = fields["IVNP_PREPARE"] == "1"
+	control.authSupported = fields["IVNP_AUTH"] == "1"
 	return control, nil
 }
 
@@ -343,6 +371,7 @@ type control struct {
 	reader             *bufio.Reader
 	version            [2]int
 	prepareDestination bool
+	authSupported     bool
 }
 
 func (c *control) command(line string) (map[string]string, error) {
@@ -509,7 +538,8 @@ func (l *listener) Accept() (net.Conn, error) {
 	}
 	ctx := l.ctx
 	l.mu.Unlock()
-	if err := l.network.running(); err != nil {
+	auth, err := l.network.running()
+	if err != nil {
 		return nil, err
 	}
 	control, err := l.network.open(ctx)
@@ -534,7 +564,15 @@ func (l *listener) Accept() (net.Conn, error) {
 		}
 		l.mu.Unlock()
 	}()
-	fields, err := control.commandContext(ctx, "STREAM ACCEPT ID="+l.network.cfg.ID)
+	if auth != "" && !control.authSupported {
+		_ = control.Close()
+		return nil, ErrProtocol
+	}
+	command := "STREAM ACCEPT ID=" + l.network.cfg.ID
+	if auth != "" {
+		command += " IVNP_AUTH=" + auth
+	}
+	fields, err := control.commandContext(ctx, command)
 	if err != nil || fields["RESULT"] != "OK" {
 		_ = control.Close()
 		if err != nil {
