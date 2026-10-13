@@ -1031,3 +1031,90 @@ func TestRatchetNewSessionCommitIsAtomicAfterReplyFailure(t *testing.T) {
 	}
 	result.Candidate.Discard()
 }
+
+func TestRatchetUnboundReplayBudgetFailsClosed(t *testing.T) {
+	a, b, _, bPeer, now := ratchetPair(t)
+	defer a.ReleaseSensitive()
+	defer b.ReleaseSensitive()
+	public := ratchetPublic(t, b)
+	packet := func(at uint64) []byte {
+		t.Helper()
+		encrypted, err := a.EncryptUnbound(make([]byte, 2048), public, 4, clove("unbound"), at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encrypted
+	}
+	var first []byte
+	for index := range replayBucketCapacity {
+		encrypted := packet(now)
+		if index == 0 {
+			first = append([]byte(nil), encrypted...)
+		}
+		if _, err := b.Receive(make([]byte, 2048), make([]byte, 2048), encrypted, now); err != nil {
+			t.Fatalf("unbound session %d: %v", index, err)
+		}
+	}
+	if _, err := b.Receive(make([]byte, 2048), nil, first, now); !errors.Is(err, ErrRatchetReplay) {
+		t.Fatalf("known duplicate at capacity: %v", err)
+	}
+	overflow := packet(now)
+	if _, err := b.Receive(make([]byte, 2048), nil, overflow, now); !errors.Is(err, ErrRatchetReplayFull) {
+		t.Fatalf("new ephemeral beyond capacity: %v", err)
+	}
+	bound, err := a.Encrypt(make([]byte, 2048), bPeer, public, 4, clove("bound"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = b.Receive(make([]byte, 2048), make([]byte, 2048), bound, now); !errors.Is(err, ErrRatchetReplayFull) {
+		t.Fatalf("bound session beyond capacity: %v", err)
+	}
+	if stats := b.Stats(); stats.NewSessions != replayBucketCapacity || stats.Sessions != 0 {
+		t.Fatalf("quota-rejected sessions changed state: %+v", stats)
+	}
+	next := (now/b.replays.tick + 1) * b.replays.tick
+	if got, err := b.Receive(make([]byte, 2048), nil, overflow, next); err != nil || !got.NewSession {
+		t.Fatalf("admission after bucket advance: result=%#v error=%v", got, err)
+	}
+	if _, err := b.Receive(make([]byte, 2048), nil, first, next); !errors.Is(err, ErrRatchetReplay) {
+		t.Fatalf("old replay lost before expiry: %v", err)
+	}
+	if got, err := b.Receive(make([]byte, 2048), make([]byte, 2048), bound, next); err != nil || got.Candidate == nil {
+		t.Fatalf("bound admission after bucket advance: result=%#v error=%v", got, err)
+	} else {
+		got.Candidate.Discard()
+	}
+}
+
+func TestRatchetReplayBudgetDoesNotBlockExistingSession(t *testing.T) {
+	a, b, aPeer, bPeer, now := ratchetPair(t)
+	defer a.ReleaseSensitive()
+	defer b.ReleaseSensitive()
+	_ = establishRatchet(t, a, b, aPeer, bPeer, now)
+	public := ratchetPublic(t, b)
+	// The established bound session has already consumed one replay slot.
+	for index := range replayBucketCapacity - 1 {
+		packet, err := a.EncryptUnbound(make([]byte, 2048), public, 4, nil, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = b.Receive(make([]byte, 2048), nil, packet, now); err != nil {
+			t.Fatalf("unbound session %d: %v", index, err)
+		}
+	}
+	packet, err := a.EncryptUnbound(make([]byte, 2048), public, 4, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = b.Receive(make([]byte, 2048), nil, packet, now); !errors.Is(err, ErrRatchetReplayFull) {
+		t.Fatalf("expected exhausted replay budget, got %v", err)
+	}
+	existing, err := a.EncryptExisting(make([]byte, 256), bPeer, clove("still alive"), RatchetOptions{}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := b.Receive(make([]byte, 256), nil, existing, now)
+	if err != nil || string(got.Payload) != string(clove("still alive")) {
+		t.Fatalf("existing traffic at replay capacity: result=%#v error=%v", got, err)
+	}
+}
