@@ -165,3 +165,73 @@ func TestStoreAckSenderReportsSendFailure(t *testing.T) {
 		t.Fatalf("send failure = %v, want %v", err, want)
 	}
 }
+
+
+func TestStoreAckSenderHardCaps(t *testing.T) {
+	release := make(chan struct{})
+	sender := newStoreAckSenderForTest(t,
+		dataplane.RouterControlQueueLimits{Items: 256, SourceItems: 32},
+		func(ctx context.Context, _ foundation.Hash, _ uint32, _ foundation.I2NPDeliveryStatusMessage) error {
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	)
+	for peer := byte(1); peer <= 8; peer++ {
+		for range storeAckSourceCapacity {
+			if err := sender.Enqueue(testStoreAckJob(peer, true)); err != nil {
+				t.Fatalf("peer %d admission below source cap = %v", peer, err)
+			}
+		}
+	}
+	if err := sender.Enqueue(testStoreAckJob(1, true)); !errors.Is(err, ErrStoreAckOverloaded) {
+		t.Fatalf("hard source cap bypass = %v", err)
+	}
+	if err := sender.Enqueue(testStoreAckJob(9, true)); !errors.Is(err, ErrStoreAckOverloaded) {
+		t.Fatalf("hard global cap bypass = %v", err)
+	}
+	close(release)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := sender.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStoreAckSenderCloseDropsQueuedReplies(t *testing.T) {
+	entered := make(chan struct{}, storeAckWorkers)
+	sender := newStoreAckSenderForTest(t,
+		dataplane.RouterControlQueueLimits{Items: storeAckWorkers + 1, SourceItems: storeAckWorkers + 1},
+		func(ctx context.Context, _ foundation.Hash, _ uint32, _ foundation.I2NPDeliveryStatusMessage) error {
+			entered <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	)
+	for range storeAckWorkers + 1 {
+		if err := sender.Enqueue(testStoreAckJob(1, true)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range storeAckWorkers {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("not all acknowledgement workers started")
+		}
+	}
+	if err := sender.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+		t.Fatal("queued reply was sent after shutdown")
+	default:
+	}
+	if err := sender.WaitIdle(t.Context()); err != nil {
+		t.Fatalf("queued replies remain after close: %v", err)
+	}
+}
