@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 	"gosuda.org/ivnp/observability"
@@ -398,9 +399,18 @@ func BuildDatabaseLookup(key foundation.Hash, typeID LookupType, route ReplyRout
 // live lookup and sends the next unqueried peer. Unknown referred RouterInfos
 // are resolved before use; known floodfills remain immediately available so a
 // stalled refresh cannot block the parent LeaseSet search. Unsolicited replies
-// cannot steer a request: From must be one of the peers already queried.
-func (m *RequestManager) HandleDatabaseSearchReply(ctx context.Context, reply foundation.I2NPDatabaseSearchReplyMessage) {
+// cannot steer a request: the authenticated direct peer must match From,
+// and From must be one of the peers already queried. Replies delivered through
+// tunnels or unidentifiable cloves carry no authenticated sender and are
+// ignored rather than trusting the wire From field.
+func (m *RequestManager) HandleDatabaseSearchReply(ctx context.Context, source dataplane.RouterI2NPSource, reply foundation.I2NPDatabaseSearchReplyMessage) {
 	if ctx.Err() != nil {
+		return
+	}
+	if !source.Direct || source.Peer == (foundation.Hash{}) || source.Peer != reply.From {
+		if m.logger != nil {
+			m.logger.Debug("netdb search reply ignored", "reason", "unverified_sender", "key", foundation.EncodeI2PBase64(reply.Key[:]), "from", foundation.EncodeI2PBase64(reply.From[:]))
+		}
 		return
 	}
 	lookupKey := requestKey{key: reply.Key}

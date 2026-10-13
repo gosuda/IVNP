@@ -134,7 +134,7 @@ type TunnelBuildReplyHandler interface {
 // NetDBRequestHandler advances all request domains which may own an admitted
 // lookup result.
 type NetDBRequestHandler interface {
-	HandleDatabaseSearchReply(context.Context, foundation.I2NPDatabaseSearchReplyMessage)
+	HandleDatabaseSearchReply(context.Context, dataplane.RouterI2NPSource, foundation.I2NPDatabaseSearchReplyMessage)
 	ExpectsDatabaseStore(foundation.I2NPDatabaseStoreMessage) bool
 	HandleDatabaseStore(context.Context, foundation.I2NPDatabaseStoreMessage)
 	Close() error
@@ -286,8 +286,8 @@ func New(cfg Config, deps Dependencies) (*Router, error) {
 		controlSinks.OutboundTunnelBuildReply = handleReply
 	}
 	if deps.RequestHandler != nil {
-		controlSinks.DatabaseSearchReply = func(ctx context.Context, reply foundation.I2NPDatabaseSearchReplyMessage) error {
-			deps.RequestHandler.HandleDatabaseSearchReply(ctx, reply)
+		controlSinks.DatabaseSearchReply = func(ctx context.Context, source dataplane.RouterI2NPSource, reply foundation.I2NPDatabaseSearchReplyMessage) error {
+			deps.RequestHandler.HandleDatabaseSearchReply(ctx, source, reply)
 			return nil
 		}
 		controlSinks.DatabaseStoreCompleted = deps.RequestHandler.HandleDatabaseStore

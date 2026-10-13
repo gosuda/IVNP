@@ -8,6 +8,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 )
 
@@ -241,7 +242,7 @@ func TestRequestManagerCoalescesFollowsSearchReplyAndCompletesStore(t *testing.T
 
 	peers := make([]byte, foundation.HashLength)
 	copy(peers, second[:])
-	manager.HandleDatabaseSearchReply(context.Background(), foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: first, Peers: peers})
+	manager.HandleDatabaseSearchReply(context.Background(), dataplane.RouterI2NPSource{Peer: first, Direct: true}, foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: first, Peers: peers})
 	manager.active.Wait()
 	messages = sender.snapshot()
 	if len(messages) != 2 || messages[1].Header.ID != 2 {
@@ -284,7 +285,7 @@ func TestRequestManagerQueriesKnownLeaseSetReferralWithoutRefresh(t *testing.T) 
 	manager.active.Wait()
 	peers := make([]byte, foundation.HashLength)
 	copy(peers, referred[:])
-	manager.HandleDatabaseSearchReply(context.Background(), foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: first, Peers: peers})
+	manager.HandleDatabaseSearchReply(context.Background(), dataplane.RouterI2NPSource{Peer: first, Direct: true}, foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: first, Peers: peers})
 	manager.active.Wait()
 	messages := sender.snapshot()
 	if len(messages) != 2 {
@@ -332,7 +333,7 @@ func TestRequestManagerDispatchesKnownParentBeforeBlockingUnknownReferralRefresh
 	copy(peers, unknown[:])
 	replyDone := make(chan struct{})
 	go func() {
-		manager.HandleDatabaseSearchReply(context.Background(), foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: initial, Peers: peers})
+		manager.HandleDatabaseSearchReply(context.Background(), dataplane.RouterI2NPSource{Peer: initial, Direct: true}, foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: initial, Peers: peers})
 		close(replyDone)
 	}()
 	select {
@@ -375,14 +376,14 @@ func TestRequestManagerResponseHandlersDoNotWaitForSend(t *testing.T) {
 			manager.active.Wait()
 			reply := foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: source, Peers: referred[:]}
 			if response == "router_info_store" {
-				manager.HandleDatabaseSearchReply(context.Background(), reply)
+				manager.HandleDatabaseSearchReply(context.Background(), dataplane.RouterI2NPSource{Peer: reply.From, Direct: true}, reply)
 				manager.active.Wait()
 			}
 			addRequestTestFloodfill(database, referred)
 			returned := make(chan struct{})
 			go func() {
 				if response == "search_reply" {
-					manager.HandleDatabaseSearchReply(context.Background(), reply)
+					manager.HandleDatabaseSearchReply(context.Background(), dataplane.RouterI2NPSource{Peer: reply.From, Direct: true}, reply)
 				} else {
 					manager.HandleDatabaseStore(context.Background(), foundation.I2NPDatabaseStoreMessage{Key: referred, Type: foundation.I2NPStoreRouterInfo})
 				}
@@ -420,7 +421,7 @@ func TestRequestManagerRejectsUnsolicitedSearchReplyAndExpires(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager.active.Wait()
-	manager.HandleDatabaseSearchReply(context.Background(), foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: requestTestHash(7)})
+	manager.HandleDatabaseSearchReply(context.Background(), dataplane.RouterI2NPSource{Peer: requestTestHash(7), Direct: true}, foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: requestTestHash(7)})
 	if len(sender.snapshot()) != 1 {
 		t.Fatal("unsolicited search reply triggered a send")
 	}
@@ -489,7 +490,7 @@ func TestRequestManagerReservesCandidateCapacityForSearchReplyReferrals(t *testi
 		addRequestTestFloodfill(database, peer)
 		copy(peers[index*foundation.HashLength:], peer[:])
 	}
-	manager.HandleDatabaseSearchReply(context.Background(), foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: responder, Peers: peers})
+	manager.HandleDatabaseSearchReply(context.Background(), dataplane.RouterI2NPSource{Peer: responder, Direct: true}, foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: responder, Peers: peers})
 	manager.mu.Lock()
 	req = manager.pending[requestKey{key: key}]
 	candidates := len(req.candidates)
@@ -824,7 +825,7 @@ func TestRequestManagerFetchesUnknownCandidatesAndWakesDuringSend(t *testing.T) 
 	discoveredPeers := make([]byte, 2*foundation.HashLength)
 	copy(discoveredPeers, firstDiscovered[:])
 	copy(discoveredPeers[foundation.HashLength:], secondDiscovered[:])
-	manager.HandleDatabaseSearchReply(context.Background(), foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: source, Peers: discoveredPeers})
+	manager.HandleDatabaseSearchReply(context.Background(), dataplane.RouterI2NPSource{Peer: source, Direct: true}, foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: source, Peers: discoveredPeers})
 	manager.active.Wait()
 	messages := sender.snapshot()
 	if len(messages) != 3 {
@@ -849,7 +850,7 @@ func TestRequestManagerFetchesUnknownCandidatesAndWakesDuringSend(t *testing.T) 
 	copy(nextPeers, next[:])
 	replyDone := make(chan struct{})
 	go func() {
-		manager.HandleDatabaseSearchReply(context.Background(), foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: source, Peers: nextPeers})
+		manager.HandleDatabaseSearchReply(context.Background(), dataplane.RouterI2NPSource{Peer: source, Direct: true}, foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: source, Peers: nextPeers})
 		close(replyDone)
 	}()
 	select {
@@ -916,7 +917,7 @@ func TestRequestManagerBoundsWireExpirationSeparately(t *testing.T) {
 	addRequestTestFloodfill(database, second)
 	peers := make([]byte, foundation.HashLength)
 	copy(peers, second[:])
-	manager.HandleDatabaseSearchReply(context.Background(), foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: first, Peers: peers})
+	manager.HandleDatabaseSearchReply(context.Background(), dataplane.RouterI2NPSource{Peer: first, Direct: true}, foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: first, Peers: peers})
 	manager.active.Wait()
 	messages = sender.snapshot()
 	if len(messages) != 2 || messages[1].Header.Expiration != 500+databaseLookupEnvelopeLifetime {
@@ -1005,7 +1006,7 @@ func TestExplorationCompletesAfterClosestFloodfillConverges(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager.active.Wait()
-	manager.HandleDatabaseSearchReply(context.Background(), foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: peer})
+	manager.HandleDatabaseSearchReply(context.Background(), dataplane.RouterI2NPSource{Peer: peer, Direct: true}, foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: peer})
 	if outcome := <-result; outcome.Err != nil || outcome.Type != ExplorationLookup {
 		t.Fatalf("exploration outcome = %#v", outcome)
 	}
@@ -1083,7 +1084,7 @@ func testRequestFollowupDeadline(t *testing.T, route string) {
 		}
 		reply := foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: initial, Peers: referred[:]}
 		if route == "router_info_store" {
-			manager.HandleDatabaseSearchReply(t.Context(), reply)
+			manager.HandleDatabaseSearchReply(t.Context(), dataplane.RouterI2NPSource{Peer: reply.From, Direct: true}, reply)
 			manager.active.Wait()
 		}
 		addRequestTestFloodfill(database, referred)
@@ -1093,7 +1094,7 @@ func testRequestFollowupDeadline(t *testing.T, route string) {
 		if route == "router_info_store" {
 			manager.HandleDatabaseStore(handlerCtx, foundation.I2NPDatabaseStoreMessage{Key: referred, Type: foundation.I2NPStoreRouterInfo})
 		} else {
-			manager.HandleDatabaseSearchReply(handlerCtx, reply)
+			manager.HandleDatabaseSearchReply(handlerCtx, dataplane.RouterI2NPSource{Peer: reply.From, Direct: true}, reply)
 		}
 		cancel()
 		if sender.holdInitial {
@@ -1109,4 +1110,70 @@ func testRequestFollowupDeadline(t *testing.T, route string) {
 			t.Fatalf("lookup deadline result = %v", outcome.Err)
 		}
 	})
+}
+
+// A response's From field is attacker-controlled. Even if it names the
+// floodfill we queried, another authenticated peer must not steer the lookup.
+func TestRequestManagerSearchReplyRequiresAuthenticatedSource(t *testing.T) {
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+	first, attacker, referred, key := requestTestHash(1), requestTestHash(2), requestTestHash(3), requestTestHash(9)
+	addRequestTestFloodfill(database, first)
+	sender := new(requestTestSender)
+	manager, err := NewRequestManager(database, sender, requestTestRoute{gateway: requestTestHash(8)}, RequestManagerConfig{
+		Capacity: 1, MaxCandidates: 4, TimeoutMillis: 60_000, Now: func() uint64 { return 100 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := manager.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := manager.LookupRouterInfo(t.Context(), key); err != nil {
+		t.Fatal(err)
+	}
+	manager.active.Wait()
+	if got := len(sender.snapshot()); got != 1 {
+		t.Fatalf("initial sends = %d, want 1", got)
+	}
+	addRequestTestFloodfill(database, referred)
+	reply := foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: first, Peers: referred[:]}
+	for _, test := range []struct {
+		name   string
+		source dataplane.RouterI2NPSource
+	}{
+		{name: "different_authenticated_peer", source: dataplane.RouterI2NPSource{Peer: attacker, Direct: true}},
+		{name: "unattributed_tunnel", source: dataplane.RouterI2NPSource{Peer: first}},
+		{name: "absent_source", source: dataplane.RouterI2NPSource{}},
+		{name: "zero_authenticated_peer", source: dataplane.RouterI2NPSource{Direct: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager.HandleDatabaseSearchReply(t.Context(), test.source, reply)
+			manager.mu.Lock()
+			req := manager.pending[requestKey{key: key}]
+			present := false
+			if req != nil {
+				_, present = req.candidate[referred]
+			}
+			manager.mu.Unlock()
+			if req == nil || present {
+				t.Fatalf("unverified reply changed pending request: pending=%t referred=%t", req != nil, present)
+			}
+			if got := len(sender.snapshot()); got != 1 {
+				t.Fatalf("unverified reply caused %d sends, want 1", got)
+			}
+		})
+	}
+	manager.HandleDatabaseSearchReply(t.Context(), dataplane.RouterI2NPSource{Peer: first, Direct: true}, reply)
+	manager.active.Wait()
+	if got := len(sender.snapshot()); got != 2 {
+		t.Fatalf("authenticated reply caused %d sends, want 2", got)
+	}
+	sender.mu.Lock()
+	secondPeer := sender.peers[1]
+	sender.mu.Unlock()
+	if secondPeer != referred {
+		t.Fatalf("referral routed to %x, want %x", secondPeer, referred)
+	}
 }

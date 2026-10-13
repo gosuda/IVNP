@@ -833,7 +833,7 @@ type closingRequestHandler struct {
 	once    sync.Once
 }
 
-func (h *closingRequestHandler) HandleDatabaseSearchReply(context.Context, foundation.I2NPDatabaseSearchReplyMessage) {
+func (h *closingRequestHandler) HandleDatabaseSearchReply(context.Context, dataplane.RouterI2NPSource, foundation.I2NPDatabaseSearchReplyMessage) {
 	close(h.started)
 	<-h.closed
 }

@@ -194,14 +194,14 @@ func (r *destinationRequestRegistry) register(handler *netdb.RequestManager) fun
 	}
 }
 
-func (r *destinationRequestRegistry) HandleDatabaseSearchReply(ctx context.Context, reply foundation.I2NPDatabaseSearchReplyMessage) {
+func (r *destinationRequestRegistry) HandleDatabaseSearchReply(ctx context.Context, source dataplane.RouterI2NPSource, reply foundation.I2NPDatabaseSearchReplyMessage) {
 	if r == nil {
 		return
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for _, registration := range r.handlers {
-		registration.handler.HandleDatabaseSearchReply(ctx, reply)
+		registration.handler.HandleDatabaseSearchReply(ctx, source, reply)
 	}
 }
 

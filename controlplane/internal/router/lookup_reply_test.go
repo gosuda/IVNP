@@ -95,7 +95,7 @@ func TestLookupResponderEncryptsECIESReplyEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	var search foundation.I2NPDatabaseSearchReplyMessage
-	service, queue := newControlServiceForTest(t, nil, ControlSinks{DatabaseSearchReply: func(_ context.Context, reply foundation.I2NPDatabaseSearchReplyMessage) error {
+	service, queue := newControlServiceForTest(t, nil, ControlSinks{DatabaseSearchReply: func(_ context.Context, _ dataplane.RouterI2NPSource, reply foundation.I2NPDatabaseSearchReplyMessage) error {
 		search = reply
 		return nil
 	}})
