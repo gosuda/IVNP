@@ -78,6 +78,7 @@ type WebUIServer struct {
 	listener net.Listener
 
 	tokenHash     [32]byte
+	sseCookieKey  [32]byte
 	scriptSources string
 
 	configMu        sync.RWMutex
@@ -117,6 +118,10 @@ func NewWebUIServer(cfg WebUIConfig, node *node.Subsystem, logger *slog.Logger, 
 	if err != nil {
 		return nil, err
 	}
+	var sseCookieKey [32]byte
+	if _, err := rand.Read(sseCookieKey[:]); err != nil {
+		return nil, fmt.Errorf("webui: generate SSE cookie key: %w", err)
+	}
 	return &WebUIServer{
 		config:          cfg,
 		policy:          policy,
@@ -125,6 +130,7 @@ func NewWebUIServer(cfg WebUIConfig, node *node.Subsystem, logger *slog.Logger, 
 		logLevel:        level,
 		started:         time.Now(),
 		tokenHash:       sha256.Sum256([]byte(cfg.BearerToken)),
+		sseCookieKey:    sseCookieKey,
 		persistedConfig: node.Config(),
 		subscribers:     make(map[chan []byte]struct{}),
 		triggerReseed:   node.TriggerReseed,
@@ -385,10 +391,17 @@ func (s *WebUIServer) wrapMiddleware(next http.Handler) http.Handler {
 			http.Error(w, "origin mismatch", http.StatusForbidden)
 			return
 		}
+		if r.URL.Path == "/api/events" && r.URL.Query().Has("token") {
+			http.Error(w, "credentials in URLs are not accepted", http.StatusBadRequest)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") && s.policy.requireAuth && !s.isAuthorized(r) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="ivnp-webui"`)
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
+		}
+		if s.policy.requireAuth && r.URL.Path == "/api/status" && r.Method == http.MethodGet {
+			s.issueSSECookie(w, r, time.Now())
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Cache-Control", "no-store")
@@ -482,7 +495,7 @@ func (s *WebUIServer) isAuthorized(r *http.Request) bool {
 	if ok && strings.EqualFold(kind, "Bearer") && s.tokenMatches(token) {
 		return true
 	}
-	return r.URL.Path == "/api/events" && s.tokenMatches(r.URL.Query().Get("token"))
+	return r.URL.Path == "/api/events" && s.sseCookieAuthorized(r, time.Now())
 }
 
 func (s *WebUIServer) tokenMatches(token string) bool {

@@ -209,9 +209,7 @@ export async function triggerTunnelProbe(): Promise<string> {
 }
 
 export function metricsEventURL(): string {
-	const token = getAccessToken();
-	if (!token) return '/api/events';
-	return `/api/events?token=${encodeURIComponent(token)}`;
+	return '/api/events';
 }
 
 export async function refreshDashboard(): Promise<{ failed: DataResource[] }> {
