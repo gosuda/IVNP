@@ -10,6 +10,34 @@ permissions:
   contents: read
 
 jobs:
+  webui:
+    name: WebUI typecheck and bundled JavaScript
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: cmd/ivnpd/webui
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: cmd/ivnpd/webui/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - name: Validate embedded JavaScript syntax
+        run: find build/_app/immutable -name '*.js' -print0 | xargs -0 -n1 node --check
+      - name: Reject SSE bearer tokens in URLs
+        run: |
+          if grep -R -n '/api/events?token' src build; then
+            echo "SSE must not expose reusable bearer tokens in request URLs"
+            exit 1
+          fi
+      - run: npm run build
+
   test:
     name: Test, vet, lint
     runs-on: ubuntu-latest

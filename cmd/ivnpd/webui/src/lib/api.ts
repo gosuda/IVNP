@@ -208,10 +208,10 @@ export async function triggerTunnelProbe(): Promise<string> {
 	return response.result;
 }
 
-export function metricsEventURL(): string {
-	const token = getAccessToken();
-	if (!token) return '/api/events';
-	return `/api/events?token=${encodeURIComponent(token)}`;
+export async function metricsEventURL(): Promise<string> {
+	if (!getAccessToken()) return '/api/events';
+	const { ticket } = await apiRequest<{ ticket: string }>('/api/events/ticket', { method: 'POST' });
+	return `/api/events?ticket=${encodeURIComponent(ticket)}`;
 }
 
 export async function refreshDashboard(): Promise<{ failed: DataResource[] }> {

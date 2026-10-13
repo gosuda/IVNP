@@ -9,9 +9,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -225,8 +227,207 @@ func TestWebUIBearerAuthenticationProtectsAPIOnly(t *testing.T) {
 	request = httptest.NewRequest(http.MethodGet, "http://router.example/api/events?token="+token, nil)
 	record = httptest.NewRecorder()
 	handler.ServeHTTP(record, request)
-	if record.Code != http.StatusNoContent {
-		t.Fatalf("SSE query token status = %d, want %d", record.Code, http.StatusNoContent)
+	if record.Code != http.StatusUnauthorized {
+		t.Fatalf("SSE query bearer token status = %d, want %d", record.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestWebUISSETicketAuthorization(t *testing.T) {
+	t.Parallel()
+	const token = "secret-token-123456"
+	server := newTestWebUIServer(t, WebUIConfig{ListenAddress: "0.0.0.0:7070", BearerToken: token})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/events/ticket", server.handleSSETicket)
+	mux.HandleFunc("/api/events", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := server.wrapMiddleware(mux)
+	request := func(method, path, bearer string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "http://router.example"+path, nil)
+		if bearer != "" {
+			r.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+
+	for _, test := range []struct {
+		name   string
+		method string
+		path   string
+		bearer string
+		want   int
+	}{
+		{name: "ticket without bearer", method: http.MethodPost, path: "/api/events/ticket", want: http.StatusUnauthorized},
+		{name: "ticket with query bearer", method: http.MethodPost, path: "/api/events/ticket?token=" + token, want: http.StatusUnauthorized},
+		{name: "SSE with query bearer", method: http.MethodGet, path: "/api/events?token=" + token, want: http.StatusUnauthorized},
+		{name: "unknown ticket", method: http.MethodGet, path: "/api/events?ticket=unknown", want: http.StatusUnauthorized},
+		{name: "ticket issuance requires POST", method: http.MethodGet, path: "/api/events/ticket", bearer: token, want: http.StatusMethodNotAllowed},
+		{name: "SSE accepts bearer header", method: http.MethodGet, path: "/api/events", bearer: token, want: http.StatusNoContent},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := request(test.method, test.path, test.bearer).Code; got != test.want {
+				t.Errorf("%s %s status = %d, want %d", test.method, test.path, got, test.want)
+			}
+		})
+	}
+
+	issued := request(http.MethodPost, "/api/events/ticket", token)
+	if issued.Code != http.StatusOK {
+		t.Fatalf("POST /api/events/ticket status = %d, want 200; body %q", issued.Code, issued.Body.String())
+	}
+	if got := issued.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("ticket Cache-Control = %q, want no-store", got)
+	}
+	var result struct {
+		Ticket string `json:"ticket"`
+	}
+	if err := json.Unmarshal(issued.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode SSE ticket: %v", err)
+	}
+	if len(result.Ticket) != 43 {
+		t.Fatalf("SSE ticket length = %d, want 43", len(result.Ticket))
+	}
+	for _, test := range []struct {
+		name   string
+		method string
+		path   string
+		want   int
+	}{
+		{name: "ticket cannot authorize status", method: http.MethodGet, path: "/api/status?ticket=" + result.Ticket, want: http.StatusUnauthorized},
+		{name: "ticket cannot authorize POST", method: http.MethodPost, path: "/api/events?ticket=" + result.Ticket, want: http.StatusUnauthorized},
+		{name: "ticket authorizes SSE once", method: http.MethodGet, path: "/api/events?ticket=" + result.Ticket, want: http.StatusNoContent},
+		{name: "ticket replay rejected", method: http.MethodGet, path: "/api/events?ticket=" + result.Ticket, want: http.StatusUnauthorized},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := request(test.method, test.path, "").Code; got != test.want {
+				t.Errorf("%s %s status = %d, want %d", test.method, "/api/events", got, test.want)
+			}
+		})
+	}
+
+	expired := request(http.MethodPost, "/api/events/ticket", token)
+	if expired.Code != http.StatusOK {
+		t.Fatalf("POST /api/events/ticket for expiry status = %d, want 200", expired.Code)
+	}
+	var expiredResult struct {
+		Ticket string `json:"ticket"`
+	}
+	if err := json.Unmarshal(expired.Body.Bytes(), &expiredResult); err != nil {
+		t.Fatalf("decode expiring ticket: %v", err)
+	}
+	server.ticketsMu.Lock()
+	server.tickets[expiredResult.Ticket] = time.Now().Add(-time.Second)
+	server.ticketsMu.Unlock()
+	if got := request(http.MethodGet, "/api/events?ticket="+expiredResult.Ticket, "").Code; got != http.StatusUnauthorized {
+		t.Errorf("GET expired SSE ticket status = %d, want 401", got)
+	}
+}
+
+func TestWebUISSETicketCapacity(t *testing.T) {
+	t.Parallel()
+	server := newTestWebUIServer(t, WebUIConfig{ListenAddress: "0.0.0.0:7070", BearerToken: "secret-token-123456"})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/events/ticket", server.handleSSETicket)
+	handler := server.wrapMiddleware(mux)
+	issue := func() int {
+		r := httptest.NewRequest(http.MethodPost, "http://router.example/api/events/ticket", nil)
+		r.Header.Set("Authorization", "Bearer secret-token-123456")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w.Code
+	}
+	for i := range maxSSETickets - 1 {
+		server.tickets[strconv.Itoa(i)] = time.Now().Add(time.Minute)
+	}
+	if got := issue(); got != http.StatusOK {
+		t.Fatalf("issue at ticket limit status = %d, want 200", got)
+	}
+	if got := issue(); got != http.StatusTooManyRequests {
+		t.Errorf("issue beyond ticket limit status = %d, want 429", got)
+	}
+	server.ticketsMu.Lock()
+	server.tickets["0"] = time.Now().Add(-time.Second)
+	server.ticketsMu.Unlock()
+	if got := issue(); got != http.StatusOK {
+		t.Errorf("issue after expiring ticket status = %d, want 200", got)
+	}
+}
+
+func TestWebUISSETicketConcurrentConsumption(t *testing.T) {
+	t.Parallel()
+	server := newTestWebUIServer(t, WebUIConfig{ListenAddress: "0.0.0.0:7070", BearerToken: "secret-token-123456"})
+	ticket := strings.Repeat("a", 43)
+	server.tickets[ticket] = time.Now().Add(time.Minute)
+
+	const attempts = 32
+	results := make(chan bool, attempts)
+	for range attempts {
+		go func() {
+			results <- server.consumeSSETicket(ticket, time.Now())
+		}()
+	}
+	var successes int
+	for range attempts {
+		if <-results {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Errorf("concurrent SSE ticket consumption successes = %d, want 1", successes)
+	}
+}
+
+func TestWebUIAuthenticatedMetricsEvents(t *testing.T) {
+	t.Parallel()
+	const token = "secret-token-123456"
+	server := newTestWebUIServer(t, WebUIConfig{ListenAddress: "127.0.0.1:0", BearerToken: token})
+	baseURL := startTestWebUIServer(t, server)
+	client := &http.Client{Timeout: 3 * time.Second}
+
+	request, err := http.NewRequest(http.MethodPost, baseURL+"/api/events/ticket", nil)
+	if err != nil {
+		t.Fatalf("build ticket request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	issued, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("POST SSE ticket: %v", err)
+	}
+	var payload struct {
+		Ticket string `json:"ticket"`
+	}
+	decodeErr := json.NewDecoder(issued.Body).Decode(&payload)
+	closeErr := issued.Body.Close()
+	if issued.StatusCode != http.StatusOK || decodeErr != nil || closeErr != nil {
+		t.Fatalf("POST SSE ticket status = %d, decode = %v, close = %v", issued.StatusCode, decodeErr, closeErr)
+	}
+
+	eventURL := baseURL + "/api/events?ticket=" + url.QueryEscape(payload.Ticket)
+	stream, err := client.Get(eventURL)
+	if err != nil {
+		t.Fatalf("GET SSE with ticket: %v", err)
+	}
+	if stream.StatusCode != http.StatusOK {
+		_ = stream.Body.Close()
+		t.Fatalf("GET SSE with ticket status = %d, want 200", stream.StatusCode)
+	}
+	line, readErr := bufio.NewReader(stream.Body).ReadString('\n')
+	closeErr = stream.Body.Close()
+	if readErr != nil || line != "event: metrics\n" || closeErr != nil {
+		t.Fatalf("SSE first line = %q, read = %v, close = %v", line, readErr, closeErr)
+	}
+	replay, err := client.Get(eventURL)
+	if err != nil {
+		t.Fatalf("GET SSE replay: %v", err)
+	}
+	_ = replay.Body.Close()
+	if replay.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET SSE replay status = %d, want 401", replay.StatusCode)
 	}
 }
 

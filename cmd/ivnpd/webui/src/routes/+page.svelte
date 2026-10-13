@@ -29,6 +29,8 @@
 	let summaryTimer: number | null = null;
 	let netdbTimer: number | null = null;
 	let fallbackTimer: number | null = null;
+	let reconnectTimer: number | null = null;
+	let streamGeneration = 0;
 	let accessToken = '';
 	let authenticating = false;
 	let authError = '';
@@ -47,12 +49,39 @@
 		}, 2000);
 	}
 
-	function connectMetrics(): void {
+	function scheduleMetricsReconnect(): void {
+		metricsStreamState.set('error');
+		if (!$collectionState.metrics.loading) void fetchMetrics();
+		startFallback();
+		if (reconnectTimer !== null) return;
+		reconnectTimer = window.setTimeout(() => {
+			reconnectTimer = null;
+			void connectMetrics();
+		}, 2000);
+	}
+
+	async function connectMetrics(): Promise<void> {
+		const generation = ++streamGeneration;
+		if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+		reconnectTimer = null;
 		eventSource?.close();
+		eventSource = null;
 		metricsStreamState.set('connecting');
 		lastStreamSample = Date.now();
-		eventSource = new EventSource(metricsEventURL());
-		eventSource.addEventListener('metrics', (event) => {
+
+		let eventURL: string;
+		try {
+			eventURL = await metricsEventURL();
+		} catch {
+			if (!disposed && generation === streamGeneration) scheduleMetricsReconnect();
+			return;
+		}
+		if (disposed || generation !== streamGeneration) return;
+
+		const source = new EventSource(eventURL);
+		eventSource = source;
+		source.addEventListener('metrics', (event) => {
+			if (source !== eventSource) return;
 			try {
 				const envelope = JSON.parse((event as MessageEvent<string>).data) as { type: 'metrics'; metrics: ObservabilityMetricsResponse };
 				applyMetrics(envelope.metrics);
@@ -65,17 +94,18 @@
 				startFallback();
 			}
 		});
-		eventSource.addEventListener('error', () => {
-			metricsStreamState.set('error');
-			if (!$collectionState.metrics.loading) void fetchMetrics();
-			startFallback();
+		source.addEventListener('error', () => {
+			if (disposed || source !== eventSource) return;
+			source.close();
+			eventSource = null;
+			scheduleMetricsReconnect();
 		});
 	}
 
 	async function initialize(): Promise<void> {
 		await refreshDashboard();
 		if (disposed) return;
-		connectMetrics();
+		void connectMetrics();
 		summaryTimer = window.setInterval(() => {
 			if (!$collectionState.status.loading) void fetchStatus();
 			if (!$collectionState.tunnels.loading) void fetchTunnels();
@@ -103,7 +133,7 @@
 			return;
 		}
 		await Promise.all([fetchMetrics(), fetchTunnels(), fetchNetDB(), fetchDestinations()]);
-		connectMetrics();
+		void connectMetrics();
 		authenticating = false;
 	}
 
@@ -111,6 +141,8 @@
 		void initialize();
 		return () => {
 			disposed = true;
+			streamGeneration++;
+			if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
 			metricsStreamState.set('closed');
 			eventSource?.close();
 			if (summaryTimer !== null) window.clearInterval(summaryTimer);

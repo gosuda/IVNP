@@ -29,7 +29,11 @@ import (
 //go:embed all:webui/build
 var webUIStaticFS embed.FS
 
-const defaultWebUIListenAddress = "127.0.0.1:7070"
+const (
+	defaultWebUIListenAddress = "127.0.0.1:7070"
+	sseTicketLifetime         = 30 * time.Second
+	maxSSETickets             = 1024
+)
 
 var (
 	errWebUINodeRequired      = errors.New("webui: node is required")
@@ -89,6 +93,9 @@ type WebUIServer struct {
 	subscribersMu sync.Mutex
 	subscribers   map[chan []byte]struct{}
 
+	ticketsMu sync.Mutex
+	tickets   map[string]time.Time
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -127,6 +134,7 @@ func NewWebUIServer(cfg WebUIConfig, node *node.Subsystem, logger *slog.Logger, 
 		tokenHash:       sha256.Sum256([]byte(cfg.BearerToken)),
 		persistedConfig: node.Config(),
 		subscribers:     make(map[chan []byte]struct{}),
+		tickets:         make(map[string]time.Time),
 		triggerReseed:   node.TriggerReseed,
 	}, nil
 }
@@ -213,6 +221,7 @@ func (s *WebUIServer) Start(parent context.Context) error {
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/actions/reseed", s.handleActionReseed)
 	mux.HandleFunc("/api/actions/tunnel-probe", s.handleActionTunnelProbe)
+	mux.HandleFunc("/api/events/ticket", s.handleSSETicket)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.Handle("/", s.staticHandler(staticFS))
 
@@ -482,7 +491,9 @@ func (s *WebUIServer) isAuthorized(r *http.Request) bool {
 	if ok && strings.EqualFold(kind, "Bearer") && s.tokenMatches(token) {
 		return true
 	}
-	return r.URL.Path == "/api/events" && s.tokenMatches(r.URL.Query().Get("token"))
+	return r.Method == http.MethodGet &&
+		r.URL.Path == "/api/events" &&
+		s.consumeSSETicket(r.URL.Query().Get("ticket"), time.Now())
 }
 
 func (s *WebUIServer) tokenMatches(token string) bool {
@@ -491,6 +502,53 @@ func (s *WebUIServer) tokenMatches(token string) bool {
 	}
 	provided := sha256.Sum256([]byte(token))
 	return subtle.ConstantTimeCompare(provided[:], s.tokenHash[:]) == 1
+}
+
+// consumeSSETicket removes a ticket even when it has expired. Only the first
+// authorized SSE request can consume a ticket.
+func (s *WebUIServer) consumeSSETicket(ticket string, now time.Time) bool {
+	if len(ticket) != 43 {
+		return false
+	}
+	s.ticketsMu.Lock()
+	expiresAt, ok := s.tickets[ticket]
+	if ok {
+		delete(s.tickets, ticket)
+	}
+	s.ticketsMu.Unlock()
+	return ok && now.Before(expiresAt)
+}
+
+func (s *WebUIServer) handleSSETicket(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	var randomTicket [32]byte
+	if _, err := rand.Read(randomTicket[:]); err != nil {
+		http.Error(w, "SSE ticket unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	ticket := base64.RawURLEncoding.EncodeToString(randomTicket[:])
+	now := time.Now()
+
+	s.ticketsMu.Lock()
+	for key, expiresAt := range s.tickets {
+		if !now.Before(expiresAt) {
+			delete(s.tickets, key)
+		}
+	}
+	if len(s.tickets) >= maxSSETickets {
+		s.ticketsMu.Unlock()
+		http.Error(w, "too many pending SSE tickets", http.StatusTooManyRequests)
+		return
+	}
+	s.tickets[ticket] = now.Add(sseTicketLifetime)
+	s.ticketsMu.Unlock()
+
+	writeJSONResponse(w, http.StatusOK, struct {
+		Ticket string `json:"ticket"`
+	}{Ticket: ticket})
 }
 
 func (s *WebUIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
