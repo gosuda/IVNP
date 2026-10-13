@@ -542,3 +542,34 @@ func TestControlDispatcherRejectsNegativeHandlerTimeout(t *testing.T) {
 		t.Fatal("negative control handler timeout was accepted")
 	}
 }
+
+// Control admission must preserve the authenticated transport predecessor
+// rather than replacing it with the sender claimed in the reply payload.
+func TestServiceForwardsDatabaseSearchReplySource(t *testing.T) {
+	const now = uint64(1_000)
+	peer, claimed, key := foundation.Hash{1}, foundation.Hash{2}, foundation.Hash{3}
+	var actual dataplane.RouterI2NPSource
+	var reply foundation.I2NPDatabaseSearchReplyMessage
+	service, queue := newControlServiceForTest(t, nil, ControlSinks{
+		DatabaseSearchReply: func(_ context.Context, source dataplane.RouterI2NPSource, incoming foundation.I2NPDatabaseSearchReplyMessage) error {
+			actual, reply = source, incoming
+			return nil
+		},
+	})
+	payload := make([]byte, 32+1+32)
+	copy(payload[:32], key[:])
+	copy(payload[33:], claimed[:])
+	message := foundation.I2NPMessage{
+		Header: foundation.I2NPHeader{Type: foundation.I2NPDatabaseSearchReply, ID: 42, Expiration: now},
+		Payload: payload,
+	}
+	if err := service.HandleI2NPFrom(peer, message, now, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.WaitIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if actual != (dataplane.RouterI2NPSource{Peer: peer, Direct: true}) || reply.Key != key || reply.From != claimed {
+		t.Fatalf("source = %+v, reply = %+v", actual, reply)
+	}
+}

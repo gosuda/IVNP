@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 )
 
@@ -97,7 +98,7 @@ func TestLookupRefreshesIneligibleCachedReferral(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager.active.Wait()
-	manager.HandleDatabaseSearchReply(t.Context(), foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: first, Peers: referred[:]})
+	manager.HandleDatabaseSearchReply(t.Context(), dataplane.RouterI2NPSource{Peer: first, Direct: true}, foundation.I2NPDatabaseSearchReplyMessage{Key: key, From: first, Peers: referred[:]})
 	manager.active.Wait()
 	messages := sender.snapshot()
 	if len(messages) != 2 {
