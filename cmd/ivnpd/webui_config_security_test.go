@@ -15,9 +15,9 @@ func TestWebUIConfigUpdateRejectsINIDirectiveInjection(t *testing.T) {
 	const directives = "\n[control]\nenabled = true\nbearer_token = 0123456789abcdef"
 	const crlfDirectives = "\r\n[control]\r\nenabled = true\r\nbearer_token = 0123456789abcdef"
 	tests := []struct {
-		name      string
-		field     string
-		mutate    func(*webUIConfigUpdate)
+		name   string
+		field  string
+		mutate func(*webUIConfigUpdate)
 	}{
 		{
 			name: "router family LF",
