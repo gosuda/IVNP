@@ -58,6 +58,9 @@ func (c *Client) Describe(ctx context.Context, location *url.URL) (Gateway, erro
 		if err != nil {
 			return Gateway{}, fmt.Errorf("upnp: invalid URLBase: %w", err)
 		}
+		if baseURL.Hostname() != location.Hostname() {
+			return Gateway{}, fmt.Errorf("upnp: URLBase host differs from description host")
+		}
 		base = baseURL
 	}
 	service, ok := description.bestMappingService()
@@ -67,6 +70,9 @@ func (c *Client) Describe(ctx context.Context, location *url.URL) (Gateway, erro
 	control, err := resolveControlURL(base, service.ControlURL)
 	if err != nil {
 		return Gateway{}, err
+	}
+	if control.Hostname() != location.Hostname() {
+		return Gateway{}, fmt.Errorf("upnp: control URL host differs from description host")
 	}
 	return Gateway{Location: cloneURL(location), ControlURL: control, ServiceType: service.ServiceType}, nil
 }
@@ -180,9 +186,23 @@ func requireEOF(decoder *xml.Decoder) error {
 	}
 }
 
+// UPnP traffic must never use process-wide HTTP proxy settings.
+var localGatewayTransport = func() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return transport
+}()
+
 func (c *Client) httpClient() *http.Client {
+	var client http.Client
 	if c != nil && c.HTTPClient != nil {
-		return c.HTTPClient
+		client = *c.HTTPClient
 	}
-	return http.DefaultClient
+	if client.Transport == nil {
+		client.Transport = localGatewayTransport
+	}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &client
 }

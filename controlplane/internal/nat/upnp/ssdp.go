@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -24,11 +25,12 @@ var ErrInvalidSSDPResponse = errors.New("upnp: invalid SSDP response")
 
 var (
 	errRelativeURL    = errors.New("must be an absolute URL")
-	errInvalidHTTPURL = errors.New("must be an unauthenticated HTTP URL")
+	errInvalidHTTPURL = errors.New("must be an unauthenticated HTTP URL with a literal IPv4 host")
 )
 
 // DiscoveryResponse holds the response to an SSDP M-SEARCH discovery request.
 type DiscoveryResponse struct {
+	Source   netip.Addr
 	Location *url.URL
 	ST       string
 	USN      string
@@ -158,7 +160,7 @@ func (c *Client) DiscoverWithConn(ctx context.Context, conn net.PacketConn, dest
 		if err := conn.SetReadDeadline(deadline); err != nil {
 			return nil, fmt.Errorf("upnp: set SSDP read deadline: %w", err)
 		}
-		n, _, err := conn.ReadFrom(buffer)
+		n, sender, err := conn.ReadFrom(buffer)
 		if err != nil {
 			if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
 				continue
@@ -169,6 +171,15 @@ func (c *Client) DiscoverWithConn(ctx context.Context, conn net.PacketConn, dest
 		if err != nil {
 			continue // SSDP is multicast; unrelated datagrams are expected.
 		}
+		peer, ok := sender.(*net.UDPAddr)
+		if !ok || response.ST != InternetGatewayDevice {
+			continue
+		}
+		source, ok := netip.AddrFromSlice(peer.IP)
+		if !ok || !source.Is4() || response.Location.Hostname() != source.String() {
+			continue // An SSDP responder cannot nominate another host for HTTP.
+		}
+		response.Source = source
 		key := response.USN + "\x00" + response.Location.String()
 		if _, duplicate := seen[key]; duplicate {
 			continue
@@ -213,6 +224,10 @@ func parseHTTPURL(raw string) (*url.URL, error) {
 		return nil, errRelativeURL
 	}
 	if parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, errInvalidHTTPURL
+	}
+	host, err := netip.ParseAddr(parsed.Hostname())
+	if err != nil || !host.Is4() {
 		return nil, errInvalidHTTPURL
 	}
 	return parsed, nil

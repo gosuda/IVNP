@@ -128,6 +128,9 @@ func (c *Client) call(ctx context.Context, gateway Gateway, action string, argum
 }
 
 func (c *Client) callResponse(ctx context.Context, gateway Gateway, action string, arguments []soapArgument, parse func(io.Reader) error) error {
+	if err := validateGateway(gateway); err != nil {
+		return err
+	}
 	body, err := marshalSOAPRequest(gateway.ServiceType, action, arguments)
 	if err != nil {
 		return err
@@ -201,6 +204,14 @@ func validateGateway(gateway Gateway) error {
 	}
 	if _, err := parseHTTPURL(gateway.ControlURL.String()); err != nil {
 		return fmt.Errorf("upnp: invalid gateway control URL: %w", err)
+	}
+	if gateway.Location != nil {
+		if _, err := parseHTTPURL(gateway.Location.String()); err != nil {
+			return fmt.Errorf("upnp: invalid gateway description URL: %w", err)
+		}
+		if gateway.ControlURL.Hostname() != gateway.Location.Hostname() {
+			return fmt.Errorf("upnp: gateway control URL host differs from description host")
+		}
 	}
 	return nil
 }
