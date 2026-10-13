@@ -187,6 +187,10 @@ func (s *WebUIServer) updateConfig(w http.ResponseWriter, r *http.Request) {
 	previous := cloneConfig(s.persistedConfig)
 	s.configMu.RUnlock()
 	updates := configINIUpdates(request, previous)
+	if err := validateConfigINIUpdates(request.Router.Family, updates); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	current, err := os.ReadFile(s.config.ConfigPath)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "cannot read configuration")
@@ -289,6 +293,20 @@ func configINIUpdates(request webUIConfigUpdate, current state.ConfigurationOper
 		{section: "metrics", key: "listen_port", value: integer(int(request.Services.MetricsPort))},
 		{section: "log", key: "level", value: strings.ToLower(request.Log.Level)},
 	}
+}
+
+// validateConfigINIUpdates checks values before placing them in line-oriented INI.
+// Family is checked before trimming so CR/LF at its edges cannot be hidden.
+func validateConfigINIUpdates(rawFamily string, updates []iniUpdate) error {
+	if strings.ContainsAny(rawFamily, "\r\n") {
+		return errors.New("router.family must not contain CR or LF")
+	}
+	for _, update := range updates {
+		if strings.ContainsAny(update.value, "\r\n") {
+			return fmt.Errorf("%s.%s must not contain CR or LF", update.section, update.key)
+		}
+	}
+	return nil
 }
 
 func updateINI(text string, updates []iniUpdate) string {
