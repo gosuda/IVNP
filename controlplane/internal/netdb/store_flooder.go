@@ -20,6 +20,7 @@ var (
 
 const (
 	storeFlooderQueue            = 64
+	storeFlooderSourceLimit      = 2 // Queued and active jobs combined.
 	storeFlooderTargets          = 3
 	storeFlooderTargetSnapshot   = 8
 	storeFlooderRecentCapacity   = 4_096
@@ -73,15 +74,17 @@ type StoreFlooder struct {
 	random   func() uint32
 	logger   *slog.Logger
 
-	jobs      chan storeFloodJob
-	done      chan struct{}
-	mu        sync.Mutex
-	start     bool
-	closed    bool
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	recent    map[[32]byte]uint64
-	keyFloods map[foundation.Hash]storeFloodCount
+	jobs          chan storeFloodJob
+	done          chan struct{}
+	mu            sync.Mutex
+	closeOnce     sync.Once
+	start         bool
+	closed        bool
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	recent        map[[32]byte]uint64
+	keyFloods     map[foundation.Hash]storeFloodCount
+	sourcePending map[foundation.Hash]uint8
 }
 
 func NewStoreFlooder(config StoreFlooderConfig) (*StoreFlooder, error) {
@@ -89,16 +92,17 @@ func NewStoreFlooder(config StoreFlooderConfig) (*StoreFlooder, error) {
 		return nil, ErrStoreFlooderConfig
 	}
 	return &StoreFlooder{
-		database:  config.Database,
-		sender:    config.Sender,
-		local:     config.Local,
-		now:       config.Now,
-		random:    config.Random,
-		logger:    config.Logger,
-		jobs:      make(chan storeFloodJob, storeFlooderQueue),
-		done:      make(chan struct{}),
-		recent:    make(map[[32]byte]uint64, storeFlooderRecentCapacity),
-		keyFloods: make(map[foundation.Hash]storeFloodCount, storeFlooderRecentCapacity),
+		database:      config.Database,
+		sender:        config.Sender,
+		local:         config.Local,
+		now:           config.Now,
+		random:        config.Random,
+		logger:        config.Logger,
+		jobs:          make(chan storeFloodJob, storeFlooderQueue),
+		done:          make(chan struct{}),
+		recent:        make(map[[32]byte]uint64, storeFlooderRecentCapacity),
+		keyFloods:     make(map[foundation.Hash]storeFloodCount, storeFlooderRecentCapacity),
+		sourcePending: make(map[foundation.Hash]uint8, storeFlooderQueue),
 	}, nil
 }
 
@@ -128,19 +132,25 @@ func (f *StoreFlooder) Enqueue(source foundation.Hash, store foundation.I2NPData
 	if !f.database.StoreMatchesCurrent(store) {
 		return nil
 	}
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		return ErrStoreFlooderClosed
+	}
+	// A peer retains its reservation until its send finishes, not just
+	// until the worker removes the job from the global queue.
+	if f.sourcePending[source] >= storeFlooderSourceLimit {
+		f.mu.Unlock()
+		return ErrStoreFlooderFull
+	}
 	job := storeFloodJob{source: source, store: store}
 	job.store.Data = append([]byte(nil), store.Data...)
 	job.store.ReplyGateway = foundation.Hash{}
 	job.store.ReplyTunnelID = 0
 	job.store.ReplyToken = 0
-	f.mu.Lock()
-	if f.closed {
-		f.mu.Unlock()
-		clear(job.store.Data)
-		return ErrStoreFlooderClosed
-	}
 	select {
 	case f.jobs <- job:
+		f.sourcePending[source]++
 		f.mu.Unlock()
 		return nil
 	default:
@@ -156,12 +166,31 @@ func (f *StoreFlooder) worker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			f.mu.Lock()
+			f.closed = true
+			f.mu.Unlock()
 			f.drain()
 			return
 		case job := <-f.jobs:
 			f.flood(ctx, &job)
-			clear(job.store.Data)
+			f.finish(&job)
 		}
+	}
+}
+
+// finish releases the admission reservation after the send or queue drain.
+func (f *StoreFlooder) finish(job *storeFloodJob) {
+	clear(job.store.Data)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pending := f.sourcePending[job.source]
+	if pending == 0 {
+		panic("netdb: store flood job has no source reservation")
+	}
+	if pending == 1 {
+		delete(f.sourcePending, job.source)
+	} else {
+		f.sourcePending[job.source] = pending - 1
 	}
 }
 
@@ -350,7 +379,7 @@ func (f *StoreFlooder) drain() {
 	for {
 		select {
 		case job := <-f.jobs:
-			clear(job.store.Data)
+			f.finish(&job)
 		default:
 			return
 		}
@@ -361,21 +390,22 @@ func (f *StoreFlooder) Close() error {
 	if f == nil {
 		return nil
 	}
-	f.mu.Lock()
-	if f.closed {
+	f.closeOnce.Do(func() {
+		f.mu.Lock()
+		f.closed = true
+		if f.cancel != nil {
+			f.cancel()
+		} else {
+			close(f.done)
+		}
 		f.mu.Unlock()
-		return nil
-	}
-	f.closed = true
-	if f.cancel != nil {
-		f.cancel()
-	} else {
-		close(f.done)
-	}
-	f.mu.Unlock()
-	f.wg.Wait()
-	clear(f.recent)
-	clear(f.keyFloods)
+		f.wg.Wait()
+		// No worker exists if Close preceded Start. Drain those jobs too.
+		f.drain()
+		clear(f.recent)
+		clear(f.keyFloods)
+		clear(f.sourcePending)
+	})
 	return nil
 }
 
