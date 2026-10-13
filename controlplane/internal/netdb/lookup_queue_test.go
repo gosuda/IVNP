@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"gosuda.org/ivnp/foundation"
 )
@@ -149,5 +150,67 @@ func TestLookupResponderAnonymousSourcesShareBudget(t *testing.T) {
 	lookup.Key = foundation.Hash{99}
 	if err := r.Enqueue(LookupSource{}, lookup); !errors.Is(err, ErrLookupResponderSourceFull) {
 		t.Fatalf("anonymous source limit = %v", err)
+	}
+}
+
+type heldLookupReplySender struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *heldLookupReplySender) SendNetDBReply(ctx context.Context, _ foundation.Hash, _ uint32, _ foundation.I2NPMessage) error {
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestLookupResponderSourceReservationHeldThroughSend(t *testing.T) {
+	local, peer, other := foundation.Hash{90}, foundation.Hash{1}, foundation.Hash{2}
+	sender := &heldLookupReplySender{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	responder, err := NewLookupResponder(LookupResponderConfig{
+		Database: NewDatabase(local, DefaultBucketCapacity), Sender: sender,
+		Local: local, Now: func() uint64 { return 100 }, Random: func() uint32 { return 7 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := responder.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := responder.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	defer close(sender.release)
+	source := LookupSource{Peer: peer, Direct: true}
+	lookup := foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{10}, From: peer}
+	if err := responder.Enqueue(source, lookup); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-sender.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not begin reply send")
+	}
+	for i := 1; i < lookupResponderSourceQueue; i++ {
+		lookup.Key = foundation.Hash{byte(i + 10)}
+		if err := responder.Enqueue(source, lookup); err != nil {
+			t.Fatalf("queued work %d = %v", i, err)
+		}
+	}
+	if err := responder.Enqueue(source, lookup); !errors.Is(err, ErrLookupResponderSourceFull) {
+		t.Fatalf("executing sender failed to retain reservation: %v", err)
+	}
+	if err := responder.Enqueue(LookupSource{Peer: other, Direct: true},
+		foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{90}, From: other}); err != nil {
+		t.Fatalf("independent source was starved: %v", err)
 	}
 }
