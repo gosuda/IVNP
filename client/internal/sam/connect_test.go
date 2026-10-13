@@ -79,7 +79,7 @@ func startConnectAttachment(t *testing.T, server *Server) (net.Conn, *bufio.Read
 func assertConnectEcho(t *testing.T, server *Server) {
 	t.Helper()
 	client, reader, result := startConnectAttachment(t, server)
-	if _, err := io.WriteString(client, "STREAM CONNECT ID=root IVNP_AUTH=" + testSessionToken(server.session("root")) + " DESTINATION=" + foundation.B32(foundation.Hash{1})+"\n"); err != nil {
+	if _, err := io.WriteString(client, "STREAM CONNECT ID=root IVNP_AUTH=" + testSessionToken(server.session("root")) + " DESTINATION=" + foundation.B32(foundation.Hash{1}) + "\n"); err != nil {
 		t.Fatal(err)
 	}
 	if line := readSAMLine(t, reader); line != "STREAM STATUS RESULT=OK" {
@@ -233,7 +233,7 @@ func TestConnectUsesRemainingCommandBudget(t *testing.T) {
 		client, _, result := startConnectAttachment(t, server)
 		synctest.Wait()
 		<-time.After(40 * time.Second)
-		if _, err := io.WriteString(client, "STREAM CONNECT ID=root IVNP_AUTH=" + testSessionToken(server.session("root")) + " DESTINATION=" + foundation.B32(foundation.Hash{1})+"\n"); err != nil {
+		if _, err := io.WriteString(client, "STREAM CONNECT ID=root IVNP_AUTH=" + testSessionToken(server.session("root")) + " DESTINATION=" + foundation.B32(foundation.Hash{1}) + "\n"); err != nil {
 			t.Fatal(err)
 		}
 		<-entered
@@ -263,7 +263,7 @@ func TestConnectSessionCancellationJoinsMonitor(t *testing.T) {
 		}}
 		server, _ := newConnectTestServer(t, endpoint)
 		client, _, result := startConnectAttachment(t, server)
-		if _, err := io.WriteString(client, "STREAM CONNECT ID=root IVNP_AUTH=" + testSessionToken(server.session("root")) + " DESTINATION=" + foundation.B32(foundation.Hash{1})+"\n"); err != nil {
+		if _, err := io.WriteString(client, "STREAM CONNECT ID=root IVNP_AUTH=" + testSessionToken(server.session("root")) + " DESTINATION=" + foundation.B32(foundation.Hash{1}) + "\n"); err != nil {
 			t.Fatal(err)
 		}
 		<-entered
