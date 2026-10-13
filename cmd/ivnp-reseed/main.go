@@ -111,7 +111,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	store := NewPeerStore()
 	if cachePath != "" {
-		if loadErr := store.LoadFromFile(cachePath); loadErr != nil {
+		if loadErr := store.LoadFromFile(cachePath, uint32(*netID)); loadErr != nil {
 			logger.Warn("failed to load peer cache file", "path", cachePath, "error", loadErr)
 		} else {
 			logger.Info("loaded peer cache", "peers", store.Len(), "path", cachePath)
