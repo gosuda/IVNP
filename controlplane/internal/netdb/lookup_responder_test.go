@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 )
 
@@ -37,7 +38,7 @@ func TestLookupResponderMissRepliesWithBoundedSearchReply(t *testing.T) {
 	if err = responder.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err = responder.Enqueue(foundation.I2NPDatabaseLookupMessage{Key: key, From: from, Flags: uint8(RouterInfoLookup << 2)}); err != nil {
+	if err = responder.Enqueue(dataplane.RouterI2NPSource{}, foundation.I2NPDatabaseLookupMessage{Key: key, From: from, Flags: uint8(RouterInfoLookup << 2)}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -76,7 +77,7 @@ func TestLookupResponderExplorationReturnsOnlyRoutingKBucketNonFloodfills(t *tes
 	if err = responder.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err = responder.Enqueue(foundation.I2NPDatabaseLookupMessage{Key: key, From: from, Flags: uint8(ExplorationLookup << 2)}); err != nil {
+	if err = responder.Enqueue(dataplane.RouterI2NPSource{}, foundation.I2NPDatabaseLookupMessage{Key: key, From: from, Flags: uint8(ExplorationLookup << 2)}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -128,7 +129,7 @@ func TestLookupResponderExplorationAppliesExclusionsBeforeLimit(t *testing.T) {
 	if err = responder.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err = responder.Enqueue(foundation.I2NPDatabaseLookupMessage{Key: key, From: from, Flags: uint8(ExplorationLookup << 2), Excluded: excluded}); err != nil {
+	if err = responder.Enqueue(dataplane.RouterI2NPSource{}, foundation.I2NPDatabaseLookupMessage{Key: key, From: from, Flags: uint8(ExplorationLookup << 2), Excluded: excluded}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -235,7 +236,7 @@ func TestLookupResponderRejectsEncryptedReplyWithoutWrapper(t *testing.T) {
 	if err = responder.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err = responder.Enqueue(foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{3}, From: from, Flags: uint8(RouterInfoLookup<<2) | 1<<1}); !errors.Is(err, ErrLookupReplyEncryptionUnsupported) {
+	if err = responder.Enqueue(dataplane.RouterI2NPSource{}, foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{3}, From: from, Flags: uint8(RouterInfoLookup<<2) | 1<<1}); !errors.Is(err, ErrLookupReplyEncryptionUnsupported) {
 		t.Fatalf("Enqueue() = %v, want ErrLookupReplyEncryptionUnsupported", err)
 	}
 	if err = responder.Close(); err != nil {
@@ -264,7 +265,7 @@ func TestLookupResponderLeavesPreliminaryECIESPublicKeyReplyPlaintext(t *testing
 	lookup := foundation.I2NPDatabaseLookupMessage{
 		Key: key, From: from, Flags: uint8(RouterInfoLookup<<2) | 1<<1 | 1<<4, ReplyPublicKey: make([]byte, 32),
 	}
-	if err = responder.Enqueue(lookup); err != nil {
+	if err = responder.Enqueue(dataplane.RouterI2NPSource{}, lookup); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -295,7 +296,7 @@ func TestLookupResponderDropsAllZeroSearchKey(t *testing.T) {
 	if err = responder.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err = responder.Enqueue(foundation.I2NPDatabaseLookupMessage{From: foundation.Hash{2}}); err != nil {
+	if err = responder.Enqueue(dataplane.RouterI2NPSource{}, foundation.I2NPDatabaseLookupMessage{From: foundation.Hash{2}}); err != nil {
 		t.Fatal(err)
 	}
 	if err = responder.Close(); err != nil {
@@ -308,5 +309,126 @@ func TestLookupResponderDropsAllZeroSearchKey(t *testing.T) {
 	defer capture.mu.Unlock()
 	if len(capture.messages) != 0 {
 		t.Fatalf("all-zero lookup produced replies: %#v", capture.messages)
+	}
+}
+
+func newBudgetedLookupResponder(t *testing.T) *LookupResponder {
+	t.Helper()
+	local := foundation.Hash{1}
+	responder, err := NewLookupResponder(LookupResponderConfig{
+		Database: NewDatabase(local, DefaultBucketCapacity),
+		Sender: &lookupReplyCapture{ready: make(chan struct{}, 1)},
+		Local: local,
+		Now: func() uint64 { return 100 },
+		Random: func() uint32 { return 7 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := responder.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return responder
+}
+
+func TestLookupResponderSourceBudgetIncludesInFlightAndFairDispatch(t *testing.T) {
+	responder := newBudgetedLookupResponder(t)
+	firstSource := dataplane.RouterI2NPSource{Peer: foundation.Hash{2}, Direct: true}
+	secondSource := dataplane.RouterI2NPSource{Peer: foundation.Hash{3}, Direct: true}
+	for i := range lookupResponderPerSource {
+		lookup := foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{byte(i + 10)}, From: firstSource.Peer}
+		if err := responder.Enqueue(firstSource, lookup); err != nil {
+			t.Fatal(err)
+		}
+	}
+	extra := foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{99}, From: firstSource.Peer}
+	if err := responder.Enqueue(firstSource, extra); !errors.Is(err, ErrLookupResponderFull) {
+		t.Fatalf("source quota at limit = %v, want ErrLookupResponderFull", err)
+	}
+	if err := responder.Enqueue(secondSource, foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{98}, From: secondSource.Peer}); err != nil {
+		t.Fatalf("other peer was starved: %v", err)
+	}
+	first, ok := responder.take(context.Background())
+	if !ok || first.source != firstSource.Peer {
+		t.Fatalf("first source = %x, ready = %t", first.source, ok)
+	}
+	second, ok := responder.take(context.Background())
+	if !ok || second.source != secondSource.Peer {
+		t.Fatalf("second source = %x, ready = %t; slow peer monopolized workers", second.source, ok)
+	}
+	if err := responder.Enqueue(firstSource, extra); !errors.Is(err, ErrLookupResponderFull) {
+		t.Fatalf("in-flight quota = %v, want ErrLookupResponderFull", err)
+	}
+	responder.finish(&first, nil)
+	if err := responder.Enqueue(firstSource, extra); err != nil {
+		t.Fatalf("completed reply did not release quota: %v", err)
+	}
+	responder.finish(&second, nil)
+}
+
+func TestLookupResponderGlobalBudgetIncludesAllSources(t *testing.T) {
+	responder := newBudgetedLookupResponder(t)
+	for i := range lookupResponderQueue {
+		source := dataplane.RouterI2NPSource{Peer: foundation.Hash{byte(i + 1)}, Direct: true}
+		lookup := foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{byte(i + 101)}, From: source.Peer}
+		if err := responder.Enqueue(source, lookup); err != nil {
+			t.Fatalf("admission %d of %d = %v", i+1, lookupResponderQueue, err)
+		}
+	}
+	source := dataplane.RouterI2NPSource{Peer: foundation.Hash{99}, Direct: true}
+	if err := responder.Enqueue(source, foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{200}, From: source.Peer}); !errors.Is(err, ErrLookupResponderFull) {
+		t.Fatalf("global quota above limit = %v, want ErrLookupResponderFull", err)
+	}
+}
+
+func TestLookupResponderAnonymousSourcesShareBudget(t *testing.T) {
+	responder := newBudgetedLookupResponder(t)
+	for i := range lookupResponderPerSource {
+		source := dataplane.RouterI2NPSource{Peer: foundation.Hash{byte(i + 1)}}
+		lookup := foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{byte(i + 10)}, From: foundation.Hash{99}}
+		if err := responder.Enqueue(source, lookup); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := dataplane.RouterI2NPSource{Peer: foundation.Hash{77}}
+	if err := responder.Enqueue(source, foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{90}, From: foundation.Hash{99}}); !errors.Is(err, ErrLookupResponderFull) {
+		t.Fatalf("anonymous quota bypass = %v, want ErrLookupResponderFull", err)
+	}
+}
+
+func TestLookupResponderValidatesDirectReturnIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		source  dataplane.RouterI2NPSource
+		lookup  foundation.I2NPDatabaseLookupMessage
+		wantErr bool
+	}{
+		{name: "matched direct reply", source: dataplane.RouterI2NPSource{Peer: foundation.Hash{2}, Direct: true},
+			lookup: foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{3}, From: foundation.Hash{2}}},
+		{name: "spoofed direct reply", source: dataplane.RouterI2NPSource{Peer: foundation.Hash{2}, Direct: true},
+			lookup: foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{3}, From: foundation.Hash{9}}, wantErr: true},
+		{name: "missing return identity", source: dataplane.RouterI2NPSource{Peer: foundation.Hash{2}, Direct: true},
+			lookup: foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{3}}, wantErr: true},
+		{name: "invalid direct source", source: dataplane.RouterI2NPSource{Direct: true},
+			lookup: foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{3}, From: foundation.Hash{9}}, wantErr: true},
+		{name: "missing return tunnel", source: dataplane.RouterI2NPSource{Peer: foundation.Hash{2}, Direct: true},
+			lookup: foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{3}, From: foundation.Hash{9}, Flags: 1}, wantErr: true},
+		{name: "forwarded tunnel gateway", source: dataplane.RouterI2NPSource{Peer: foundation.Hash{2}, Direct: true},
+			lookup: foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{3}, From: foundation.Hash{9}, Flags: 1, ReplyTunnelID: 7}},
+		{name: "anonymous direct reply", source: dataplane.RouterI2NPSource{},
+			lookup: foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{3}, From: foundation.Hash{9}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			responder := newBudgetedLookupResponder(t)
+			err := responder.Enqueue(test.source, test.lookup)
+			if test.wantErr && !errors.Is(err, ErrLookupReplyRoute) {
+				t.Fatalf("Enqueue = %v, want ErrLookupReplyRoute", err)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("valid reply route rejected: %v", err)
+			}
+		})
 	}
 }

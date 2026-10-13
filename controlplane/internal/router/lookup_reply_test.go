@@ -70,7 +70,7 @@ func TestLookupResponderEncryptsECIESReplyEndToEnd(t *testing.T) {
 	if err = responder.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err = responder.Enqueue(lookup); err != nil {
+	if err = responder.Enqueue(dataplane.RouterI2NPSource{}, lookup); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -137,7 +137,7 @@ func TestLookupResponderRejectsIncompleteEncryptedMetadataAtIngress(t *testing.T
 	lookup := foundation.I2NPDatabaseLookupMessage{
 		Key: foundation.Hash{3}, From: foundation.Hash{2}, Flags: 1 << 4, ReplyKey: make([]byte, 32), ReplyTagLen: 8,
 	}
-	if err = responder.Enqueue(lookup); !errors.Is(err, dataplane.GarlicErrLookupReply) {
+	if err = responder.Enqueue(dataplane.RouterI2NPSource{}, lookup); !errors.Is(err, dataplane.GarlicErrLookupReply) {
 		t.Fatalf("Enqueue() = %v, want ErrLookupReply", err)
 	}
 	if err = responder.Close(); err != nil {

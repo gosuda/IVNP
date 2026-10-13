@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 )
@@ -16,10 +17,12 @@ var (
 	ErrLookupResponderFull              = errors.New("netdb: lookup responder queue is full")
 	ErrLookupResponderClosed            = errors.New("netdb: lookup responder is closed")
 	ErrLookupReplyEncryptionUnsupported = errors.New("netdb: encrypted lookup reply is unsupported")
+	ErrLookupReplyRoute                 = errors.New("netdb: invalid lookup reply route")
 )
 
 const (
 	lookupResponderQueue                  = 64
+	lookupResponderPerSource              = 4
 	lookupResponderRouterInfoMaxAgeMillis = uint64(time.Hour / time.Millisecond)
 )
 
@@ -54,6 +57,7 @@ type LookupResponderConfig struct {
 }
 
 type lookupJob struct {
+	source foundation.Hash
 	lookup foundation.I2NPDatabaseLookupMessage
 }
 
@@ -69,9 +73,14 @@ type LookupResponder struct {
 	wrapper  LookupReplyWrapper
 	logger   *slog.Logger
 
-	jobs    chan lookupJob
-	done    chan struct{}
-	mu      sync.Mutex
+	jobs        []lookupJob
+	available   chan struct{}
+	outstanding map[foundation.Hash]int
+	running     map[foundation.Hash]bool
+	total       int
+	done        chan struct{}
+	mu          sync.Mutex
+
 	started bool
 	closed  bool
 	cancel  context.CancelFunc
@@ -83,7 +92,13 @@ func NewLookupResponder(config LookupResponderConfig) (*LookupResponder, error) 
 	if config.Database == nil || config.Sender == nil || config.Local == (foundation.Hash{}) || config.Now == nil || config.Random == nil {
 		return nil, ErrLookupResponderConfig
 	}
-	return &LookupResponder{database: config.Database, sender: config.Sender, local: config.Local, now: config.Now, random: config.Random, wrapper: config.Wrapper, logger: config.Logger, jobs: make(chan lookupJob, lookupResponderQueue), done: make(chan struct{})}, nil
+	return &LookupResponder{
+		database: config.Database, sender: config.Sender, local: config.Local,
+		now: config.Now, random: config.Random, wrapper: config.Wrapper, logger: config.Logger,
+		jobs: make([]lookupJob, 0, lookupResponderQueue), available: make(chan struct{}, 1),
+		outstanding: make(map[foundation.Hash]int), running: make(map[foundation.Hash]bool),
+		done: make(chan struct{}),
+	}, nil
 }
 
 // Start launches a CPU-scaled worker set bounded by the responder queue. It is
@@ -101,7 +116,7 @@ func (r *LookupResponder) Start(parent context.Context) error {
 	}
 	ctx, cancel := context.WithCancel(parent)
 	r.started, r.cancel = true, cancel
-	workers := parallelism.Workers(cap(r.jobs))
+	workers := parallelism.Workers(lookupResponderQueue)
 	r.wg.Add(workers)
 	for range workers {
 		go r.worker(ctx)
@@ -110,9 +125,18 @@ func (r *LookupResponder) Start(parent context.Context) error {
 	return nil
 }
 
-func (r *LookupResponder) Enqueue(lookup foundation.I2NPDatabaseLookupMessage) error {
+// Enqueue admits work against the authenticated transport source. Anonymous
+// Garlic and tunnel deliveries share a single budget; a direct reply must
+// return to its authenticated sender. Tunnel replies name a gateway by design.
+func (r *LookupResponder) Enqueue(source dataplane.RouterI2NPSource, lookup foundation.I2NPDatabaseLookupMessage) error {
 	if lookup.Key == (foundation.Hash{}) {
 		return nil
+	}
+	if lookup.From == (foundation.Hash{}) ||
+		lookup.ReplyThroughTunnel() != (lookup.ReplyTunnelID != 0) ||
+		(source.Direct && (source.Peer == (foundation.Hash{}) ||
+			(!lookup.ReplyThroughTunnel() && lookup.From != source.Peer))) {
+		return ErrLookupReplyRoute
 	}
 	if lookup.ReplyEncrypted() && !lookup.ReplyUsesECIESPublicKey() {
 		if r.wrapper == nil {
@@ -122,51 +146,101 @@ func (r *LookupResponder) Enqueue(lookup foundation.I2NPDatabaseLookupMessage) e
 			return err
 		}
 	}
-	job := lookupJob{lookup: foundation.I2NPDatabaseLookupMessage{
-		Key: lookup.Key, From: lookup.From, Flags: lookup.Flags, ReplyTunnelID: lookup.ReplyTunnelID,
-		Excluded: append([]byte(nil), lookup.Excluded...), ReplyKey: append([]byte(nil), lookup.ReplyKey...),
-		ReplyTags: append([]byte(nil), lookup.ReplyTags...), ReplyTagLen: lookup.ReplyTagLen,
-		ReplyPublicKey: append([]byte(nil), lookup.ReplyPublicKey...),
-	}}
+	peer := foundation.Hash{}
+	if source.Direct {
+		peer = source.Peer
+	}
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		clearLookupJob(&job)
 		return ErrLookupResponderClosed
 	}
-	select {
-	case r.jobs <- job:
+	if r.total >= lookupResponderQueue || r.outstanding[peer] >= lookupResponderPerSource {
 		r.mu.Unlock()
-		return nil
-	default:
-		r.mu.Unlock()
-		clearLookupJob(&job)
 		if r.logger != nil {
 			r.logger.Debug("netdb lookup dropped", "reason", "queue_full", "key", foundation.EncodeI2PBase64(lookup.Key[:]))
 		}
 		return ErrLookupResponderFull
 	}
+	// Admission includes queued and executing work until the send returns.
+	job := lookupJob{source: peer, lookup: foundation.I2NPDatabaseLookupMessage{
+		Key: lookup.Key, From: lookup.From, Flags: lookup.Flags, ReplyTunnelID: lookup.ReplyTunnelID,
+		Excluded: append([]byte(nil), lookup.Excluded...), ReplyKey: append([]byte(nil), lookup.ReplyKey...),
+		ReplyTags: append([]byte(nil), lookup.ReplyTags...), ReplyTagLen: lookup.ReplyTagLen,
+		ReplyPublicKey: append([]byte(nil), lookup.ReplyPublicKey...),
+	}}
+	r.jobs = append(r.jobs, job)
+	r.total++
+	r.outstanding[peer]++
+	r.mu.Unlock()
+	r.notify()
+	return nil
+}
+
+func (r *LookupResponder) notify() {
+	select {
+	case r.available <- struct{}{}:
+	default:
+	}
+}
+
+// take skips sources already executing a response, so one slow peer cannot
+// occupy every worker. The bounded FIFO preserves arrival order across peers.
+func (r *LookupResponder) take(ctx context.Context) (lookupJob, bool) {
+	for {
+		if ctx.Err() != nil {
+			return lookupJob{}, false
+		}
+		r.mu.Lock()
+		for index, job := range r.jobs {
+			if r.running[job.source] {
+				continue
+			}
+			r.running[job.source] = true
+			copy(r.jobs[index:], r.jobs[index+1:])
+			r.jobs[len(r.jobs)-1] = lookupJob{}
+			r.jobs = r.jobs[:len(r.jobs)-1]
+			r.mu.Unlock()
+			r.notify()
+			return job, true
+		}
+		r.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return lookupJob{}, false
+		case <-r.available:
+		}
+	}
+}
+
+func (r *LookupResponder) finish(job *lookupJob, err error) {
+	clearLookupJob(job)
+	r.mu.Lock()
+	delete(r.running, job.source)
+	if r.outstanding[job.source] == 1 {
+		delete(r.outstanding, job.source)
+	} else {
+		r.outstanding[job.source]--
+	}
+	r.total--
+	if err != nil && !errors.Is(err, context.Canceled) && r.err == nil {
+		r.err = err
+	}
+	r.mu.Unlock()
+	r.notify()
 }
 
 func (r *LookupResponder) worker(ctx context.Context) {
 	defer r.wg.Done()
 	for {
-		select {
-		case <-ctx.Done():
+		job, ok := r.take(ctx)
+		if !ok {
 			return
-		case job := <-r.jobs:
-			err := r.respond(ctx, job.lookup)
-			clearLookupJob(&job)
-			if err != nil && !errors.Is(err, context.Canceled) {
-				r.mu.Lock()
-				if r.err == nil {
-					r.err = err
-				}
-				r.mu.Unlock()
-			}
 		}
+		r.finish(&job, r.respond(ctx, job.lookup))
 	}
 }
+
 func clearLookupJob(job *lookupJob) {
 	if job == nil {
 		return
@@ -306,14 +380,17 @@ func (r *LookupResponder) Close() error {
 	}
 	r.mu.Unlock()
 	r.wg.Wait()
-	for {
-		select {
-		case job := <-r.jobs:
-			clearLookupJob(&job)
-		default:
-			close(r.done)
-			return nil
-		}
+	r.mu.Lock()
+	for index := range r.jobs {
+		clearLookupJob(&r.jobs[index])
+		r.jobs[index] = lookupJob{}
 	}
+	r.jobs = nil
+	r.outstanding = nil
+	r.running = nil
+	r.total = 0
+	r.mu.Unlock()
+	close(r.done)
+	return nil
 }
 func (r *LookupResponder) Wait() error { <-r.done; r.mu.Lock(); defer r.mu.Unlock(); return r.err }
