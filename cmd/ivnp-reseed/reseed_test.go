@@ -246,7 +246,7 @@ func TestProberWithRateLimiter(t *testing.T) {
 	store := NewPeerStore()
 	info, raw := createTestRouterInfo(t, "LR")
 	rec, _ := store.AddOrUpdate(info, raw)
-	rec.IPv4 = []netip.Addr{netip.MustParseAddr("198.51.100.1")}
+	rec.IPv4 = []netip.Addr{netip.MustParseAddr("8.8.8.8")}
 	rec.Ports = []uint16{8080}
 
 	prober := NewProber(store, 4)
@@ -1267,23 +1267,23 @@ func TestProberRejectsLocalAndFastRTT(t *testing.T) {
 	// 2. Peer with public IP, but dial returns in < 5ms (e.g. 2ms local bridge)
 	info2, raw2 := createTestRouterInfo(t, "LR")
 	rec2, _ := store.AddOrUpdate(info2, raw2)
-	rec2.IPv4 = []netip.Addr{netip.MustParseAddr("198.51.100.1")}
+	rec2.IPv4 = []netip.Addr{netip.MustParseAddr("8.8.8.8")}
 	rec2.Ports = []uint16{8081}
 	rec2.Stats.IsReachable = false
 
 	// 3. Peer with public IP and normal network latency (30ms)
 	info3, raw3 := createTestRouterInfo(t, "LR")
 	rec3, _ := store.AddOrUpdate(info3, raw3)
-	rec3.IPv4 = []netip.Addr{netip.MustParseAddr("198.51.100.2")}
+	rec3.IPv4 = []netip.Addr{netip.MustParseAddr("1.1.1.1")}
 	rec3.Ports = []uint16{8082}
 	rec3.Stats.IsReachable = false
 
 	prober := NewProber(store, 4)
 	prober.SetDialer(func(ctx context.Context, network, address string) (time.Duration, error) {
-		if strings.Contains(address, "198.51.100.1") {
+		if strings.Contains(address, "8.8.8.8") {
 			return 2 * time.Millisecond, nil // too fast, local socket!
 		}
-		if strings.Contains(address, "198.51.100.2") {
+		if strings.Contains(address, "1.1.1.1") {
 			return 30 * time.Millisecond, nil // normal Internet latency
 		}
 		t.Fatalf("unexpected dial to %s", address)
