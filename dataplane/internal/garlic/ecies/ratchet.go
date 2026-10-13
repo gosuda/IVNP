@@ -27,6 +27,7 @@ const (
 	DefaultTagLookahead        = 512
 	defaultMaxSessions         = 256
 	defaultMaxTags             = 8192
+	defaultMaxReplays          = 8192
 	defaultSessionLife         = 10 * 60 * 1000
 	defaultReplayLife          = 5 * 60 * 1000
 	previousSetLife            = 3 * 60 * 1000
@@ -35,12 +36,13 @@ const (
 )
 
 var (
-	ErrRatchet             = errors.New("garlic/ecies: invalid ratchet packet")
-	ErrRatchetClosed       = errors.New("garlic/ecies: ratchet manager is closed")
-	ErrRatchetReplay       = errors.New("garlic/ecies: replayed new session")
-	ErrRatchetExpired      = errors.New("garlic/ecies: ratchet session expired")
-	ErrRatchetNoSession    = errors.New("garlic/ecies: no ratchet session")
-	ErrRatchetTagExhausted = errors.New("garlic/ecies: ratchet tag set exhausted")
+	ErrRatchet                = errors.New("garlic/ecies: invalid ratchet packet")
+	ErrRatchetClosed          = errors.New("garlic/ecies: ratchet manager is closed")
+	ErrRatchetReplay          = errors.New("garlic/ecies: replayed new session")
+	ErrRatchetReplayExhausted = errors.New("garlic/ecies: replay capacity exhausted")
+	ErrRatchetExpired         = errors.New("garlic/ecies: ratchet session expired")
+	ErrRatchetNoSession       = errors.New("garlic/ecies: no ratchet session")
+	ErrRatchetTagExhausted    = errors.New("garlic/ecies: ratchet tag set exhausted")
 )
 
 // RatchetConfig limits destination-local ratchet state. SessionLifetime is an
@@ -52,6 +54,8 @@ type RatchetConfig struct {
 	MaxSessions int
 	// MaxInboundTags bounds registered receive tags, including retained history.
 	MaxInboundTags int
+	// MaxReplayEntries bounds authenticated New Session replay reservations.
+	MaxReplayEntries int
 	// TagLookahead is the forward window; nonpositive selects DefaultTagLookahead.
 	// Up to the same number of earlier indices are retained when the tag budget allows.
 	TagLookahead    int
@@ -249,7 +253,7 @@ type RatchetManager struct {
 	sessions      map[foundation.Hash]*session
 	inbound       map[[ratchetTagLen]byte]tagEntry
 	pending       map[[ratchetTagLen]byte]pendingInitiator
-	replays       map[[32]byte]uint64
+	replays       replayWindow
 	metrics       *observability.Registry
 	tagObserver   TagObserver
 	windowScratch []tagEntry
@@ -303,6 +307,9 @@ func newRatchetManager(local *foundation.LocalDestination, config RatchetConfig,
 	if config.MaxInboundTags <= 0 {
 		config.MaxInboundTags = defaultMaxTags
 	}
+	if config.MaxReplayEntries <= 0 {
+		config.MaxReplayEntries = defaultMaxReplays
+	}
 	if config.TagLookahead <= 0 {
 		config.TagLookahead = DefaultTagLookahead
 	}
@@ -321,7 +328,7 @@ func newRatchetManager(local *foundation.LocalDestination, config RatchetConfig,
 	}
 	cryptoCount := len(config.CryptoTypes)
 	config.CryptoTypes = nil
-	return &RatchetManager{owner: local.Hash(), private: private, cryptoTypes: cryptoTypes, cryptoCount: cryptoCount, config: config, metrics: config.Metrics, tagObserver: observer, sessions: make(map[foundation.Hash]*session), inbound: make(map[[ratchetTagLen]byte]tagEntry), pending: make(map[[ratchetTagLen]byte]pendingInitiator), replays: make(map[[32]byte]uint64), windowScratch: make([]tagEntry, config.TagLookahead), windowTags: make(map[[ratchetTagLen]byte]struct{}, config.TagLookahead)}, nil
+	return &RatchetManager{owner: local.Hash(), private: private, cryptoTypes: cryptoTypes, cryptoCount: cryptoCount, config: config, metrics: config.Metrics, tagObserver: observer, sessions: make(map[foundation.Hash]*session), inbound: make(map[[ratchetTagLen]byte]tagEntry), pending: make(map[[ratchetTagLen]byte]pendingInitiator), replays: newReplayWindow(config.ReplayLifetime, config.MaxReplayEntries), windowScratch: make([]tagEntry, config.TagLookahead), windowTags: make(map[[ratchetTagLen]byte]struct{}, config.TagLookahead)}, nil
 }
 func (m *RatchetManager) addInboundTagLocked(entry tagEntry) {
 	m.inbound[entry.tag] = entry
@@ -821,8 +828,8 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 	}
 	var ephemeral [32]byte
 	copy(ephemeral[:], packet[:32])
-	if until, duplicate := m.replays[ephemeral]; duplicate && until >= now {
-		return RatchetResult{}, ErrRatchetReplay
+	if err := m.replays.check(ephemeral, now); err != nil {
+		return RatchetResult{}, err
 	}
 
 	var responder *Responder
@@ -857,7 +864,9 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 		return RatchetResult{}, err
 	}
 	if !responder.bound {
-		m.replays[ephemeral] = now + m.config.ReplayLifetime
+		if err := m.replays.reserve(ephemeral, now); err != nil {
+			return RatchetResult{}, err
+		}
 		return RatchetResult{Payload: application, NewSession: true}, nil
 	}
 	tag, err := responder.ReplyTag()
@@ -878,11 +887,14 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 	if err != nil {
 		return RatchetResult{}, err
 	}
-	candidate := &NewSessionCandidate{owner: m.owner, session: s}
 	// Authentication and replay reservation complete together, while session
 	// and tag admission remain deferred until the authenticated Destination is
 	// known to the caller.
-	m.replays[ephemeral] = now + m.config.ReplayLifetime
+	if err := m.replays.reserve(ephemeral, now); err != nil {
+		releaseSession(s)
+		return RatchetResult{}, err
+	}
+	candidate := &NewSessionCandidate{owner: m.owner, session: s}
 	return RatchetResult{Payload: application, Reply: replyDst[:n], Peer: peer, Candidate: candidate, NewSession: true}, nil
 }
 
@@ -1297,11 +1309,7 @@ func (m *RatchetManager) checkLocked(now uint64) error {
 			m.removePendingTagLocked(tag)
 		}
 	}
-	for eph, expiry := range m.replays {
-		if expiry < now {
-			delete(m.replays, eph)
-		}
-	}
+	m.replays.expire(now)
 	for peer, s := range m.sessions {
 		if s.expires < now || s.terminated {
 			m.discardSessionLocked(peer, s)
@@ -1393,6 +1401,7 @@ func (m *RatchetManager) ReleaseSensitive() {
 	}
 	clear(m.windowScratch)
 	clear(m.windowTags)
+	m.replays.clear()
 	clear(m.private[:])
 	m.closed = true
 }
