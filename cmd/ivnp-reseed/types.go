@@ -75,10 +75,10 @@ type PeerRecord struct {
 	UDPPorts    []uint16        `json:"udp_ports,omitempty"`
 	// ProbeEndpoints are exact TCP (or unclassified) RouterInfo address:port pairs.
 	ProbeEndpoints []netip.AddrPort `json:"probe_endpoints,omitempty"`
-	HasNTCP2    bool            `json:"has_ntcp2"`
-	HasSSU2     bool            `json:"has_ssu2"`
-	Stats       PeerStats       `json:"stats"`
-	Score       float64         `json:"score"`
+	HasNTCP2       bool             `json:"has_ntcp2"`
+	HasSSU2        bool             `json:"has_ssu2"`
+	Stats          PeerStats        `json:"stats"`
+	Score          float64          `json:"score"`
 }
 
 // ReseedPackage contains pre-rendered, signed reseed archives and their metadata.
