@@ -28,7 +28,7 @@ func TestWriteFileAtomicDoesNotFollowPredictableSymlink(t *testing.T) {
 	if got, err := os.ReadFile(path); err != nil || string(got) != replacement {
 		t.Fatalf("new state: data=%q err=%v", got, err)
 	}
-	if info, err := os.Lstat(path+".tmp"); err != nil || info.Mode()&os.ModeSymlink == 0 {
+	if info, err := os.Lstat(path + ".tmp"); err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("predictable symlink changed: info=%v err=%v", info, err)
 	}
 	entries, err := os.ReadDir(dir)
