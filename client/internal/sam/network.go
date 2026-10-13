@@ -53,6 +53,7 @@ type Network struct {
 
 	mu                sync.Mutex
 	control           *control
+	authToken         string
 	privateDest       string
 	publicDest        string
 	local             samAddr
@@ -155,13 +156,26 @@ func (n *Network) Start(ctx context.Context) error {
 		control.Close()
 		return statusError("SESSION STATUS", fields)
 	}
+	authToken := fields["IVNP_AUTH"]
+	if control.authSupported && authToken == "" {
+		control.Close()
+		return ErrProtocol
+	}
+	if authToken != "" {
+		var decoded [samAuthBytes]byte
+		n, decodeErr := base64.RawURLEncoding.Decode(decoded[:], []byte(authToken))
+		if decodeErr != nil || n != samAuthBytes {
+			control.Close()
+			return ErrProtocol
+		}
+	}
 	privateDest := fields["DESTINATION"]
 	publicDest, addr, err := publicAddress(privateDest)
 	if err != nil {
 		control.Close()
 		return err
 	}
-	n.control, n.privateDest, n.publicDest, n.local = control, privateDest, publicDest, addr
+	n.control, n.authToken, n.privateDest, n.publicDest, n.local = control, authToken, privateDest, publicDest, addr
 	if compareVersion(control.version, [2]int{3, 2}) >= 0 {
 		n.keepaliveDone = make(chan struct{})
 		go n.keepalive(control, n.keepaliveDone)
@@ -207,7 +221,13 @@ func (n *Network) DialI2P(ctx context.Context, address string) (net.Conn, error)
 	if err != nil {
 		return nil, err
 	}
+	n.mu.Lock()
+	authToken := n.authToken
+	n.mu.Unlock()
 	line := "STREAM CONNECT ID=" + n.cfg.ID + " DESTINATION=" + host + " TO_PORT=" + strconv.Itoa(port)
+	if authToken != "" {
+		line += " IVNP_AUTH=" + authToken
+	}
 	fields, err := control.commandContext(ctx, line)
 	if err != nil {
 		control.Close()
@@ -267,7 +287,7 @@ func (n *Network) Close() error {
 	listener := n.listener
 	control := n.control
 	keepaliveDone := n.keepaliveDone
-	n.listener, n.control, n.privateDest, n.publicDest, n.keepaliveDone = nil, nil, "", "", nil
+	n.listener, n.control, n.authToken, n.privateDest, n.publicDest, n.keepaliveDone = nil, nil, "", "", "", nil
 	close(n.done)
 	n.mu.Unlock()
 	var err error
@@ -335,6 +355,7 @@ func (n *Network) open(ctx context.Context) (*control, error) {
 	}
 	control.version = version
 	control.prepareDestination = fields["IVNP_PREPARE"] == "1"
+	control.authSupported = fields["IVNP_AUTH"] == "1"
 	return control, nil
 }
 
@@ -343,6 +364,7 @@ type control struct {
 	reader             *bufio.Reader
 	version            [2]int
 	prepareDestination bool
+	authSupported      bool
 }
 
 func (c *control) command(line string) (map[string]string, error) {
@@ -534,7 +556,14 @@ func (l *listener) Accept() (net.Conn, error) {
 		}
 		l.mu.Unlock()
 	}()
-	fields, err := control.commandContext(ctx, "STREAM ACCEPT ID="+l.network.cfg.ID)
+	l.network.mu.Lock()
+	authToken := l.network.authToken
+	l.network.mu.Unlock()
+	line := "STREAM ACCEPT ID=" + l.network.cfg.ID
+	if authToken != "" {
+		line += " IVNP_AUTH=" + authToken
+	}
+	fields, err := control.commandContext(ctx, line)
 	if err != nil || fields["RESULT"] != "OK" {
 		_ = control.Close()
 		if err != nil {

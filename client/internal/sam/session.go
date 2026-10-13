@@ -44,6 +44,7 @@ func datagramStyleProtocol(style sessionStyle) uint8 {
 type samSession struct {
 	server           *Server
 	root             *samSession
+	auth             [samAuthBytes]byte
 	id               string
 	style            sessionStyle
 	endpoint         destination.DestinationEndpoint
@@ -79,11 +80,12 @@ type samSession struct {
 	wg                  sync.WaitGroup
 }
 
-func newRootSession(server *Server, id string, style sessionStyle, endpoint destination.DestinationEndpoint, control *serverConnection, fromPort, toPort, listenPort uint16, protocol, listenProtocol uint8, rawHeader bool, udpTarget *net.UDPAddr, offline *foundation.OfflineSignature) *samSession {
+func newRootSession(server *Server, id string, style sessionStyle, endpoint destination.DestinationEndpoint, control *serverConnection, fromPort, toPort, listenPort uint16, protocol, listenProtocol uint8, rawHeader bool, udpTarget *net.UDPAddr, offline *foundation.OfflineSignature, auth [samAuthBytes]byte) *samSession {
 	ctx, cancel := context.WithCancel(server.ctx)
 	s := &samSession{server: server, id: id, style: style, endpoint: endpoint, control: control, ctx: ctx, cancel: cancel, sourceIP: connectionIP(control.Conn), fromPort: fromPort, toPort: toPort, listenPort: listenPort, protocol: protocol, listenProtocol: listenProtocol, rawHeader: rawHeader, udpTarget: udpTarget, offline: offline, now: func() int64 { return server.config.Now().Unix() }, children: make(map[string]*samSession), attachments: make(map[net.Conn]struct{}), queueBytes: newByteBudget(server.config.MaxSessionQueueBytes), acceptRequests: make(chan acceptRequest, server.config.SessionQueue)}
 	s.datagramOverhead = datagramOverhead(protocol, endpoint, offline)
 	s.root = s
+	s.auth = auth
 	return s
 }
 
@@ -115,6 +117,7 @@ func (s *samSession) close() error {
 	}
 	r.once.Do(func() {
 		r.server.removeRoot(r)
+		clear(r.auth[:])
 		r.cancel()
 		r.mu.Lock()
 		children := make([]*samSession, 0, len(r.children))

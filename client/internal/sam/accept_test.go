@@ -93,14 +93,16 @@ func TestStreamAcceptAttachmentsAreFIFO(t *testing.T) {
 	control, controlReader := samDial(t, server.Addr().String())
 	defer control.Close()
 	_, _ = io.WriteString(control, "SESSION CREATE STYLE=STREAM ID=fifo DESTINATION=TRANSIENT\n")
-	if line := readSAMLine(t, controlReader); line[:24] != "SESSION STATUS RESULT=OK" {
+	line := readSAMLine(t, controlReader)
+	if !strings.HasPrefix(line, "SESSION STATUS RESULT=OK") {
 		t.Fatal(line)
 	}
+	authToken := testSAMAuthToken(t, line)
 	endpoint := <-controller.endpoint
 
 	firstAttachment, firstReader := samDial(t, server.Addr().String())
 	defer firstAttachment.Close()
-	_, _ = io.WriteString(firstAttachment, "STREAM ACCEPT ID=fifo\n")
+	_, _ = io.WriteString(firstAttachment, "STREAM ACCEPT ID=fifo IVNP_AUTH=" + authToken + "\n")
 	waitForSAMCondition(t, time.Second, func() bool {
 		server.mu.RLock()
 		session := server.sessions["fifo"]
@@ -109,7 +111,7 @@ func TestStreamAcceptAttachmentsAreFIFO(t *testing.T) {
 	}, "first FIFO accept request admission")
 	secondAttachment, secondReader := samDial(t, server.Addr().String())
 	defer secondAttachment.Close()
-	_, _ = io.WriteString(secondAttachment, "STREAM ACCEPT ID=fifo\n")
+	_, _ = io.WriteString(secondAttachment, "STREAM ACCEPT ID=fifo IVNP_AUTH=" + authToken + "\n")
 	waitForSAMCondition(t, time.Second, func() bool {
 		server.mu.RLock()
 		session := server.sessions["fifo"]
@@ -151,13 +153,15 @@ func TestStreamAcceptDeadFirstAttachmentDoesNotConsumeInbound(t *testing.T) {
 	control, controlReader := samDial(t, server.Addr().String())
 	defer control.Close()
 	_, _ = io.WriteString(control, "SESSION CREATE STYLE=STREAM ID=dead-first DESTINATION=TRANSIENT\n")
-	if line := readSAMLine(t, controlReader); line[:24] != "SESSION STATUS RESULT=OK" {
+	line := readSAMLine(t, controlReader)
+	if !strings.HasPrefix(line, "SESSION STATUS RESULT=OK") {
 		t.Fatal(line)
 	}
+	authToken := testSAMAuthToken(t, line)
 	endpoint := <-controller.endpoint
 
 	first, _ := samDial(t, server.Addr().String())
-	_, _ = io.WriteString(first, "STREAM ACCEPT ID=dead-first\n")
+	_, _ = io.WriteString(first, "STREAM ACCEPT ID=dead-first IVNP_AUTH=" + authToken + "\n")
 	waitForSAMCondition(t, time.Second, func() bool {
 		server.mu.RLock()
 		session := server.sessions["dead-first"]
@@ -174,7 +178,7 @@ func TestStreamAcceptDeadFirstAttachmentDoesNotConsumeInbound(t *testing.T) {
 
 	second, secondReader := samDial(t, server.Addr().String())
 	defer second.Close()
-	_, _ = io.WriteString(second, "STREAM ACCEPT ID=dead-first\n")
+	_, _ = io.WriteString(second, "STREAM ACCEPT ID=dead-first IVNP_AUTH=" + authToken + "\n")
 	inbound, peer := net.Pipe()
 	defer peer.Close()
 	endpoint.listener.incoming <- &metadataConn{Conn: inbound, remote: []byte("LIVE"), from: 31, to: 41}

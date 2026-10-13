@@ -80,7 +80,7 @@ func TestDatagram2OfflineRoundtrip(t *testing.T) {
 	if !strings.Contains(line, "RESULT=OK DESTINATION=") {
 		t.Fatalf("offline create = %q", line)
 	}
-	if echoed := strings.Split(line, " DESTINATION=")[1]; echoed != private {
+	if echoed := strings.Fields(strings.Split(line, " DESTINATION=")[1])[0]; echoed != private {
 		t.Fatal("SESSION STATUS did not echo the offline private destination")
 	}
 	_, _ = io.WriteString(control, "DATAGRAM SEND ID=offline DESTINATION="+public+" SIZE=4\nDATA")

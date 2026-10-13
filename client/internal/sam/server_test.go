@@ -305,9 +305,11 @@ func TestEmbeddedServerLiveLoopbackStylesAndRecovery(t *testing.T) {
 	streamControl, streamReader := samDial(t, address)
 	defer streamControl.Close()
 	_, _ = io.WriteString(streamControl, "SESSION CREATE STYLE=STREAM ID=stream DESTINATION=TRANSIENT PORT=80\n")
-	if line := readSAMLine(t, streamReader); !strings.Contains(line, "RESULT=OK DESTINATION=") {
-		t.Fatalf("stream create = %q", line)
+	streamStatus := readSAMLine(t, streamReader)
+	if !strings.Contains(streamStatus, "RESULT=OK DESTINATION=") {
+		t.Fatalf("stream create = %q", streamStatus)
 	}
+	authToken := testSAMAuthToken(t, streamStatus)
 	_, _ = io.WriteString(streamControl, "BROKEN \"unterminated\nPING still-alive\n")
 	if line := readSAMLine(t, streamReader); !strings.Contains(line, "MALFORMED_COMMAND") {
 		t.Fatalf("malformed = %q", line)
@@ -318,7 +320,7 @@ func TestEmbeddedServerLiveLoopbackStylesAndRecovery(t *testing.T) {
 
 	attachment, attachmentReader := samDial(t, address)
 	defer attachment.Close()
-	_, _ = io.WriteString(attachment, "STREAM CONNECT ID=stream DESTINATION=peer.i2p TO_PORT=80\n")
+	_, _ = io.WriteString(attachment, "STREAM CONNECT ID=stream DESTINATION=peer.i2p TO_PORT=80 IVNP_AUTH="+authToken+"\n")
 	if line := readSAMLine(t, attachmentReader); line != "STREAM STATUS RESULT=OK" {
 		t.Fatalf("connect = %q", line)
 	}
@@ -335,7 +337,7 @@ func TestEmbeddedServerLiveLoopbackStylesAndRecovery(t *testing.T) {
 	if !strings.Contains(line, "RESULT=OK DESTINATION=") {
 		t.Fatalf("datagram create = %q", line)
 	}
-	private := strings.TrimPrefix(strings.Split(line, " DESTINATION=")[1], "")
+	private := strings.Fields(strings.Split(line, " DESTINATION=")[1])[0]
 	local, err := decodePrivateDestination(private)
 	if err != nil {
 		t.Fatal(err)
@@ -379,7 +381,7 @@ func TestEmbeddedServerLiveLoopbackStylesAndRecovery(t *testing.T) {
 	if !strings.Contains(line, "RESULT=OK DESTINATION=") {
 		t.Fatalf("raw create = %q", line)
 	}
-	private = strings.Split(line, " DESTINATION=")[1]
+	private = strings.Fields(strings.Split(line, " DESTINATION=")[1])[0]
 	local, err = decodePrivateDestination(private)
 	if err != nil {
 		t.Fatal(err)

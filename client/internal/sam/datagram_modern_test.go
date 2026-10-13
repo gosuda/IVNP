@@ -112,7 +112,7 @@ func createDatagramSession(t *testing.T, address, id, style string) (net.Conn, *
 	if !strings.Contains(line, "RESULT=OK DESTINATION=") {
 		t.Fatalf("%s create = %q", style, line)
 	}
-	local, err := decodePrivateDestination(strings.Split(line, " DESTINATION=")[1])
+	local, err := decodePrivateDestination(strings.Fields(strings.Split(line, " DESTINATION=")[1])[0])
 	if err != nil {
 		t.Fatal(err)
 	}

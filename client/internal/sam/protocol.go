@@ -3,7 +3,9 @@ package sam
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"encoding/base32"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -114,6 +116,11 @@ func (s *Server) createSession(ctx context.Context, connection *serverConnection
 	if !ok {
 		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_STYLE")
 	}
+	var auth [samAuthBytes]byte
+	if _, err := rand.Read(auth[:]); err != nil {
+		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR")
+	}
+	defer clear(auth[:])
 	target, preparationRequested := cmd.values["IVNP_PREPARE"]
 	if preparationRequested && !validPreparationTarget(target) {
 		return connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=INVALID_OPTION")
@@ -196,7 +203,7 @@ func (s *Server) createSession(ctx context.Context, connection *serverConnection
 			return errors.Join(connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=SESSION_NOT_READY"), cleanupErr)
 		}
 	}
-	root := newRootSession(s, id, style, endpoint, connection, fromPort, toPort, listenPort, protocol, listenProtocol, rawHeader, udpTarget, offline)
+	root := newRootSession(s, id, style, endpoint, connection, fromPort, toPort, listenPort, protocol, listenProtocol, rawHeader, udpTarget, offline, auth)
 	if err = s.addRoot(root); err != nil {
 		cleanupErr := s.destroyDestination(endpoint)
 		result := "I2P_ERROR"
@@ -220,7 +227,7 @@ func (s *Server) createSession(ctx context.Context, connection *serverConnection
 		cleanupErr := root.close()
 		return errors.Join(connection.writeLine("SESSION STATUS RESULT=I2P_ERROR MESSAGE=ROUTE_UNAVAILABLE"), cleanupErr)
 	}
-	return connection.writeLine("SESSION STATUS RESULT=OK DESTINATION=" + string(private))
+	return connection.writeLine("SESSION STATUS RESULT=OK DESTINATION=" + string(private) + " IVNP_AUTH=" + base64.RawURLEncoding.EncodeToString(auth[:]))
 }
 
 type sessionReadiness struct {
