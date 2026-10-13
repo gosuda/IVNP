@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/netip"
 	"slices"
-	"strconv"
 	"sync"
 	"time"
 
@@ -174,12 +173,6 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 				if ctx.Err() != nil {
 					return
 				}
-				// Rate limit: pause if token rate exceeded
-				if p.limiter != nil {
-					if err := p.limiter.Wait(ctx); err != nil {
-						return
-					}
-				}
 				success, rtt := p.probePeer(ctx, rec)
 				p.store.RecordProbeResult(rec.Hash, success, rtt)
 				if success {
@@ -199,41 +192,38 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 }
 
 func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Duration) {
-	// If the peer has TCP ports (NTCP/NTCP2), or fallback to general Ports if unclassified:
-	tcpPorts := rec.TCPPorts
-	if len(tcpPorts) == 0 && len(rec.UDPPorts) == 0 {
-		tcpPorts = rec.Ports
-	}
-
-	var targets []string
-	addEndpoints := func(ips []netip.Addr, ports []uint16) {
-		for _, ip := range ips {
-			if !ip.IsValid() || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
-				continue
-			}
-			for _, port := range ports {
-				targets = append(targets, net.JoinHostPort(ip.String(), strconv.Itoa(int(port))))
-			}
+	// Preserve IPv4 preference, falling back to IPv6 only when no usable
+	// IPv4 endpoint was advertised. Never combine unrelated IPs and ports.
+	hasIPv4 := false
+	for _, endpoint := range rec.ProbeEndpoints {
+		if validProbeEndpoint(endpoint) && endpoint.Addr().Unmap().Is4() {
+			hasIPv4 = true
+			break
 		}
 	}
 
-	if len(tcpPorts) > 0 {
-		addEndpoints(rec.IPv4, tcpPorts)
-		if len(targets) == 0 {
-			addEndpoints(rec.IPv6, tcpPorts)
+	attempts := 0
+	for _, endpoint := range rec.ProbeEndpoints {
+		if !validProbeEndpoint(endpoint) || (hasIPv4 && !endpoint.Addr().Unmap().Is4()) {
+			continue
 		}
-		for _, target := range targets {
-			if ctx.Err() != nil {
+		if attempts >= MaxProbeAttemptsPerPeer {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return false, 0
+		}
+		// Charge the shared limiter once per outbound dial, including ProbeSingle.
+		if p.limiter != nil {
+			if err := p.limiter.Wait(ctx); err != nil {
 				return false, 0
 			}
-			rtt, err := p.probeDialer(ctx, "tcp", target)
-			if err == nil {
-				// Reject localhost / host-local bridge sockets that complete in < 5ms
-				if rtt < 5*time.Millisecond {
-					continue
-				}
-				return true, rtt
-			}
+		}
+		attempts++
+		rtt, err := p.probeDialer(ctx, "tcp", endpoint.String())
+		if err == nil && rtt >= 5*time.Millisecond {
+			// Reject host-local bridge sockets that complete in under 5ms.
+			return true, rtt
 		}
 	}
 
@@ -252,6 +242,15 @@ func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Dura
 	return false, 0
 }
 
+// validProbeEndpoint enforces the same network-address restrictions for
+// parsed and cached endpoints. Unmap IPv4-in-IPv6 addresses before checking.
+func validProbeEndpoint(endpoint netip.AddrPort) bool {
+	if !endpoint.IsValid() || endpoint.Port() == 0 {
+		return false
+	}
+	ip := endpoint.Addr().Unmap()
+	return !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsLinkLocalUnicast()
+}
 func (p *Prober) ProbeSingle(ctx context.Context, hash foundation.Hash) (bool, time.Duration) {
 	peers := p.store.Snapshot()
 	for _, rec := range peers {
