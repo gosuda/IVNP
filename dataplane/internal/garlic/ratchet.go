@@ -285,6 +285,30 @@ func (m *RatchetManager) Receive(dst, replyDst, packet []byte, now uint64) (Ratc
 	return shard.Receive(dst, replyDst, packet, now)
 }
 
+// HasTag reports whether the packet names a live Existing Session or
+// New Session Reply tag. It performs no cryptographic work.
+func (m *RatchetManager) HasTag(packet []byte) bool {
+	if m == nil || len(packet) < 8 {
+		return false
+	}
+	var tag dataplanegarlicecies.SessionTag
+	copy(tag[:], packet[:8])
+	m.tagMu.RLock()
+	_, found := m.tagRoutes[tag]
+	m.tagMu.RUnlock()
+	return found
+}
+
+// ReceiveTagged refuses unknown or consumed tags without attempting New
+// Session decryption. A tag can disappear between HasTag and this call.
+func (m *RatchetManager) ReceiveTagged(dst, replyDst, packet []byte, now uint64) (RatchetResult, error) {
+	if m == nil || len(m.shards) == 0 {
+		return RatchetResult{}, ErrRatchetClosed
+	}
+	_, shard := m.packetShard(packet)
+	return shard.ReceiveTagged(dst, replyDst, packet, now)
+}
+
 func (m *RatchetManager) ReleaseSensitive() {
 	if m == nil {
 		return
