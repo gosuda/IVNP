@@ -64,7 +64,7 @@ func TestGarlicPreauthDuplicateAndReservationLifetime(t *testing.T) {
 		t.Fatal("in-flight duplicate was admitted")
 	}
 	limiter.forget(first)
-	second, fresh := limiter.begin(packet, now)
+	_, fresh = limiter.begin(packet, now)
 	if !fresh {
 		t.Fatal("released reservation was not retryable")
 	}
@@ -78,7 +78,6 @@ func TestGarlicPreauthDuplicateAndReservationLifetime(t *testing.T) {
 	if _, fresh := limiter.begin(packet, now+garlicInvalidCiphertextLifetime); !fresh {
 		t.Fatal("invalid ciphertext did not expire")
 	}
-	_ = second
 }
 
 func TestGarlicPreauthCacheCapacity(t *testing.T) {
