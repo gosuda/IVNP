@@ -179,7 +179,7 @@ func (s *WebUIServer) Start(parent context.Context) error {
 		s.cancel()
 		return fmt.Errorf("webui: listen %s: %w", s.config.ListenAddress, err)
 	}
-	s.listener = listener
+	s.listener = newWebUILimitedListener(listener, maxWebUIConnections)
 
 	staticFS, err := fs.Sub(webUIStaticFS, "webui/build")
 	if err != nil {
@@ -229,7 +229,7 @@ func (s *WebUIServer) Start(parent context.Context) error {
 	s.wg.Add(2)
 	go func() {
 		defer s.wg.Done()
-		if serveErr := s.server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		if serveErr := s.server.Serve(s.listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			s.logger.Error("webui server stopped", "error", serveErr)
 		}
 	}()
@@ -503,14 +503,20 @@ func (s *WebUIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unavailable", http.StatusInternalServerError)
 		return
 	}
+	s.subscribersMu.Lock()
+	if len(s.subscribers) >= maxWebUISubscribers {
+		s.subscribersMu.Unlock()
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "too many event subscribers", http.StatusServiceUnavailable)
+		return
+	}
+	messages := make(chan []byte, 4)
+	s.subscribers[messages] = struct{}{}
+	s.subscribersMu.Unlock()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("Connection", "keep-alive")
-
-	messages := make(chan []byte, 4)
-	s.subscribersMu.Lock()
-	s.subscribers[messages] = struct{}{}
-	s.subscribersMu.Unlock()
 	defer func() {
 		s.subscribersMu.Lock()
 		delete(s.subscribers, messages)
