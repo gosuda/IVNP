@@ -79,6 +79,7 @@ func (f *fakeNATPMPClient) Unmap(context.Context, natpmp.Mapping) error {
 type fakeUPnPClient struct {
 	events            *[]string
 	discoverErr       error
+	publicErr         error
 	responses         []upnp.DiscoveryResponse
 	gateway           upnp.Gateway
 	public            netip.Addr
@@ -101,7 +102,7 @@ func (f *fakeUPnPClient) Describe(_ context.Context, location *url.URL) (upnp.Ga
 	return f.gateway, nil
 }
 func (f *fakeUPnPClient) ExternalAddress(context.Context, upnp.Gateway) (netip.Addr, error) {
-	return f.public, nil
+	return f.public, f.publicErr
 }
 func (f *fakeUPnPClient) AddPortMapping(_ context.Context, _ upnp.Gateway, mapping upnp.PortMapping) error {
 	f.mapping = mapping
@@ -466,7 +467,7 @@ func TestUPnPPublicAddressRequiresExplicitCorroboration(t *testing.T) {
 	}
 	client := &fakeUPnPClient{
 		gateway: upnp.Gateway{ControlURL: control, ServiceType: "urn:schemas-upnp-org:service:WANIPConnection:1"},
-		public: netip.MustParseAddr("198.51.100.30"),
+		public:  netip.MustParseAddr("198.51.100.30"),
 	}
 	publisher.upnp = client
 	publisher.route = func(context.Context, string, uint16) (netip.Addr, error) {
@@ -490,6 +491,14 @@ func TestUPnPPublicAddressRequiresExplicitCorroboration(t *testing.T) {
 		t.Fatal("mapping created with mismatched public IPv4")
 	}
 	spec.publicHint = client.public
+	client.publicErr = errors.New("unavailable")
+	if _, err := publisher.attemptUPnP(context.Background(), spec, 0); !errors.Is(err, client.publicErr) {
+		t.Fatalf("missing gateway corroboration error = %v", err)
+	}
+	if client.addCalls != 0 {
+		t.Fatal("mapping created without gateway corroboration")
+	}
+	client.publicErr = nil
 	mapped, err := publisher.attemptUPnP(context.Background(), spec, 0)
 	if err != nil || mapped == nil || mapped.public != spec.publicHint || client.addCalls != 1 {
 		t.Fatalf("corroborated UPnP mapping = %#v, error %v, calls %d", mapped, err, client.addCalls)
