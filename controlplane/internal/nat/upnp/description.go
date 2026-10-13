@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -32,11 +33,14 @@ func (c *Client) Describe(ctx context.Context, location *url.URL) (Gateway, erro
 	if _, err := parseHTTPURL(location.String()); err != nil {
 		return Gateway{}, fmt.Errorf("upnp: invalid description location: %w", err)
 	}
+	if !sameGatewayHost(location, location) {
+		return Gateway{}, fmt.Errorf("upnp: description host must be an IPv4 literal")
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, location.String(), nil)
 	if err != nil {
 		return Gateway{}, fmt.Errorf("upnp: create description request: %w", err)
 	}
-	response, err := c.httpClient().Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return Gateway{}, fmt.Errorf("upnp: fetch device description: %w", err)
 	}
@@ -58,6 +62,9 @@ func (c *Client) Describe(ctx context.Context, location *url.URL) (Gateway, erro
 		if err != nil {
 			return Gateway{}, fmt.Errorf("upnp: invalid URLBase: %w", err)
 		}
+		if !sameGatewayHost(location, baseURL) {
+			return Gateway{}, fmt.Errorf("upnp: URLBase changes gateway host")
+		}
 		base = baseURL
 	}
 	service, ok := description.bestMappingService()
@@ -67,6 +74,9 @@ func (c *Client) Describe(ctx context.Context, location *url.URL) (Gateway, erro
 	control, err := resolveControlURL(base, service.ControlURL)
 	if err != nil {
 		return Gateway{}, err
+	}
+	if !sameGatewayHost(location, control) {
+		return Gateway{}, fmt.Errorf("upnp: control URL changes gateway host")
 	}
 	return Gateway{Location: cloneURL(location), ControlURL: control, ServiceType: service.ServiceType}, nil
 }
@@ -160,6 +170,16 @@ func resolveControlURL(base *url.URL, raw string) (*url.URL, error) {
 	return resolved, nil
 }
 
+// sameGatewayHost binds device-provided URLs to one literal IPv4 endpoint.
+func sameGatewayHost(first, second *url.URL) bool {
+	if first == nil || second == nil {
+		return false
+	}
+	firstIP, firstErr := netip.ParseAddr(first.Hostname())
+	secondIP, secondErr := netip.ParseAddr(second.Hostname())
+	return firstErr == nil && secondErr == nil && firstIP.Unmap().Is4() && firstIP.Unmap() == secondIP.Unmap()
+}
+
 func cloneURL(value *url.URL) *url.URL {
 	copy := *value
 	return &copy
@@ -178,6 +198,15 @@ func requireEOF(decoder *xml.Decoder) error {
 			return fmt.Errorf("unexpected trailing XML")
 		}
 	}
+}
+
+// do never follows a redirect supplied by an untrusted gateway.
+func (c *Client) do(request *http.Request) (*http.Response, error) {
+	client := *c.httpClient()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return client.Do(request)
 }
 
 func (c *Client) httpClient() *http.Client {
