@@ -80,20 +80,20 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 	if !found {
 		contact := extractRouterAddresses(info)
 		rec := &PeerRecord{
-			Hash:        hash,
-			Raw:         bytes.Clone(raw),
-			PublishedAt: time.UnixMilli(int64(info.Published)),
-			Family:      contact.family,
-			IsFloodfill: foundation.NetworkDatabaseIsFloodfill(info),
-			IPv4:        contact.ipv4,
-			IPv6:        contact.ipv6,
-			Ports:       contact.ports,
-			TCPPorts:    contact.tcpPorts,
-			UDPPorts:    contact.udpPorts,
+			Hash:           hash,
+			Raw:            bytes.Clone(raw),
+			PublishedAt:    time.UnixMilli(int64(info.Published)),
+			Family:         contact.family,
+			IsFloodfill:    foundation.NetworkDatabaseIsFloodfill(info),
+			IPv4:           contact.ipv4,
+			IPv6:           contact.ipv6,
+			Ports:          contact.ports,
+			TCPPorts:       contact.tcpPorts,
+			UDPPorts:       contact.udpPorts,
 			ProbeEndpoints: contact.probeEndpoints,
-			HasNTCP2:    contact.ntcp2,
-			HasSSU2:     contact.ssu2,
-			Stats: PeerStats{
+			HasNTCP2:       contact.ntcp2,
+			HasSSU2:        contact.ssu2,
+			Stats:          PeerStats{
 				FirstSeen: lastSeen,
 				LastSeen:  lastSeen,
 			},
@@ -693,15 +693,15 @@ func calculateScore(rec *PeerRecord) float64 {
 }
 
 type routerContactInfo struct {
-	family   string
-	ipv4     []netip.Addr
-	ipv6     []netip.Addr
-	ports    []uint16
-	tcpPorts []uint16
-	udpPorts []uint16
+	family         string
+	ipv4           []netip.Addr
+	ipv6           []netip.Addr
+	ports          []uint16
+	tcpPorts       []uint16
+	udpPorts       []uint16
 	probeEndpoints []netip.AddrPort
-	ntcp2    bool
-	ssu2     bool
+	ntcp2          bool
+	ssu2           bool
 }
 
 func extractRouterAddresses(info foundation.NetworkDatabaseRouterInfo) routerContactInfo {
