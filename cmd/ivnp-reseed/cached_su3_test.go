@@ -187,7 +187,7 @@ func TestInspectSU3ArchiveExpansionLimits(t *testing.T) {
 			} else {
 				// The dummy RouterInfo is invalid, but the resource boundary
 				// itself must permit an archive exactly at the limit.
-				if err == nil || errors.Is(err, errSU3TooManyEntries) ||
+				if errors.Is(err, errSU3TooManyEntries) ||
 					errors.Is(err, errSU3EntryTooLarge) || errors.Is(err, errSU3TotalTooLarge) {
 					t.Fatalf("boundary archive got unexpected error: %v", err)
 				}
