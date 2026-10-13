@@ -294,7 +294,7 @@ func TestAutomaticMappingFallsBackToUPnP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) < 2 || events[0] != "natpmp-public" || events[1] != "upnp-discover" {
+	if len(events) < 2 || events[0] != "natpmp-public" || events[len(events)-1] != "upnp-discover" {
 		t.Fatalf("mapping attempt order = %#v", events)
 	}
 	options := addressOptions(addresses[0])
