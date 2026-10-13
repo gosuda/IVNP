@@ -37,6 +37,7 @@ type ControlDispatcher struct {
 	database       *controlplanenetdb.Database
 	sinks          ControlSinks
 	queue          *dataplane.RouterControlQueue
+	ackSender      *databaseStoreAckSender
 	handlerTimeout time.Duration
 }
 
@@ -53,6 +54,10 @@ func NewControlDispatcher(database *controlplanenetdb.Database, sinks ControlSin
 		return nil, err
 	}
 	dispatcher.queue = queue
+	if sinks.DatabaseStoreReply != nil {
+		// A slow peer-selected reply route must never occupy the control worker.
+		dispatcher.ackSender = newDatabaseStoreAckSender(sinks.DatabaseStoreReply, min(config.HandlerTimeout, maxDatabaseStoreAckTimeout))
+	}
 	return dispatcher, nil
 }
 
@@ -68,10 +73,40 @@ func (d *ControlDispatcher) Enqueue(incoming dataplane.RouterControlMessage) err
 	return d.queue.Enqueue(incoming)
 }
 
-func (d *ControlDispatcher) Start(ctx context.Context) error    { return d.queue.Start(ctx) }
-func (d *ControlDispatcher) Close() error                       { return d.queue.Close() }
-func (d *ControlDispatcher) WaitIdle(ctx context.Context) error { return d.queue.WaitIdle(ctx) }
-func (d *ControlDispatcher) Barrier(ctx context.Context) error  { return d.queue.Barrier(ctx) }
+func (d *ControlDispatcher) Start(ctx context.Context) error {
+	if d.ackSender != nil {
+		if err := d.ackSender.Start(ctx); err != nil {
+			return err
+		}
+	}
+	if err := d.queue.Start(ctx); err != nil {
+		if d.ackSender != nil {
+			d.ackSender.Close()
+		}
+		return err
+	}
+	return nil
+}
+
+func (d *ControlDispatcher) Close() error {
+	err := d.queue.Close()
+	if d.ackSender != nil {
+		d.ackSender.Close()
+	}
+	return err
+}
+
+// WaitIdle includes acknowledgement work admitted by completed control handlers.
+func (d *ControlDispatcher) WaitIdle(ctx context.Context) error {
+	err := d.queue.WaitIdle(ctx)
+	if d.ackSender != nil {
+		err = errors.Join(err, d.ackSender.WaitIdle(ctx))
+	}
+	return err
+}
+
+// Barrier only waits for control processing, not peer-selected outbound I/O.
+func (d *ControlDispatcher) Barrier(ctx context.Context) error { return d.queue.Barrier(ctx) }
 
 func (d *ControlDispatcher) Accepts(message foundation.I2NPMessage) bool {
 	switch message.Header.Type {
@@ -130,7 +165,13 @@ func (d *ControlDispatcher) HandleControl(ctx context.Context, incoming dataplan
 		if d.sinks.DatabaseStoreFlood != nil {
 			floodErr = d.sinks.DatabaseStoreFlood(incoming.Source, store)
 		}
-		replyErr := d.sinks.DatabaseStoreReply(ctx, store.ReplyGateway, store.ReplyTunnelID, foundation.I2NPDeliveryStatusMessage{MessageID: store.ReplyToken, Timestamp: incoming.NowMillis})
+		// The bounded sender owns the outbound reply and its timeout. Control
+		// ingress never waits for network I/O or sender queue capacity.
+		replyErr := d.ackSender.Enqueue(databaseStoreAck{
+			source: incoming.Source, gateway: store.ReplyGateway,
+			tunnelID: store.ReplyTunnelID,
+			status:   foundation.I2NPDeliveryStatusMessage{MessageID: store.ReplyToken, Timestamp: incoming.NowMillis},
+		})
 		return errors.Join(floodErr, replyErr)
 	case foundation.I2NPDatabaseLookup:
 		lookup, err := foundation.I2NPParseDatabaseLookup(message.Payload)
