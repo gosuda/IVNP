@@ -15,11 +15,11 @@ import (
 )
 
 func (s *Server) handleSend(connection *serverConnection, cmd command) error {
-	if !onlyOptions(cmd.values, "ID", "DESTINATION", "SIZE", "FROM_PORT", "TO_PORT", "PROTOCOL") {
+	if !onlyOptions(cmd.values, "ID", "DESTINATION", "SIZE", "FROM_PORT", "TO_PORT", "PROTOCOL", "IVNP_AUTH") {
 		return connection.writeLine(cmd.verb + " STATUS RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_OPTIONS")
 	}
 	id := cmd.values["ID"]
-	session := s.session(id)
+	session := s.authorizedSession(connection, id, cmd.values["IVNP_AUTH"])
 	if session == nil {
 		return connection.writeLine(cmd.verb + " STATUS RESULT=INVALID_ID")
 	}

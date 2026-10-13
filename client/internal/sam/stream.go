@@ -26,20 +26,20 @@ type destinationConnection interface {
 func (s *Server) handleStream(connection *serverConnection, cmd command) (bool, error) {
 	switch cmd.subverb {
 	case "CONNECT":
-		if !onlyOptions(cmd.values, "ID", "DESTINATION", "SILENT", "FROM_PORT", "TO_PORT") {
+		if !onlyOptions(cmd.values, "ID", "DESTINATION", "SILENT", "FROM_PORT", "TO_PORT", "IVNP_AUTH") {
 			return true, connection.writeLine("STREAM STATUS RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_OPTIONS")
 		}
 	case "ACCEPT":
-		if !onlyOptions(cmd.values, "ID", "SILENT") {
+		if !onlyOptions(cmd.values, "ID", "SILENT", "IVNP_AUTH") {
 			return true, connection.writeLine("STREAM STATUS RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_OPTIONS")
 		}
 	case "FORWARD":
-		if !onlyOptions(cmd.values, "ID", "HOST", "PORT", "SSL") {
+		if !onlyOptions(cmd.values, "ID", "HOST", "PORT", "SSL", "IVNP_AUTH") {
 			return true, connection.writeLine("STREAM STATUS RESULT=I2P_ERROR MESSAGE=UNSUPPORTED_OPTIONS")
 		}
 	}
 	id := cmd.values["ID"]
-	session := s.session(id)
+	session := s.authorizedSession(connection, id, cmd.values["IVNP_AUTH"])
 	if session == nil || session.style != styleStream {
 		return true, connection.writeLine("STREAM STATUS RESULT=INVALID_ID")
 	}

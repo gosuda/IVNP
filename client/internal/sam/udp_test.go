@@ -52,12 +52,13 @@ func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {
 	destination := string(local.Destination())
 	local.ReleaseSensitive()
 
+	auth := samSessionAuth(t, control, reader)
 	sender, err := net.DialUDP("udp", nil, server.UDPAddr().(*net.UDPAddr))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sender.Close()
-	wire := []byte("3.3 udp " + destination + " FROM_PORT=4 TO_PORT=0\nhello")
+	wire := []byte("3.3 udp " + destination + " IVNP_AUTH=" + auth + " FROM_PORT=4 TO_PORT=0\nhello")
 	if _, err = sender.Write(wire); err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +77,8 @@ func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {
 	// control socket are rejected without reaching the destination route.
 	for _, malformed := range [][]byte{
 		[]byte("3.3 ID=udp " + destination + "\nbad"),
+		[]byte("3.3 udp " + destination + "\nbad"),
+		[]byte("3.3 udp " + destination + " IVNP_AUTH=" + strings.Repeat("0", 2*sessionAuthSize) + "\nbad"),
 		[]byte("3.3  udp " + destination + "\nbad"),
 		[]byte("3.3 udp " + destination + "\r\nbad"),
 	} {
@@ -83,7 +86,7 @@ func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {
 	}
 	wrongSource, bindErr := net.DialUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.2")}, server.UDPAddr().(*net.UDPAddr))
 	if bindErr == nil {
-		_, _ = wrongSource.Write([]byte("3.3 udp " + destination + "\nbad"))
+		_, _ = wrongSource.Write([]byte("3.3 udp " + destination + " IVNP_AUTH=" + auth + "\nbad"))
 		_ = wrongSource.Close()
 	}
 	_ = receiver.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
@@ -127,12 +130,13 @@ func TestEmbeddedServerPrimaryRawChildUDPHeader(t *testing.T) {
 	if line = readSAMLine(t, reader); line != "SESSION STATUS RESULT=OK" {
 		t.Fatal(line)
 	}
+	auth := samSessionAuth(t, control, reader)
 	sender, err := net.DialUDP("udp", nil, server.UDPAddr().(*net.UDPAddr))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sender.Close()
-	_, _ = sender.Write([]byte("3.3 child " + destination + " FROM_PORT=8 TO_PORT=7 PROTOCOL=18\nraw"))
+	_, _ = sender.Write([]byte("3.3 child " + destination + " IVNP_AUTH=" + auth + " FROM_PORT=8 TO_PORT=7 PROTOCOL=18\nraw"))
 	buffer := make([]byte, 256)
 	_ = receiver.SetReadDeadline(time.Now().Add(time.Second))
 	n, _, err := receiver.ReadFromUDP(buffer)
@@ -176,12 +180,13 @@ func TestEmbeddedServerUDPQueuedByteBudgetBackpressure(t *testing.T) {
 	}
 	destination := string(local.Destination())
 	local.ReleaseSensitive()
+	auth := samSessionAuth(t, control, reader)
 	sender, err := net.DialUDP("udp", nil, server.UDPAddr().(*net.UDPAddr))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sender.Close()
-	_, _ = sender.Write([]byte("3.3 budget " + destination + "\nx"))
+	_, _ = sender.Write([]byte("3.3 budget " + destination + " IVNP_AUTH=" + auth + "\nx"))
 	_ = control.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 	if line, err = reader.ReadString('\n'); err == nil {
 		t.Fatalf("over-budget UDP ingress reached route: %q", line)
@@ -286,11 +291,12 @@ func TestUDPBlockingDestinationSendCancelsAndWaitIsBounded(t *testing.T) {
 	}
 	destination := string(local.Destination())
 	local.ReleaseSensitive()
+	auth := samSessionAuth(t, control, reader)
 	sender, err := net.DialUDP("udp", nil, server.UDPAddr().(*net.UDPAddr))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = sender.Write([]byte("3.3 blocking " + destination + "\nblocked"))
+	_, _ = sender.Write([]byte("3.3 blocking " + destination + " IVNP_AUTH=" + auth + "\nblocked"))
 	select {
 	case <-controller.entered:
 	case <-time.After(time.Second):

@@ -47,6 +47,8 @@ func newConnectTestServer(t *testing.T, endpoint destination.DestinationEndpoint
 		ctx: server.ctx, attachments: make(map[net.Conn]struct{}),
 		queueBytes: newByteBudget(server.config.MaxSessionQueueBytes),
 	}
+	session.root = session
+	session.auth[0] = 1
 	server.sessions[session.id] = session
 	return server, session
 }
@@ -77,7 +79,7 @@ func startConnectAttachment(t *testing.T, server *Server) (net.Conn, *bufio.Read
 func assertConnectEcho(t *testing.T, server *Server) {
 	t.Helper()
 	client, reader, result := startConnectAttachment(t, server)
-	if _, err := io.WriteString(client, "STREAM CONNECT ID=root DESTINATION="+foundation.B32(foundation.Hash{1})+"\n"); err != nil {
+	if _, err := io.WriteString(client, "STREAM CONNECT ID=root IVNP_AUTH="+server.session("root").authString()+" DESTINATION="+foundation.B32(foundation.Hash{1})+"\n"); err != nil {
 		t.Fatal(err)
 	}
 	if line := readSAMLine(t, reader); line != "STREAM STATUS RESULT=OK" {
@@ -121,7 +123,7 @@ func TestConnectDisconnectCancelsBackendWithoutClosingSession(t *testing.T) {
 				if phase == "resolve" {
 					target = "slow.i2p"
 				}
-				command := "STREAM CONNECT ID=root DESTINATION=" + target
+				command := "STREAM CONNECT ID=root IVNP_AUTH="+server.session("root").authString()+" DESTINATION=" + target
 				if phase == "source port dial" {
 					command += " FROM_PORT=1234"
 				}
@@ -181,7 +183,7 @@ func TestConnectPreservesPipelinedPayload(t *testing.T) {
 				}}
 				server, _ := newConnectTestServer(t, endpoint)
 				client, reader, result := startConnectAttachment(t, server)
-				command := "STREAM CONNECT ID=root DESTINATION=" + foundation.B32(foundation.Hash{1})
+				command := "STREAM CONNECT ID=root IVNP_AUTH="+server.session("root").authString()+" DESTINATION=" + foundation.B32(foundation.Hash{1})
 				if test.silent {
 					command += " SILENT=true"
 				}
@@ -231,7 +233,7 @@ func TestConnectUsesRemainingCommandBudget(t *testing.T) {
 		client, _, result := startConnectAttachment(t, server)
 		synctest.Wait()
 		<-time.After(40 * time.Second)
-		if _, err := io.WriteString(client, "STREAM CONNECT ID=root DESTINATION="+foundation.B32(foundation.Hash{1})+"\n"); err != nil {
+		if _, err := io.WriteString(client, "STREAM CONNECT ID=root IVNP_AUTH="+server.session("root").authString()+" DESTINATION="+foundation.B32(foundation.Hash{1})+"\n"); err != nil {
 			t.Fatal(err)
 		}
 		<-entered
@@ -261,7 +263,7 @@ func TestConnectSessionCancellationJoinsMonitor(t *testing.T) {
 		}}
 		server, _ := newConnectTestServer(t, endpoint)
 		client, _, result := startConnectAttachment(t, server)
-		if _, err := io.WriteString(client, "STREAM CONNECT ID=root DESTINATION="+foundation.B32(foundation.Hash{1})+"\n"); err != nil {
+		if _, err := io.WriteString(client, "STREAM CONNECT ID=root IVNP_AUTH="+server.session("root").authString()+" DESTINATION="+foundation.B32(foundation.Hash{1})+"\n"); err != nil {
 			t.Fatal(err)
 		}
 		<-entered

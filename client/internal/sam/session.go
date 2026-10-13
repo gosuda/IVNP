@@ -2,6 +2,8 @@ package sam
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"net"
 	"net/netip"
@@ -41,9 +43,12 @@ func datagramStyleProtocol(style sessionStyle) uint8 {
 	}
 }
 
+const sessionAuthSize = 32
+
 type samSession struct {
 	server           *Server
 	root             *samSession
+	auth             [sessionAuthSize]byte
 	id               string
 	style            sessionStyle
 	endpoint         destination.DestinationEndpoint
@@ -85,6 +90,29 @@ func newRootSession(server *Server, id string, style sessionStyle, endpoint dest
 	s.datagramOverhead = datagramOverhead(protocol, endpoint, offline)
 	s.root = s
 	return s
+}
+
+// authorized permits the owning control socket or a bearer of this root's
+// capability. A session ID alone does not authorize a command.
+func (s *samSession) authorized(connection *serverConnection, token string) bool {
+	if s == nil || s.root == nil {
+		return false
+	}
+	if connection != nil && connection.root == s.root {
+		return true
+	}
+	if len(token) != 2*sessionAuthSize {
+		return false
+	}
+	var supplied [sessionAuthSize]byte
+	if _, err := hex.Decode(supplied[:], []byte(token)); err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(supplied[:], s.root.auth[:]) == 1
+}
+
+func (s *samSession) authString() string {
+	return hex.EncodeToString(s.root.auth[:])
 }
 
 func (s *samSession) attach(connection net.Conn) error {
