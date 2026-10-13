@@ -7,11 +7,20 @@ import (
 	"testing"
 )
 
+func privateCopyTestDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "private")
+	if err := EnsurePrivateDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestCopyPrivateBoundedIfExistsBoundsAndMissing(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateCopyTestDir(t)
 	src := filepath.Join(dir, "source")
 	dst := filepath.Join(dir, "target")
-	if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
+	if err := WriteAtomic(dst, []byte("old"), 0o600, 64); err != nil {
 		t.Fatal(err)
 	}
 	if err := CopyPrivateBoundedIfExists(src, dst, 4); err != nil {
@@ -20,7 +29,7 @@ func TestCopyPrivateBoundedIfExistsBoundsAndMissing(t *testing.T) {
 	if content, err := os.ReadFile(dst); err != nil || string(content) != "old" {
 		t.Fatalf("missing source changed destination: %q, %v", content, err)
 	}
-	if err := os.WriteFile(src, []byte("12345"), 0o600); err != nil {
+	if err := WriteAtomic(src, []byte("12345"), 0o600, 64); err != nil {
 		t.Fatal(err)
 	}
 	if err := CopyPrivateBoundedIfExists(src, dst, 4); !errors.Is(err, ErrTooLarge) {
@@ -64,11 +73,11 @@ func TestCopyPrivateBoundedIfExistsBoundsAndMissing(t *testing.T) {
 }
 
 func TestCopyPrivateBoundedIfExistsRejectsSymlinkAndDirectory(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateCopyTestDir(t)
 	src := filepath.Join(dir, "source")
 	link := filepath.Join(dir, "link")
 	dst := filepath.Join(dir, "destination")
-	if err := os.WriteFile(src, []byte("safe"), 0o600); err != nil {
+	if err := WriteAtomic(src, []byte("safe"), 0o600, 64); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
@@ -80,7 +89,11 @@ func TestCopyPrivateBoundedIfExistsRejectsSymlinkAndDirectory(t *testing.T) {
 	if err := CopyPrivateBoundedIfExists(link, dst, 10); err == nil {
 		t.Fatal("symlink source was accepted")
 	}
-	if err := CopyPrivateBoundedIfExists(dir, dst, 10); !errors.Is(err, ErrInvalidFile) {
+	directory := filepath.Join(dir, "directory")
+	if err := EnsurePrivateDir(directory); err != nil {
+		t.Fatal(err)
+	}
+	if err := CopyPrivateBoundedIfExists(directory, dst, 10); !errors.Is(err, ErrInvalidFile) {
 		t.Fatalf("directory source = %v, want ErrInvalidFile", err)
 	}
 	if content, err := os.ReadFile(dst); err != nil || string(content) != "old" {
@@ -89,14 +102,14 @@ func TestCopyPrivateBoundedIfExistsRejectsSymlinkAndDirectory(t *testing.T) {
 }
 
 func TestCopyPrivateBoundedIfExistsDoesNotFollowDestinationSymlink(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateCopyTestDir(t)
 	src := filepath.Join(dir, "source")
 	victim := filepath.Join(dir, "victim")
 	dst := filepath.Join(dir, "destination")
-	if err := os.WriteFile(src, []byte("copy"), 0o600); err != nil {
+	if err := WriteAtomic(src, []byte("copy"), 0o600, 64); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(victim, []byte("untouched"), 0o600); err != nil {
+	if err := WriteAtomic(victim, []byte("untouched"), 0o600, 64); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(victim, dst); err != nil {

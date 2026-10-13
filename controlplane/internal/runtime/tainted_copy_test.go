@@ -60,7 +60,7 @@ func TestTaintedCopyRejectsSymlinkedStateKeyAndParent(t *testing.T) {
 func TestTaintedCopyRejectsOversizedStateBeforeInitialization(t *testing.T) {
 	cfg := daemonTestConfig(t)
 	cfg.State.MaxBytes = 4096
-	if err := os.WriteFile(cfg.StatePath, make([]byte, cfg.State.MaxBytes+1), 0o600); err != nil {
+	if err := state.FilesystemStoreWriteAtomic(cfg.StatePath, make([]byte, cfg.State.MaxBytes+1), 0o600, int(cfg.State.MaxBytes+1)); err != nil {
 		t.Fatal(err)
 	}
 	controller, err := NewController(cfg, ControllerOptions{TaintedCopy: true, SocketRuntime: new(recordingSockets)})
