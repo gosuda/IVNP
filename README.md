@@ -111,10 +111,6 @@ IVNP_EEPSITE_PROXY=http://127.0.0.1:4444 IVNP_SAM_ADDRESS=127.0.0.1:7656 \
   -count=1 -timeout=12m .
 ```
 
-## License
-
-[MIT](LICENSE)
-
 ### Embedded SAM session authorization
 
 The embedded SAM server requires a per-session capability for commands sent over
@@ -134,3 +130,8 @@ clients connecting to the embedded server must handle the token. IVNP's SAM
 client adds it automatically when the bridge supplies one, and remains
 compatible with external bridges that do not advertise the extension. Treat
 the token as a secret; possession authorizes access to the associated session.
+
+## License
+
+[MIT](LICENSE)
+

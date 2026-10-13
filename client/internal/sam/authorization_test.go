@@ -3,7 +3,6 @@ package sam
 import (
 	"encoding/base64"
 	"io"
-	"net"
 	"strings"
 	"testing"
 
