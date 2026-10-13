@@ -37,6 +37,7 @@ type ControlDispatcher struct {
 	database       *controlplanenetdb.Database
 	sinks          ControlSinks
 	queue          *dataplane.RouterControlQueue
+	acks           *storeAckSender
 	handlerTimeout time.Duration
 }
 
@@ -53,6 +54,9 @@ func NewControlDispatcher(database *controlplanenetdb.Database, sinks ControlSin
 		return nil, err
 	}
 	dispatcher.queue = queue
+	if sinks.DatabaseStoreReply != nil {
+		dispatcher.acks = newStoreAckSender(sinks.DatabaseStoreReply, config.HandlerTimeout, config.QueueLimits)
+	}
 	return dispatcher, nil
 }
 
@@ -68,10 +72,38 @@ func (d *ControlDispatcher) Enqueue(incoming dataplane.RouterControlMessage) err
 	return d.queue.Enqueue(incoming)
 }
 
-func (d *ControlDispatcher) Start(ctx context.Context) error    { return d.queue.Start(ctx) }
-func (d *ControlDispatcher) Close() error                       { return d.queue.Close() }
-func (d *ControlDispatcher) WaitIdle(ctx context.Context) error { return d.queue.WaitIdle(ctx) }
-func (d *ControlDispatcher) Barrier(ctx context.Context) error  { return d.queue.Barrier(ctx) }
+func (d *ControlDispatcher) Start(ctx context.Context) error {
+	if err := d.queue.Start(ctx); err != nil {
+		return err
+	}
+	if d.acks != nil {
+		if err := d.acks.Start(ctx); err != nil {
+			_ = d.queue.Close()
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *ControlDispatcher) Close() error {
+	err := d.queue.Close()
+	if d.acks != nil {
+		err = errors.Join(err, d.acks.Close())
+	}
+	return err
+}
+
+// WaitIdle includes asynchronous acknowledgements. Barrier only waits for
+// control handling, so slow reply routes cannot delay subsequent ingress.
+func (d *ControlDispatcher) WaitIdle(ctx context.Context) error {
+	err := d.queue.WaitIdle(ctx)
+	if ctx.Err() != nil || d.acks == nil {
+		return err
+	}
+	return errors.Join(err, d.acks.WaitIdle(ctx))
+}
+
+func (d *ControlDispatcher) Barrier(ctx context.Context) error { return d.queue.Barrier(ctx) }
 
 func (d *ControlDispatcher) Accepts(message foundation.I2NPMessage) bool {
 	switch message.Header.Type {
@@ -130,7 +162,12 @@ func (d *ControlDispatcher) HandleControl(ctx context.Context, incoming dataplan
 		if d.sinks.DatabaseStoreFlood != nil {
 			floodErr = d.sinks.DatabaseStoreFlood(incoming.Source, store)
 		}
-		replyErr := d.sinks.DatabaseStoreReply(ctx, store.ReplyGateway, store.ReplyTunnelID, foundation.I2NPDeliveryStatusMessage{MessageID: store.ReplyToken, Timestamp: incoming.NowMillis})
+		replyErr := d.acks.Enqueue(storeAckJob{
+			source:   incoming.Source,
+			gateway:  store.ReplyGateway,
+			tunnelID: store.ReplyTunnelID,
+			status:   foundation.I2NPDeliveryStatusMessage{MessageID: store.ReplyToken, Timestamp: incoming.NowMillis},
+		})
 		return errors.Join(floodErr, replyErr)
 	case foundation.I2NPDatabaseLookup:
 		lookup, err := foundation.I2NPParseDatabaseLookup(message.Payload)

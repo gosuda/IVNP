@@ -542,3 +542,61 @@ func TestControlDispatcherRejectsNegativeHandlerTimeout(t *testing.T) {
 		t.Fatal("negative control handler timeout was accepted")
 	}
 }
+
+
+func TestStoreAcknowledgementCannotBlockControlIngress(t *testing.T) {
+	const now = uint64(2_000)
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	sending := make(chan struct{})
+	release := make(chan struct{})
+	delivered := make(chan struct{}, 1)
+	service, control := newControlServiceForTest(t, database, ControlSinks{
+		DatabaseStoreReply: func(ctx context.Context, _ foundation.Hash, _ uint32, _ foundation.I2NPDeliveryStatusMessage) error {
+			close(sending)
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+		DeliveryStatus: func(foundation.I2NPDeliveryStatusMessage) error {
+			delivered <- struct{}{}
+			return nil
+		},
+	})
+	payload, _ := testEncryptedDatabaseStore(t, 91, 0)
+	store := foundation.I2NPMessage{
+		Header:  foundation.I2NPHeader{Type: foundation.I2NPDatabaseStore, ID: 1, Expiration: now},
+		Payload: payload,
+	}
+	if err := service.HandleI2NPFrom(foundation.Hash{1}, store, now, false); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-sending:
+	case <-time.After(5 * time.Second):
+		t.Fatal("store acknowledgement did not begin")
+	}
+	status := foundation.I2NPMessage{
+		Header:  foundation.I2NPHeader{Type: foundation.I2NPDeliveryStatus, ID: 2, Expiration: now},
+		Payload: make([]byte, 12),
+	}
+	if err := service.HandleI2NPFrom(foundation.Hash{2}, status, now, false); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := control.Barrier(ctx); err != nil {
+		t.Fatalf("blocked acknowledgement delayed control ingress: %v", err)
+	}
+	select {
+	case <-delivered:
+	default:
+		t.Fatal("following control message was not delivered")
+	}
+	close(release)
+	if err := control.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
