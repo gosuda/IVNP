@@ -750,6 +750,7 @@ func extractRouterAddresses(info foundation.NetworkDatabaseRouterInfo) routerCon
 	}
 	return contact
 }
+
 func extractFamily(info foundation.NetworkDatabaseRouterInfo) string {
 	options := info.Options.Iterator()
 	for {
