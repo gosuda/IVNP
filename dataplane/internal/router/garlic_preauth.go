@@ -11,8 +11,10 @@ const (
 	// A full 256-destination scan fits in one source's budget, but further
 	// unauthenticated scans are bounded even when message IDs change.
 	garlicCryptoWindowMillis           = uint64(1000)
-	garlicCryptoGlobalWorkLimit        = 512
-	garlicCryptoSourceWorkLimit        = 256
+	// One complete scan can try every ratchet and legacy destination after
+	// the router static key. A second scan is allowed globally each second.
+	garlicCryptoSourceWorkLimit        = 2*maxGarlicDestinations + 1
+	garlicCryptoGlobalWorkLimit        = 2 * garlicCryptoSourceWorkLimit
 	garlicInvalidCiphertextLifetime    = uint64(30_000)
 	garlicInvalidCiphertextCapacity    = 1024
 )
