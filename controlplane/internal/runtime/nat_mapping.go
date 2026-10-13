@@ -358,7 +358,10 @@ func (p *natMappingPublisher) attemptUPnP(ctx context.Context, spec natMappingSp
 		return nil, errUPnPPublicIPv4Unavailable
 	}
 	observed, err := p.upnp.ExternalAddress(ctx, gateway)
-	if err == nil && (!validPublicIPv4(observed) || observed.Unmap() != public) {
+	if err != nil {
+		return nil, fmt.Errorf("daemon: get UPnP external IPv4 address: %w", err)
+	}
+	if !validPublicIPv4(observed) || observed.Unmap() != public {
 		return nil, errUPnPPublicIPv4Mismatch
 	}
 	internalIP, err := p.route(ctx, gateway.ControlURL.Hostname(), 80)
