@@ -519,3 +519,46 @@ func TestWebUIConfigInMemoryConflict(t *testing.T) {
 		t.Fatalf("POST /api/config status = %d, want 409, body: %s", response.StatusCode, body)
 	}
 }
+
+func TestWebUILoopbackEnvironmentTokenProtectsAPI(t *testing.T) {
+	const token = "environment-token-123456"
+	t.Setenv("IVNPD_WEBUI_TOKEN", token)
+
+	for _, address := range []string{"127.0.0.1:7070", "localhost:7070", "[::1]:7070"} {
+		t.Run(address, func(t *testing.T) {
+			server := newTestWebUIServer(t, WebUIConfig{
+				ListenAddress: address,
+				BearerToken:   resolveWebUIToken(""),
+			})
+			if !server.policy.loopback || !server.policy.requireAuth {
+				t.Fatalf("loopback policy = %+v, want authentication required", server.policy)
+			}
+			handler := server.wrapMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+
+			for _, check := range []struct {
+				name          string
+				authorization string
+				wantStatus    int
+			}{
+				{name: "missing token", wantStatus: http.StatusUnauthorized},
+				{name: "incorrect token", authorization: "Bearer incorrect", wantStatus: http.StatusUnauthorized},
+				{name: "correct token", authorization: "Bearer " + token, wantStatus: http.StatusNoContent},
+			} {
+				t.Run(check.name, func(t *testing.T) {
+					request := httptest.NewRequest(http.MethodGet, "http://"+address+"/api/status", nil)
+					request.RemoteAddr = "127.0.0.1:41000"
+					if check.authorization != "" {
+						request.Header.Set("Authorization", check.authorization)
+					}
+					response := httptest.NewRecorder()
+					handler.ServeHTTP(response, request)
+					if response.Code != check.wantStatus {
+						t.Fatalf("API status = %d, want %d", response.Code, check.wantStatus)
+					}
+				})
+			}
+		})
+	}
+}

@@ -134,3 +134,18 @@ func TestClearStoragePaths(t *testing.T) {
 		t.Errorf("clearStoragePaths did not clear bootstrap router info paths: %+v", cfg.NetDB.BootstrapRouterInfoPaths)
 	}
 }
+
+func TestResolveWebUIToken(t *testing.T) {
+	t.Setenv("IVNPD_WEBUI_TOKEN", "environment-token-123456")
+	if got := resolveWebUIToken(""); got != "environment-token-123456" {
+		t.Fatalf("environment fallback = %q, want environment token", got)
+	}
+	if got := resolveWebUIToken("cli-token-123456"); got != "cli-token-123456" {
+		t.Fatalf("explicit token = %q, want CLI token", got)
+	}
+
+	t.Setenv("IVNPD_WEBUI_TOKEN", "")
+	if got := resolveWebUIToken(""); got != "" {
+		t.Fatalf("unconfigured token = %q, want empty", got)
+	}
+}
