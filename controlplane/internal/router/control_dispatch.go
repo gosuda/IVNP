@@ -14,7 +14,7 @@ import (
 var errNegativeControlHandlerTimeout = errors.New("router: negative control handler timeout")
 
 type ControlSinks struct {
-	DatabaseLookup      func(foundation.I2NPDatabaseLookupMessage) error
+	DatabaseLookup      func(dataplane.RouterI2NPSource, foundation.I2NPDatabaseLookupMessage) error
 	DatabaseSearchReply func(context.Context, foundation.I2NPDatabaseSearchReplyMessage) error
 	// Expected lookup replies must be classified before admission and completion.
 	DatabaseStoreExpected    func(foundation.I2NPDatabaseStoreMessage) bool
@@ -137,7 +137,7 @@ func (d *ControlDispatcher) HandleControl(ctx context.Context, incoming dataplan
 		if err != nil {
 			return err
 		}
-		return d.sinks.DatabaseLookup(lookup)
+		return d.sinks.DatabaseLookup(incoming.Source, lookup)
 	case foundation.I2NPDatabaseSearchReply:
 		reply, err := foundation.I2NPParseDatabaseSearchReply(message.Payload)
 		if err != nil {
