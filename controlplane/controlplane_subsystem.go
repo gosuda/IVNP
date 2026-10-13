@@ -283,6 +283,7 @@ var (
 	NetworkDatabaseErrStoreFlooderClosed                     = netdb.ErrStoreFlooderClosed
 	NetworkDatabaseErrStoreFlooderConfig                     = netdb.ErrStoreFlooderConfig
 	NetworkDatabaseErrStoreFlooderFull                       = netdb.ErrStoreFlooderFull
+	NetworkDatabaseErrStoreFlooderSourceFull                 = netdb.ErrStoreFlooderSourceFull
 	NetworkDatabaseErrStoreKeyMismatch                       = netdb.ErrStoreKeyMismatch
 	NetworkDatabaseErrStoreUnsupported                       = netdb.ErrStoreUnsupported
 	NetworkDatabaseLoadStaticRouterInfos                     = netdb.LoadStaticRouterInfos
