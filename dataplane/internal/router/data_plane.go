@@ -375,17 +375,17 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 	// Only unidentified ciphertext is subject to the pre-authentication
 	// budget. Cache confirmed misses, but release reservations for
 	// authenticated packets and packets rejected by the budget.
-	var fingerprint [32]byte
+	var reservation garlicCryptoReservation
 	rememberRejected := false
 	if !tagged {
 		var fresh bool
-		fingerprint, fresh = r.preauth.begin(outer.Encrypted, now)
+		reservation, fresh = r.preauth.begin(outer.Encrypted, now)
 		if !fresh {
 			return ErrDuplicate
 		}
 		defer func() {
 			if !rememberRejected {
-				r.preauth.forget(fingerprint)
+				r.preauth.forget(reservation)
 			}
 		}()
 	}
