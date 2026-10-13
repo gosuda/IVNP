@@ -265,17 +265,17 @@ func TestAutomaticMappingUsesNATPMPFirstAndObservedLease(t *testing.T) {
 func TestAutomaticMappingFallsBackToUPnP(t *testing.T) {
 	local := newNATMappingTestLocal(t)
 	base := staticAddressPublisher{{Transport: "NTCP2"}}
-	publisher := newNATMappingPublisher(base, autoTransportConfig{enabled: true, automatic: true}, autoTransportConfig{}, netip.AddrPort{}, "", local, discardNATLogger()).(*natMappingPublisher)
+	publisher := newNATMappingPublisher(base, autoTransportConfig{enabled: true, automatic: true, publicHint: netip.MustParseAddr("198.51.100.30")}, autoTransportConfig{}, netip.AddrPort{}, "", local, discardNATLogger()).(*natMappingPublisher)
 	events := make([]string, 0, 2)
 	natClient := &fakeNATPMPClient{publicErr: errors.New("no NAT-PMP response"), events: &events}
 	location, _ := url.Parse("http://192.168.1.1/igd.xml")
 	control, _ := url.Parse("http://192.168.1.1/control")
 	upnpClient := &fakeUPnPClient{
-		events: &events, responses: []upnp.DiscoveryResponse{{Location: location}},
-		gateway: upnp.Gateway{ControlURL: control, ServiceType: "urn:schemas-upnp-org:service:WANIPConnection:2"},
+		events: &events, responses: []upnp.DiscoveryResponse{{Location: location, Sender: netip.MustParseAddr("192.168.1.1")}},
+		gateway: upnp.Gateway{Location: location, ControlURL: control, ServiceType: "urn:schemas-upnp-org:service:WANIPConnection:2"},
 		public:  netip.MustParseAddr("198.51.100.30"),
 	}
-	publisher.prefixes = func() ([]netip.Prefix, error) { return []netip.Prefix{netip.MustParsePrefix("10.2.0.2/32")}, nil }
+	publisher.prefixes = func() ([]netip.Prefix, error) { return []netip.Prefix{netip.MustParsePrefix("10.2.0.2/32"), netip.MustParsePrefix("192.168.1.20/24")}, nil }
 	publisher.route = func(_ context.Context, host string, _ uint16) (netip.Addr, error) {
 		if host == "10.2.0.1" {
 			return netip.MustParseAddr("10.2.0.2"), nil
@@ -309,6 +309,123 @@ func TestAutomaticMappingFallsBackToUPnP(t *testing.T) {
 	}
 	if upnpClient.deleteCalls != 1 {
 		t.Fatalf("UPnP delete calls = %d", upnpClient.deleteCalls)
+	}
+}
+
+
+func TestUPnPDiscoveryRejectsUntrustedPeersBeforeDescription(t *testing.T) {
+	prefixes := []netip.Prefix{netip.MustParsePrefix("192.168.1.20/24")}
+	for _, test := range []struct {
+		name     string
+		sender   string
+		location string
+	}{
+		{"off-link", "10.0.0.1", "http://10.0.0.1/igd.xml"},
+		{"forged-location", "192.168.1.1", "http://169.254.169.254/igd.xml"},
+		{"hostname", "192.168.1.1", "http://router.local/igd.xml"},
+		{"loopback", "127.0.0.1", "http://127.0.0.1/igd.xml"},
+		{"self-address", "192.168.1.20", "http://192.168.1.20/igd.xml"},
+		{"outside-subnet-boundary", "192.168.2.1", "http://192.168.2.1/igd.xml"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			location, err := url.Parse(test.location)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := upnp.DiscoveryResponse{Sender: netip.MustParseAddr(test.sender), Location: location}
+			if validDiscoveredUPnP(response, prefixes) {
+				t.Fatal("accepted an untrusted SSDP response")
+			}
+			publisher := newNATMappingPublisher(
+				staticAddressPublisher{{Transport: "NTCP2"}},
+				autoTransportConfig{enabled: true, automatic: true},
+				autoTransportConfig{}, netip.AddrPort{}, "", newNATMappingTestLocal(t), discardNATLogger(),
+			).(*natMappingPublisher)
+			client := &fakeUPnPClient{responses: []upnp.DiscoveryResponse{response}}
+			publisher.upnp = client
+			publisher.prefixes = func() ([]netip.Prefix, error) { return prefixes, nil }
+			_, err = publisher.upnpGateway(context.Background())
+			if !errors.Is(err, errUPnPUntrustedResponder) {
+				t.Fatalf("upnpGateway() error = %v, want rejection", err)
+			}
+			if client.describedLocation != nil {
+				t.Fatalf("Describe() called on untrusted %s", client.describedLocation)
+			}
+		})
+	}
+}
+
+func TestUPnPDescriptionCannotChangeDiscoveredHost(t *testing.T) {
+	location, _ := url.Parse("http://192.168.1.1/igd.xml")
+	control, _ := url.Parse("http://192.168.1.2/control")
+	publisher := newNATMappingPublisher(
+		staticAddressPublisher{{Transport: "NTCP2"}},
+		autoTransportConfig{enabled: true, automatic: true},
+		autoTransportConfig{}, netip.AddrPort{}, "", newNATMappingTestLocal(t), discardNATLogger(),
+	).(*natMappingPublisher)
+	client := &fakeUPnPClient{
+		responses: []upnp.DiscoveryResponse{{Sender: netip.MustParseAddr("192.168.1.1"), Location: location}},
+		gateway: upnp.Gateway{Location: location, ControlURL: control, ServiceType: "urn:schemas-upnp-org:service:WANIPConnection:1"},
+	}
+	publisher.upnp = client
+	publisher.prefixes = func() ([]netip.Prefix, error) {
+		return []netip.Prefix{netip.MustParsePrefix("192.168.1.20/24")}, nil
+	}
+	_, err := publisher.upnpGateway(context.Background())
+	if !errors.Is(err, errUPnPUntrustedResponder) {
+		t.Fatalf("upnpGateway() error = %v, want off-host control rejection", err)
+	}
+}
+
+func TestUPnPRequiresConfirmedPublicAddress(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		hint    string
+		report  string
+		wantErr error
+	}{
+		{"missing-hint", "", "198.51.100.10", errUPnPPublicIPv4Unavailable},
+		{"mismatched", "198.51.100.20", "198.51.100.10", errUPnPPublicIPv4Mismatch},
+		{"private-reported", "198.51.100.20", "192.168.1.1", errUPnPPublicIPv4Mismatch},
+		{"confirmed", "198.51.100.20", "198.51.100.20", nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var hint netip.Addr
+			if test.hint != "" {
+				hint = netip.MustParseAddr(test.hint)
+			}
+			publisher := newNATMappingPublisher(
+				staticAddressPublisher{{Transport: "NTCP2"}},
+				autoTransportConfig{enabled: true, automatic: true}, autoTransportConfig{},
+				netip.AddrPort{}, "http://192.168.1.1/igd.xml",
+				newNATMappingTestLocal(t), discardNATLogger(),
+			).(*natMappingPublisher)
+			control, _ := url.Parse("http://192.168.1.1/control")
+			client := &fakeUPnPClient{
+				gateway: upnp.Gateway{ControlURL: control, ServiceType: "urn:schemas-upnp-org:service:WANIPConnection:1"},
+				public: netip.MustParseAddr(test.report),
+			}
+			publisher.upnp = client
+			publisher.route = func(context.Context, string, uint16) (netip.Addr, error) {
+				return netip.MustParseAddr("192.168.1.20"), nil
+			}
+			mapping, err := publisher.attemptUPnP(context.Background(), natMappingSpec{
+				transport: "NTCP2", protocol: "TCP", internalPort: 4321,
+				boundAddress: netip.IPv4Unspecified(), publicHint: hint,
+			}, 0)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("attemptUPnP() error = %v, want %v", err, test.wantErr)
+			}
+			if test.wantErr != nil {
+				if client.addCalls != 0 || mapping != nil {
+					t.Fatal("added a mapping with an unverified public address")
+				}
+				return
+			}
+			if client.addCalls != 1 || mapping == nil || mapping.public != hint {
+				t.Fatalf("confirmed mapping = %#v, calls = %d", mapping, client.addCalls)
+			}
+		})
 	}
 }
 
