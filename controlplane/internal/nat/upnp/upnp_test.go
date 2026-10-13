@@ -6,9 +6,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -65,6 +67,11 @@ func TestDiscoverWithConnReceivesLocalPacket(t *testing.T) {
 			served <- errors.New("missing M-SEARCH request")
 			return
 		}
+		_, err = server.WriteToUDP([]byte("HTTP/1.1 200 OK\r\nLOCATION: http://127.0.0.2/igd.xml\r\nST: "+InternetGatewayDevice+"\r\nUSN: uuid:spoof\r\n\r\n"), sender)
+		if err != nil {
+			served <- err
+			return
+		}
 		_, err = server.WriteToUDP([]byte("HTTP/1.1 200 OK\r\nLOCATION: http://127.0.0.1/igd.xml\r\nST: "+InternetGatewayDevice+"\r\nUSN: uuid:test\r\n\r\n"), sender)
 		served <- err
 	}()
@@ -76,8 +83,9 @@ func TestDiscoverWithConnReceivesLocalPacket(t *testing.T) {
 	if err := <-served; err != nil {
 		t.Fatal(err)
 	}
-	if len(responses) != 1 || responses[0].USN != "uuid:test" {
-		t.Fatalf("DiscoverWithConn() = %#v, want one test response", responses)
+	if len(responses) != 1 || responses[0].USN != "uuid:test" ||
+		responses[0].Source != netip.MustParseAddr("127.0.0.1") {
+		t.Fatalf("DiscoverWithConn() = %#v, want only the response bound to its sender", responses)
 	}
 }
 
@@ -175,6 +183,96 @@ func TestExternalAddressParsesStrictSOAPResponse(t *testing.T) {
 	address, err := (&Client{HTTPClient: server.Client()}).ExternalAddress(context.Background(), Gateway{ControlURL: control, ServiceType: serviceType})
 	if err != nil || address.String() != "198.51.100.9" {
 		t.Fatalf("ExternalAddress() = %s, %v", address, err)
+	}
+}
+
+func TestUPnPURLRequiresLiteralIPv4Host(t *testing.T) {
+	for _, raw := range []string{
+		"http://router.example/igd.xml",
+		"http://[::1]/igd.xml",
+		"http://user@192.168.1.1/igd.xml",
+		"file:///etc/passwd",
+	} {
+		if _, err := parseHTTPURL(raw); err == nil {
+			t.Errorf("parseHTTPURL(%q) accepted an untrusted host", raw)
+		}
+	}
+	if _, err := parseHTTPURL("http://192.168.1.1:5431/igd.xml"); err != nil {
+		t.Fatalf("literal IPv4 URL rejected: %v", err)
+	}
+}
+
+func TestDescribeRejectsCrossHostURLs(t *testing.T) {
+	const serviceType = "urn:schemas-upnp-org:service:WANIPConnection:1"
+	for _, tc := range []struct {
+		name, base, control string
+	}{
+		{name: "URLBase", base: "<URLBase>http://127.0.0.2/</URLBase>", control: "/control"},
+		{name: "controlURL", control: "http://127.0.0.2/control"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				_, _ = writer.Write([]byte("<root>" + tc.base + "<device><serviceList><service><serviceType>" +
+					serviceType + "</serviceType><controlURL>" + tc.control +
+					"</controlURL></service></serviceList></device></root>"))
+			}))
+			defer server.Close()
+			location, err := url.Parse(server.URL + "/description.xml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := (&Client{HTTPClient: server.Client()}).Describe(context.Background(), location); err == nil {
+				t.Fatal("Describe() accepted a cross-host URL")
+			}
+		})
+	}
+}
+
+func TestUPnPHTTPRedirectsAreNotFollowed(t *testing.T) {
+	var redirectedRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		redirectedRequests.Add(1)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, target.URL+"/target", http.StatusFound)
+	}))
+	defer source.Close()
+	client := &Client{HTTPClient: source.Client()}
+	location, err := url.Parse(source.URL + "/description.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Describe(context.Background(), location); err == nil {
+		t.Fatal("Describe() followed a redirect")
+	}
+	control, err := url.Parse(source.URL + "/control")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := Gateway{Location: location, ControlURL: control, ServiceType: "urn:schemas-upnp-org:service:WANIPConnection:1"}
+	mapping := PortMapping{ExternalPort: 4242, InternalPort: 4242, Protocol: "TCP", InternalClient: "192.168.1.20", Enabled: true}
+	if err := client.AddPortMapping(context.Background(), gateway, mapping); err == nil {
+		t.Fatal("AddPortMapping() followed a redirect")
+	}
+	if got := redirectedRequests.Load(); got != 0 {
+		t.Fatalf("redirect target received %d requests", got)
+	}
+}
+
+func TestExternalAddressRejectsChangedControlHost(t *testing.T) {
+	location, err := url.Parse("http://192.168.1.1/description.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := url.Parse("http://192.168.1.2/control")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := Gateway{Location: location, ControlURL: control, ServiceType: "urn:schemas-upnp-org:service:WANIPConnection:1"}
+	if _, err := new(Client).ExternalAddress(context.Background(), gateway); err == nil {
+		t.Fatal("ExternalAddress() accepted a control URL on another host")
 	}
 }
 

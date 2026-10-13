@@ -36,7 +36,9 @@ var (
 	errMappingSocketUnassignedPort = errors.New("daemon: mapping socket has no assigned port")
 	errNoNATPMPGatewayCandidates   = errors.New("daemon: no NAT-PMP gateway candidates")
 	errEmptyNATPMPMapping          = errors.New("daemon: NAT-PMP returned an empty mapping")
-	errUPnPPublicIPv4Unavailable   = errors.New("daemon: UPnP gateway did not report a public IPv4 address")
+	errUPnPPublicIPv4Unavailable   = errors.New("daemon: UPnP publication requires an explicitly configured public IPv4 address")
+	errUPnPPublicIPv4Mismatch      = errors.New("daemon: UPnP reported a different external IPv4 address")
+	errUPnPDiscoverySourceRejected = errors.New("daemon: SSDP responder is not on the local interface")
 	errUPnPInternalAddressRejected = errors.New("daemon: transport listener does not accept the UPnP internal address")
 	errMappingInterfaceUnavailable = errors.New("daemon: cannot determine mapping interface")
 	errMappingInterfaceNotIPv4     = errors.New("daemon: mapping interface is not IPv4")
@@ -350,13 +352,17 @@ func (p *natMappingPublisher) attemptUPnP(ctx context.Context, spec natMappingSp
 	if err != nil {
 		return nil, err
 	}
-	public := spec.publicHint
-	observed, err := p.upnp.ExternalAddress(ctx, gateway)
-	if err == nil && validPublicIPv4(observed) {
-		public = observed.Unmap()
-	}
+	// An unauthenticated UPnP reply cannot choose a signed RouterInfo host.
+	public := spec.publicHint.Unmap()
 	if !validPublicIPv4(public) {
 		return nil, errUPnPPublicIPv4Unavailable
+	}
+	observed, err := p.upnp.ExternalAddress(ctx, gateway)
+	if err != nil {
+		return nil, fmt.Errorf("daemon: get UPnP external IPv4 address: %w", err)
+	}
+	if !validPublicIPv4(observed) || observed.Unmap() != public {
+		return nil, errUPnPPublicIPv4Mismatch
 	}
 	internalIP, err := p.route(ctx, gateway.ControlURL.Hostname(), 80)
 	if err != nil {
@@ -403,8 +409,17 @@ func (p *natMappingPublisher) upnpGateway(ctx context.Context) (upnp.Gateway, er
 	if err != nil {
 		return upnp.Gateway{}, err
 	}
+	prefixes, err := p.prefixes()
+	if err != nil {
+		return upnp.Gateway{}, fmt.Errorf("daemon: inspect UPnP interface addresses: %w", err)
+	}
 	var result error
 	for _, response := range responses {
+		if response.Location == nil || response.Location.Hostname() != response.Source.String() ||
+			!validUPnPDiscoverySource(response.Source, prefixes) {
+			result = errors.Join(result, errUPnPDiscoverySourceRejected)
+			continue
+		}
 		gateway, describeErr := p.upnp.Describe(ctx, response.Location)
 		if describeErr != nil {
 			result = errors.Join(result, describeErr)
@@ -648,6 +663,20 @@ func interfacePrefixes() ([]netip.Prefix, error) {
 		}
 	}
 	return prefixes, nil
+}
+
+// Only a peer on a non-loopback local IPv4 subnet may supply a gateway URL.
+func validUPnPDiscoverySource(source netip.Addr, prefixes []netip.Prefix) bool {
+	source = source.Unmap()
+	if !source.Is4() || !source.IsGlobalUnicast() || source.IsLoopback() || source.IsLinkLocalUnicast() {
+		return false
+	}
+	for _, prefix := range prefixes {
+		if prefix.IsValid() && prefix.Addr().Is4() && prefix.Contains(source) && prefix.Addr().Unmap() != source {
+			return true
+		}
+	}
+	return false
 }
 
 func gatewayCandidates(prefixes []netip.Prefix) []netip.Addr {
