@@ -37,17 +37,17 @@ const (
 )
 
 var (
-	ConfigurationErrInvalidOperating     = configuration.ErrInvalidOperating
-	ConfigurationDefaultOperating        = configuration.DefaultOperating
-	ConfigurationLoadOperating           = configuration.LoadOperating
-	ConfigurationLoadOrCreateOperating   = configuration.LoadOrCreateOperating
-	ConfigurationParseOperating          = configuration.ParseOperating
+	ConfigurationErrInvalidOperating          = configuration.ErrInvalidOperating
+	ConfigurationDefaultOperating             = configuration.DefaultOperating
+	ConfigurationLoadOperating                = configuration.LoadOperating
+	ConfigurationLoadOrCreateOperating        = configuration.LoadOrCreateOperating
+	ConfigurationParseOperating               = configuration.ParseOperating
 	FilesystemStoreCopyPrivateBoundedIfExists = filesystemstore.CopyPrivateBoundedIfExists
-	FilesystemStoreErrTooLarge           = filesystemstore.ErrTooLarge
-	FilesystemStoreOpenRegular           = filesystemstore.OpenRegular
-	FilesystemStoreReadBoundedFile       = filesystemstore.ReadBoundedFile
-	FilesystemStoreWriteAtomic           = filesystemstore.WriteAtomic
-	SecureStateErrStateLocked            = securestore.ErrStateLocked
-	SecureStateNewStore                  = securestore.NewStore
-	SecureStateNewMemoryStore            = securestore.NewMemoryStore
+	FilesystemStoreErrTooLarge                = filesystemstore.ErrTooLarge
+	FilesystemStoreOpenRegular                = filesystemstore.OpenRegular
+	FilesystemStoreReadBoundedFile            = filesystemstore.ReadBoundedFile
+	FilesystemStoreWriteAtomic                = filesystemstore.WriteAtomic
+	SecureStateErrStateLocked                 = securestore.ErrStateLocked
+	SecureStateNewStore                       = securestore.NewStore
+	SecureStateNewMemoryStore                 = securestore.NewMemoryStore
 )
