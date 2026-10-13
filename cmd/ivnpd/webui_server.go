@@ -29,7 +29,11 @@ import (
 //go:embed all:webui/build
 var webUIStaticFS embed.FS
 
-const defaultWebUIListenAddress = "127.0.0.1:7070"
+const (
+	defaultWebUIListenAddress = "127.0.0.1:7070"
+	maxWebUIConnections       = 64
+	maxWebUISubscribers       = 16
+)
 
 var (
 	errWebUINodeRequired      = errors.New("webui: node is required")
@@ -52,6 +56,46 @@ type webUIAccessPolicy struct {
 	loopback    bool
 	listenHost  string
 	requireAuth bool
+}
+
+// webUILimitedListener drops excess sockets before http.Server creates handlers.
+type webUILimitedListener struct {
+	net.Listener
+	connections chan struct{}
+}
+
+type webUILimitedConn struct {
+	net.Conn
+	connections chan struct{}
+	closeOnce   sync.Once
+}
+
+func newWebUILimitedListener(listener net.Listener, limit int) *webUILimitedListener {
+	return &webUILimitedListener{
+		Listener:    listener,
+		connections: make(chan struct{}, limit),
+	}
+}
+
+func (l *webUILimitedListener) Accept() (net.Conn, error) {
+	for {
+		connection, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case l.connections <- struct{}{}:
+			return &webUILimitedConn{Conn: connection, connections: l.connections}, nil
+		default:
+			_ = connection.Close()
+		}
+	}
+}
+
+func (c *webUILimitedConn) Close() error {
+	err := c.Conn.Close()
+	c.closeOnce.Do(func() { <-c.connections })
+	return err
 }
 
 type trafficSample struct {
@@ -229,7 +273,7 @@ func (s *WebUIServer) Start(parent context.Context) error {
 	s.wg.Add(2)
 	go func() {
 		defer s.wg.Done()
-		if serveErr := s.server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		if serveErr := s.server.Serve(newWebUILimitedListener(listener, maxWebUIConnections)); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			s.logger.Error("webui server stopped", "error", serveErr)
 		}
 	}()
@@ -503,14 +547,19 @@ func (s *WebUIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unavailable", http.StatusInternalServerError)
 		return
 	}
+	s.subscribersMu.Lock()
+	if len(s.subscribers) >= maxWebUISubscribers {
+		s.subscribersMu.Unlock()
+		http.Error(w, "too many event subscribers", http.StatusServiceUnavailable)
+		return
+	}
+	messages := make(chan []byte, 4)
+	s.subscribers[messages] = struct{}{}
+	s.subscribersMu.Unlock()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("Connection", "keep-alive")
-
-	messages := make(chan []byte, 4)
-	s.subscribersMu.Lock()
-	s.subscribers[messages] = struct{}{}
-	s.subscribersMu.Unlock()
 	defer func() {
 		s.subscribersMu.Lock()
 		delete(s.subscribers, messages)
