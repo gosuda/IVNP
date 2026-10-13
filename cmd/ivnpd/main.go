@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -123,11 +122,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if *webUIEnabled {
-		webUIHost, _, _ := net.SplitHostPort(*webUIListen)
-		token := *webUIToken
-		if token == "" && !isLoopbackHost(webUIHost) {
-			token = os.Getenv("IVNPD_WEBUI_TOKEN")
-		}
+		token := resolveWebUIToken(*webUIToken)
 		webUIConfigPath := *configPath
 		if *memoryMode {
 			webUIConfigPath = ""
@@ -157,6 +152,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func resolveWebUIToken(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	return os.Getenv("IVNPD_WEBUI_TOKEN")
 }
 
 func applyConfigOverrides(cfg *state.ConfigurationOperating, dataDir, logLevel, logFormat string, httpProxy, socks5 bool) {
