@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/netip"
 	"slices"
-	"strconv"
 	"sync"
 	"time"
 
@@ -25,6 +24,42 @@ func defaultDialProbe(ctx context.Context, network, address string) (time.Durati
 	}
 	_ = conn.Close()
 	return time.Since(start), nil
+}
+
+// A global-unicast address can still belong to a non-public special-purpose range.
+var nonPublicProbeNetworks = [...]netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("3ffe::/16"),
+	netip.MustParsePrefix("3fff::/20"),
+}
+
+var publicIPv6ProbeRange = netip.MustParsePrefix("2000::/3")
+
+// isPublicProbeAddress rejects non-public and special-purpose probe targets.
+func isPublicProbeAddress(ip netip.Addr) bool {
+	if !ip.IsValid() || ip.Is4In6() || ip.Zone() != "" || !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		return false
+	}
+	if ip.Is6() && !publicIPv6ProbeRange.Contains(ip) {
+		return false
+	}
+	for _, network := range nonPublicProbeNetworks {
+		if network.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 // TokenBucketRateLimiter ensures outgoing probe rate does not trigger DDoS / flood alerts.
@@ -205,14 +240,16 @@ func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Dura
 		tcpPorts = rec.Ports
 	}
 
-	var targets []string
+	var targets []netip.AddrPort
 	addEndpoints := func(ips []netip.Addr, ports []uint16) {
 		for _, ip := range ips {
-			if !ip.IsValid() || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
+			if !isPublicProbeAddress(ip) {
 				continue
 			}
 			for _, port := range ports {
-				targets = append(targets, net.JoinHostPort(ip.String(), strconv.Itoa(int(port))))
+				if port != 0 {
+					targets = append(targets, netip.AddrPortFrom(ip, port))
+				}
 			}
 		}
 	}
@@ -226,7 +263,7 @@ func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Dura
 			if ctx.Err() != nil {
 				return false, 0
 			}
-			rtt, err := p.probeDialer(ctx, "tcp", target)
+			rtt, err := p.probeDialer(ctx, "tcp", target.String())
 			if err == nil {
 				// Reject localhost / host-local bridge sockets that complete in < 5ms
 				if rtt < 5*time.Millisecond {
