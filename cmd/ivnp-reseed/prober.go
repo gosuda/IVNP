@@ -6,12 +6,13 @@ import (
 	"net"
 	"net/netip"
 	"slices"
-	"strconv"
 	"sync"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
 )
+
+const maxProbeAttemptsPerPeer = 4
 
 // DialFunc abstracts network reachability probes for testing.
 type DialFunc func(ctx context.Context, network, address string) (time.Duration, error)
@@ -174,13 +175,10 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 				if ctx.Err() != nil {
 					return
 				}
-				// Rate limit: pause if token rate exceeded
-				if p.limiter != nil {
-					if err := p.limiter.Wait(ctx); err != nil {
-						return
-					}
-				}
 				success, rtt := p.probePeer(ctx, rec)
+				if ctx.Err() != nil {
+					return
+				}
 				p.store.RecordProbeResult(rec.Hash, success, rtt)
 				if success {
 					successCount.Store(rec.Hash, struct{}{})
@@ -198,42 +196,48 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 	return totalSuccess
 }
 
+// probeEndpointValid validates persisted endpoint pairs before opening sockets.
+func probeEndpointValid(endpoint netip.AddrPort) bool {
+	ip := endpoint.Addr().Unmap()
+	return endpoint.Port() != 0 && ip.IsValid() &&
+		!ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsLinkLocalUnicast()
+}
+
 func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Duration) {
-	// If the peer has TCP ports (NTCP/NTCP2), or fallback to general Ports if unclassified:
-	tcpPorts := rec.TCPPorts
-	if len(tcpPorts) == 0 && len(rec.UDPPorts) == 0 {
-		tcpPorts = rec.Ports
-	}
-
-	var targets []string
-	addEndpoints := func(ips []netip.Addr, ports []uint16) {
-		for _, ip := range ips {
-			if !ip.IsValid() || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
-				continue
-			}
-			for _, port := range ports {
-				targets = append(targets, net.JoinHostPort(ip.String(), strconv.Itoa(int(port))))
-			}
+	// Prefer IPv4 when a valid TCP endpoint exists, otherwise use IPv6.
+	// Only probe pairs published in the same RouterInfo transport address.
+	preferIPv4 := false
+	for _, endpoint := range rec.ProbeEndpoints {
+		if probeEndpointValid(endpoint) && endpoint.Addr().Unmap().Is4() {
+			preferIPv4 = true
+			break
 		}
 	}
 
-	if len(tcpPorts) > 0 {
-		addEndpoints(rec.IPv4, tcpPorts)
-		if len(targets) == 0 {
-			addEndpoints(rec.IPv6, tcpPorts)
+	attempts := 0
+	for _, endpoint := range rec.ProbeEndpoints {
+		if !probeEndpointValid(endpoint) || endpoint.Addr().Unmap().Is4() != preferIPv4 {
+			continue
 		}
-		for _, target := range targets {
-			if ctx.Err() != nil {
+		if attempts == maxProbeAttemptsPerPeer {
+			break
+		}
+		if ctx.Err() != nil {
+			return false, 0
+		}
+		// One global rate-limit token per actual dial, including ProbeSingle.
+		if p.limiter != nil {
+			if err := p.limiter.Wait(ctx); err != nil {
 				return false, 0
 			}
-			rtt, err := p.probeDialer(ctx, "tcp", target)
-			if err == nil {
-				// Reject localhost / host-local bridge sockets that complete in < 5ms
-				if rtt < 5*time.Millisecond {
-					continue
-				}
-				return true, rtt
-			}
+		}
+		if ctx.Err() != nil {
+			return false, 0
+		}
+		attempts++
+		rtt, err := p.probeDialer(ctx, "tcp", endpoint.String())
+		if err == nil && rtt >= 5*time.Millisecond {
+			return true, rtt
 		}
 	}
 
@@ -257,7 +261,9 @@ func (p *Prober) ProbeSingle(ctx context.Context, hash foundation.Hash) (bool, t
 	for _, rec := range peers {
 		if rec.Hash == hash {
 			success, rtt := p.probePeer(ctx, rec)
-			p.store.RecordProbeResult(hash, success, rtt)
+			if ctx.Err() == nil {
+				p.store.RecordProbeResult(hash, success, rtt)
+			}
 			return success, rtt
 		}
 	}

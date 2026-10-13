@@ -68,7 +68,20 @@ func createTestRouterInfo(t *testing.T, caps string) (foundation.NetworkDatabase
 	return info, wire
 }
 
+type testRouterAddress struct {
+	style string
+	host  string
+	port  string
+}
+
 func createTestRouterInfoWithEndpoint(t *testing.T, seed []byte, caps, host, port, family string, published uint64) (foundation.NetworkDatabaseRouterInfo, []byte) {
+	t.Helper()
+	return createTestRouterInfoWithEndpoints(t, seed, caps, []testRouterAddress{
+		{style: "NTCP2", host: host, port: port},
+	}, family, published)
+}
+
+func createTestRouterInfoWithEndpoints(t *testing.T, seed []byte, caps string, endpoints []testRouterAddress, family string, published uint64) (foundation.NetworkDatabaseRouterInfo, []byte) {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(bytes.NewReader(seed))
 	if err != nil {
@@ -82,21 +95,23 @@ func createTestRouterInfoWithEndpoint(t *testing.T, seed []byte, caps, host, por
 	identity[387], identity[388] = 0, byte(foundation.SigningEdDSASHA512Ed25519)
 	identity[389], identity[390] = 0, byte(foundation.CryptoElGamal)
 
-	addrOptions := make([]byte, 128)
-	addrLen, err := foundation.MarshalMappingTo(addrOptions, []foundation.MappingEntry{
-		{Key: []byte("host"), Value: []byte(host)},
-		{Key: []byte("port"), Value: []byte(port)},
-	})
-	if err != nil {
-		t.Fatal(err)
+	var addresses []byte
+	for _, endpoint := range endpoints {
+		addrOptions := make([]byte, 128)
+		addrLen, err := foundation.MarshalMappingTo(addrOptions, []foundation.MappingEntry{
+			{Key: []byte("host"), Value: []byte(endpoint.host)},
+			{Key: []byte("port"), Value: []byte(endpoint.port)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		style := []byte(endpoint.style)
+		addresses = append(addresses, 4)
+		addresses = append(addresses, make([]byte, 8)...)
+		addresses = append(addresses, byte(len(style)))
+		addresses = append(addresses, style...)
+		addresses = append(addresses, addrOptions[:addrLen]...)
 	}
-	style := []byte("NTCP2")
-	address := make([]byte, 0, 10+len(style)+addrLen)
-	address = append(address, 4)
-	address = append(address, make([]byte, 8)...)
-	address = append(address, byte(len(style)))
-	address = append(address, style...)
-	address = append(address, addrOptions[:addrLen]...)
 
 	entries := []foundation.MappingEntry{
 		{Key: []byte("caps"), Value: []byte(caps)},
@@ -113,8 +128,8 @@ func createTestRouterInfoWithEndpoint(t *testing.T, seed []byte, caps, host, por
 
 	unsigned := append(identity, make([]byte, 8)...)
 	binary.BigEndian.PutUint64(unsigned[len(identity):], published)
-	unsigned = append(unsigned, 1)
-	unsigned = append(unsigned, address...)
+	unsigned = append(unsigned, byte(len(endpoints)))
+	unsigned = append(unsigned, addresses...)
 	unsigned = append(unsigned, 0)
 	unsigned = append(unsigned, options[:optionLen]...)
 	wire := append(unsigned, ed25519.Sign(private, unsigned)...)
@@ -248,6 +263,7 @@ func TestProberWithRateLimiter(t *testing.T) {
 	rec, _ := store.AddOrUpdate(info, raw)
 	rec.IPv4 = []netip.Addr{netip.MustParseAddr("198.51.100.1")}
 	rec.Ports = []uint16{8080}
+	rec.ProbeEndpoints = []netip.AddrPort{netip.MustParseAddrPort("198.51.100.1:8080")}
 
 	prober := NewProber(store, 4)
 	mockDialerCalled := false
@@ -1262,6 +1278,7 @@ func TestProberRejectsLocalAndFastRTT(t *testing.T) {
 	rec1, _ := store.AddOrUpdate(info1, raw1)
 	rec1.IPv4 = []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("0.0.0.0")}
 	rec1.Ports = []uint16{8080}
+	rec1.ProbeEndpoints = []netip.AddrPort{netip.MustParseAddrPort("127.0.0.1:8080"), netip.MustParseAddrPort("0.0.0.0:8080")}
 	rec1.Stats.IsReachable = false
 
 	// 2. Peer with public IP, but dial returns in < 5ms (e.g. 2ms local bridge)
@@ -1269,6 +1286,7 @@ func TestProberRejectsLocalAndFastRTT(t *testing.T) {
 	rec2, _ := store.AddOrUpdate(info2, raw2)
 	rec2.IPv4 = []netip.Addr{netip.MustParseAddr("198.51.100.1")}
 	rec2.Ports = []uint16{8081}
+	rec2.ProbeEndpoints = []netip.AddrPort{netip.MustParseAddrPort("198.51.100.1:8081")}
 	rec2.Stats.IsReachable = false
 
 	// 3. Peer with public IP and normal network latency (30ms)
@@ -1276,6 +1294,7 @@ func TestProberRejectsLocalAndFastRTT(t *testing.T) {
 	rec3, _ := store.AddOrUpdate(info3, raw3)
 	rec3.IPv4 = []netip.Addr{netip.MustParseAddr("198.51.100.2")}
 	rec3.Ports = []uint16{8082}
+	rec3.ProbeEndpoints = []netip.AddrPort{netip.MustParseAddrPort("198.51.100.2:8082")}
 	rec3.Stats.IsReachable = false
 
 	prober := NewProber(store, 4)
