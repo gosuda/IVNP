@@ -128,6 +128,9 @@ func (c *Client) call(ctx context.Context, gateway Gateway, action string, argum
 }
 
 func (c *Client) callResponse(ctx context.Context, gateway Gateway, action string, arguments []soapArgument, parse func(io.Reader) error) error {
+	if err := validateGateway(gateway); err != nil {
+		return err
+	}
 	body, err := marshalSOAPRequest(gateway.ServiceType, action, arguments)
 	if err != nil {
 		return err
@@ -138,7 +141,7 @@ func (c *Client) callResponse(ctx context.Context, gateway Gateway, action strin
 	}
 	request.Header.Set("Content-Type", "text/xml; charset=\"utf-8\"")
 	request.Header.Set("SOAPAction", "\""+gateway.ServiceType+"#"+action+"\"")
-	response, err := c.httpClient().Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return fmt.Errorf("upnp: %s request: %w", action, err)
 	}
@@ -201,6 +204,10 @@ func validateGateway(gateway Gateway) error {
 	}
 	if _, err := parseHTTPURL(gateway.ControlURL.String()); err != nil {
 		return fmt.Errorf("upnp: invalid gateway control URL: %w", err)
+	}
+	if !sameGatewayHost(gateway.ControlURL, gateway.ControlURL) ||
+		(gateway.Location != nil && !sameGatewayHost(gateway.Location, gateway.ControlURL)) {
+		return fmt.Errorf("upnp: gateway control URL must retain the original IPv4 host")
 	}
 	return nil
 }
