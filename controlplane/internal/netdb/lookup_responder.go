@@ -80,6 +80,7 @@ type LookupResponder struct {
 	total       int
 	done        chan struct{}
 	mu          sync.Mutex
+
 	started bool
 	closed  bool
 	cancel  context.CancelFunc
