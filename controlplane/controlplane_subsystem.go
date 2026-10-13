@@ -264,6 +264,7 @@ var (
 	NetworkDatabaseErrLocalLeaseSet2                         = netdb.ErrLocalLeaseSet2
 	NetworkDatabaseErrLocalRouterIdentity                    = netdb.ErrLocalRouterIdentity
 	NetworkDatabaseErrLookupReplyEncryptionUnsupported       = netdb.ErrLookupReplyEncryptionUnsupported
+	NetworkDatabaseErrLookupReplyRoute                       = netdb.ErrLookupReplyRoute
 	NetworkDatabaseErrLookupResponderClosed                  = netdb.ErrLookupResponderClosed
 	NetworkDatabaseErrLookupResponderConfig                  = netdb.ErrLookupResponderConfig
 	NetworkDatabaseErrLookupResponderFull                    = netdb.ErrLookupResponderFull
