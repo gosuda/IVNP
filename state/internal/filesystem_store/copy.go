@@ -15,9 +15,6 @@ func CopyPrivateBoundedIfExists(srcPath, dstPath string, maxBytes int64) error {
 	if maxBytes < 0 || maxBytes == math.MaxInt64 {
 		return os.ErrInvalid
 	}
-	if err := EnsurePrivateDir(filepath.Dir(srcPath)); err != nil {
-		return err
-	}
 	source, info, err := OpenRegular(srcPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -26,6 +23,9 @@ func CopyPrivateBoundedIfExists(srcPath, dstPath string, maxBytes int64) error {
 		return err
 	}
 	defer source.Close()
+	if err := EnsurePrivateDir(filepath.Dir(srcPath)); err != nil {
+		return err
+	}
 
 	if err := ValidatePrivateFile(source); err != nil {
 		return err

@@ -26,6 +26,13 @@ func TestCopyPrivateBoundedIfExistsBoundsAndMissing(t *testing.T) {
 	if err := CopyPrivateBoundedIfExists(src, dst, 4); err != nil {
 		t.Fatal(err)
 	}
+	uncreated := filepath.Join(dir, "uncreated")
+	if err := CopyPrivateBoundedIfExists(filepath.Join(uncreated, "source"), dst, 4); err != nil {
+		t.Fatalf("missing source in absent directory: %v", err)
+	}
+	if _, err := os.Lstat(uncreated); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing source created its parent directory: %v", err)
+	}
 	if content, err := os.ReadFile(dst); err != nil || string(content) != "old" {
 		t.Fatalf("missing source changed destination: %q, %v", content, err)
 	}
