@@ -156,14 +156,6 @@ func parseWebUIAccessPolicy(listenAddress, bearerToken string, disableAuth ...bo
 	return webUIAccessPolicy{loopback: false, listenHost: host, requireAuth: true}, nil
 }
 
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
 // Start opens the listener and starts the telemetry stream.
 func (s *WebUIServer) Start(parent context.Context) error {
 	if s.server != nil {
