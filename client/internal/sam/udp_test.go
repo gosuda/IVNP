@@ -44,7 +44,7 @@ func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {
 	if !strings.Contains(line, "RESULT=OK DESTINATION=") {
 		t.Fatal(line)
 	}
-		authToken := testSAMAuthToken(t, line)
+	authToken := testSAMAuthToken(t, line)
 	private := strings.Fields(strings.Split(line, " DESTINATION=")[1])[0]
 	local, err := decodePrivateDestination(private)
 	if err != nil {
@@ -73,9 +73,8 @@ func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {
 		t.Fatalf("forwarded datagram = %q", forwarded)
 	}
 
-	// Missing or invalid credentials, malformed headers, and a different source
-	// IP from the
-	// control socket are rejected without reaching the destination route.
+	// Missing or invalid credentials, malformed headers, and a source IP
+	// different from the control socket are rejected without reaching the destination route.
 	for _, malformed := range [][]byte{
 		[]byte("3.3 udp " + destination + "\nbad"),
 		[]byte("3.3 udp " + destination + " IVNP_AUTH=" + strings.Repeat("A", len(authToken)) + "\nbad"),
