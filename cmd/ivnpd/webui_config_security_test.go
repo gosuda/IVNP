@@ -51,28 +51,28 @@ func TestWebUIConfigUpdateRejectsINIDirectiveInjection(t *testing.T) {
 			name: "reseed endpoint LF",
 			field: "reseed.endpoints",
 			mutate: func(update *webUIConfigUpdate) {
-				update.Reseed.Endpoints[0] += directives
+				update.Reseed.Endpoints[len(update.Reseed.Endpoints)-1] += directives
 			},
 		},
 		{
 			name: "reseed endpoint CRLF",
 			field: "reseed.endpoints",
 			mutate: func(update *webUIConfigUpdate) {
-				update.Reseed.Endpoints[0] += crlfDirectives
+				update.Reseed.Endpoints[len(update.Reseed.Endpoints)-1] += crlfDirectives
 			},
 		},
 		{
 			name: "addressbook subscription LF",
 			field: "addressbook.subscriptions",
 			mutate: func(update *webUIConfigUpdate) {
-				update.AddressBook.Subscriptions[0] += directives
+				update.AddressBook.Subscriptions[len(update.AddressBook.Subscriptions)-1] += directives
 			},
 		},
 		{
 			name: "addressbook subscription CRLF",
 			field: "addressbook.subscriptions",
 			mutate: func(update *webUIConfigUpdate) {
-				update.AddressBook.Subscriptions[0] += crlfDirectives
+				update.AddressBook.Subscriptions[len(update.AddressBook.Subscriptions)-1] += crlfDirectives
 			},
 		},
 		{
