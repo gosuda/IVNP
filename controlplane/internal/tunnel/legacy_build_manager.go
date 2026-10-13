@@ -173,9 +173,8 @@ func (m *BuildManager) handleVariableTransit(ctx context.Context, message founda
 		return err
 	}
 	now := m.now()
-	if !m.reserveTransit(message.Header.ID, sha256.Sum256(message.Payload), now) {
-		return ErrBuildTransit
-	}
+	// Record processing modifies message.Payload; hash the original wire data.
+	replayHash := sha256.Sum256(message.Payload)
 	kind := VariableBuildLongECIES
 	if m.legacyEnabled {
 		kind = VariableBuildElGamal
@@ -193,6 +192,9 @@ func (m *BuildManager) handleVariableTransit(ctx context.Context, message founda
 		return err
 	}
 	defer clearVariableBuildKey(&keys)
+	if !m.reserveTransit(message.Header.ID, replayHash, now) {
+		return ErrBuildTransit
+	}
 	accept := m.validVariableTransitRequest(request, kind, now)
 	if accept && m.admit != nil {
 		accept = m.admit(shortRequestFromVariable(request))
