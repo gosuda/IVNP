@@ -225,8 +225,8 @@ func TestWebUIBearerAuthenticationProtectsAPIOnly(t *testing.T) {
 	request = httptest.NewRequest(http.MethodGet, "http://router.example/api/events?token="+token, nil)
 	record = httptest.NewRecorder()
 	handler.ServeHTTP(record, request)
-	if record.Code != http.StatusNoContent {
-		t.Fatalf("SSE query token status = %d, want %d", record.Code, http.StatusNoContent)
+	if record.Code != http.StatusBadRequest {
+		t.Fatalf("SSE query token status = %d, want %d", record.Code, http.StatusBadRequest)
 	}
 }
 
@@ -517,5 +517,140 @@ func TestWebUIConfigInMemoryConflict(t *testing.T) {
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusConflict {
 		t.Fatalf("POST /api/config status = %d, want 409, body: %s", response.StatusCode, body)
+	}
+}
+
+func TestWebUISSECookieAuthentication(t *testing.T) {
+	t.Parallel()
+	const token = "secret-token-123456"
+	server := newTestWebUIServer(t, WebUIConfig{ListenAddress: "0.0.0.0:7070", BearerToken: token})
+	handler := server.wrapMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "http://router.example/api/status", nil)
+	statusRequest.Header.Set("Authorization", "Bearer "+token)
+	statusResponse := httptest.NewRecorder()
+	handler.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusNoContent {
+		t.Fatalf("authenticated GET /api/status = %d, want %d", statusResponse.Code, http.StatusNoContent)
+	}
+	cookies := statusResponse.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("GET /api/status issued %d cookies, want 1", len(cookies))
+	}
+	cookie := cookies[0]
+	if cookie.Name != webUISSECookieName || cookie.Path != "/api/events" || cookie.MaxAge != int(webUISSECookieLifetime/time.Second) || !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode || cookie.Secure {
+		t.Fatalf("GET /api/status issued cookie with unsafe attributes: %+v", cookie)
+	}
+
+	tests := []struct {
+		name       string
+		path       string
+		bearer     string
+		cookie     *http.Cookie
+		wantStatus int
+	}{
+		{name: "SSE without credentials", path: "/api/events", wantStatus: http.StatusUnauthorized},
+		{name: "SSE with cookie", path: "/api/events", cookie: cookie, wantStatus: http.StatusNoContent},
+		{name: "cookie cannot access other APIs", path: "/api/status", cookie: cookie, wantStatus: http.StatusUnauthorized},
+		{name: "SSE with bearer", path: "/api/events", bearer: token, wantStatus: http.StatusNoContent},
+		{name: "reusable token in URL", path: "/api/events?token=" + token, wantStatus: http.StatusBadRequest},
+		{name: "URL token even with a valid cookie", path: "/api/events?token=" + token, cookie: cookie, wantStatus: http.StatusBadRequest},
+		{name: "URL token even with a valid bearer", path: "/api/events?token=" + token, bearer: token, wantStatus: http.StatusBadRequest},
+		{name: "empty URL token", path: "/api/events?token=", wantStatus: http.StatusBadRequest},
+		{name: "forged cookie", path: "/api/events", cookie: &http.Cookie{Name: webUISSECookieName, Value: "forged"}, wantStatus: http.StatusUnauthorized},
+		{name: "invalid bearer", path: "/api/status", bearer: "invalid", wantStatus: http.StatusUnauthorized},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			request := httptest.NewRequest(http.MethodGet, "http://router.example"+test.path, nil)
+			if test.bearer != "" {
+				request.Header.Set("Authorization", "Bearer "+test.bearer)
+			}
+			if test.cookie != nil {
+				request.AddCookie(test.cookie)
+			}
+			record := httptest.NewRecorder()
+			handler.ServeHTTP(record, request)
+			if record.Code != test.wantStatus {
+				t.Errorf("GET %s status = %d, want %d", test.path, record.Code, test.wantStatus)
+			}
+		})
+	}
+
+	tlsRequest := httptest.NewRequest(http.MethodGet, "https://router.example/api/status", nil)
+	tlsRequest.Header.Set("Authorization", "Bearer "+token)
+	tlsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(tlsResponse, tlsRequest)
+	if tlsResponse.Code != http.StatusNoContent {
+		t.Fatalf("HTTPS GET /api/status status = %d, want %d", tlsResponse.Code, http.StatusNoContent)
+	}
+	tlsCookies := tlsResponse.Result().Cookies()
+	if len(tlsCookies) != 1 || !tlsCookies[0].Secure {
+		t.Errorf("HTTPS SSE cookie Secure = %v, want true", len(tlsCookies) == 1 && tlsCookies[0].Secure)
+	}
+}
+
+func TestWebUISSECookieExpiry(t *testing.T) {
+	t.Parallel()
+	server := newTestWebUIServer(t, WebUIConfig{ListenAddress: "127.0.0.1:7070", BearerToken: "secret-token-123456"})
+	issuedAt := time.Unix(1_700_000_000, 0)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/status", nil)
+	record := httptest.NewRecorder()
+	server.issueSSECookie(record, request, issuedAt)
+	cookies := record.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("issueSSECookie issued %d cookies, want 1", len(cookies))
+	}
+	cookie := cookies[0]
+	tests := []struct {
+		name string
+		at   time.Time
+		want bool
+	}{
+		{name: "issued", at: issuedAt, want: true},
+		{name: "just before expiry", at: issuedAt.Add(webUISSECookieLifetime - time.Second), want: true},
+		{name: "exact expiry", at: issuedAt.Add(webUISSECookieLifetime), want: false},
+		{name: "after expiry", at: issuedAt.Add(webUISSECookieLifetime + time.Second), want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			eventRequest := httptest.NewRequest(http.MethodGet, "http://localhost/api/events", nil)
+			eventRequest.AddCookie(cookie)
+			if got := server.sseCookieAuthorized(eventRequest, test.at); got != test.want {
+				t.Errorf("sseCookieAuthorized(at=%s) = %t, want %t", test.at, got, test.want)
+			}
+		})
+	}
+
+	parts := strings.SplitN(cookie.Value, ".", 2)
+	if len(parts) != 2 || len(parts[1]) == 0 {
+		t.Fatalf("issueSSECookie produced malformed cookie")
+	}
+	replacement := "A"
+	if strings.HasPrefix(parts[1], replacement) {
+		replacement = "B"
+	}
+	invalid := []struct {
+		name  string
+		value string
+	}{
+		{name: "missing signature", value: parts[0]},
+		{name: "altered signature", value: parts[0] + "." + replacement + parts[1][1:]},
+		{name: "altered expiry", value: "999999999999999999999999." + parts[1]},
+		{name: "malformed signature", value: parts[0] + ".!!!"},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			eventRequest := httptest.NewRequest(http.MethodGet, "http://localhost/api/events", nil)
+			eventRequest.AddCookie(&http.Cookie{Name: webUISSECookieName, Value: test.value})
+			if server.sseCookieAuthorized(eventRequest, issuedAt) {
+				t.Errorf("sseCookieAuthorized(%q) = true, want false", test.name)
+			}
+		})
 	}
 }
