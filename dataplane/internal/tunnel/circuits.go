@@ -49,6 +49,9 @@ func (c *inboundCircuit) release() {
 	}
 	clear(c.transforms)
 	c.transforms = nil
+	// The final admitted packet is gone; discard the generation's replay state.
+	clear(c.replay.words)
+	c.replay.words = nil
 	if c.endpoint != nil {
 		c.endpoint.Expire(^uint64(0))
 		c.endpoint = nil

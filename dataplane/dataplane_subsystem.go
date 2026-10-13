@@ -556,6 +556,7 @@ var (
 	TunnelErrGatewayPayload                     = tunnel.ErrGatewayPayload
 	TunnelErrLayerSize                          = tunnel.ErrLayerSize
 	TunnelErrTooLarge                           = tunnel.ErrTooLarge
+	TunnelErrTunnelReplay                       = tunnel.ErrTunnelReplay
 	TunnelErrTunnelSender                       = tunnel.ErrTunnelSender
 	TunnelNewBlockIterator                      = tunnel.NewBlockIterator
 	TunnelNewEndpoint                           = tunnel.NewEndpoint

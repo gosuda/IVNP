@@ -36,6 +36,7 @@ var (
 	ErrCircuitDirection = errors.New("tunnel: invalid circuit direction")
 	ErrTunnelSender     = errors.New("tunnel: sender unavailable")
 	ErrDeliveryHandler  = errors.New("tunnel: local delivery handler unavailable")
+	ErrTunnelReplay     = errors.New("tunnel: replayed tunnel data cell")
 )
 
 // Sender sends an I2NP message to a directly connected router.
@@ -79,6 +80,7 @@ type inboundCircuit struct {
 	local      func(foundation.I2NPMessage) error
 	expiresAt  uint64
 	activity   *atomic.Uint64
+	replay     cellReplayFilter
 }
 
 type outboundCircuit struct {
@@ -627,6 +629,12 @@ func (r *Runtime) HandleContext(ctx context.Context, message foundation.I2NPMess
 	circuit.lifetime.refs.Add(1)
 	shard.mu.RUnlock()
 	defer circuit.release()
+
+	// Outer I2NP IDs can be replaced without changing the encrypted cell.
+	// Reject replays before decrypting, forwarding, or endpoint delivery.
+	if circuit.replay.seen(data.Data) {
+		return ErrTunnelReplay
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, forwardSendTimeout)
 	defer cancel()
