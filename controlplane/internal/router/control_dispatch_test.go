@@ -542,3 +542,35 @@ func TestControlDispatcherRejectsNegativeHandlerTimeout(t *testing.T) {
 		t.Fatal("negative control handler timeout was accepted")
 	}
 }
+
+func TestControlDispatcherPreservesLookupSource(t *testing.T) {
+	const now = uint64(1_000)
+	peer, key := foundation.Hash{7}, foundation.Hash{9}
+	payload := make([]byte, 67)
+	copy(payload[:32], key[:])
+	copy(payload[32:64], peer[:])
+	payload[64] = uint8(controlplanenetdb.RouterInfoLookup << 2)
+	seen := make(chan dataplane.RouterI2NPSource, 1)
+	service, queue := newControlServiceForTest(t, nil, ControlSinks{
+		DatabaseLookup: func(source dataplane.RouterI2NPSource, lookup foundation.I2NPDatabaseLookupMessage) error {
+			if lookup.Key != key || lookup.From != peer {
+				t.Errorf("parsed lookup = %#v", lookup)
+			}
+			seen <- source
+			return nil
+		},
+	})
+	message := foundation.I2NPMessage{
+		Header: foundation.I2NPHeader{Type: foundation.I2NPDatabaseLookup, ID: 999, Expiration: now},
+		Payload: payload,
+	}
+	if err := service.HandleI2NPFrom(peer, message, now, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.WaitIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-seen; got != (dataplane.RouterI2NPSource{Peer: peer, Direct: true}) {
+		t.Fatalf("lookup source = %#v, want authenticated peer", got)
+	}
+}
