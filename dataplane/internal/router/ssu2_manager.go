@@ -81,6 +81,7 @@ const (
 	ssu2EgressSlots             = 32
 	ssu2ACKDelay                = time.Millisecond
 	ssu2MaxNewTokens            = 1024
+	ssu2MaxLiveSessionsPerPeer   = 2 // One canonical session and one draining session.
 	ssu2RelayTarget             = 3
 	ssu2RelayPublishMin         = 100 * time.Millisecond
 	ssu2RelayPublishMax         = 30 * time.Second
@@ -237,6 +238,7 @@ type SSU2Manager struct {
 	publishedRevision   uint64
 	relayPublishMu      sync.Mutex
 	newTokens           map[string]ssu2NewTokenLease
+	issuedNewTokens     map[uint64]ssu2IssuedNewToken
 	peerTests           map[uint32]*ssu2PeerTestState
 	symmetricEvidence   map[string]ssu2PeerTestEvidence
 	relayRequests       map[uint32]*ssu2RelayRequest
@@ -811,6 +813,11 @@ type ssu2NewTokenLease struct {
 	expires     time.Time
 }
 
+type ssu2IssuedNewToken struct {
+	endpoint netip.AddrPort
+	expires  time.Time
+}
+
 // ssu2PeerTestState records only authenticated observations. It is bounded by
 type ssu2PeerTestState struct {
 	nonce            uint32
@@ -936,6 +943,7 @@ func NewSSU2Manager(config SSU2ManagerConfig) (*SSU2Manager, error) {
 		advertisedRelays:      make(map[foundation.Hash]ssu2RelayTagLease),
 		relayTagPending:       make(map[foundation.Hash]time.Time),
 		newTokens:             make(map[string]ssu2NewTokenLease),
+		issuedNewTokens:       make(map[uint64]ssu2IssuedNewToken),
 		peerTests:             make(map[uint32]*ssu2PeerTestState),
 		symmetricEvidence:     make(map[string]ssu2PeerTestEvidence),
 		relayRequests:         make(map[uint32]*ssu2RelayRequest),
@@ -1091,6 +1099,7 @@ func (m *SSU2Manager) Close() error {
 		clear(m.relayTagPending)
 		m.relayRevision++
 		clear(m.newTokens)
+		clear(m.issuedNewTokens)
 		clear(m.symmetricEvidence)
 		for _, state := range m.peerTests {
 			if state.timer != nil {
@@ -4100,28 +4109,60 @@ func newTokenCacheKey(peer foundation.Hash, remote net.Addr, destination uint64)
 	return string(peer[:]) + "|" + remote.String() + "|" + strconv.FormatUint(destination, 10)
 }
 
+// newNewTokenLocked issues a fresh, single-use token for one UDP endpoint.
+// The token table is bounded independently of the number of pending handshakes.
 func (m *SSU2Manager) newNewTokenLocked(remote net.Addr) (dataplanessu2.NewToken, error) {
-	token, err := m.retryToken(remote, 0, 0, m.tokenBucket(m.nowLocked()))
-	if err != nil {
-		return dataplanessu2.NewToken{}, err
+	endpoint, ok := addrPortKey(remote)
+	if !ok || endpoint.Port() == 0 {
+		return dataplanessu2.NewToken{}, ErrSSU2Session
 	}
-	return dataplanessu2.NewToken{Token: token, Expiration: uint32(m.nowLocked().Add(m.tokenLifetime).Unix())}, nil
+	now := m.nowLocked()
+	if len(m.issuedNewTokens) >= ssu2MaxNewTokens {
+		for token, issued := range m.issuedNewTokens {
+			if !issued.expires.After(now) {
+				delete(m.issuedNewTokens, token)
+			}
+		}
+		if len(m.issuedNewTokens) >= ssu2MaxNewTokens {
+			return dataplanessu2.NewToken{}, ErrSSU2Session
+		}
+	}
+	expires := now.Add(m.tokenLifetime)
+	for range 4 {
+		var random [8]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return dataplanessu2.NewToken{}, err
+		}
+		token := binary.BigEndian.Uint64(random[:])
+		if token == 0 {
+			continue
+		}
+		if _, exists := m.issuedNewTokens[token]; exists {
+			continue
+		}
+		m.issuedNewTokens[token] = ssu2IssuedNewToken{endpoint: endpoint, expires: expires}
+		return dataplanessu2.NewToken{Token: token, Expiration: uint32(expires.Unix())}, nil
+	}
+	return dataplanessu2.NewToken{}, ErrSSU2Session
 }
 
+// consumeNewTokenLocked validates the endpoint and consumes the token atomically.
+// Invalid endpoint guesses leave the issued token available to its recipient.
 func (m *SSU2Manager) consumeNewTokenLocked(token uint64, remote net.Addr) bool {
-	if token == 0 {
+	issued, exists := m.issuedNewTokens[token]
+	if !exists {
 		return false
 	}
-	bucket := m.tokenBucket(m.nowLocked())
-	expected, err := m.retryToken(remote, 0, 0, bucket)
-	if err == nil && hmac.Equal(u64Bytes(token), u64Bytes(expected)) {
-		return true
-	}
-	if bucket == 0 {
+	if !issued.expires.After(m.nowLocked()) {
+		delete(m.issuedNewTokens, token)
 		return false
 	}
-	expected, err = m.retryToken(remote, 0, 0, bucket-1)
-	return err == nil && hmac.Equal(u64Bytes(token), u64Bytes(expected))
+	endpoint, ok := addrPortKey(remote)
+	if !ok || endpoint != issued.endpoint {
+		return false
+	}
+	delete(m.issuedNewTokens, token)
+	return true
 }
 
 func (m *SSU2Manager) expireExtensions(now time.Time) {
@@ -4167,6 +4208,11 @@ func (m *SSU2Manager) expireExtensions(now time.Time) {
 	for key, lease := range m.newTokens {
 		if !lease.expires.After(now) {
 			delete(m.newTokens, key)
+		}
+	}
+	for token, issued := range m.issuedNewTokens {
+		if !issued.expires.After(now) {
+			delete(m.issuedNewTokens, token)
 		}
 	}
 	for nonce, state := range m.peerTests {
@@ -4344,33 +4390,40 @@ func (m *SSU2Manager) retryToken(remote net.Addr, destinationID, sourceID, bucke
 	return token, nil
 }
 
-// installSessionLocked installs a freshly authenticated session. Crossed
-// handshakes produce one session per direction; both peers must converge on
-// the same canonical winner or each keeps the session the other dropped. The
-// session initiated by the lower identity hash wins the sessionsByPeer slot,
-// while a non-preferred newcomer stays live for inbound traffic so its peer
-// can drain its congestion window before discarding it. A displaced session
-// is removed from sessionsByID and returned so callers can release it after
-// dropping m.mu.
+// installSessionLocked installs an authenticated session. Crossed handshakes
+// converge on the connection initiated by the lower identity hash. At most
+// one non-canonical session remains live to drain its congestion window.
+// Every insertion that increases live state counts toward maxSessions.
+// A displaced session is released by the caller after unlocking m.mu.
 func (m *SSU2Manager) installSessionLocked(session *ssu2TransportSession) (displaced *ssu2TransportSession, ok bool) {
 	if !m.runningLocked() || m.sessionsByID[session.receiveID] != nil {
 		return nil, false
 	}
 	previous := m.sessionsByPeer[session.peer]
-	if previous == nil && len(m.sessionsByID) >= m.maxSessions {
+	keepPrevious := previous != nil && previous.inbound == preferInboundSession(m.bindings.LocalInfo, session.peer) && previous.inbound != session.inbound
+	if previous != nil && !keepPrevious {
+		displaced = previous
+	}
+	if displaced == nil && len(m.sessionsByID) >= m.maxSessions {
 		return nil, false
 	}
+	peerSessions := 0
+	for _, live := range m.sessionsByID {
+		if live.peer == session.peer && live != displaced {
+			peerSessions++
+			if peerSessions >= ssu2MaxLiveSessionsPerPeer {
+				return nil, false
+			}
+		}
+	}
+	if displaced != nil {
+		delete(m.sessionsByID, displaced.receiveID)
+	}
 	m.sessionsByID[session.receiveID] = session
-	if previous == nil {
+	if !keepPrevious {
 		m.sessionsByPeer[session.peer] = session
-		return nil, true
 	}
-	if previous.inbound == preferInboundSession(m.bindings.LocalInfo, session.peer) && previous.inbound != session.inbound {
-		return nil, true
-	}
-	delete(m.sessionsByID, previous.receiveID)
-	m.sessionsByPeer[session.peer] = session
-	return previous, true
+	return displaced, true
 }
 
 // preferInboundSession reports whether the canonical session to peer should
