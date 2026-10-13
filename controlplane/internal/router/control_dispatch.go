@@ -29,15 +29,16 @@ type ControlSinks struct {
 
 type ControlDispatcherConfig struct {
 	QueueLimits dataplane.RouterControlQueueLimits
-	// HandlerTimeout bounds each execution; zero selects 30 seconds.
+	// HandlerTimeout bounds each execution and asynchronous acknowledgement; zero selects 30 seconds.
 	HandlerTimeout time.Duration
 }
 
 type ControlDispatcher struct {
-	database       *controlplanenetdb.Database
-	sinks          ControlSinks
-	queue          *dataplane.RouterControlQueue
-	handlerTimeout time.Duration
+	database         *controlplanenetdb.Database
+	sinks            ControlSinks
+	queue            *dataplane.RouterControlQueue
+	handlerTimeout   time.Duration
+	acknowledgements *databaseStoreAckSender
 }
 
 func NewControlDispatcher(database *controlplanenetdb.Database, sinks ControlSinks, config ControlDispatcherConfig) (*ControlDispatcher, error) {
@@ -48,6 +49,9 @@ func NewControlDispatcher(database *controlplanenetdb.Database, sinks ControlSin
 		config.HandlerTimeout = 30 * time.Second
 	}
 	dispatcher := &ControlDispatcher{database: database, sinks: sinks, handlerTimeout: config.HandlerTimeout}
+	if sinks.DatabaseStoreReply != nil {
+		dispatcher.acknowledgements = newDatabaseStoreAckSender(sinks.DatabaseStoreReply, config.HandlerTimeout)
+	}
 	queue, err := dataplane.RouterNewControlQueue(dispatcher, config.QueueLimits)
 	if err != nil {
 		return nil, err
@@ -68,10 +72,44 @@ func (d *ControlDispatcher) Enqueue(incoming dataplane.RouterControlMessage) err
 	return d.queue.Enqueue(incoming)
 }
 
-func (d *ControlDispatcher) Start(ctx context.Context) error    { return d.queue.Start(ctx) }
-func (d *ControlDispatcher) Close() error                       { return d.queue.Close() }
-func (d *ControlDispatcher) WaitIdle(ctx context.Context) error { return d.queue.WaitIdle(ctx) }
-func (d *ControlDispatcher) Barrier(ctx context.Context) error  { return d.queue.Barrier(ctx) }
+func (d *ControlDispatcher) Start(ctx context.Context) error {
+	if d.acknowledgements != nil {
+		if err := d.acknowledgements.Start(ctx); err != nil {
+			return err
+		}
+	}
+	if err := d.queue.Start(ctx); err != nil {
+		if d.acknowledgements != nil {
+			d.acknowledgements.Close()
+		}
+		return err
+	}
+	return nil
+}
+
+func (d *ControlDispatcher) Close() error {
+	err := d.queue.Close()
+	if d.acknowledgements != nil {
+		d.acknowledgements.Close()
+	}
+	return err
+}
+
+// WaitIdle includes outstanding acknowledgements; Barrier only tracks control dispatch.
+func (d *ControlDispatcher) WaitIdle(ctx context.Context) error {
+	controlErr := d.queue.WaitIdle(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d.acknowledgements == nil {
+		return controlErr
+	}
+	return errors.Join(controlErr, d.acknowledgements.WaitIdle(ctx))
+}
+
+func (d *ControlDispatcher) Barrier(ctx context.Context) error {
+	return d.queue.Barrier(ctx)
+}
 
 func (d *ControlDispatcher) Accepts(message foundation.I2NPMessage) bool {
 	switch message.Header.Type {
@@ -130,8 +168,13 @@ func (d *ControlDispatcher) HandleControl(ctx context.Context, incoming dataplan
 		if d.sinks.DatabaseStoreFlood != nil {
 			floodErr = d.sinks.DatabaseStoreFlood(incoming.Source, store)
 		}
-		replyErr := d.sinks.DatabaseStoreReply(ctx, store.ReplyGateway, store.ReplyTunnelID, foundation.I2NPDeliveryStatusMessage{MessageID: store.ReplyToken, Timestamp: incoming.NowMillis})
-		return errors.Join(floodErr, replyErr)
+		ackErr := d.acknowledgements.Enqueue(databaseStoreAck{
+			source:   incoming.Source,
+			gateway:  store.ReplyGateway,
+			tunnelID: store.ReplyTunnelID,
+			status:   foundation.I2NPDeliveryStatusMessage{MessageID: store.ReplyToken, Timestamp: incoming.NowMillis},
+		})
+		return errors.Join(floodErr, ackErr)
 	case foundation.I2NPDatabaseLookup:
 		lookup, err := foundation.I2NPParseDatabaseLookup(message.Payload)
 		if err != nil {
