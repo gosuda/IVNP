@@ -1856,7 +1856,7 @@ func TestInspectSU3Archive(t *testing.T) {
 		t.Fatalf("BuildSU3: %v", err)
 	}
 
-	peerCount, floodCount, err := InspectSU3Archive(su3Bytes)
+	peerCount, floodCount, err := InspectSU3Archive(su3Bytes, signerID, &rsaKey.PublicKey)
 	if err != nil {
 		t.Fatalf("InspectSU3Archive failed: %v", err)
 	}
