@@ -9,8 +9,8 @@ import (
 	"gosuda.org/ivnp/state"
 )
 
-func TestTaintedCopyRejectsSymlinkedStateAndKey(t *testing.T) {
-	for _, name := range []string{"state", "key"} {
+func TestTaintedCopyRejectsSymlinkedStateKeyAndParent(t *testing.T) {
+	for _, name := range []string{"state", "key", "parent"} {
 		t.Run(name, func(t *testing.T) {
 			cfg := daemonTestConfig(t)
 			store, err := state.SecureStateNewStore(cfg.StatePath, cfg.KeyPath)
@@ -25,16 +25,26 @@ func TestTaintedCopyRejectsSymlinkedStateAndKey(t *testing.T) {
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
 			}
-			path := cfg.StatePath
-			if name == "key" {
-				path = cfg.KeyPath
-			}
-			original := path + ".original"
-			if err := os.Rename(path, original); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(original, path); err != nil {
-				t.Skipf("symlink unavailable: %v", err)
+			if name == "parent" {
+				parent := filepath.Dir(cfg.StatePath)
+				alias := filepath.Join(parent, "linked")
+				if err := os.Symlink(parent, alias); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+				cfg.StatePath = filepath.Join(alias, filepath.Base(cfg.StatePath))
+				cfg.KeyPath = filepath.Join(alias, filepath.Base(cfg.KeyPath))
+			} else {
+				path := cfg.StatePath
+				if name == "key" {
+					path = cfg.KeyPath
+				}
+				original := path + ".original"
+				if err := os.Rename(path, original); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(original, path); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
 			}
 			controller, err := NewController(cfg, ControllerOptions{TaintedCopy: true, SocketRuntime: new(recordingSockets)})
 			if controller != nil {

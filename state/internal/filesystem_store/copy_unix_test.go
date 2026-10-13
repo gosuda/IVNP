@@ -47,3 +47,24 @@ func TestCopyOwnedFileIfExistsRejectsUnsafeMetadata(t *testing.T) {
 		t.Fatalf("FIFO source = %v, want invalid file", err)
 	}
 }
+
+func TestCopyOwnedFileIfExistsRejectsSymlinkedParent(t *testing.T) {
+	dir := t.TempDir()
+	privateDir := filepath.Join(dir, "private")
+	if err := os.Mkdir(privateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(privateDir, "source"), []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(dir, "alias")
+	if err := os.Symlink(privateDir, alias); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := CopyOwnedFileIfExists(filepath.Join(alias, "source"), filepath.Join(dir, "destination"), 2, true); err == nil {
+		t.Fatal("private source directory symlink was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "destination")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination after rejected directory symlink: %v", err)
+	}
+}
