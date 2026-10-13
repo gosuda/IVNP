@@ -36,13 +36,13 @@ const (
 )
 
 var (
-	ErrRatchet             = errors.New("garlic/ecies: invalid ratchet packet")
-	ErrRatchetClosed       = errors.New("garlic/ecies: ratchet manager is closed")
-	ErrRatchetReplay       = errors.New("garlic/ecies: replayed new session")
+	ErrRatchet                = errors.New("garlic/ecies: invalid ratchet packet")
+	ErrRatchetClosed          = errors.New("garlic/ecies: ratchet manager is closed")
+	ErrRatchetReplay          = errors.New("garlic/ecies: replayed new session")
 	ErrRatchetReplayExhausted = errors.New("garlic/ecies: replay capacity exhausted")
-	ErrRatchetExpired      = errors.New("garlic/ecies: ratchet session expired")
-	ErrRatchetNoSession    = errors.New("garlic/ecies: no ratchet session")
-	ErrRatchetTagExhausted = errors.New("garlic/ecies: ratchet tag set exhausted")
+	ErrRatchetExpired         = errors.New("garlic/ecies: ratchet session expired")
+	ErrRatchetNoSession       = errors.New("garlic/ecies: no ratchet session")
+	ErrRatchetTagExhausted    = errors.New("garlic/ecies: ratchet tag set exhausted")
 )
 
 // RatchetConfig limits destination-local ratchet state. SessionLifetime is an
