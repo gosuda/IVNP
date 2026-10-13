@@ -60,20 +60,21 @@ type PeerStats struct {
 
 // PeerRecord holds a parsed RouterInfo, its raw wire payload, and indexed network properties.
 type PeerRecord struct {
-	Hash        foundation.Hash `json:"hash"`
-	Raw         []byte          `json:"raw"`
-	PublishedAt time.Time       `json:"published_at"`
-	IsFloodfill bool            `json:"is_floodfill"`
-	Family      string          `json:"family,omitempty"`
-	IPv4        []netip.Addr    `json:"ipv4,omitempty"`
-	IPv6        []netip.Addr    `json:"ipv6,omitempty"`
-	Ports       []uint16        `json:"ports,omitempty"`
-	TCPPorts    []uint16        `json:"tcp_ports,omitempty"`
-	UDPPorts    []uint16        `json:"udp_ports,omitempty"`
-	HasNTCP2    bool            `json:"has_ntcp2"`
-	HasSSU2     bool            `json:"has_ssu2"`
-	Stats       PeerStats       `json:"stats"`
-	Score       float64         `json:"score"`
+	Hash           foundation.Hash  `json:"hash"`
+	Raw            []byte           `json:"raw"`
+	PublishedAt    time.Time        `json:"published_at"`
+	IsFloodfill    bool             `json:"is_floodfill"`
+	Family         string           `json:"family,omitempty"`
+	IPv4           []netip.Addr     `json:"ipv4,omitempty"`
+	IPv6           []netip.Addr     `json:"ipv6,omitempty"`
+	Ports          []uint16         `json:"ports,omitempty"`
+	TCPPorts       []uint16         `json:"tcp_ports,omitempty"`
+	UDPPorts       []uint16         `json:"udp_ports,omitempty"`
+	ProbeEndpoints []netip.AddrPort `json:"probe_endpoints,omitempty"`
+	HasNTCP2       bool             `json:"has_ntcp2"`
+	HasSSU2        bool             `json:"has_ssu2"`
+	Stats          PeerStats        `json:"stats"`
+	Score          float64          `json:"score"`
 }
 
 // ReseedPackage contains pre-rendered, signed reseed archives and their metadata.
