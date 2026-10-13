@@ -101,7 +101,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	certPath := filepath.Join(*dataDir, "reseed-rsa.crt")
 	pubKeyPath := filepath.Join(*dataDir, "reseed-rsa.pub.pem")
 
-	// Drop partial state left by interrupted atomic writes before loading.
+	// Clean up legacy fixed-name temporary files from older versions.
 	for _, statePath := range []string{cachePath, su3Path, keyPath, certPath, pubKeyPath} {
 		removeStaleTempFile(statePath, logger)
 	}
@@ -634,18 +634,48 @@ func initReseedMaterial(certPath string, pubKeyPath string, signerID string, pri
 	return certPEM, pubKeyPEM, nil
 }
 
-// writeFileAtomic stages data under "<path>.tmp" then renames it over path so
-// readers never observe a partially written state file.
+// writeFileAtomic writes a complete file before atomically replacing path.
+// The temporary file is created exclusively in path's directory so a
+// predictable symlink cannot redirect writes and the rename stays atomic.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, perm); err != nil {
-		return err
+	dir := filepath.Dir(path)
+	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-")
+	if err != nil {
+		return fmt.Errorf("create temporary file: %w", err)
 	}
-	return os.Rename(tmpPath, path)
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	defer temp.Close()
+
+	if _, err := temp.Write(data); err != nil {
+		return fmt.Errorf("write temporary file: %w", err)
+	}
+	if err := temp.Chmod(perm); err != nil {
+		return fmt.Errorf("set temporary file permissions: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		return fmt.Errorf("sync temporary file: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close temporary file: %w", err)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("replace file atomically: %w", err)
+	}
+
+	parent, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open parent directory: %w", err)
+	}
+	defer parent.Close()
+	if err := parent.Sync(); err != nil {
+		return fmt.Errorf("sync parent directory: %w", err)
+	}
+	return nil
 }
 
-// removeStaleTempFile deletes a leftover "<statePath>.tmp" from a write
-// interrupted before its rename completed.
+// removeStaleTempFile deletes a legacy "<statePath>.tmp" left by an
+// interrupted write from an older version.
 func removeStaleTempFile(statePath string, logger *slog.Logger) {
 	tmpPath := statePath + ".tmp"
 	if err := os.Remove(tmpPath); err == nil {
