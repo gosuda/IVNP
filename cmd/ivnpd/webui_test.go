@@ -232,7 +232,6 @@ func TestWebUIBearerAuthenticationProtectsAPIOnly(t *testing.T) {
 	}
 }
 
-
 func TestWebUISSETicketAuthorization(t *testing.T) {
 	t.Parallel()
 	const token = "secret-token-123456"
