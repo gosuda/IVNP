@@ -127,29 +127,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		SignerID:      *signerID,
 	}, store)
 
-	// Load persistent SU3 archive if present for immediate availability across restarts
-	if su3Data, readErr := os.ReadFile(su3Path); readErr == nil && len(su3Data) > 0 {
-		sum := sha256.Sum256(su3Data)
-		etag := `"` + hex.EncodeToString(sum[:8]) + `"`
-		peerCount, floodCount, inspectErr := InspectSU3Archive(su3Data)
-		if inspectErr != nil {
-			logger.Warn("failed to parse existing SU3 archive metadata", "path", su3Path, "error", inspectErr)
-		}
-		server.UpdatePackage(ReseedPackage{
-			GeneratedAt:    time.Now(),
-			PeerCount:      peerCount,
-			FloodfillCount: floodCount,
-			SU3Data:        su3Data,
-			ETag:           etag,
-		})
-		logger.Info("loaded persistent reseed archive for immediate serving",
-			"path", su3Path,
-			"su3_bytes", len(su3Data),
-			"peers", peerCount,
-			"floodfills", floodCount,
-		)
-	}
-
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -188,6 +165,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	server.SetSigningMaterial(certPEM, pubKeyPEM)
+
+	// The cached archive must be authenticated by this process's signing key.
+	// Until verification completes, the HTTP endpoint returns 503.
+	if pkg, loadErr := restoreCachedSU3(server, su3Path, *signerID, &rsaPrivKey.PublicKey); loadErr != nil {
+		if !errors.Is(loadErr, os.ErrNotExist) {
+			logger.Warn("discarding invalid cached SU3 archive", "path", su3Path, "error", loadErr)
+		}
+	} else {
+		logger.Info("loaded verified persistent reseed archive",
+			"path", su3Path,
+			"su3_bytes", len(pkg.SU3Data),
+			"peers", pkg.PeerCount,
+			"floodfills", pkg.FloodfillCount,
+		)
+	}
 
 	logger.Info("initialized signing keys",
 		"su3_signer", *signerID,
