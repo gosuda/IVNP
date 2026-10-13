@@ -26,6 +26,7 @@ var (
 	ErrLeaseSetExpired       = errors.New("router: LeaseSet has no unexpired lease")
 	ErrGarlicDestination     = errors.New("router: Garlic destination is not configured")
 	ErrGarlicPacket          = errors.New("router: malformed Garlic packet")
+	ErrGarlicCryptoBudget    = errors.New("router: Garlic pre-authentication crypto budget exhausted")
 	ErrUnsupportedEncryption = errors.New("router: unsupported Garlic encryption")
 )
 
@@ -84,6 +85,7 @@ type GarlicReceiver struct {
 	staticPrivate  [32]byte
 	hasStatic      bool
 	replyScratch   *sync.Pool
+	preauth        garlicPreauthLimiter
 }
 
 func (r *GarlicReceiver) MatchesService(service *Service) bool {
@@ -357,9 +359,42 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 			return unwrapErr
 		}
 	}
-	if r.hasStatic {
+	// Registered ratchet tags require only an indexed symmetric decrypt.
+	// In particular, a consumed tag must never fall through to the expensive
+	// New Session path if another goroutine receives the same packet.
+	tagged := false
+	if len(outer.Encrypted) <= foundation.I2NPI2PDMaxPayload {
+		for _, destination := range destinations {
+			if destination.Ratchet != nil && destination.Ratchet.HasTag(outer.Encrypted) {
+				tagged = true
+				break
+			}
+		}
+	}
+
+	// Only unidentified ciphertext is subject to the pre-authentication
+	// budget. Cache confirmed misses, but release reservations for
+	// authenticated packets and packets rejected by the budget.
+	var fingerprint [32]byte
+	rememberRejected := false
+	if !tagged {
+		var fresh bool
+		fingerprint, fresh = r.preauth.begin(outer.Encrypted, now)
+		if !fresh {
+			return ErrDuplicate
+		}
+		defer func() {
+			if !rememberRejected {
+				r.preauth.forget(fingerprint)
+			}
+		}()
+	}
+	if !tagged && r.hasStatic {
 		plainLen := len(outer.Encrypted) - 32 - 16
 		if plainLen > 0 && plainLen <= foundation.I2NPI2PDMaxPayload {
+			if !r.preauth.allowWork(source, now) {
+				return ErrGarlicCryptoBudget
+			}
 			scratch, scratchPool := r.getReplyScratch()
 			inner, openErr := dataplanegarlicecies.OpenRouterMessage(scratch[:plainLen], r.staticPrivate[:], outer.Encrypted, now)
 			if openErr == nil {
@@ -379,8 +414,21 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 		if destination.Ratchet == nil || len(outer.Encrypted) > foundation.I2NPI2PDMaxPayload {
 			continue
 		}
+		if tagged {
+			if !destination.Ratchet.HasTag(outer.Encrypted) {
+				continue
+			}
+		} else if !r.preauth.allowWork(source, now) {
+			return ErrGarlicCryptoBudget
+		}
 		scratch := destination.getScratch()
-		result, receiveErr := destination.Ratchet.Receive(scratch.plaintext[:], scratch.reply[:], outer.Encrypted, now)
+		var result dataplanegarlic.RatchetResult
+		var receiveErr error
+		if tagged {
+			result, receiveErr = destination.Ratchet.ReceiveTagged(scratch.plaintext[:], scratch.reply[:], outer.Encrypted, now)
+		} else {
+			result, receiveErr = destination.Ratchet.Receive(scratch.plaintext[:], scratch.reply[:], outer.Encrypted, now)
+		}
 		if receiveErr != nil {
 			clear(scratch.plaintext[:])
 			clear(scratch.reply[:])
@@ -403,9 +451,15 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 		destination.scratch.Put(scratch)
 		return receiveErr
 	}
+	if tagged {
+		return ErrGarlicDestination
+	}
 	for _, destination := range destinations {
 		if destination.Sessions == nil || len(outer.Encrypted) > foundation.I2NPI2PDMaxPayload {
 			continue
+		}
+		if !r.preauth.allowWork(source, now) {
+			return ErrGarlicCryptoBudget
 		}
 		scratch := destination.getScratch()
 		payload, _, _, receiveErr := destination.Sessions.Receive(scratch.plaintext[:], outer.Encrypted, destination.Private, now)
@@ -431,6 +485,7 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 		destination.scratch.Put(scratch)
 		return parseErr
 	}
+	rememberRejected = true
 	return ErrGarlicDestination
 }
 
