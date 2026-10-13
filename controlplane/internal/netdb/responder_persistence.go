@@ -56,7 +56,16 @@ func NewResponderProfileStore(config ResponderProfileStoreConfig) (*ResponderPro
 }
 
 func (s *ResponderProfileStore) maxBytes() int {
-	return responderSnapshotHeader + s.profiles.maxPeers*responderSnapshotRecord + sha256.Size
+	return responderSnapshotMaxBytes(s.profiles.maxPeers)
+}
+
+// DefaultResponderSnapshotMaxBytes bounds the default responder snapshot.
+func DefaultResponderSnapshotMaxBytes() int64 {
+	return int64(responderSnapshotMaxBytes(defaultResponderProfilePeers))
+}
+
+func responderSnapshotMaxBytes(maxPeers int) int {
+	return responderSnapshotHeader + maxPeers*responderSnapshotRecord + sha256.Size
 }
 
 // Load runs after verified RouterInfos are restored and before request workers start.

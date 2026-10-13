@@ -30,6 +30,7 @@ type (
 )
 
 const (
+	SecureStateDefaultMaxStateBytes        = securestore.DefaultMaxStateBytes
 	SecureStateRemoteELSAuthorizationDH   = securestore.RemoteELSAuthorizationDH
 	SecureStateRemoteELSAuthorizationNone = securestore.RemoteELSAuthorizationNone
 	SecureStateRemoteELSAuthorizationPSK  = securestore.RemoteELSAuthorizationPSK
@@ -41,6 +42,7 @@ var (
 	ConfigurationLoadOperating         = configuration.LoadOperating
 	ConfigurationLoadOrCreateOperating = configuration.LoadOrCreateOperating
 	ConfigurationParseOperating        = configuration.ParseOperating
+	FilesystemStoreCopyPrivateBoundedIfExists = filesystemstore.CopyPrivateBoundedIfExists
 	FilesystemStoreOpenRegular         = filesystemstore.OpenRegular
 	FilesystemStoreReadBoundedFile     = filesystemstore.ReadBoundedFile
 	FilesystemStoreWriteAtomic         = filesystemstore.WriteAtomic
