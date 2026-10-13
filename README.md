@@ -25,6 +25,21 @@ go run ./cmd/ivnpd -config ivnp.conf
 - Web console: `http://127.0.0.1:7070`
 - SAM bridge: `127.0.0.1:7656`
 
+The embedded SAM bridge advertises `IVNP_AUTH=1` in its HELLO reply. After
+`SESSION CREATE`, send `SESSION AUTH` on the owning control socket to obtain a
+256-bit capability (`IVNP_AUTH=<64 hexadecimal characters>`). Separate TCP
+connections must include that option with `STREAM CONNECT`, `STREAM ACCEPT`,
+`STREAM FORWARD`, `DATAGRAM SEND`, and `RAW SEND`. Include it in the SAM UDP
+header as well, for example `3.3 my-id destination IVNP_AUTH=<token>` followed
+by a newline and the datagram body. Commands on the owning control socket
+retain access to that session and its PRIMARY children without an extra token.
+
+This security extension is required for third-party clients using detached
+connections with the embedded SAM bridge. The bundled SAM client negotiates it
+automatically, while external SAM bridges without this extension remain
+supported. Keep the capability confidential; closing the owning control socket
+revokes it.
+
 ### Configuration
 
 The daemon generates `ivnp.conf` on first start if missing.
