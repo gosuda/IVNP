@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/foundation"
 )
 
@@ -34,7 +35,10 @@ var (
 	ErrInvalidSignature  = errors.New("packager: invalid archive signature")
 	errSU3TooShort       = errors.New("packager: su3 archive too short")
 	errInvalidSU3Magic   = errors.New("packager: invalid su3 magic")
-	errInvalidSU3Bounds  = errors.New("packager: invalid su3 content bounds")
+	errInvalidSU3Bounds        = errors.New("packager: invalid su3 content bounds")
+	errSU3TooManyEntries       = errors.New("packager: too many su3 zip entries")
+	errSU3InvalidRouterInfoSize = errors.New("packager: invalid router info size")
+	errSU3NoRouterInfos        = errors.New("packager: su3 zip contains no router infos")
 )
 
 // BuildSU3 builds a signed standard I2P SU3 reseed container containing a ZIP archive of routerInfos.
@@ -222,7 +226,8 @@ func CalculatePackageStats(peers []PeerRecord, su3SizeBytes int, etag string, ge
 	return stats
 }
 
-// InspectSU3Archive inspects an SU3 container and counts valid RouterInfos and floodfills within.
+// InspectSU3Archive counts valid RouterInfos in a bounded SU3 ZIP payload.
+// Cache callers must verify the SU3 signature separately before publishing it.
 func InspectSU3Archive(su3Data []byte) (peerCount int, floodfillCount int, err error) {
 	if len(su3Data) < su3HeaderLen+su3RSASignatureLen {
 		return 0, 0, errSU3TooShort
@@ -232,18 +237,23 @@ func InspectSU3Archive(su3Data []byte) (peerCount int, floodfillCount int, err e
 	}
 	versionLen := int(su3Data[13])
 	signerLen := int(su3Data[15])
-	contentLen := int(binary.BigEndian.Uint64(su3Data[16:24]))
-
+	contentLen := binary.BigEndian.Uint64(su3Data[16:24])
 	zipStart := su3HeaderLen + versionLen + signerLen
-	zipEnd := zipStart + contentLen
-	if zipStart > len(su3Data) || zipEnd > len(su3Data)-su3RSASignatureLen || zipStart >= zipEnd {
+
+	if versionLen < su3MinimumVersion || signerLen == 0 ||
+		zipStart > len(su3Data)-su3RSASignatureLen ||
+		contentLen == 0 || contentLen > uint64(controlplane.ReseedDefaultMaxArchiveBytes) ||
+		contentLen != uint64(len(su3Data)-su3RSASignatureLen-zipStart) {
 		return 0, 0, errInvalidSU3Bounds
 	}
 
-	zipBytes := su3Data[zipStart:zipEnd]
+	zipBytes := su3Data[zipStart : zipStart+int(contentLen)]
 	zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
 	if err != nil {
 		return 0, 0, fmt.Errorf("read su3 zip payload: %w", err)
+	}
+	if len(zr.File) > controlplane.ReseedDefaultMaxRouterInfos {
+		return 0, 0, fmt.Errorf("%w: got %d, max %d", errSU3TooManyEntries, len(zr.File), controlplane.ReseedDefaultMaxRouterInfos)
 	}
 
 	for _, f := range zr.File {
@@ -254,21 +264,35 @@ func InspectSU3Archive(su3Data []byte) (peerCount int, floodfillCount int, err e
 		if !strings.HasPrefix(baseName, "routerInfo-") || !strings.HasSuffix(baseName, ".dat") {
 			continue
 		}
-		peerCount++
+		if f.UncompressedSize64 == 0 || f.UncompressedSize64 > uint64(foundation.NetworkDatabaseMaxRouterInfoBytes) {
+			return 0, 0, fmt.Errorf("router info %q: %w", f.Name, errSU3InvalidRouterInfoSize)
+		}
 		rc, openErr := f.Open()
 		if openErr != nil {
-			continue
+			return 0, 0, fmt.Errorf("open router info %q: %w", f.Name, openErr)
 		}
-		raw, readErr := io.ReadAll(rc)
-		_ = rc.Close()
+		raw, readErr := io.ReadAll(io.LimitReader(rc, int64(foundation.NetworkDatabaseMaxRouterInfoBytes)+1))
+		closeErr := rc.Close()
 		if readErr != nil {
-			continue
+			return 0, 0, fmt.Errorf("read router info %q: %w", f.Name, readErr)
 		}
-		if info, parseErr := foundation.NetworkDatabaseParseRouterInfo(raw); parseErr == nil {
-			if foundation.NetworkDatabaseIsFloodfill(info) {
-				floodfillCount++
-			}
+		if closeErr != nil {
+			return 0, 0, fmt.Errorf("close router info %q: %w", f.Name, closeErr)
 		}
+		if len(raw) != int(f.UncompressedSize64) {
+			return 0, 0, fmt.Errorf("router info %q: %w", f.Name, errSU3InvalidRouterInfoSize)
+		}
+		info, parseErr := foundation.NetworkDatabaseParseRouterInfo(raw)
+		if parseErr != nil {
+			return 0, 0, fmt.Errorf("parse router info %q: %w", f.Name, parseErr)
+		}
+		peerCount++
+		if foundation.NetworkDatabaseIsFloodfill(info) {
+			floodfillCount++
+		}
+	}
+	if peerCount == 0 {
+		return 0, 0, errSU3NoRouterInfos
 	}
 	return peerCount, floodfillCount, nil
 }
