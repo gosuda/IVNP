@@ -444,7 +444,7 @@ func TestQueuedLookupStoreRemainsPrivateAfterRequestExpiry(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if err = responder.Enqueue(foundation.I2NPDatabaseLookupMessage{Key: key, From: foundation.Hash{9}, Flags: uint8(controlplanenetdb.LeaseSetLookup) << 2}); err != nil {
+	if err = responder.Enqueue(controlplanenetdb.LookupSource{Peer: foundation.Hash{9}, Direct: true}, foundation.I2NPDatabaseLookupMessage{Key: key, From: foundation.Hash{9}, Flags: uint8(controlplanenetdb.LeaseSetLookup) << 2}); err != nil {
 		t.Fatal(err)
 	}
 	select {
