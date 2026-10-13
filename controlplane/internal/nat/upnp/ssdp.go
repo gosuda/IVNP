@@ -176,7 +176,11 @@ func (c *Client) DiscoverWithConn(ctx context.Context, conn net.PacketConn, dest
 			continue
 		}
 		source, ok := netip.AddrFromSlice(peer.IP)
-		if !ok || !source.Is4() || response.Location.Hostname() != source.String() {
+		if !ok {
+			continue
+		}
+		source = source.Unmap()
+		if !source.Is4() || response.Location.Hostname() != source.String() {
 			continue // An SSDP responder cannot nominate another host for HTTP.
 		}
 		response.Source = source
