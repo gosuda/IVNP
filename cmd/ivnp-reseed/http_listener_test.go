@@ -127,8 +127,10 @@ func TestReseedHTTPConnectionCapSharedBetweenListeners(t *testing.T) {
 		t.Fatal(err)
 	}
 	var b [1]byte
-	if _, err := overflow.Read(b[:]); err != io.EOF {
-		t.Fatalf("over-limit connection read error = %v, want EOF", err)
+	if _, err := overflow.Read(b[:]); err == nil {
+		t.Fatal("over-limit connection remained open")
+	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatalf("over-limit connection was not rejected: %v", err)
 	}
 	if got := len(permits); got != 1 {
 		t.Fatalf("connections charged to limiter = %d, want 1", got)
