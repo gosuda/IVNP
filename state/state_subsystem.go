@@ -30,23 +30,23 @@ type (
 )
 
 const (
-	SecureStateDefaultMaxStateBytes        = securestore.DefaultMaxStateBytes
+	SecureStateDefaultMaxStateBytes       = securestore.DefaultMaxStateBytes
 	SecureStateRemoteELSAuthorizationDH   = securestore.RemoteELSAuthorizationDH
 	SecureStateRemoteELSAuthorizationNone = securestore.RemoteELSAuthorizationNone
 	SecureStateRemoteELSAuthorizationPSK  = securestore.RemoteELSAuthorizationPSK
 )
 
 var (
-	ConfigurationErrInvalidOperating   = configuration.ErrInvalidOperating
-	ConfigurationDefaultOperating      = configuration.DefaultOperating
-	ConfigurationLoadOperating         = configuration.LoadOperating
-	ConfigurationLoadOrCreateOperating = configuration.LoadOrCreateOperating
-	ConfigurationParseOperating        = configuration.ParseOperating
+	ConfigurationErrInvalidOperating          = configuration.ErrInvalidOperating
+	ConfigurationDefaultOperating             = configuration.DefaultOperating
+	ConfigurationLoadOperating                = configuration.LoadOperating
+	ConfigurationLoadOrCreateOperating        = configuration.LoadOrCreateOperating
+	ConfigurationParseOperating               = configuration.ParseOperating
 	FilesystemStoreCopyPrivateBoundedIfExists = filesystemstore.CopyPrivateBoundedIfExists
-	FilesystemStoreOpenRegular         = filesystemstore.OpenRegular
-	FilesystemStoreReadBoundedFile     = filesystemstore.ReadBoundedFile
-	FilesystemStoreWriteAtomic         = filesystemstore.WriteAtomic
-	SecureStateErrStateLocked          = securestore.ErrStateLocked
-	SecureStateNewStore                = securestore.NewStore
-	SecureStateNewMemoryStore          = securestore.NewMemoryStore
+	FilesystemStoreOpenRegular                = filesystemstore.OpenRegular
+	FilesystemStoreReadBoundedFile            = filesystemstore.ReadBoundedFile
+	FilesystemStoreWriteAtomic                = filesystemstore.WriteAtomic
+	SecureStateErrStateLocked                 = securestore.ErrStateLocked
+	SecureStateNewStore                       = securestore.NewStore
+	SecureStateNewMemoryStore                 = securestore.NewMemoryStore
 )
