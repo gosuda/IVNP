@@ -312,7 +312,6 @@ func TestAutomaticMappingFallsBackToUPnP(t *testing.T) {
 	}
 }
 
-
 func TestUPnPDiscoveryRejectsUntrustedPeersBeforeDescription(t *testing.T) {
 	prefixes := []netip.Prefix{netip.MustParsePrefix("192.168.1.20/24")}
 	for _, test := range []struct {
