@@ -37,7 +37,7 @@ func TestLookupResponderMissRepliesWithBoundedSearchReply(t *testing.T) {
 	if err = responder.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err = responder.Enqueue(foundation.I2NPDatabaseLookupMessage{Key: key, From: from, Flags: uint8(RouterInfoLookup << 2)}); err != nil {
+	if err = responder.Enqueue(LookupSource{Peer: from, Direct: true}, foundation.I2NPDatabaseLookupMessage{Key: key, From: from, Flags: uint8(RouterInfoLookup << 2)}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -76,7 +76,7 @@ func TestLookupResponderExplorationReturnsOnlyRoutingKBucketNonFloodfills(t *tes
 	if err = responder.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err = responder.Enqueue(foundation.I2NPDatabaseLookupMessage{Key: key, From: from, Flags: uint8(ExplorationLookup << 2)}); err != nil {
+	if err = responder.Enqueue(LookupSource{Peer: from, Direct: true}, foundation.I2NPDatabaseLookupMessage{Key: key, From: from, Flags: uint8(ExplorationLookup << 2)}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -128,7 +128,7 @@ func TestLookupResponderExplorationAppliesExclusionsBeforeLimit(t *testing.T) {
 	if err = responder.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err = responder.Enqueue(foundation.I2NPDatabaseLookupMessage{Key: key, From: from, Flags: uint8(ExplorationLookup << 2), Excluded: excluded}); err != nil {
+	if err = responder.Enqueue(LookupSource{Peer: from, Direct: true}, foundation.I2NPDatabaseLookupMessage{Key: key, From: from, Flags: uint8(ExplorationLookup << 2), Excluded: excluded}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -235,7 +235,7 @@ func TestLookupResponderRejectsEncryptedReplyWithoutWrapper(t *testing.T) {
 	if err = responder.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err = responder.Enqueue(foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{3}, From: from, Flags: uint8(RouterInfoLookup<<2) | 1<<1}); !errors.Is(err, ErrLookupReplyEncryptionUnsupported) {
+	if err = responder.Enqueue(LookupSource{Peer: from, Direct: true}, foundation.I2NPDatabaseLookupMessage{Key: foundation.Hash{3}, From: from, Flags: uint8(RouterInfoLookup<<2) | 1<<1}); !errors.Is(err, ErrLookupReplyEncryptionUnsupported) {
 		t.Fatalf("Enqueue() = %v, want ErrLookupReplyEncryptionUnsupported", err)
 	}
 	if err = responder.Close(); err != nil {
@@ -264,7 +264,7 @@ func TestLookupResponderLeavesPreliminaryECIESPublicKeyReplyPlaintext(t *testing
 	lookup := foundation.I2NPDatabaseLookupMessage{
 		Key: key, From: from, Flags: uint8(RouterInfoLookup<<2) | 1<<1 | 1<<4, ReplyPublicKey: make([]byte, 32),
 	}
-	if err = responder.Enqueue(lookup); err != nil {
+	if err = responder.Enqueue(LookupSource{Peer: from, Direct: true}, lookup); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -295,7 +295,7 @@ func TestLookupResponderDropsAllZeroSearchKey(t *testing.T) {
 	if err = responder.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err = responder.Enqueue(foundation.I2NPDatabaseLookupMessage{From: foundation.Hash{2}}); err != nil {
+	if err = responder.Enqueue(LookupSource{Peer: foundation.Hash{2}, Direct: true}, foundation.I2NPDatabaseLookupMessage{From: foundation.Hash{2}}); err != nil {
 		t.Fatal(err)
 	}
 	if err = responder.Close(); err != nil {
