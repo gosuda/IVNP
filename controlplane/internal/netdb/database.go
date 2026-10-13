@@ -292,6 +292,20 @@ func (d *Database) storeRouterInfo(store foundation.I2NPDatabaseStoreMessage, fl
 	return d.AdmitRouterInfo(parsed, floodfill, seenAt)
 }
 
+// leaseSetSupersedes compares versions only within compatible timestamp domains.
+// Legacy LeaseSets version by their earliest lease expiry in milliseconds; modern
+// LeaseSets version by publication time in seconds. A modern record takes
+// precedence on migration, and an old legacy record cannot downgrade it.
+func leaseSetSupersedes(old leaseEntry, incomingType foundation.I2NPStoreType, incomingVersion uint64) bool {
+	if old.typeID == foundation.I2NPStoreLeaseSet {
+		return incomingType != foundation.I2NPStoreLeaseSet || incomingVersion > old.version
+	}
+	if incomingType == foundation.I2NPStoreLeaseSet {
+		return false
+	}
+	return incomingVersion > old.version
+}
+
 func (d *Database) storeLeaseSet(store foundation.I2NPDatabaseStoreMessage, seenAt uint64, published bool) error {
 	parsed, err := foundation.NetworkDatabaseParseLeaseSet(store.Data)
 	if err != nil {
@@ -321,8 +335,8 @@ func (d *Database) storeLeaseSet(store foundation.I2NPDatabaseStoreMessage, seen
 	}
 	d.leasesMu.Lock()
 	defer d.leasesMu.Unlock()
-	if old, exists := d.leases[store.Key]; exists && old.version >= earliest {
-		if published && !old.published {
+	if old, exists := d.leases[store.Key]; exists && !leaseSetSupersedes(old, store.Type, earliest) {
+		if published && !old.published && old.typeID == store.Type {
 			old.published = true
 			d.leases[store.Key] = old
 		}
@@ -372,8 +386,8 @@ func (d *Database) storeLeaseSet2(store foundation.I2NPDatabaseStoreMessage, see
 	}
 	d.leasesMu.Lock()
 	defer d.leasesMu.Unlock()
-	if old, exists := d.leases[store.Key]; exists && old.version >= version {
-		if published && !old.published {
+	if old, exists := d.leases[store.Key]; exists && !leaseSetSupersedes(old, store.Type, version) {
+		if published && !old.published && old.typeID == store.Type {
 			old.published = true
 			d.leases[store.Key] = old
 		}
@@ -426,8 +440,8 @@ func (d *Database) storeMetaLeaseSet(store foundation.I2NPDatabaseStoreMessage, 
 	version := uint64(parsed.Header.Published)
 	d.leasesMu.Lock()
 	defer d.leasesMu.Unlock()
-	if old, exists := d.leases[store.Key]; exists && old.version >= version {
-		if published && !old.published {
+	if old, exists := d.leases[store.Key]; exists && !leaseSetSupersedes(old, store.Type, version) {
+		if published && !old.published && old.typeID == store.Type {
 			old.published = true
 			d.leases[store.Key] = old
 		}
@@ -474,8 +488,8 @@ func (d *Database) storeEncryptedLeaseSet(store foundation.I2NPDatabaseStoreMess
 	version := uint64(parsed.Published)
 	d.leasesMu.Lock()
 	defer d.leasesMu.Unlock()
-	if old, exists := d.leases[store.Key]; exists && old.version >= version {
-		if published && !old.published {
+	if old, exists := d.leases[store.Key]; exists && !leaseSetSupersedes(old, store.Type, version) {
+		if published && !old.published && old.typeID == store.Type {
 			old.published = true
 			d.leases[store.Key] = old
 		}
