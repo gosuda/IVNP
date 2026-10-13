@@ -13,10 +13,10 @@ import (
 )
 
 var (
-	ErrStoreFlooderConfig = errors.New("netdb: invalid store flooder configuration")
+	ErrStoreFlooderConfig     = errors.New("netdb: invalid store flooder configuration")
 	ErrStoreFlooderFull       = errors.New("netdb: store flooder queue is full")
 	ErrStoreFlooderSourceFull = errors.New("netdb: store flooder source quota exceeded")
-	ErrStoreFlooderClosed = errors.New("netdb: store flooder is closed")
+	ErrStoreFlooderClosed     = errors.New("netdb: store flooder is closed")
 )
 
 const (
@@ -94,16 +94,16 @@ func NewStoreFlooder(config StoreFlooderConfig) (*StoreFlooder, error) {
 		return nil, ErrStoreFlooderConfig
 	}
 	return &StoreFlooder{
-		database:  config.Database,
-		sender:    config.Sender,
-		local:     config.Local,
-		now:       config.Now,
-		random:    config.Random,
-		logger:    config.Logger,
-		jobs:      make(chan storeFloodJob, storeFlooderQueue),
-		done:      make(chan struct{}),
-		recent:    make(map[[32]byte]uint64, storeFlooderRecentCapacity),
-		keyFloods: make(map[foundation.Hash]storeFloodCount, storeFlooderRecentCapacity),
+		database:   config.Database,
+		sender:     config.Sender,
+		local:      config.Local,
+		now:        config.Now,
+		random:     config.Random,
+		logger:     config.Logger,
+		jobs:       make(chan storeFloodJob, storeFlooderQueue),
+		done:       make(chan struct{}),
+		recent:     make(map[[32]byte]uint64, storeFlooderRecentCapacity),
+		keyFloods:  make(map[foundation.Hash]storeFloodCount, storeFlooderRecentCapacity),
 		sourceJobs: make(map[foundation.Hash]uint8),
 	}, nil
 }
