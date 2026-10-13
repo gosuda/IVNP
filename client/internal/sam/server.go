@@ -312,7 +312,7 @@ func (s *Server) serveConnection(raw net.Conn) (result error) {
 		_ = connection.writeLine("HELLO REPLY RESULT=NOVERSION")
 		return ErrProtocol
 	}
-	if err = connection.writeLine("HELLO REPLY RESULT=OK VERSION=3.3 IVNP_PREPARE=1"); err != nil {
+	if err = connection.writeLine("HELLO REPLY RESULT=OK VERSION=3.3 IVNP_PREPARE=1 IVNP_AUTH=1"); err != nil {
 		return err
 	}
 	_ = raw.SetReadDeadline(time.Time{})

@@ -135,7 +135,14 @@ func (s *Server) parseUDPPacket(wire []byte, source net.Addr) (udpPacket, bool) 
 	if len(parts) < 3 || !validUDPVersion(parts[0]) || !validID(parts[1]) || parts[2] == "" {
 		return udpPacket{}, false
 	}
-	session := s.session(parts[1])
+	auth := ""
+	for _, option := range parts[3:] {
+		key, value, ok := strings.Cut(option, "=")
+		if ok && key == "IVNP_AUTH" {
+			auth = value
+		}
+	}
+	session := s.authorizedSession(nil, parts[1], auth)
 	parseUDPPacketRejected := session == nil || (!isDatagramStyle(session.style) && session.style != styleRaw)
 	if !parseUDPPacketRejected {
 		parseUDPPacketRejected = !sameSourceIP(session.sourceIP, source)
@@ -151,6 +158,9 @@ func (s *Server) parseUDPPacket(wire []byte, source net.Addr) (udpPacket, bool) 
 			return udpPacket{}, false
 		}
 		seen[key] = true
+		if key == "IVNP_AUTH" {
+			continue
+		}
 		parsed, err := strconv.ParseUint(value, 10, 16)
 		if err != nil {
 			return udpPacket{}, false
