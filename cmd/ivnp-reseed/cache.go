@@ -28,6 +28,17 @@ func loadCachedSU3(path, signerID string, signingKey *rsa.PrivateKey) (ReseedPac
 	if signingKey == nil || signingKey.N == nil || signingKey.N.BitLen() != 4096 {
 		return ReseedPackage{}, ErrInvalidPrivateKey
 	}
+	// Reject links, devices, and FIFOs before opening: a FIFO open can block.
+	entry, err := os.Lstat(path)
+	if err != nil {
+		return ReseedPackage{}, fmt.Errorf("lstat cached SU3: %w", err)
+	}
+	if !entry.Mode().IsRegular() || entry.Size() == 0 {
+		return ReseedPackage{}, errCachedSU3InvalidFile
+	}
+	if entry.Size() > maxCachedSU3Bytes {
+		return ReseedPackage{}, errCachedSU3TooLarge
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return ReseedPackage{}, fmt.Errorf("open cached SU3: %w", err)
