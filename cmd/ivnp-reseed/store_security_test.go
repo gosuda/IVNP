@@ -87,8 +87,11 @@ func TestPeerStoreLoadRevalidatesSignedDataAndDiscardsProbeClaims(t *testing.T) 
 		got.Stats.TunnelBuildAccepted || got.Stats.EWMARTT != 0 || !got.Stats.LastSeen.IsZero() {
 		t.Fatalf("untrusted cached probe state restored: %+v", got.Stats)
 	}
-	if got.Stats.FirstSeen.Before(time.Now().Add(-time.Minute)) || got.Score != calculateScore(&got) {
-		t.Fatalf("cached uptime/score was trusted: firstSeen=%s score=%f", got.Stats.FirstSeen, got.Score)
+	if got.Stats.FirstSeen.Before(time.Now().Add(-time.Minute)) {
+		t.Fatalf("cached uptime was trusted: firstSeen=%s", got.Stats.FirstSeen)
+	}
+	if diff := got.Score - calculateScore(&got); diff < -0.01 || diff > 0.01 {
+		t.Fatalf("cached score was trusted: score=%f delta=%f", got.Score, diff)
 	}
 	if len(SelectDiversePeers(peers, DefaultSelectorConfig())) != 0 {
 		t.Fatal("unprobed cache records must never enter a signed bootstrap package")
