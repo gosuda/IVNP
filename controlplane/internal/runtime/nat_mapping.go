@@ -36,7 +36,9 @@ var (
 	errMappingSocketUnassignedPort = errors.New("daemon: mapping socket has no assigned port")
 	errNoNATPMPGatewayCandidates   = errors.New("daemon: no NAT-PMP gateway candidates")
 	errEmptyNATPMPMapping          = errors.New("daemon: NAT-PMP returned an empty mapping")
-	errUPnPPublicIPv4Unavailable   = errors.New("daemon: UPnP gateway did not report a public IPv4 address")
+	errUPnPPublicIPv4Unavailable   = errors.New("daemon: UPnP requires a configured public IPv4 address")
+	errUPnPPublicIPv4Mismatch      = errors.New("daemon: UPnP external address differs from the configured public IPv4")
+	errUPnPUntrustedResponder      = errors.New("daemon: UPnP responder is not on a local interface or changed its host")
 	errUPnPInternalAddressRejected = errors.New("daemon: transport listener does not accept the UPnP internal address")
 	errMappingInterfaceUnavailable = errors.New("daemon: cannot determine mapping interface")
 	errMappingInterfaceNotIPv4     = errors.New("daemon: mapping interface is not IPv4")
@@ -346,18 +348,22 @@ func (p *natMappingPublisher) mapNATPMP(ctx context.Context, client natPMPClient
 }
 
 func (p *natMappingPublisher) attemptUPnP(ctx context.Context, spec natMappingSpec, externalPort uint16) (*activeNATMapping, error) {
+	// An unauthenticated UPnP responder cannot establish our published address.
+	if !validPublicIPv4(spec.publicHint) {
+		return nil, errUPnPPublicIPv4Unavailable
+	}
 	gateway, err := p.upnpGateway(ctx)
 	if err != nil {
 		return nil, err
 	}
-	public := spec.publicHint
 	observed, err := p.upnp.ExternalAddress(ctx, gateway)
-	if err == nil && validPublicIPv4(observed) {
-		public = observed.Unmap()
+	if err != nil {
+		return nil, fmt.Errorf("daemon: read UPnP external address: %w", err)
 	}
-	if !validPublicIPv4(public) {
-		return nil, errUPnPPublicIPv4Unavailable
+	if !validPublicIPv4(observed) || observed.Unmap() != spec.publicHint.Unmap() {
+		return nil, errUPnPPublicIPv4Mismatch
 	}
+	public := spec.publicHint.Unmap()
 	internalIP, err := p.route(ctx, gateway.ControlURL.Hostname(), 80)
 	if err != nil {
 		return nil, err
@@ -403,11 +409,28 @@ func (p *natMappingPublisher) upnpGateway(ctx context.Context) (upnp.Gateway, er
 	if err != nil {
 		return upnp.Gateway{}, err
 	}
+	var prefixes []netip.Prefix
+	if len(responses) > 0 {
+		prefixes, err = p.prefixes()
+		if err != nil {
+			return upnp.Gateway{}, fmt.Errorf("daemon: read UPnP interface prefixes: %w", err)
+		}
+	}
 	var result error
 	for _, response := range responses {
+		if !validDiscoveredUPnP(response, prefixes) {
+			result = errors.Join(result, errUPnPUntrustedResponder)
+			continue
+		}
 		gateway, describeErr := p.upnp.Describe(ctx, response.Location)
 		if describeErr != nil {
 			result = errors.Join(result, describeErr)
+			continue
+		}
+		if gateway.Location == nil || gateway.ControlURL == nil ||
+			gateway.Location.Hostname() != response.Sender.String() ||
+			gateway.ControlURL.Hostname() != response.Sender.String() {
+			result = errors.Join(result, errUPnPUntrustedResponder)
 			continue
 		}
 		p.mu.Lock()
@@ -422,6 +445,25 @@ func (p *natMappingPublisher) upnpGateway(ctx context.Context) (upnp.Gateway, er
 		result = errUPnPDiscoveryUnavailable
 	}
 	return upnp.Gateway{}, result
+}
+
+// validDiscoveredUPnP confines unauthenticated SSDP peers to the local LAN.
+func validDiscoveredUPnP(response upnp.DiscoveryResponse, prefixes []netip.Prefix) bool {
+	sender := response.Sender.Unmap()
+	if response.Location == nil || !sender.Is4() || !sender.IsGlobalUnicast() ||
+		sender.IsLoopback() || sender.IsLinkLocalUnicast() {
+		return false
+	}
+	location, err := netip.ParseAddr(response.Location.Hostname())
+	if err != nil || location.Unmap() != sender {
+		return false
+	}
+	for _, prefix := range prefixes {
+		if prefix.Addr().Is4() && prefix.Addr().Unmap() != sender && prefix.Contains(sender) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *natMappingPublisher) maintain(ctx context.Context, spec natMappingSpec, current *activeNATMapping) {
