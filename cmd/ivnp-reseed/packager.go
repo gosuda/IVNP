@@ -268,7 +268,8 @@ func InspectSU3Archive(su3Data []byte, signerID string, publicKey *rsa.PublicKey
 		return 0, 0, errSU3NoRouterInfos
 	}
 
-	var totalBytes int64
+	// Reject oversized entries and totals before decompressing any contents.
+	var declaredBytes uint64
 	for _, f := range zr.File {
 		if f.FileInfo().IsDir() || !strings.HasPrefix(f.Name, "routerInfo-") ||
 			!strings.HasSuffix(f.Name, ".dat") || strings.ContainsAny(f.Name, "/\\") {
@@ -277,10 +278,14 @@ func InspectSU3Archive(su3Data []byte, signerID string, publicKey *rsa.PublicKey
 		if f.UncompressedSize64 > maxRouterInfoBytes {
 			return 0, 0, fmt.Errorf("%w: %q", errSU3EntryTooLarge, f.Name)
 		}
-		if totalBytes+int64(f.UncompressedSize64) > maxTotalRouterBytes {
+		if declaredBytes+f.UncompressedSize64 > maxTotalRouterBytes {
 			return 0, 0, errSU3TotalTooLarge
 		}
+		declaredBytes += f.UncompressedSize64
+	}
 
+	var totalBytes int64
+	for _, f := range zr.File {
 		rc, openErr := f.Open()
 		if openErr != nil {
 			return 0, 0, fmt.Errorf("open su3 zip entry %q: %w", f.Name, openErr)
