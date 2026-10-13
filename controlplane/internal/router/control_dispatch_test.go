@@ -444,7 +444,7 @@ func TestQueuedLookupStoreRemainsPrivateAfterRequestExpiry(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if err = responder.Enqueue(foundation.I2NPDatabaseLookupMessage{Key: key, From: foundation.Hash{9}, Flags: uint8(controlplanenetdb.LeaseSetLookup) << 2}); err != nil {
+	if err = responder.Enqueue(dataplane.RouterI2NPSource{}, foundation.I2NPDatabaseLookupMessage{Key: key, From: foundation.Hash{9}, Flags: uint8(controlplanenetdb.LeaseSetLookup) << 2}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -540,5 +540,38 @@ func TestControlDispatcherRejectsNegativeHandlerTimeout(t *testing.T) {
 			t.Error(closeErr)
 		}
 		t.Fatal("negative control handler timeout was accepted")
+	}
+}
+
+func TestControlDispatcherPreservesDatabaseLookupSource(t *testing.T) {
+	const now = uint64(2_000)
+	peer, key := foundation.Hash{7}, foundation.Hash{8}
+	var received dataplane.RouterI2NPSource
+	called := false
+	service, control := newControlServiceForTest(t, nil, ControlSinks{
+		DatabaseLookup: func(source dataplane.RouterI2NPSource, lookup foundation.I2NPDatabaseLookupMessage) error {
+			called = true
+			received = source
+			if lookup.Key != key || lookup.From != peer {
+				t.Errorf("lookup payload changed: %#v", lookup)
+			}
+			return nil
+		},
+	})
+	payload := make([]byte, 67)
+	copy(payload[:32], key[:])
+	copy(payload[32:64], peer[:])
+	message := foundation.I2NPMessage{
+		Header: foundation.I2NPHeader{Type: foundation.I2NPDatabaseLookup, ID: 10, Expiration: now + 1_000},
+		Payload: payload,
+	}
+	if err := service.HandleI2NPFrom(peer, message, now, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.WaitIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !called || received != (dataplane.RouterI2NPSource{Peer: peer, Direct: true}) {
+		t.Fatalf("lookup lost authenticated source: called=%t source=%#v", called, received)
 	}
 }
