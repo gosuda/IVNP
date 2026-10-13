@@ -251,6 +251,7 @@ func validProbeEndpoint(endpoint netip.AddrPort) bool {
 	ip := endpoint.Addr().Unmap()
 	return !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsLinkLocalUnicast()
 }
+
 func (p *Prober) ProbeSingle(ctx context.Context, hash foundation.Hash) (bool, time.Duration) {
 	peers := p.store.Snapshot()
 	for _, rec := range peers {
