@@ -30,15 +30,15 @@ const (
 )
 
 var (
-	ErrInvalidPrivateKey = errors.New("packager: invalid private key")
-	ErrInvalidSignerID   = errors.New("packager: invalid signer ID length")
-	ErrInvalidSignature  = errors.New("packager: invalid archive signature")
-	errSU3TooShort       = errors.New("packager: su3 archive too short")
-	errInvalidSU3Magic   = errors.New("packager: invalid su3 magic")
-	errInvalidSU3Bounds        = errors.New("packager: invalid su3 content bounds")
-	errSU3TooManyEntries       = errors.New("packager: too many su3 zip entries")
+	ErrInvalidPrivateKey        = errors.New("packager: invalid private key")
+	ErrInvalidSignerID          = errors.New("packager: invalid signer ID length")
+	ErrInvalidSignature         = errors.New("packager: invalid archive signature")
+	errSU3TooShort              = errors.New("packager: su3 archive too short")
+	errInvalidSU3Magic          = errors.New("packager: invalid su3 magic")
+	errInvalidSU3Bounds         = errors.New("packager: invalid su3 content bounds")
+	errSU3TooManyEntries        = errors.New("packager: too many su3 zip entries")
 	errSU3InvalidRouterInfoSize = errors.New("packager: invalid router info size")
-	errSU3NoRouterInfos        = errors.New("packager: su3 zip contains no router infos")
+	errSU3NoRouterInfos         = errors.New("packager: su3 zip contains no router infos")
 )
 
 // BuildSU3 builds a signed standard I2P SU3 reseed container containing a ZIP archive of routerInfos.
