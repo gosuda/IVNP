@@ -143,6 +143,14 @@ func (d *ControlDispatcher) HandleControl(ctx context.Context, incoming dataplan
 		if err != nil {
 			return err
 		}
+		// A direct connection authenticates the sending router, not the
+		// sender claimed by the DatabaseSearchReply payload. Drop mismatches
+		// before they can affect pending lookups or responder profiles.
+		// Tunnel-delivered replies have no authenticated router origin here;
+		// they retain the request manager's pending-peer correlation checks.
+		if incoming.Source.Direct && (incoming.Source.Peer == (foundation.Hash{}) || incoming.Source.Peer != reply.From) {
+			return nil
+		}
 		return d.sinks.DatabaseSearchReply(ctx, reply)
 	case foundation.I2NPDeliveryStatus:
 		status, err := foundation.I2NPParseDeliveryStatus(message.Payload)
