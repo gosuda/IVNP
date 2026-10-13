@@ -192,7 +192,11 @@ func (s *WebUIServer) updateConfig(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "cannot read configuration")
 		return
 	}
-	nextText := updateINI(string(current), updates)
+	nextText, err := updateINI(string(current), updates)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	nextConfig, err := state.ConfigurationParseOperating(nextText, s.config.ConfigPath)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
@@ -291,7 +295,12 @@ func configINIUpdates(request webUIConfigUpdate, current state.ConfigurationOper
 	}
 }
 
-func updateINI(text string, updates []iniUpdate) string {
+func updateINI(text string, updates []iniUpdate) (string, error) {
+	for _, update := range updates {
+		if strings.ContainsAny(update.value, "\r\n\x00") {
+			return "", fmt.Errorf("invalid configuration value: %s.%s contains a line break or NUL", update.section, update.key)
+		}
+	}
 	bySection := make(map[string][]iniUpdate)
 	sectionOrder := make([]string, 0)
 	for _, update := range updates {
@@ -336,7 +345,7 @@ func updateINI(text string, updates []iniUpdate) string {
 		output = append(output, "["+section+"]")
 		output = appendMissingINI(output, section, bySection, seenKeys)
 	}
-	return strings.Join(output, "\n") + "\n"
+	return strings.Join(output, "\n") + "\n", nil
 }
 
 func iniSection(line string) (string, bool) {
