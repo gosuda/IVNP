@@ -128,7 +128,7 @@ func createTestRouterInfoWithEndpoint(t *testing.T, seed []byte, caps, host, por
 
 func TestPeerStoreAndScoring(t *testing.T) {
 	store := NewPeerStore()
-	info, raw := createTestRouterInfo(t, "f")
+	info, raw := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{0x42}, 64), "f", "198.51.100.17", "23456", "", uint64(time.Now().UnixMilli()))
 
 	rec, isNew := store.AddOrUpdate(info, raw)
 	if !isNew {
@@ -161,7 +161,7 @@ func TestPeerStoreAndScoring(t *testing.T) {
 	}
 
 	store2 := NewPeerStore()
-	if err := store2.LoadFromFile(tmpFile); err != nil {
+	if err := store2.LoadFromFile(tmpFile, 2); err != nil {
 		t.Fatalf("LoadFromFile: %v", err)
 	}
 	if store2.Len() != 1 {

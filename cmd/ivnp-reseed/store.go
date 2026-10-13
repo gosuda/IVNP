@@ -5,6 +5,8 @@ import (
 	"cmp"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"slices"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/state"
 )
 
 // PeerStore provides thread-safe, memory-bounded peer indexing and snapshot persistence.
@@ -583,52 +586,160 @@ func (s *PeerStore) Snapshot() []PeerRecord {
 	return result
 }
 
+const maxPeerCacheBytes int64 = 64 << 20
+
+var (
+	errInvalidPeerCache  = errors.New("reseed: invalid peer cache")
+	errPeerCacheOverflow = errors.New("reseed: peer cache exceeds configured peer count")
+)
+
+type peerCacheEntry struct {
+	Raw []byte `json:"raw"`
+}
+
+// SaveToFile persists only wire bytes; cached observations are not proof of reachability.
 func (s *PeerStore) SaveToFile(filePath string) error {
 	s.mu.RLock()
-	records := make([]*PeerRecord, 0, len(s.peers))
+	records := make([]peerCacheEntry, 0, len(s.peers))
 	for _, rec := range s.peers {
-		records = append(records, rec)
+		records = append(records, peerCacheEntry{Raw: rec.Raw})
 	}
 	s.mu.RUnlock()
 
 	data, err := json.MarshalIndent(records, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal peer cache: %w", err)
 	}
-	return writeFileAtomic(filePath, data, 0600)
+	return state.FilesystemStoreWriteAtomic(filePath, data, 0o600, int(maxPeerCacheBytes))
 }
 
-func (s *PeerStore) LoadFromFile(filePath string) error {
-	data, err := os.ReadFile(filePath)
+// LoadFromFile treats the persistent cache as untrusted, regardless of file ownership.
+// It validates every RouterInfo before atomically admitting any peer. Previous probe
+// results are not restored; each peer must be observed again to become selectable.
+func (s *PeerStore) LoadFromFile(filePath string, networkID uint32) error {
+	if networkID > 255 {
+		return fmt.Errorf("%w: invalid network ID %d", errInvalidPeerCache, networkID)
+	}
+	file, _, err := state.FilesystemStoreOpenRegular(filePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
+		return fmt.Errorf("open peer cache: %w", err)
+	}
+	defer file.Close()
+
+	if err := state.FilesystemStoreValidatePrivateAccess(file); err != nil {
+		return fmt.Errorf("validate peer cache ownership and permissions: %w", err)
+	}
+	data, err := state.FilesystemStoreReadBoundedFile(file, maxPeerCacheBytes)
+	if err != nil {
+		return fmt.Errorf("read peer cache: %w", err)
 	}
 
-	var loaded []*PeerRecord
-	if err := json.Unmarshal(data, &loaded); err != nil {
-		return err
+	s.mu.RLock()
+	limit := s.maxPeers
+	s.mu.RUnlock()
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('[') {
+		return fmt.Errorf("%w: expected JSON array", errInvalidPeerCache)
+	}
+	now := time.Now()
+	nowMillis := uint64(now.UnixMilli())
+	cfg := DefaultSelectorConfig()
+	maxAgeMillis := uint64(cfg.MaxInfoAge.Milliseconds())
+	maxFutureMillis := uint64(cfg.MaxInfoFuture.Milliseconds())
+	verified := make(map[foundation.Hash]*PeerRecord)
+	count := 0
+	for decoder.More() {
+		if count >= limit {
+			return errPeerCacheOverflow
+		}
+		count++
+		var entry peerCacheEntry
+		if err := decoder.Decode(&entry); err != nil {
+			return fmt.Errorf("%w: decode record %d: %v", errInvalidPeerCache, count, err)
+		}
+		if len(entry.Raw) == 0 || len(entry.Raw) > foundation.NetworkDatabaseMaxRouterInfoBytes {
+			return fmt.Errorf("%w: invalid RouterInfo size in record %d", errInvalidPeerCache, count)
+		}
+		info, err := foundation.NetworkDatabaseParseRouterInfo(entry.Raw)
+		if err != nil {
+			return fmt.Errorf("%w: parse record %d: %v", errInvalidPeerCache, count, err)
+		}
+		valid, err := info.Verify()
+		if err != nil {
+			return fmt.Errorf("%w: verify record %d: %v", errInvalidPeerCache, count, err)
+		}
+		if !valid {
+			return fmt.Errorf("%w: invalid signature in record %d", errInvalidPeerCache, count)
+		}
+		id, err := foundation.NetworkDatabaseNetID(info)
+		if err != nil || id != networkID {
+			return fmt.Errorf("%w: network mismatch in record %d", errInvalidPeerCache, count)
+		}
+		if info.Published > nowMillis {
+			if info.Published-nowMillis > maxFutureMillis {
+				return fmt.Errorf("%w: future RouterInfo in record %d", errInvalidPeerCache, count)
+			}
+		} else if nowMillis-info.Published > maxAgeMillis {
+			return fmt.Errorf("%w: stale RouterInfo in record %d", errInvalidPeerCache, count)
+		}
+
+		contact := extractRouterAddresses(info)
+		rec := &PeerRecord{
+			Hash:        info.Hash(),
+			Raw:         entry.Raw,
+			PublishedAt: time.UnixMilli(int64(info.Published)),
+			Family:      contact.family,
+			IsFloodfill: foundation.NetworkDatabaseIsFloodfill(info),
+			IPv4:        contact.ipv4,
+			IPv6:        contact.ipv6,
+			Ports:       contact.ports,
+			TCPPorts:    contact.tcpPorts,
+			UDPPorts:    contact.udpPorts,
+			HasNTCP2:    contact.ntcp2,
+			HasSSU2:     contact.ssu2,
+			Stats:       PeerStats{FirstSeen: now},
+		}
+		rec.Score = calculateScore(rec)
+		if prior, found := verified[rec.Hash]; !found || rec.PublishedAt.After(prior.PublishedAt) {
+			verified[rec.Hash] = rec
+		}
+	}
+	end, err := decoder.Token()
+	if err != nil || end != json.Delim(']') {
+		return fmt.Errorf("%w: malformed JSON array", errInvalidPeerCache)
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("%w: trailing JSON content", errInvalidPeerCache)
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, rec := range loaded {
-		if rec.Stats.FirstSeen.IsZero() {
-			rec.Stats.FirstSeen = rec.Stats.LastSeen
+	additional := 0
+	for hash := range verified {
+		if hash == s.localHash && s.localHash != (foundation.Hash{}) {
+			continue
 		}
-		if !rec.HasNTCP2 && !rec.HasSSU2 && len(rec.Raw) > 0 {
-			if info, err := foundation.NetworkDatabaseParseRouterInfo(rec.Raw); err == nil {
-				contact := extractRouterAddresses(info)
-				rec.HasNTCP2 = contact.ntcp2
-				rec.HasSSU2 = contact.ssu2
-			}
+		if _, found := s.peers[hash]; !found {
+			additional++
 		}
-		if prev, found := s.peers[rec.Hash]; found {
-			s.deindexPeerLocked(prev)
+	}
+	if additional > s.maxPeers-len(s.peers) {
+		return errPeerCacheOverflow
+	}
+	for hash, rec := range verified {
+		if hash == s.localHash && s.localHash != (foundation.Hash{}) {
+			continue
 		}
-		s.peers[rec.Hash] = rec
+		if _, found := s.peers[hash]; found {
+			continue
+		}
+		s.peers[hash] = rec
 		s.indexPeerLocked(rec)
 	}
 	return nil

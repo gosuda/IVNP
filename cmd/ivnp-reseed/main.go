@@ -94,6 +94,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if *netID > 255 {
+		logger.Error("invalid network ID", "netid", *netID)
+		return 2
+	}
 
 	cachePath := cmp.Or(*peersFile, filepath.Join(*dataDir, "reseed-peers.json"))
 	su3Path := filepath.Join(*dataDir, "i2pseeds.su3")
@@ -111,7 +115,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	store := NewPeerStore()
 	if cachePath != "" {
-		if loadErr := store.LoadFromFile(cachePath); loadErr != nil {
+		if loadErr := store.LoadFromFile(cachePath, uint32(*netID)); loadErr != nil {
 			logger.Warn("failed to load peer cache file", "path", cachePath, "error", loadErr)
 		} else {
 			logger.Info("loaded peer cache", "peers", store.Len(), "path", cachePath)

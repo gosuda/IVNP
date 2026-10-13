@@ -182,7 +182,9 @@ Usage of ivnp-reseed:
 
 When a seed phrase is supplied, the same RSA-4096 key is reproduced on every restart and the phrase itself is the only backup needed — no private key is ever written to disk. Without a phrase an ephemeral random key is generated on each startup, so the signer identity changes and downstream routers must fetch the new certificate. Changing the phrase rotates the key.
 
-State files (`reseed-peers.json`, `i2pseeds.su3`, `reseed-rsa.crt`, `reseed-rsa.pub.pem`) are written through an atomic `path.tmp` + rename step so a crash never leaves a half-written file; any leftover `.tmp` files are deleted at startup before state is loaded.
+Persistent peer cache snapshots now contain only RouterInfo wire bytes. Loading them requires an owner-private, regular file, enforces a 64 MiB file and 5,000-entry limit, verifies signatures, network IDs and freshness, and derives all peer metadata anew. Cached reachability and probe scores are discarded until live probing confirms a peer.
+
+State files (`reseed-peers.json`, `i2pseeds.su3`, `reseed-rsa.crt`, `reseed-rsa.pub.pem`) are replaced atomically so a crash never exposes a partially written file; leftover legacy `.tmp` files are removed at startup.
 
 ---
 
