@@ -176,6 +176,9 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 					return
 				}
 				success, rtt := p.probePeer(ctx, rec)
+				if ctx.Err() != nil {
+					return
+				}
 				p.store.RecordProbeResult(rec.Hash, success, rtt)
 				if success {
 					successCount.Store(rec.Hash, struct{}{})
@@ -258,7 +261,9 @@ func (p *Prober) ProbeSingle(ctx context.Context, hash foundation.Hash) (bool, t
 	for _, rec := range peers {
 		if rec.Hash == hash {
 			success, rtt := p.probePeer(ctx, rec)
-			p.store.RecordProbeResult(hash, success, rtt)
+			if ctx.Err() == nil {
+				p.store.RecordProbeResult(hash, success, rtt)
+			}
 			return success, rtt
 		}
 	}
