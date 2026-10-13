@@ -12,11 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path"
 	"slices"
 	"strings"
 	"time"
 
+	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/foundation"
 )
 
@@ -26,6 +26,10 @@ const (
 	su3MinimumVersion    = 16
 	su3FileTypeZIP       = 0
 	su3ContentTypeReseed = 3
+	maxCachedSU3Bytes     = 16 << 20
+	maxCachedRouterInfos  = controlplane.ReseedDefaultMaxRouterInfos
+	maxRouterInfoBytes    = 64 << 10
+	maxTotalRouterBytes   = controlplane.ReseedDefaultMaxTotalRouterBytes
 )
 
 var (
@@ -33,8 +37,13 @@ var (
 	ErrInvalidSignerID   = errors.New("packager: invalid signer ID length")
 	ErrInvalidSignature  = errors.New("packager: invalid archive signature")
 	errSU3TooShort       = errors.New("packager: su3 archive too short")
-	errInvalidSU3Magic   = errors.New("packager: invalid su3 magic")
-	errInvalidSU3Bounds  = errors.New("packager: invalid su3 content bounds")
+	errCachedSU3TooLarge    = errors.New("packager: cached su3 exceeds size limit")
+	errInvalidSU3PublicKey  = errors.New("packager: invalid su3 public key")
+	errSU3TooManyEntries   = errors.New("packager: too many su3 zip entries")
+	errSU3EntryTooLarge    = errors.New("packager: su3 zip entry exceeds size limit")
+	errSU3TotalTooLarge    = errors.New("packager: total su3 router info bytes exceed limit")
+	errSU3UnexpectedEntry  = errors.New("packager: unexpected su3 zip entry")
+	errSU3NoRouterInfos    = errors.New("packager: su3 zip contains no router infos")
 )
 
 // BuildSU3 builds a signed standard I2P SU3 reseed container containing a ZIP archive of routerInfos.
@@ -222,52 +231,83 @@ func CalculatePackageStats(peers []PeerRecord, su3SizeBytes int, etag string, ge
 	return stats
 }
 
-// InspectSU3Archive inspects an SU3 container and counts valid RouterInfos and floodfills within.
-func InspectSU3Archive(su3Data []byte) (peerCount int, floodfillCount int, err error) {
+// InspectSU3Archive verifies the expected signer before inspecting a bounded ZIP
+// payload. Any invalid entry rejects the entire archive.
+func InspectSU3Archive(su3Data []byte, signerID string, publicKey *rsa.PublicKey) (peerCount int, floodfillCount int, err error) {
 	if len(su3Data) < su3HeaderLen+su3RSASignatureLen {
 		return 0, 0, errSU3TooShort
 	}
-	if !bytes.Equal(su3Data[:7], []byte{'I', '2', 'P', 's', 'u', '3', 0}) {
-		return 0, 0, errInvalidSU3Magic
+	if len(su3Data) > maxCachedSU3Bytes {
+		return 0, 0, errCachedSU3TooLarge
 	}
-	versionLen := int(su3Data[13])
-	signerLen := int(su3Data[15])
-	contentLen := int(binary.BigEndian.Uint64(su3Data[16:24]))
-
-	zipStart := su3HeaderLen + versionLen + signerLen
-	zipEnd := zipStart + contentLen
-	if zipStart > len(su3Data) || zipEnd > len(su3Data)-su3RSASignatureLen || zipStart >= zipEnd {
-		return 0, 0, errInvalidSU3Bounds
+	if publicKey == nil || publicKey.N == nil || publicKey.N.BitLen() != 4096 || publicKey.E != 65537 {
+		return 0, 0, errInvalidSU3PublicKey
+	}
+	if len(signerID) == 0 || len(signerID) > 255 {
+		return 0, 0, ErrInvalidSignerID
 	}
 
-	zipBytes := su3Data[zipStart:zipEnd]
+	zipBytes, err := controlplane.ReseedVerifySU3(su3Data, map[string]controlplane.ReseedSU3Signer{
+		signerID: {
+			SigningType: foundation.SigningRSASHA512_4096,
+			PublicKey:   publicKey.N.FillBytes(make([]byte, su3RSASignatureLen)),
+		},
+	}, maxCachedSU3Bytes)
+	if err != nil {
+		return 0, 0, fmt.Errorf("verify su3 signature: %w", err)
+	}
+
 	zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
 	if err != nil {
 		return 0, 0, fmt.Errorf("read su3 zip payload: %w", err)
 	}
+	if len(zr.File) > maxCachedRouterInfos {
+		return 0, 0, errSU3TooManyEntries
+	}
+	if len(zr.File) == 0 {
+		return 0, 0, errSU3NoRouterInfos
+	}
 
+	var totalBytes int64
 	for _, f := range zr.File {
-		if f.FileInfo().IsDir() {
-			continue
+		if f.FileInfo().IsDir() || !strings.HasPrefix(f.Name, "routerInfo-") ||
+			!strings.HasSuffix(f.Name, ".dat") || strings.ContainsAny(f.Name, "/\\") {
+			return 0, 0, fmt.Errorf("%w: %q", errSU3UnexpectedEntry, f.Name)
 		}
-		baseName := path.Base(f.Name)
-		if !strings.HasPrefix(baseName, "routerInfo-") || !strings.HasSuffix(baseName, ".dat") {
-			continue
+		if f.UncompressedSize64 > maxRouterInfoBytes {
+			return 0, 0, fmt.Errorf("%w: %q", errSU3EntryTooLarge, f.Name)
 		}
-		peerCount++
+		if totalBytes+int64(f.UncompressedSize64) > maxTotalRouterBytes {
+			return 0, 0, errSU3TotalTooLarge
+		}
+
 		rc, openErr := f.Open()
 		if openErr != nil {
-			continue
+			return 0, 0, fmt.Errorf("open su3 zip entry %q: %w", f.Name, openErr)
 		}
-		raw, readErr := io.ReadAll(rc)
-		_ = rc.Close()
+		raw, readErr := io.ReadAll(io.LimitReader(rc, maxRouterInfoBytes+1))
+		closeErr := rc.Close()
 		if readErr != nil {
-			continue
+			return 0, 0, fmt.Errorf("read su3 zip entry %q: %w", f.Name, readErr)
 		}
-		if info, parseErr := foundation.NetworkDatabaseParseRouterInfo(raw); parseErr == nil {
-			if foundation.NetworkDatabaseIsFloodfill(info) {
-				floodfillCount++
-			}
+		if closeErr != nil {
+			return 0, 0, fmt.Errorf("close su3 zip entry %q: %w", f.Name, closeErr)
+		}
+		if len(raw) > maxRouterInfoBytes {
+			return 0, 0, fmt.Errorf("%w: %q", errSU3EntryTooLarge, f.Name)
+		}
+		totalBytes += int64(len(raw))
+		if totalBytes > maxTotalRouterBytes {
+			return 0, 0, errSU3TotalTooLarge
+		}
+
+		info, parseErr := foundation.NetworkDatabaseParseRouterInfo(raw)
+		if parseErr != nil {
+			return 0, 0, fmt.Errorf("parse su3 router info %q: %w", f.Name, parseErr)
+		}
+		peerCount++
+		if foundation.NetworkDatabaseIsFloodfill(info) {
+			floodfillCount++
 		}
 	}
 	return peerCount, floodfillCount, nil
