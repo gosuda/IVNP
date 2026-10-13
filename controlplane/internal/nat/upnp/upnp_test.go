@@ -3,6 +3,7 @@ package upnp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -65,6 +66,12 @@ func TestDiscoverWithConnReceivesLocalPacket(t *testing.T) {
 			served <- errors.New("missing M-SEARCH request")
 			return
 		}
+		// The response sender cannot redirect our HTTP client to another IP.
+		_, err = server.WriteToUDP([]byte("HTTP/1.1 200 OK\r\nLOCATION: http://127.0.0.2/metadata\r\nST: "+InternetGatewayDevice+"\r\nUSN: uuid:forged\r\n\r\n"), sender)
+		if err != nil {
+			served <- err
+			return
+		}
 		_, err = server.WriteToUDP([]byte("HTTP/1.1 200 OK\r\nLOCATION: http://127.0.0.1/igd.xml\r\nST: "+InternetGatewayDevice+"\r\nUSN: uuid:test\r\n\r\n"), sender)
 		served <- err
 	}()
@@ -76,8 +83,8 @@ func TestDiscoverWithConnReceivesLocalPacket(t *testing.T) {
 	if err := <-served; err != nil {
 		t.Fatal(err)
 	}
-	if len(responses) != 1 || responses[0].USN != "uuid:test" {
-		t.Fatalf("DiscoverWithConn() = %#v, want one test response", responses)
+	if len(responses) != 1 || responses[0].USN != "uuid:test" || responses[0].Sender.String() != "127.0.0.1" {
+		t.Fatalf("DiscoverWithConn() = %#v, want only the matching sender", responses)
 	}
 }
 
@@ -151,6 +158,72 @@ func TestDescriptionAndSOAPMapping(t *testing.T) {
 	mu.Unlock()
 	if !deletionWasRequested {
 		t.Fatal("DeletePortMapping request was not sent")
+	}
+}
+
+
+func TestDescribeRejectsCrossHostReferencesAndRedirects(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		t.Error("unexpected HTTP request to redirected destination")
+	}))
+	defer target.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		const service = "<device><serviceList><service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>"
+		switch request.URL.Path {
+		case "/base":
+			_, _ = fmt.Fprint(writer, "<root><URLBase>http://127.0.0.2/</URLBase>"+service+"<controlURL>control</controlURL></service></serviceList></device></root>")
+		case "/control":
+			_, _ = fmt.Fprint(writer, "<root>"+service+"<controlURL>http://127.0.0.2/control</controlURL></service></serviceList></device></root>")
+		case "/redirect":
+			http.Redirect(writer, request, target.URL+"/internal", http.StatusFound)
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	for _, test := range []struct {
+		path string
+		want string
+	}{
+		{"/base", "URLBase changes gateway host"},
+		{"/control", "control URL changes gateway host"},
+		{"/redirect", "HTTP 302"},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			location, err := url.Parse(server.URL + test.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = (&Client{HTTPClient: server.Client()}).Describe(context.Background(), location)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Describe() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestSOAPRedirectCannotChangeDestination(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		t.Error("unexpected SOAP request at redirect target")
+	}))
+	defer target.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, target.URL+"/soap", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+
+	control, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (&Client{HTTPClient: server.Client()}).ExternalAddress(context.Background(), Gateway{
+		ControlURL: control, ServiceType: "urn:schemas-upnp-org:service:WANIPConnection:1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 307") {
+		t.Fatalf("ExternalAddress() error = %v, want rejection of HTTP redirect", err)
 	}
 }
 
