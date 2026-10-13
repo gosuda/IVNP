@@ -278,7 +278,7 @@ func (p *HTTPProxy) forwardOutproxyConnect(w http.ResponseWriter, request *http.
 		return
 	}
 	outproxyReader := bufio.NewReader(outbound)
-	response, err := http.ReadResponse(outproxyReader, request)
+	response, outproxyReader, err := readBoundedHTTPResponse(outproxyReader, request, p.config.MaxHeaderBytes)
 	if err != nil {
 		rejectHTTP(w, request, "I2P outproxy unavailable", http.StatusBadGateway)
 		return
@@ -356,7 +356,7 @@ func (p *HTTPProxy) exchangeHTTP(w http.ResponseWriter, request *http.Request, o
 		rejectHTTP(w, request, "I2P destination unavailable", http.StatusBadGateway)
 		return
 	}
-	response, err := http.ReadResponse(bufio.NewReader(outbound), request)
+	response, _, err := readBoundedHTTPResponse(bufio.NewReader(outbound), request, p.config.MaxHeaderBytes)
 	if err != nil {
 		rejectHTTP(w, request, "I2P destination unavailable", http.StatusBadGateway)
 		return
