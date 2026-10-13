@@ -36,7 +36,7 @@ func TestSessionStartReceiverCloseConcurrentRace(t *testing.T) {
 		}
 		pipeA, pipeB := net.Pipe()
 		control := &serverConnection{Conn: pipeA}
-		session := newRootSession(server, "test", styleDatagram, endpoint, control, 0, 0, 0, 0, 0, false, nil, nil)
+		session := newRootSession(server, "test", styleDatagram, endpoint, control, 0, 0, 0, 0, 0, false, nil, nil, [samAuthBytes]byte{})
 		if err := server.addRoot(session); err != nil {
 			t.Fatal(err)
 		}
