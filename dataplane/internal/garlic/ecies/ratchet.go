@@ -749,6 +749,17 @@ func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, 
 // Sessions return an uninstalled Candidate which the caller must commit or
 // discard; Receive never evicts live session capacity for that candidate.
 func (m *RatchetManager) Receive(dst, replyDst, packet []byte, now uint64) (RatchetResult, error) {
+	return m.receive(dst, replyDst, packet, now, false)
+}
+
+// ReceiveTagged only accepts registered Existing Session or New Session Reply
+// tags. An unknown or concurrently consumed tag never invokes New Session
+// public-key cryptography.
+func (m *RatchetManager) ReceiveTagged(dst, replyDst, packet []byte, now uint64) (RatchetResult, error) {
+	return m.receive(dst, replyDst, packet, now, true)
+}
+
+func (m *RatchetManager) receive(dst, replyDst, packet []byte, now uint64, taggedOnly bool) (RatchetResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.checkLocked(now); err != nil {
@@ -781,6 +792,9 @@ func (m *RatchetManager) Receive(dst, replyDst, packet []byte, now uint64) (Ratc
 			}
 		}
 		return result, err
+	}
+	if taggedOnly {
+		return RatchetResult{}, ErrRatchetNoSession
 	}
 	result, err := m.receiveNewLocked(dst, replyDst, packet, now)
 	if err == nil {
