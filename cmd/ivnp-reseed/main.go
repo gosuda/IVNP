@@ -157,19 +157,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// initial crawl pass so /health answers while startup work is running.
 	var httpServers []*http.Server
 	if !*runOnce {
+		permits := make(chan struct{}, maxReseedHTTPConnections)
 		for _, raw := range strings.Split(*listenAddr, ",") {
 			addr := strings.TrimSpace(raw)
 			if addr == "" {
 				continue
 			}
-			srv := &http.Server{
-				Addr:    addr,
-				Handler: server,
-			}
+			srv := newReseedHTTPServer(addr, server)
 			httpServers = append(httpServers, srv)
 			go func(s *http.Server) {
 				logger.Info("starting reseed HTTP server", "listen", s.Addr)
-				if srvErr := s.ListenAndServe(); srvErr != nil && srvErr != http.ErrServerClosed {
+				if srvErr := serveReseedHTTP(s, permits); srvErr != nil && !errors.Is(srvErr, http.ErrServerClosed) {
 					logger.Error("HTTP server failed", "listen", s.Addr, "error", srvErr)
 				}
 			}(srv)
