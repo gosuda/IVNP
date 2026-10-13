@@ -146,6 +146,7 @@ func createTestRouterInfoWithEndpoints(t *testing.T, seed []byte, caps string, e
 	}
 	return info, wire
 }
+
 func TestPeerStoreAndScoring(t *testing.T) {
 	store := NewPeerStore()
 	info, raw := createTestRouterInfo(t, "f")
