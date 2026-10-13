@@ -12,12 +12,13 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/state"
 )
 
 func writePeerCacheFixture(t *testing.T, data []byte) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "peers.json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := state.FilesystemStoreWriteAtomic(path, data, 0o600, -1); err != nil {
 		t.Fatal(err)
 	}
 	return path
