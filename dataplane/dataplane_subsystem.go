@@ -428,6 +428,7 @@ var (
 	RouterErrExpired                            = router.ErrExpired
 	RouterErrFutureExpiration                   = router.ErrFutureExpiration
 	RouterErrGarlicDestination                  = router.ErrGarlicDestination
+	RouterErrGarlicCryptoBudget                 = router.ErrGarlicCryptoBudget
 	RouterErrGarlicPacket                       = router.ErrGarlicPacket
 	RouterErrLeaseSetExpired                    = router.ErrLeaseSetExpired
 	RouterErrLeaseSetUnavailable                = router.ErrLeaseSetUnavailable
