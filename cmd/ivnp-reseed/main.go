@@ -17,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/pprof"
 	"net/netip"
@@ -157,22 +158,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// initial crawl pass so /health answers while startup work is running.
 	var httpServers []*http.Server
 	if !*runOnce {
+		connectionSlots := make(chan struct{}, reseedMaxConnections)
 		for _, raw := range strings.Split(*listenAddr, ",") {
 			addr := strings.TrimSpace(raw)
 			if addr == "" {
 				continue
 			}
-			srv := &http.Server{
-				Addr:    addr,
-				Handler: server,
+			listener, listenErr := net.Listen("tcp", addr)
+			if listenErr != nil {
+				logger.Error("failed to bind reseed HTTP listener", "listen", addr, "error", listenErr)
+				continue
 			}
+			srv := newReseedHTTPServer(addr, server)
 			httpServers = append(httpServers, srv)
-			go func(s *http.Server) {
+			go func(s *http.Server, l net.Listener) {
 				logger.Info("starting reseed HTTP server", "listen", s.Addr)
-				if srvErr := s.ListenAndServe(); srvErr != nil && srvErr != http.ErrServerClosed {
+				if srvErr := s.Serve(newReseedLimitedListener(l, connectionSlots)); srvErr != nil && !errors.Is(srvErr, http.ErrServerClosed) {
 					logger.Error("HTTP server failed", "listen", s.Addr, "error", srvErr)
 				}
-			}(srv)
+			}(srv, listener)
 		}
 	}
 
