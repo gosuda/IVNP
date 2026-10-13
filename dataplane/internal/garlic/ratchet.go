@@ -277,12 +277,36 @@ func (m *RatchetManager) EncryptExistingWithScratch(dst, plain []byte, peer foun
 	return shard.EncryptExistingWithScratch(dst, plain, peer, payload, options, now)
 }
 
+// HasReceiveTag checks the destination's live Existing Session and New
+// Session Reply tags without attempting any cryptography.
+func (m *RatchetManager) HasReceiveTag(packet []byte) bool {
+	if m == nil || len(packet) < 8 {
+		return false
+	}
+	var tag dataplanegarlicecies.SessionTag
+	copy(tag[:], packet[:8])
+	m.tagMu.RLock()
+	_, exists := m.tagRoutes[tag]
+	m.tagMu.RUnlock()
+	return exists
+}
+
 func (m *RatchetManager) Receive(dst, replyDst, packet []byte, now uint64) (RatchetResult, error) {
 	if m == nil || len(m.shards) == 0 {
 		return RatchetResult{}, ErrRatchetClosed
 	}
 	_, shard := m.packetShard(packet)
 	return shard.Receive(dst, replyDst, packet, now)
+}
+
+// ReceiveTagged fails closed if a live tag disappears after HasReceiveTag.
+// It never attempts unauthenticated New Session cryptography.
+func (m *RatchetManager) ReceiveTagged(dst, replyDst, packet []byte, now uint64) (RatchetResult, error) {
+	if m == nil || len(m.shards) == 0 {
+		return RatchetResult{}, ErrRatchetClosed
+	}
+	_, shard := m.packetShard(packet)
+	return shard.ReceiveTagged(dst, replyDst, packet, now)
 }
 
 func (m *RatchetManager) ReleaseSensitive() {

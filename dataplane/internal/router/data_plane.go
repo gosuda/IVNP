@@ -84,6 +84,7 @@ type GarlicReceiver struct {
 	staticPrivate  [32]byte
 	hasStatic      bool
 	replyScratch   *sync.Pool
+	preauth        garlicPreauthAdmission
 }
 
 func (r *GarlicReceiver) MatchesService(service *Service) bool {
@@ -180,7 +181,7 @@ func NewGarlicReceiver(config GarlicReceiverConfig) (*GarlicReceiver, error) {
 	receiver := &GarlicReceiver{
 		service: config.Service, destinations: make(map[foundation.Hash]*garlicDestinationState, len(config.Destinations)),
 		replyKeys: config.ReplyKeys, now: config.Now, metrics: config.Metrics, logger: config.Logger, hasStatic: len(config.StaticPrivate) == 32,
-		replyScratch: new(sync.Pool),
+		replyScratch: new(sync.Pool), preauth: newGarlicPreauthAdmission(),
 	}
 	copy(receiver.staticPrivate[:], config.StaticPrivate)
 	for hash, destination := range config.Destinations {
@@ -357,12 +358,60 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 			return unwrapErr
 		}
 	}
+	// Route recognized one-time tags without any pre-authentication key
+	// guesses. ReceiveTagged also fails closed if the tag is removed meanwhile.
+	if len(outer.Encrypted) <= foundation.I2NPI2PDMaxPayload {
+		for _, destination := range destinations {
+			if destination.Ratchet == nil || !destination.Ratchet.HasReceiveTag(outer.Encrypted) {
+				continue
+			}
+			_, receiveErr := r.receiveRatchet(destination, outer.Encrypted, now, true, unlock, func() {})
+			return receiveErr
+		}
+	}
+
+	// An unknown ciphertext could otherwise trigger all three ECIES formats
+	// and legacy decryption on every destination. Reserve the worst-case work
+	// before the first private-key operation.
+	work := 0
+	if r.hasStatic {
+		plainLen := len(outer.Encrypted) - 32 - 16
+		if plainLen > 0 && plainLen <= foundation.I2NPI2PDMaxPayload {
+			work++
+		}
+	}
+	if len(outer.Encrypted) <= foundation.I2NPI2PDMaxPayload {
+		for _, destination := range destinations {
+			if destination.Ratchet != nil {
+				work += 3
+			}
+			if destination.Sessions != nil {
+				work++
+			}
+		}
+	}
+	admitted := false
+	releaseAdmission := func() {
+		if admitted {
+			r.preauth.finish()
+			admitted = false
+		}
+	}
+	defer releaseAdmission()
+	if work != 0 {
+		if err := r.preauth.admit(source.Peer, outer.Encrypted, work, now); err != nil {
+			return err
+		}
+		admitted = true
+	}
+
 	if r.hasStatic {
 		plainLen := len(outer.Encrypted) - 32 - 16
 		if plainLen > 0 && plainLen <= foundation.I2NPI2PDMaxPayload {
 			scratch, scratchPool := r.getReplyScratch()
 			inner, openErr := dataplanegarlicecies.OpenRouterMessage(scratch[:plainLen], r.staticPrivate[:], outer.Encrypted, now)
 			if openErr == nil {
+				releaseAdmission()
 				unlock()
 				openErr = r.service.
 					handleI2NP(inner, now, false, source)
@@ -379,29 +428,10 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 		if destination.Ratchet == nil || len(outer.Encrypted) > foundation.I2NPI2PDMaxPayload {
 			continue
 		}
-		scratch := destination.getScratch()
-		result, receiveErr := destination.Ratchet.Receive(scratch.plaintext[:], scratch.reply[:], outer.Encrypted, now)
-		if receiveErr != nil {
-			clear(scratch.plaintext[:])
-			clear(scratch.reply[:])
-			destination.scratch.Put(scratch)
-			continue
+		handled, receiveErr := r.receiveRatchet(destination, outer.Encrypted, now, false, unlock, releaseAdmission)
+		if handled {
+			return receiveErr
 		}
-		if result.Candidate != nil {
-			defer result.Candidate.Discard()
-		}
-		if destination.Limiter != nil && !destination.Limiter.TryAcquire(uint64(len(outer.Encrypted))) {
-			clear(scratch.plaintext[:])
-			clear(scratch.reply[:])
-			destination.scratch.Put(scratch)
-			return ErrDestinationBandwidth
-		}
-		unlock()
-		receiveErr = r.handleRatchetResult(destination, result, scratch.reply[:], now)
-		clear(scratch.plaintext[:])
-		clear(scratch.reply[:])
-		destination.scratch.Put(scratch)
-		return receiveErr
 	}
 	for _, destination := range destinations {
 		if destination.Sessions == nil || len(outer.Encrypted) > foundation.I2NPI2PDMaxPayload {
@@ -415,6 +445,7 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 			destination.scratch.Put(scratch)
 			continue
 		}
+		releaseAdmission()
 		if destination.Limiter != nil && !destination.Limiter.TryAcquire(uint64(len(outer.Encrypted))) {
 			clear(scratch.plaintext[:])
 			destination.scratch.Put(scratch)
@@ -432,6 +463,42 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 		return parseErr
 	}
 	return ErrGarlicDestination
+}
+
+
+// receiveRatchet does not continue after a recognized tag fails to authenticate:
+// a forged or already consumed one-time tag must never reach New Session crypto.
+func (r *GarlicReceiver) receiveRatchet(destination *garlicDestinationState, packet []byte, now uint64, tagged bool, unlock, authenticated func()) (bool, error) {
+	scratch := destination.getScratch()
+	var result dataplanegarlic.RatchetResult
+	var receiveErr error
+	if tagged {
+		result, receiveErr = destination.Ratchet.ReceiveTagged(scratch.plaintext[:], scratch.reply[:], packet, now)
+	} else {
+		result, receiveErr = destination.Ratchet.Receive(scratch.plaintext[:], scratch.reply[:], packet, now)
+	}
+	if receiveErr != nil {
+		clear(scratch.plaintext[:])
+		clear(scratch.reply[:])
+		destination.scratch.Put(scratch)
+		return false, receiveErr
+	}
+	if result.Candidate != nil {
+		defer result.Candidate.Discard()
+	}
+	authenticated()
+	if destination.Limiter != nil && !destination.Limiter.TryAcquire(uint64(len(packet))) {
+		clear(scratch.plaintext[:])
+		clear(scratch.reply[:])
+		destination.scratch.Put(scratch)
+		return true, ErrDestinationBandwidth
+	}
+	unlock()
+	receiveErr = r.handleRatchetResult(destination, result, scratch.reply[:], now)
+	clear(scratch.plaintext[:])
+	clear(scratch.reply[:])
+	destination.scratch.Put(scratch)
+	return true, receiveErr
 }
 
 func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState, result dataplanegarlic.RatchetResult, replyDst []byte, now uint64) error {
