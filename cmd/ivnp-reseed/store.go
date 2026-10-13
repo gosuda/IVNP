@@ -90,6 +90,7 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 			Ports:       contact.ports,
 			TCPPorts:    contact.tcpPorts,
 			UDPPorts:    contact.udpPorts,
+			ProbeEndpoints: contact.probeEndpoints,
 			HasNTCP2:    contact.ntcp2,
 			HasSSU2:     contact.ssu2,
 			Stats: PeerStats{
@@ -140,6 +141,7 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 		existing.Ports = contact.ports
 		existing.TCPPorts = contact.tcpPorts
 		existing.UDPPorts = contact.udpPorts
+		existing.ProbeEndpoints = contact.probeEndpoints
 		existing.HasNTCP2 = contact.ntcp2
 		existing.HasSSU2 = contact.ssu2
 		existing.IsFloodfill = foundation.NetworkDatabaseIsFloodfill(info)
@@ -618,11 +620,17 @@ func (s *PeerStore) LoadFromFile(filePath string) error {
 		if rec.Stats.FirstSeen.IsZero() {
 			rec.Stats.FirstSeen = rec.Stats.LastSeen
 		}
-		if !rec.HasNTCP2 && !rec.HasSSU2 && len(rec.Raw) > 0 {
+		// Never trust cached dial targets. Rebuild exact pairs from the raw
+		// RouterInfo, including for caches written before this field existed.
+		rec.ProbeEndpoints = nil
+		if len(rec.Raw) > 0 {
 			if info, err := foundation.NetworkDatabaseParseRouterInfo(rec.Raw); err == nil {
 				contact := extractRouterAddresses(info)
-				rec.HasNTCP2 = contact.ntcp2
-				rec.HasSSU2 = contact.ssu2
+				rec.ProbeEndpoints = contact.probeEndpoints
+				if !rec.HasNTCP2 && !rec.HasSSU2 {
+					rec.HasNTCP2 = contact.ntcp2
+					rec.HasSSU2 = contact.ssu2
+				}
 			}
 		}
 		if prev, found := s.peers[rec.Hash]; found {
@@ -690,12 +698,14 @@ type routerContactInfo struct {
 	ports    []uint16
 	tcpPorts []uint16
 	udpPorts []uint16
+	probeEndpoints []netip.AddrPort
 	ntcp2    bool
 	ssu2     bool
 }
 
 func extractRouterAddresses(info foundation.NetworkDatabaseRouterInfo) routerContactInfo {
 	contact := routerContactInfo{family: extractFamily(info)}
+	var tcpEndpoints, otherEndpoints []netip.AddrPort
 
 	addresses := info.Addresses()
 	for {
@@ -715,10 +725,15 @@ func extractRouterAddresses(info foundation.NetworkDatabaseRouterInfo) routerCon
 		style := strings.ToUpper(string(address.TransportStyle))
 		if port > 0 {
 			contact.ports = append(contact.ports, port)
-			if strings.HasPrefix(style, "NTCP") {
+			endpoint := netip.AddrPortFrom(ip, port)
+			switch {
+			case strings.HasPrefix(style, "NTCP"):
 				contact.tcpPorts = append(contact.tcpPorts, port)
-			} else if strings.HasPrefix(style, "SSU") {
+				tcpEndpoints = append(tcpEndpoints, endpoint)
+			case strings.HasPrefix(style, "SSU"):
 				contact.udpPorts = append(contact.udpPorts, port)
+			default:
+				otherEndpoints = append(otherEndpoints, endpoint)
 			}
 		}
 		// V2 transport gate flags require a dialable host:port on the exact
@@ -729,9 +744,12 @@ func extractRouterAddresses(info foundation.NetworkDatabaseRouterInfo) routerCon
 			contact.ssu2 = true
 		}
 	}
+	contact.probeEndpoints = tcpEndpoints
+	if len(tcpEndpoints) == 0 && len(contact.udpPorts) == 0 {
+		contact.probeEndpoints = otherEndpoints
+	}
 	return contact
 }
-
 func extractFamily(info foundation.NetworkDatabaseRouterInfo) string {
 	options := info.Options.Iterator()
 	for {
