@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -518,4 +520,155 @@ func TestWebUIConfigInMemoryConflict(t *testing.T) {
 	if response.StatusCode != http.StatusConflict {
 		t.Fatalf("POST /api/config status = %d, want 409, body: %s", response.StatusCode, body)
 	}
+}
+
+
+func TestWebUILimitedListenerRejectsConnectionsAndReleasesSlots(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited := newWebUILimitedListener(listener, 2)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(limited) }()
+	t.Cleanup(func() {
+		_ = server.Close()
+		if serveErr := <-done; serveErr != http.ErrServerClosed {
+			t.Errorf("serve result: %v", serveErr)
+		}
+	})
+
+	dial := func() net.Conn {
+		t.Helper()
+		conn, dialErr := net.Dial("tcp", listener.Addr().String())
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn
+	}
+	waitForSlots := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for len(limited.connections) != want && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if len(limited.connections) != want {
+			t.Fatalf("admitted connections = %d, want %d", len(limited.connections), want)
+		}
+	}
+
+	first := dial()
+	_ = dial()
+	waitForSlots(2)
+
+	extra := dial()
+	if err := extra.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := extra.Read(make([]byte, 1))
+	var networkErr net.Error
+	if readErr == nil || (errors.As(readErr, &networkErr) && networkErr.Timeout()) {
+		t.Fatalf("over-capacity connection was not rejected: %v", readErr)
+	}
+
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitForSlots(1)
+	recovered := dial()
+	if _, err := io.WriteString(recovered, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recovered.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	status, err := bufio.NewReader(recovered).ReadString('\n')
+	if err != nil || !strings.Contains(status, "200 OK") {
+		t.Fatalf("recovered connection: status=%q err=%v", status, err)
+	}
+}
+
+func TestWebUIEventsSubscriberLimit(t *testing.T) {
+	server := newTestWebUIServer(t, WebUIConfig{ListenAddress: "127.0.0.1:0"})
+
+	type subscription struct {
+		cancel context.CancelFunc
+		done   chan struct{}
+	}
+	subscriptions := make([]subscription, 0, maxWebUISubscribers+1)
+	t.Cleanup(func() {
+		for _, subscriber := range subscriptions {
+			subscriber.cancel()
+		}
+		for _, subscriber := range subscriptions {
+			select {
+			case <-subscriber.done:
+			case <-time.After(2 * time.Second):
+				t.Error("subscriber did not terminate")
+			}
+		}
+	})
+	subscribe := func() subscription {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "http://localhost/api/events", nil).WithContext(ctx)
+		go func() {
+			defer close(done)
+			server.handleEvents(recorder, request)
+		}()
+		subscriber := subscription{cancel: cancel, done: done}
+		subscriptions = append(subscriptions, subscriber)
+		return subscriber
+	}
+	waitForCount := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			server.subscribersMu.Lock()
+			got := len(server.subscribers)
+			server.subscribersMu.Unlock()
+			if got == want {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatalf("subscriber count did not reach %d", want)
+	}
+
+	for range maxWebUISubscribers {
+		subscribe()
+	}
+	waitForCount(maxWebUISubscribers)
+
+	overloaded := httptest.NewRecorder()
+	server.handleEvents(overloaded, httptest.NewRequest(http.MethodGet, "http://localhost/api/events", nil))
+	if overloaded.Code != http.StatusServiceUnavailable {
+		t.Fatalf("over-capacity SSE response = %d, want 503", overloaded.Code)
+	}
+	if strings.Contains(overloaded.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatal("rejected SSE request received streaming content type")
+	}
+
+	subscriptions[0].cancel()
+	select {
+	case <-subscriptions[0].done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled subscriber did not terminate")
+	}
+	waitForCount(maxWebUISubscribers - 1)
+
+	replacement := subscribe()
+	waitForCount(maxWebUISubscribers)
+	replacement.cancel()
+	select {
+	case <-replacement.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("replacement subscriber did not terminate")
+	}
+	waitForCount(maxWebUISubscribers - 1)
 }
