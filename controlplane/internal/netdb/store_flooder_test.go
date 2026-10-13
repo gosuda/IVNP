@@ -197,7 +197,6 @@ func TestStoreFlooderEnqueueSkipsPropagationTrafficAndOwnsPayload(t *testing.T) 
 	}
 }
 
-
 // storeFloodTestCurrentStore builds a different valid, current LeaseSet2 for
 // each call so admission limits cannot depend on duplicate suppression.
 func storeFloodTestCurrentStore(t *testing.T, database *Database, now uint64) foundation.I2NPDatabaseStoreMessage {
