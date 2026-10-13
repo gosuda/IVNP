@@ -44,7 +44,8 @@ func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {
 	if !strings.Contains(line, "RESULT=OK DESTINATION=") {
 		t.Fatal(line)
 	}
-	private := strings.Split(line, " DESTINATION=")[1]
+		authToken := testSAMAuthToken(t, line)
+	private := strings.Fields(strings.Split(line, " DESTINATION=")[1])[0]
 	local, err := decodePrivateDestination(private)
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +58,7 @@ func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sender.Close()
-	wire := []byte("3.3 udp " + destination + " FROM_PORT=4 TO_PORT=0\nhello")
+	wire := []byte("3.3 udp " + destination + " FROM_PORT=4 TO_PORT=0 IVNP_AUTH=" + authToken + "\nhello")
 	if _, err = sender.Write(wire); err != nil {
 		t.Fatal(err)
 	}
@@ -72,18 +73,21 @@ func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {
 		t.Fatalf("forwarded datagram = %q", forwarded)
 	}
 
-	// Key=value IDs, duplicate spacing, and a source IP different from the
+	// Missing or invalid credentials, malformed headers, and a different source
+	// IP from the
 	// control socket are rejected without reaching the destination route.
 	for _, malformed := range [][]byte{
-		[]byte("3.3 ID=udp " + destination + "\nbad"),
-		[]byte("3.3  udp " + destination + "\nbad"),
-		[]byte("3.3 udp " + destination + "\r\nbad"),
+		[]byte("3.3 udp " + destination + "\nbad"),
+		[]byte("3.3 udp " + destination + " IVNP_AUTH=" + strings.Repeat("A", len(authToken)) + "\nbad"),
+		[]byte("3.3 ID=udp " + destination + " IVNP_AUTH=" + authToken + "\nbad"),
+		[]byte("3.3  udp " + destination + " IVNP_AUTH=" + authToken + "\nbad"),
+		[]byte("3.3 udp " + destination + " IVNP_AUTH=" + authToken + "\r\nbad"),
 	} {
 		_, _ = sender.Write(malformed)
 	}
 	wrongSource, bindErr := net.DialUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.2")}, server.UDPAddr().(*net.UDPAddr))
 	if bindErr == nil {
-		_, _ = wrongSource.Write([]byte("3.3 udp " + destination + "\nbad"))
+		_, _ = wrongSource.Write([]byte("3.3 udp " + destination + " IVNP_AUTH=" + authToken + "\nbad"))
 		_ = wrongSource.Close()
 	}
 	_ = receiver.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
@@ -117,7 +121,8 @@ func TestEmbeddedServerPrimaryRawChildUDPHeader(t *testing.T) {
 	if !strings.Contains(line, "RESULT=OK DESTINATION=") {
 		t.Fatal(line)
 	}
-	local, err := decodePrivateDestination(strings.Split(line, " DESTINATION=")[1])
+	authToken := testSAMAuthToken(t, line)
+	local, err := decodePrivateDestination(strings.Fields(strings.Split(line, " DESTINATION=")[1])[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +137,7 @@ func TestEmbeddedServerPrimaryRawChildUDPHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sender.Close()
-	_, _ = sender.Write([]byte("3.3 child " + destination + " FROM_PORT=8 TO_PORT=7 PROTOCOL=18\nraw"))
+	_, _ = sender.Write([]byte("3.3 child " + destination + " FROM_PORT=8 TO_PORT=7 PROTOCOL=18 IVNP_AUTH=" + authToken + "\nraw"))
 	buffer := make([]byte, 256)
 	_ = receiver.SetReadDeadline(time.Now().Add(time.Second))
 	n, _, err := receiver.ReadFromUDP(buffer)
@@ -170,7 +175,8 @@ func TestEmbeddedServerUDPQueuedByteBudgetBackpressure(t *testing.T) {
 	if !strings.Contains(line, "RESULT=OK DESTINATION=") {
 		t.Fatal(line)
 	}
-	local, err := decodePrivateDestination(strings.Split(line, " DESTINATION=")[1])
+	authToken := testSAMAuthToken(t, line)
+	local, err := decodePrivateDestination(strings.Fields(strings.Split(line, " DESTINATION=")[1])[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +187,7 @@ func TestEmbeddedServerUDPQueuedByteBudgetBackpressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sender.Close()
-	_, _ = sender.Write([]byte("3.3 budget " + destination + "\nx"))
+	_, _ = sender.Write([]byte("3.3 budget " + destination + " IVNP_AUTH=" + authToken + "\nx"))
 	_ = control.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 	if line, err = reader.ReadString('\n'); err == nil {
 		t.Fatalf("over-budget UDP ingress reached route: %q", line)
@@ -280,7 +286,8 @@ func TestUDPBlockingDestinationSendCancelsAndWaitIsBounded(t *testing.T) {
 	if !strings.Contains(line, "RESULT=OK DESTINATION=") {
 		t.Fatal(line)
 	}
-	local, err := decodePrivateDestination(strings.Split(line, " DESTINATION=")[1])
+	authToken := testSAMAuthToken(t, line)
+	local, err := decodePrivateDestination(strings.Fields(strings.Split(line, " DESTINATION=")[1])[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +297,7 @@ func TestUDPBlockingDestinationSendCancelsAndWaitIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = sender.Write([]byte("3.3 blocking " + destination + "\nblocked"))
+	_, _ = sender.Write([]byte("3.3 blocking " + destination + " IVNP_AUTH=" + authToken + "\nblocked"))
 	select {
 	case <-controller.entered:
 	case <-time.After(time.Second):

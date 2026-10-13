@@ -114,3 +114,23 @@ IVNP_EEPSITE_PROXY=http://127.0.0.1:4444 IVNP_SAM_ADDRESS=127.0.0.1:7656 \
 ## License
 
 [MIT](LICENSE)
+
+### Embedded SAM session authorization
+
+The embedded SAM server requires a per-session capability for commands sent over
+a different connection from the one that created the session. Successful
+`SESSION CREATE` responses include `IVNP_AUTH=<token>`, and `HELLO REPLY`
+advertises `IVNP_AUTH=1`.
+
+Clients must include `IVNP_AUTH=<token>` in `STREAM CONNECT`, `STREAM ACCEPT`,
+`STREAM FORWARD`, `DATAGRAM SEND`, and `RAW SEND` commands when using a
+separate TCP connection. UDP datagrams require the same token as a header
+option, in addition to source-IP binding. The owning control socket can send
+DATAGRAM and RAW commands without repeating its credential. PRIMARY session
+children share their root's credential.
+
+This extension intentionally tightens standard SAM v3.3 semantics: third-party
+clients connecting to the embedded server must handle the token. IVNP's SAM
+client adds it automatically when the bridge supplies one, and remains
+compatible with external bridges that do not advertise the extension. Treat
+the token as a secret; possession authorizes access to the associated session.
