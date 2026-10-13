@@ -72,6 +72,7 @@ type InboundCircuit struct {
 
 type inboundCircuit struct {
 	lifetime   circuitLifetime
+	replay     cellReplayFilter
 	owner      foundation.Hash
 	transforms []LayerCipher
 	forward    *Forward
@@ -627,6 +628,10 @@ func (r *Runtime) HandleContext(ctx context.Context, message foundation.I2NPMess
 	circuit.lifetime.refs.Add(1)
 	shard.mu.RUnlock()
 	defer circuit.release()
+
+	if err := circuit.replay.admit(data.Data); err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, forwardSendTimeout)
 	defer cancel()
