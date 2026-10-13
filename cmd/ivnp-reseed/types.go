@@ -15,6 +15,9 @@ const (
 	DefaultProbeRateLimit = 8.0 // probes per second
 	DefaultProbeBurst     = 16.0
 
+	// MaxProbeAttemptsPerPeer bounds a single router's sequential TCP dials.
+	MaxProbeAttemptsPerPeer = 4
+
 	// ProbeStatsWindow is the trailing observation window for the selection
 	// hard gate's probe success-rate requirement.
 	ProbeStatsWindow = 3 * time.Hour
@@ -70,10 +73,12 @@ type PeerRecord struct {
 	Ports       []uint16        `json:"ports,omitempty"`
 	TCPPorts    []uint16        `json:"tcp_ports,omitempty"`
 	UDPPorts    []uint16        `json:"udp_ports,omitempty"`
-	HasNTCP2    bool            `json:"has_ntcp2"`
-	HasSSU2     bool            `json:"has_ssu2"`
-	Stats       PeerStats       `json:"stats"`
-	Score       float64         `json:"score"`
+	// ProbeEndpoints are exact TCP (or unclassified) RouterInfo address:port pairs.
+	ProbeEndpoints []netip.AddrPort `json:"probe_endpoints,omitempty"`
+	HasNTCP2       bool             `json:"has_ntcp2"`
+	HasSSU2        bool             `json:"has_ssu2"`
+	Stats          PeerStats        `json:"stats"`
+	Score          float64          `json:"score"`
 }
 
 // ReseedPackage contains pre-rendered, signed reseed archives and their metadata.
