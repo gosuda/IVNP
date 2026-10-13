@@ -161,7 +161,6 @@ func TestDescriptionAndSOAPMapping(t *testing.T) {
 	}
 }
 
-
 func TestDescribeRejectsCrossHostReferencesAndRedirects(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		t.Error("unexpected HTTP request to redirected destination")
