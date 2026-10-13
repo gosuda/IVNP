@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -29,6 +30,7 @@ var (
 
 // DiscoveryResponse holds the response to an SSDP M-SEARCH discovery request.
 type DiscoveryResponse struct {
+	Sender   netip.Addr
 	Location *url.URL
 	ST       string
 	USN      string
@@ -158,7 +160,7 @@ func (c *Client) DiscoverWithConn(ctx context.Context, conn net.PacketConn, dest
 		if err := conn.SetReadDeadline(deadline); err != nil {
 			return nil, fmt.Errorf("upnp: set SSDP read deadline: %w", err)
 		}
-		n, _, err := conn.ReadFrom(buffer)
+		n, remote, err := conn.ReadFrom(buffer)
 		if err != nil {
 			if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
 				continue
@@ -166,9 +168,22 @@ func (c *Client) DiscoverWithConn(ctx context.Context, conn net.PacketConn, dest
 			return nil, fmt.Errorf("upnp: receive SSDP response: %w", err)
 		}
 		response, err := ParseSSDPResponse(buffer[:n])
-		if err != nil {
+		if err != nil || response.ST != InternetGatewayDevice {
 			continue // SSDP is multicast; unrelated datagrams are expected.
 		}
+		sender, ok := remote.(*net.UDPAddr)
+		if !ok {
+			continue
+		}
+		senderIP, ok := netip.AddrFromSlice(sender.IP)
+		if !ok || !senderIP.Unmap().Is4() {
+			continue
+		}
+		locationIP, err := netip.ParseAddr(response.Location.Hostname())
+		if err != nil || locationIP.Unmap() != senderIP.Unmap() {
+			continue // Untrusted LOCATION must resolve to the packet sender, without DNS.
+		}
+		response.Sender = senderIP.Unmap()
 		key := response.USN + "\x00" + response.Location.String()
 		if _, duplicate := seen[key]; duplicate {
 			continue
