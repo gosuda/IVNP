@@ -81,7 +81,7 @@ const (
 	ssu2EgressSlots             = 32
 	ssu2ACKDelay                = time.Millisecond
 	ssu2MaxNewTokens            = 1024
-	ssu2MaxLiveSessionsPerPeer   = 2 // One canonical session and one draining session.
+	ssu2MaxLiveSessionsPerPeer  = 2 // One canonical session and one draining session.
 	ssu2RelayTarget             = 3
 	ssu2RelayPublishMin         = 100 * time.Millisecond
 	ssu2RelayPublishMax         = 30 * time.Second
@@ -4242,12 +4242,6 @@ func (m *SSU2Manager) expireExtensions(now time.Time) {
 	for _, expired := range expiredTests {
 		m.expirePeerTest(expired.nonce, expired.state)
 	}
-}
-
-func u64Bytes(value uint64) []byte {
-	var bytes [8]byte
-	binary.BigEndian.PutUint64(bytes[:], value)
-	return bytes[:]
 }
 
 func (m *SSU2Manager) sendNewToken(session *ssu2TransportSession) error {
