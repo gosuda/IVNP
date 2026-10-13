@@ -3082,5 +3082,3 @@ func (d *Controller) tryPromoteToMaster() (bool, error) {
 
 	return true, nil
 }
-
-
