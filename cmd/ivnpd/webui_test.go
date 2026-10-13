@@ -253,7 +253,10 @@ func TestUpdateINIPreservesCommentsAndAddsKeys(t *testing.T) {
 		{section: "tunnel", key: "hops", value: "4"},
 		{section: "router", key: "obsolete", remove: true},
 	}
-	got := updateINI(input, updates)
+	got, err := updateINI(input, updates)
+	if err != nil {
+		t.Fatalf("updateINI: %v", err)
+	}
 	for _, wanted := range []string{"# operator note", "family = new", "floodfill = true", "[tunnel]", "hops = 4", "[log]", "level = info"} {
 		if !strings.Contains(got, wanted) {
 			t.Fatalf("updateINI output missing %q:\n%s", wanted, got)
@@ -517,5 +520,176 @@ func TestWebUIConfigInMemoryConflict(t *testing.T) {
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusConflict {
 		t.Fatalf("POST /api/config status = %d, want 409, body: %s", response.StatusCode, body)
+	}
+}
+
+func TestUpdateINIRejectsUnsafeValues(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		update iniUpdate
+	}{
+		{name: "family LF", update: iniUpdate{section: "router", key: "family", value: "trusted\n[state]\ntainted_copy = true"}},
+		{name: "reseed CRLF", update: iniUpdate{section: "reseed", key: "endpoints", value: "https://reseed.example/i2pseeds.su3?netid=2\r\n[state]\r\ntainted_copy = true"}},
+		{name: "subscription CR", update: iniUpdate{section: "addressbook", key: "subscriptions", value: "http://reg.i2p/\rhosts.txt"}},
+		{name: "log NUL", update: iniUpdate{section: "log", key: "level", value: "info\x00"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			next, err := updateINI("[router]\n", []iniUpdate{test.update})
+			if err == nil {
+				t.Fatalf("updateINI accepted unsafe value for %s.%s", test.update.section, test.update.key)
+			}
+			if next != "" {
+				t.Fatalf("updateINI returned configuration on error: %q", next)
+			}
+		})
+	}
+}
+
+func TestWebUIConfigRejectsINIDirectiveInjection(t *testing.T) {
+	server := newTestWebUIServer(t, WebUIConfig{ListenAddress: "127.0.0.1:0"})
+	baseURL := startTestWebUIServer(t, server)
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Get(baseURL + "/api/config")
+	if err != nil {
+		t.Fatalf("GET config: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET config status = %d", response.StatusCode)
+	}
+	var view webUIConfigView
+	decodeErr := json.NewDecoder(response.Body).Decode(&view)
+	closeErr := response.Body.Close()
+	if decodeErr != nil || closeErr != nil {
+		t.Fatalf("decode config: %v; close: %v", decodeErr, closeErr)
+	}
+	original, err := os.ReadFile(server.config.ConfigPath)
+	if err != nil {
+		t.Fatalf("read original config: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*webUIConfigUpdate)
+	}{
+		{
+			name: "router family LF",
+			mutate: func(update *webUIConfigUpdate) {
+				update.Router.Family = "trusted\n[state]\ntainted_copy = true"
+			},
+		},
+		{
+			name: "reseed endpoint CRLF",
+			mutate: func(update *webUIConfigUpdate) {
+				update.Reseed.Endpoints = []string{"https://reseed.example/i2pseeds.su3?netid=2\r\n[state]\r\ntainted_copy = true"}
+			},
+		},
+		{
+			name: "addressbook subscription LF",
+			mutate: func(update *webUIConfigUpdate) {
+				update.AddressBook.Subscriptions = []string{"http://reg.i2p/export/hosts.txt\n[state]\ntainted_copy = true"}
+			},
+		},
+		{
+			name: "router family CR",
+			mutate: func(update *webUIConfigUpdate) {
+				update.Router.Family = "tru\rsted"
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			update := webUIConfigUpdateFromView(view)
+			test.mutate(&update)
+			payload, err := json.Marshal(update)
+			if err != nil {
+				t.Fatalf("marshal update: %v", err)
+			}
+			response, err := client.Post(baseURL+"/api/config", "application/json", bytes.NewReader(payload))
+			if err != nil {
+				t.Fatalf("POST config: %v", err)
+			}
+			body, readErr := io.ReadAll(response.Body)
+			closeErr := response.Body.Close()
+			if readErr != nil || closeErr != nil {
+				t.Fatalf("read response: %v; close: %v", readErr, closeErr)
+			}
+			if response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("POST config status = %d, want 400; body: %s", response.StatusCode, body)
+			}
+			persisted, err := os.ReadFile(server.config.ConfigPath)
+			if err != nil {
+				t.Fatalf("read persisted config: %v", err)
+			}
+			if !bytes.Equal(persisted, original) {
+				t.Fatalf("rejected config update modified the configuration file")
+			}
+		})
+	}
+}
+
+func TestWebUIConfigRequestBodySizeBoundary(t *testing.T) {
+	server := newTestWebUIServer(t, WebUIConfig{ListenAddress: "127.0.0.1:0"})
+	baseURL := startTestWebUIServer(t, server)
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Get(baseURL + "/api/config")
+	if err != nil {
+		t.Fatalf("GET config: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET config status = %d", response.StatusCode)
+	}
+	var view webUIConfigView
+	decodeErr := json.NewDecoder(response.Body).Decode(&view)
+	closeErr := response.Body.Close()
+	if decodeErr != nil || closeErr != nil {
+		t.Fatalf("decode config: %v; close: %v", decodeErr, closeErr)
+	}
+	payload, err := json.Marshal(webUIConfigUpdateFromView(view))
+	if err != nil {
+		t.Fatalf("marshal config update: %v", err)
+	}
+	const maximumBodyBytes = 64 << 10
+	for _, test := range []struct {
+		name       string
+		size       int
+		wantStatus int
+	}{
+		{name: "at limit", size: maximumBodyBytes, wantStatus: http.StatusOK},
+		{name: "one byte above limit", size: maximumBodyBytes + 1, wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if len(payload) > test.size {
+				t.Fatalf("payload size %d exceeds test limit %d", len(payload), test.size)
+			}
+			padded := append(bytes.Clone(payload), bytes.Repeat([]byte(" "), test.size-len(payload))...)
+			before, err := os.ReadFile(server.config.ConfigPath)
+			if err != nil {
+				t.Fatalf("read config: %v", err)
+			}
+			response, err := client.Post(baseURL+"/api/config", "application/json", bytes.NewReader(padded))
+			if err != nil {
+				t.Fatalf("POST config: %v", err)
+			}
+			body, readErr := io.ReadAll(response.Body)
+			closeErr := response.Body.Close()
+			if readErr != nil || closeErr != nil {
+				t.Fatalf("read response: %v; close: %v", readErr, closeErr)
+			}
+			if response.StatusCode != test.wantStatus {
+				t.Fatalf("POST %d-byte config status = %d, want %d; body: %s", test.size, response.StatusCode, test.wantStatus, body)
+			}
+			if test.wantStatus != http.StatusOK {
+				after, err := os.ReadFile(server.config.ConfigPath)
+				if err != nil {
+					t.Fatalf("read persisted config: %v", err)
+				}
+				if !bytes.Equal(after, before) {
+					t.Fatal("oversized config update modified the configuration file")
+				}
+			}
+		})
 	}
 }
