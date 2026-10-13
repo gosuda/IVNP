@@ -198,6 +198,45 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 	return totalSuccess
 }
 
+// Go's IsGlobalUnicast includes some non-public ranges. Never use an
+// untrusted RouterInfo address to probe private or special-purpose networks.
+var excludedProbeRanges = [...]netip.Prefix{
+	// IPv4 shared, protocol-assignment, documentation, benchmark, and reserved ranges.
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	// IPv6 protocol-assignment, documentation, and transition ranges.
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("3fff::/20"),
+}
+
+var globalProbeIPv6 = netip.MustParsePrefix("2000::/3")
+
+func isPublicProbeAddress(ip netip.Addr) bool {
+	if !ip.IsValid() || ip.Is4In6() || ip.Zone() != "" || !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		return false
+	}
+	// Global IPv6 unicast is allocated from 2000::/3, not the whole
+	// address space accepted by IsGlobalUnicast.
+	if ip.Is6() && !globalProbeIPv6.Contains(ip) {
+		return false
+	}
+	for _, excluded := range excludedProbeRanges {
+		if excluded.Contains(ip) {
+			return false
+		}
+	}
+	return true
+}
+
 func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Duration) {
 	// If the peer has TCP ports (NTCP/NTCP2), or fallback to general Ports if unclassified:
 	tcpPorts := rec.TCPPorts
@@ -208,10 +247,13 @@ func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Dura
 	var targets []string
 	addEndpoints := func(ips []netip.Addr, ports []uint16) {
 		for _, ip := range ips {
-			if !ip.IsValid() || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
+			if !isPublicProbeAddress(ip) {
 				continue
 			}
 			for _, port := range ports {
+				if port == 0 {
+					continue
+				}
 				targets = append(targets, net.JoinHostPort(ip.String(), strconv.Itoa(int(port))))
 			}
 		}
