@@ -14,12 +14,14 @@ import (
 
 var (
 	ErrStoreFlooderConfig = errors.New("netdb: invalid store flooder configuration")
-	ErrStoreFlooderFull   = errors.New("netdb: store flooder queue is full")
+	ErrStoreFlooderFull       = errors.New("netdb: store flooder queue is full")
+	ErrStoreFlooderSourceFull = errors.New("netdb: store flooder source quota exceeded")
 	ErrStoreFlooderClosed = errors.New("netdb: store flooder is closed")
 )
 
 const (
 	storeFlooderQueue            = 64
+	storeFlooderSourceJobs       = 4
 	storeFlooderTargets          = 3
 	storeFlooderTargetSnapshot   = 8
 	storeFlooderRecentCapacity   = 4_096
@@ -82,6 +84,8 @@ type StoreFlooder struct {
 	wg        sync.WaitGroup
 	recent    map[[32]byte]uint64
 	keyFloods map[foundation.Hash]storeFloodCount
+	// sourceJobs counts both queued and active jobs, protected by mu.
+	sourceJobs map[foundation.Hash]uint8
 }
 
 func NewStoreFlooder(config StoreFlooderConfig) (*StoreFlooder, error) {
@@ -99,6 +103,7 @@ func NewStoreFlooder(config StoreFlooderConfig) (*StoreFlooder, error) {
 		done:      make(chan struct{}),
 		recent:    make(map[[32]byte]uint64, storeFlooderRecentCapacity),
 		keyFloods: make(map[foundation.Hash]storeFloodCount, storeFlooderRecentCapacity),
+		sourceJobs: make(map[foundation.Hash]uint8),
 	}, nil
 }
 
@@ -128,26 +133,30 @@ func (f *StoreFlooder) Enqueue(source foundation.Hash, store foundation.I2NPData
 	if !f.database.StoreMatchesCurrent(store) {
 		return nil
 	}
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		return ErrStoreFlooderClosed
+	}
+	if f.sourceJobs[source] >= storeFlooderSourceJobs {
+		f.mu.Unlock()
+		return ErrStoreFlooderSourceFull
+	}
+	if len(f.jobs) == cap(f.jobs) {
+		f.mu.Unlock()
+		return ErrStoreFlooderFull
+	}
 	job := storeFloodJob{source: source, store: store}
 	job.store.Data = append([]byte(nil), store.Data...)
 	job.store.ReplyGateway = foundation.Hash{}
 	job.store.ReplyTunnelID = 0
 	job.store.ReplyToken = 0
-	f.mu.Lock()
-	if f.closed {
-		f.mu.Unlock()
-		clear(job.store.Data)
-		return ErrStoreFlooderClosed
-	}
-	select {
-	case f.jobs <- job:
-		f.mu.Unlock()
-		return nil
-	default:
-		f.mu.Unlock()
-		clear(job.store.Data)
-		return ErrStoreFlooderFull
-	}
+	// The lock serializes producers. The queue cannot fill between the
+	// capacity check and the send, and the reservation precedes worker release.
+	f.sourceJobs[source]++
+	f.jobs <- job
+	f.mu.Unlock()
+	return nil
 }
 
 func (f *StoreFlooder) worker(ctx context.Context) {
@@ -156,11 +165,15 @@ func (f *StoreFlooder) worker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			f.mu.Lock()
+			f.closed = true
+			f.mu.Unlock()
 			f.drain()
 			return
 		case job := <-f.jobs:
 			f.flood(ctx, &job)
 			clear(job.store.Data)
+			f.releaseSource(job.source)
 		}
 	}
 }
@@ -346,11 +359,26 @@ func (f *StoreFlooder) logFailure(key, target foundation.Hash, err error) {
 	}
 }
 
+func (f *StoreFlooder) releaseSource(source foundation.Hash) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := f.sourceJobs[source]
+	if count == 0 {
+		panic("netdb: store flood job has no source reservation")
+	}
+	if count == 1 {
+		delete(f.sourceJobs, source)
+	} else {
+		f.sourceJobs[source] = count - 1
+	}
+}
+
 func (f *StoreFlooder) drain() {
 	for {
 		select {
 		case job := <-f.jobs:
 			clear(job.store.Data)
+			f.releaseSource(job.source)
 		default:
 			return
 		}
@@ -362,20 +390,22 @@ func (f *StoreFlooder) Close() error {
 		return nil
 	}
 	f.mu.Lock()
-	if f.closed {
-		f.mu.Unlock()
-		return nil
-	}
-	f.closed = true
-	if f.cancel != nil {
-		f.cancel()
-	} else {
-		close(f.done)
+	if !f.closed {
+		f.closed = true
+		if f.cancel != nil {
+			f.cancel()
+		} else {
+			close(f.done)
+		}
 	}
 	f.mu.Unlock()
 	f.wg.Wait()
+	f.drain()
+	f.mu.Lock()
 	clear(f.recent)
 	clear(f.keyFloods)
+	clear(f.sourceJobs)
+	f.mu.Unlock()
 	return nil
 }
 
