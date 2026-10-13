@@ -83,6 +83,13 @@ func TestLoadCachedSU3RejectsInvalidCache(t *testing.T) {
 		t.Fatalf("archive above size limit: got %v", err)
 	}
 
+	linkPath := filepath.Join(t.TempDir(), "linked.su3")
+	if err := os.Symlink(path, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadCachedSU3(linkPath, signerID, key); !errors.Is(err, errCachedSU3InvalidFile) {
+		t.Fatalf("symlink cache: got %v", err)
+	}
 	if _, err := loadCachedSU3(t.TempDir(), signerID, key); !errors.Is(err, errCachedSU3InvalidFile) {
 		t.Fatalf("directory cache: got %v", err)
 	}
