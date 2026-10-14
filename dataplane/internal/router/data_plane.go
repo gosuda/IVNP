@@ -493,7 +493,10 @@ func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState
 		remaining = append(remaining, clove)
 	}
 	if reservation != nil {
-		if err := reservation.Send(context.Background(), result.Reply); err != nil {
+		sendCtx, sendCancel := context.WithTimeout(context.Background(), deliveryForwardSendTimeout)
+		err := reservation.Send(sendCtx, result.Reply)
+		sendCancel()
+		if err != nil {
 			return appendError(dispatchErr, err)
 		}
 		if r.metrics != nil {
@@ -521,7 +524,9 @@ func sendRatchetResponse(destination *garlicDestinationState, result dataplanega
 	if err != nil {
 		return err
 	}
-	return reservation.SendEstablished(context.Background(), packet)
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), deliveryForwardSendTimeout)
+	defer sendCancel()
+	return reservation.SendEstablished(sendCtx, packet)
 }
 
 func parseRatchetGarlicCloves(payload []byte) ([]dataplanegarlic.Clove, error) {

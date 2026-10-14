@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 
@@ -13,185 +15,311 @@ import (
 	dataplanestreamingtunnel "gosuda.org/ivnp/dataplane/internal/streaming/tunnel"
 	dataplanetunnel "gosuda.org/ivnp/dataplane/internal/tunnel"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/parallelism"
 )
 
-var (
-	errTestDecryptedSenderPayloadChanged = errors.New("decrypted sender payload changed")
-	errTestScratchPinnedAcrossWrite      = errors.New("scratch pinned across tunnel write")
-)
+var errTestDecryptedSenderPayloadChanged = errors.New("decrypted sender payload changed")
 
-func assertSenderScratchWiped(t testing.TB, scratch *streamingSenderScratch) {
+func preparedTestSenderWithConfig(t testing.TB, config PreparedRouteSenderConfig, writer preparedTestWriter) (*PreparedRouteSender, PreparedRoute) {
 	t.Helper()
-	for _, buffer := range []*senderScratchBuffer{&scratch.data, &scratch.clove, &scratch.ratchet, &scratch.plain, &scratch.encrypted} {
-		for _, value := range buffer.exposed[:cap(buffer.exposed)] {
-			if value != 0 {
-				t.Fatal("scratch retained sensitive output")
+	if config.Now == nil {
+		config.Now = func() uint64 { return 1000 }
+	}
+	if config.Owner == (foundation.Hash{}) {
+		config.Owner = foundation.Hash{1}
+	}
+	if config.RouteCapacity == 0 {
+		config.RouteCapacity = 1
+	}
+	if config.Garlic == nil && config.Ratchet == nil {
+		sessions := dataplanegarlic.NewSessionManager(dataplanegarlic.SessionManagerConfig{})
+		t.Cleanup(func() {
+			if err := sessions.Close(); err != nil {
+				t.Error(err)
 			}
-		}
+		})
+		config.Garlic = sessions
+	}
+	config.Tunnels = writer
+	runtime := dataplanetunnel.NewRuntime(dataplanetunnel.RuntimeConfig{Now: config.Now})
+	token, err := runtime.RegisterOutbound(dataplanetunnel.OutboundCircuit{ID: 1, NextTunnelID: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { runtime.RemoveCircuit(token) })
+	sender, err := NewPreparedRouteSender(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sender.ReleaseSensitive)
+	return sender, PreparedRoute{
+		Owner:         config.Owner,
+		Remote:        foundation.Hash{2},
+		Generation:    1,
+		KeyType:       foundation.CryptoX25519,
+		KeyData:       append([]byte{9}, make([]byte, 31)...),
+		Circuit:       token,
+		Gateway:       foundation.Hash{3},
+		TunnelID:      4,
+		Expires:       2000,
+		LocalLeaseSet: []byte("private local bundle"),
 	}
 }
 
 func TestPreparedSenderCanceledScratchAdmission(t *testing.T) {
-	sender, _ := preparedTestSender(t, func() uint64 { return 1000 }, 1, func(context.Context, dataplanetunnel.CircuitToken, dataplanetunnel.Block) error { return nil })
+	writes := 0
+	local, err := foundation.GenerateLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(local.ReleaseSensitive)
+	ratchet, err := dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ratchet.ReleaseSensitive)
+	sender, route := preparedTestSenderWithConfig(t, PreparedRouteSenderConfig{Ratchet: ratchet}, func(context.Context, dataplanetunnel.CircuitToken, dataplanetunnel.Block) error {
+		writes++
+		return nil
+	})
+	if err := sender.InstallRoute(route); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	scratch, err := sender.acquireScratch(ctx)
-	if scratch != nil {
-		sender.releaseScratch(scratch)
+	delivery := dataplanestreamingtunnel.Delivery{
+		From:     route.Owner,
+		To:       route.Remote,
+		Protocol: dataplanedatagram.ProtocolRaw,
+		Payload:  []byte("canceled payload"),
 	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled acquisition = %v", err)
+	if err := sender.SendTunnel(ctx, delivery); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled SendTunnel = %v, want %v", err, context.Canceled)
 	}
-	if len(sender.scratch) != sender.scratchSlots {
-		t.Fatal("canceled acquisition consumed admission capacity")
+	if writes != 0 {
+		t.Fatalf("canceled SendTunnel invoked writer %d times", writes)
+	}
+	if err := sender.SendTunnel(t.Context(), delivery); err != nil {
+		t.Fatalf("subsequent live SendTunnel failed after canceled admission: %v", err)
+	}
+	if writes != 1 {
+		t.Fatalf("writer calls after live send = %d, want 1", writes)
 	}
 }
 
 func TestPreparedSenderScratchExhaustionWaitsForCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		sender := &PreparedRouteSender{scratch: make(chan *streamingSenderScratch, 1)}
+		slots := parallelism.CPUs()
+		local, err := foundation.GenerateLocalDestination()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(local.ReleaseSensitive)
+		ratchet, err := dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(ratchet.ReleaseSensitive)
+		checkedOut := make(chan struct{}, slots)
+		releaseHold := make(chan struct{})
+		sender, route := preparedTestSenderWithConfig(t, PreparedRouteSenderConfig{
+			Ratchet: ratchet,
+			NextID: func() (uint32, error) {
+				checkedOut <- struct{}{}
+				<-releaseHold
+				return 1, nil
+			},
+		}, func(context.Context, dataplanetunnel.CircuitToken, dataplanetunnel.Block) error {
+			return nil
+		})
+		if err := sender.InstallRoute(route); err != nil {
+			t.Fatal(err)
+		}
+		delivery := dataplanestreamingtunnel.Delivery{
+			From:     route.Owner,
+			To:       route.Remote,
+			Protocol: dataplanedatagram.ProtocolRaw,
+			Payload:  []byte("scratch exhaustion probe"),
+		}
+		holders := make(chan error, slots)
+		for range slots {
+			go func() {
+				holders <- sender.SendTunnel(t.Context(), delivery)
+			}()
+		}
+		for range slots {
+			<-checkedOut
+		}
+
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		done := make(chan error, 1)
-		go func() { _, err := sender.acquireScratch(ctx); done <- err }()
+		go func() {
+			done <- sender.SendTunnel(ctx, delivery)
+		}()
 		synctest.Wait()
 		select {
 		case err := <-done:
+			close(releaseHold)
 			t.Fatalf("exhausted admission returned early: %v", err)
 		default:
 		}
 		cancel()
 		if err := <-done; !errors.Is(err, context.Canceled) {
-			t.Fatalf("exhausted acquisition = %v", err)
+			close(releaseHold)
+			t.Fatalf("exhausted acquisition = %v, want %v", err, context.Canceled)
+		}
+		close(releaseHold)
+		for range slots {
+			if err := <-holders; err != nil {
+				t.Fatal(err)
+			}
 		}
 	})
 }
 
-func TestSenderScratchWipesPartialWritesAndRetiredBacking(t *testing.T) {
-	var scratch streamingSenderScratch
-	for _, buffer := range []*senderScratchBuffer{&scratch.data, &scratch.clove, &scratch.ratchet, &scratch.plain, &scratch.encrypted} {
-		small := buffer.bytes(100)
-		copy(small, bytes.Repeat([]byte{0xa1}, len(small)))
-		large := buffer.bytes(8192)
-		if &small[0] != &large[0] {
-			for _, value := range small {
-				if value != 0 {
-					t.Fatal("growing scratch abandoned sensitive backing")
-				}
-			}
-		}
-		large[len(large)-1] = 0xb2
-		buffer.bytes(1)[0] = 0xc3
-	}
-	clearStreamingSenderScratch(&scratch)
-	assertSenderScratchWiped(t, &scratch)
-	for _, buffer := range []*senderScratchBuffer{&scratch.data, &scratch.clove, &scratch.ratchet, &scratch.plain, &scratch.encrypted} {
-		view := buffer.bytes(17)
-		if len(view) != 17 || cap(view) != 17 {
-			t.Fatalf("small writable view = %d/%d", len(view), cap(view))
-		}
-		view[16] = 0xd4
-	}
-	clearStreamingSenderScratch(&scratch)
-	assertSenderScratchWiped(t, &scratch)
-}
-
-// TestSenderScratchBufferShrinksOnlyWhenUnusedAtLargeSinceLastWindow checks
-// senderScratchBuffer.shrinkIdle's core contract: a buffer that grew past
-// the baseline stays grown as long as bytes() keeps asking for large sizes
-// window over window, but releases its backing array the first window it
-// doesn't.
-func TestSenderScratchBufferShrinksOnlyWhenUnusedAtLargeSinceLastWindow(t *testing.T) {
-	var buffer senderScratchBuffer
-	buffer.bytes(senderScratchBaselineCapacity + 1)
-	if cap(buffer.exposed) <= senderScratchBaselineCapacity {
-		t.Fatalf("cap after large use = %d, want > %d", cap(buffer.exposed), senderScratchBaselineCapacity)
-	}
-
-	// Still being used at a large size every window: must not shrink.
-	for i := 0; i < 3; i++ {
-		buffer.shrinkIdle()
-		buffer.bytes(senderScratchBaselineCapacity + 1)
-	}
-	if cap(buffer.exposed) <= senderScratchBaselineCapacity {
-		t.Fatalf("cap while still used large = %d, want > %d (should not have shrunk)", cap(buffer.exposed), senderScratchBaselineCapacity)
-	}
-
-	// The loop above ends on a bytes() call, so one shrinkIdle just closes
-	// out that window (usedAtLarge is still set from it) without shrinking.
-	buffer.shrinkIdle()
-	if cap(buffer.exposed) <= senderScratchBaselineCapacity {
-		t.Fatalf("cap right after the last large use = %d, want > %d (should not have shrunk yet)", cap(buffer.exposed), senderScratchBaselineCapacity)
-	}
-
-	// Now a full window has passed with no bytes() call in between: must shrink.
-	buffer.shrinkIdle()
-	if buffer.exposed != nil {
-		t.Fatalf("exposed after idle shrink = %v, want nil", buffer.exposed)
-	}
-
-	// Below baseline afterward, growth/shrink churn is not worth avoiding,
-	// so small requests keep working against the released backing.
-	view := buffer.bytes(17)
-	if len(view) != 17 || cap(view) != 17 {
-		t.Fatalf("post-shrink small view = %d/%d, want 17/17", len(view), cap(view))
-	}
-}
-
-// TestPreparedSenderMaintainScratchSkipsCheckedOutSlots checks that
-// MaintainScratch only shrinks slots currently sitting free in the pool,
-// leaving a slot an in-flight send is holding untouched, and that it puts
-// every drained slot back so scratch admission capacity is unchanged.
 func TestPreparedSenderMaintainScratchSkipsCheckedOutSlots(t *testing.T) {
-	sender := &PreparedRouteSender{scratch: make(chan *streamingSenderScratch, 2), scratchSlots: 2}
-	idle := &streamingSenderScratch{}
-	idle.data.bytes(senderScratchBaselineCapacity + 1)
-	held := &streamingSenderScratch{}
-	held.data.bytes(senderScratchBaselineCapacity + 1)
-	sender.scratch <- idle
+	synctest.Test(t, func(t *testing.T) {
+		local, err := foundation.GenerateLocalDestination()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(local.ReleaseSensitive)
+		remote, err := foundation.GenerateLocalDestination()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(remote.ReleaseSensitive)
+		receiver, err := dataplanegarlic.NewRatchetManager(remote, dataplanegarlic.RatchetConfig{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(receiver.ReleaseSensitive)
+		ratchet, err := dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(ratchet.ReleaseSensitive)
 
-	// The first pass just closes out the window idle.data grew in (bytes()
-	// marked it used-at-large); it must not shrink yet.
-	sender.MaintainScratch()
-	if cap(idle.data.exposed) <= senderScratchBaselineCapacity {
-		t.Fatal("idle slot shrunk on the same window it grew in")
-	}
-	// A full window with no further large use of the now-idle slot: shrink.
-	sender.MaintainScratch()
+		var blockNextID sync.Mutex
+		pauseID := false
+		inFlight := make(chan struct{})
+		releaseInFlight := make(chan struct{})
+		var nextID uint32
 
-	if len(sender.scratch) != 1 {
-		t.Fatalf("scratch admission capacity after maintenance = %d, want 1 (held slot stays checked out)", len(sender.scratch))
-	}
-	if idle.data.exposed != nil {
-		t.Fatal("idle slot's oversized buffer was not shrunk")
-	}
-	if cap(held.data.exposed) <= senderScratchBaselineCapacity {
-		t.Fatal("checked-out slot was shrunk despite never being observed idle")
-	}
+		var decryptedMu sync.Mutex
+		var decrypted [][]byte
+		sender, route := preparedTestSenderWithConfig(t, PreparedRouteSenderConfig{
+			Ratchet: ratchet,
+			NextID: func() (uint32, error) {
+				blockNextID.Lock()
+				shouldPause := pauseID
+				pauseID = false
+				nextID++
+				id := nextID
+				blockNextID.Unlock()
+				if shouldPause {
+					close(inFlight)
+					<-releaseInFlight
+				}
+				return id, nil
+			},
+		}, func(_ context.Context, _ dataplanetunnel.CircuitToken, block dataplanetunnel.Block) error {
+			result, recvErr := receiver.Receive(make([]byte, foundation.I2NPI2PDMaxPayload), make([]byte, 2048), block.Data[foundation.I2NPStandardHeaderLen+4:], 1000)
+			if recvErr != nil {
+				return recvErr
+			}
+			decryptedMu.Lock()
+			decrypted = append(decrypted, append([]byte(nil), result.Payload...))
+			decryptedMu.Unlock()
+			return nil
+		})
+		key := remote.X25519Public()
+		route.KeyData = key[:]
+		if err := sender.InstallRoute(route); err != nil {
+			t.Fatal(err)
+		}
 
-	sender.scratch <- held
-	if len(sender.scratch) != 2 {
-		t.Fatal("MaintainScratch dropped a returned slot")
-	}
+		largePayload := bytes.Repeat([]byte{0x5a}, 32*1024)
+		if err := sender.SendTunnel(t.Context(), dataplanestreamingtunnel.Delivery{
+			From: route.Owner, To: route.Remote, Protocol: dataplanedatagram.ProtocolRaw, Payload: largePayload,
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		blockNextID.Lock()
+		pauseID = true
+		blockNextID.Unlock()
+		heldPayload := bytes.Repeat([]byte{0x6b}, 16*1024)
+		heldDone := make(chan error, 1)
+		go func() {
+			heldDone <- sender.SendTunnel(t.Context(), dataplanestreamingtunnel.Delivery{
+				From: route.Owner, To: route.Remote, Protocol: dataplanedatagram.ProtocolRaw, Payload: heldPayload,
+			})
+		}()
+		<-inFlight
+
+		sender.MaintainScratch()
+		sender.MaintainScratch()
+
+		close(releaseInFlight)
+		if err := <-heldDone; err != nil {
+			t.Fatalf("in-flight send across MaintainScratch failed: %v", err)
+		}
+
+		smallPayload := bytes.Repeat([]byte{0x7c}, 128)
+		if err := sender.SendTunnel(t.Context(), dataplanestreamingtunnel.Delivery{
+			From: route.Owner, To: route.Remote, Protocol: dataplanedatagram.ProtocolRaw, Payload: smallPayload,
+		}); err != nil {
+			t.Fatalf("post-MaintainScratch small send failed: %v", err)
+		}
+
+		decryptedMu.Lock()
+		defer decryptedMu.Unlock()
+		if len(decrypted) != 3 ||
+			!bytes.Contains(decrypted[0], largePayload) ||
+			!bytes.Contains(decrypted[1], heldPayload) ||
+			!bytes.Contains(decrypted[2], smallPayload) {
+			t.Fatal("MaintainScratch corrupted in-flight or subsequent sender payloads")
+		}
+	})
 }
 
 func TestPreparedSenderWipesPartiallySerializedLeaseSet(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		t.Run(map[bool]string{false: "ratchet", true: "legacy"}[legacy], func(t *testing.T) {
-			sender, route := preparedTestSender(t, func() uint64 { return 1000 }, 1, func(context.Context, dataplanetunnel.CircuitToken, dataplanetunnel.Block) error {
-				t.Fatal("failed serialization reached writer")
-				return nil
-			})
 			local, err := foundation.GenerateLocalDestination()
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(local.ReleaseSensitive)
-			sender.ratchet, err = dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{})
+			ratchet, err := dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(sender.ratchet.ReleaseSensitive)
+			t.Cleanup(ratchet.ReleaseSensitive)
+			garlicSessions := dataplanegarlic.NewSessionManager(dataplanegarlic.SessionManagerConfig{})
+			t.Cleanup(func() {
+				if err := garlicSessions.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			injected := errors.New("ID source failed after payload write")
+			calls := 0
+			sender, route := preparedTestSenderWithConfig(t, PreparedRouteSenderConfig{
+				Garlic:  garlicSessions,
+				Ratchet: ratchet,
+				NextID: func() (uint32, error) {
+					calls++
+					if calls == 2 {
+						return 0, injected
+					}
+					return uint32(calls), nil
+				},
+			}, func(context.Context, dataplanetunnel.CircuitToken, dataplanetunnel.Block) error {
+				t.Fatal("failed serialization reached writer")
+				return nil
+			})
 			route.LocalLeaseSet2 = true
 			route.Legacy = legacy
 			if legacy {
@@ -200,23 +328,14 @@ func TestPreparedSenderWipesPartiallySerializedLeaseSet(t *testing.T) {
 			if err = sender.InstallRoute(route); err != nil {
 				t.Fatal(err)
 			}
-			injected := errors.New("ID source failed after payload write")
-			calls := 0
-			sender.nextID = func() (uint32, error) {
-				calls++
-				if calls == 2 {
-					return 0, injected
-				}
-				return 1, nil
-			}
-			err = sender.SendTunnel(t.Context(), dataplanestreamingtunnel.Delivery{From: route.Owner, To: route.Remote, Protocol: dataplanedatagram.ProtocolDatagram1, Payload: []byte("secret application payload")})
+			err = sender.SendTunnel(t.Context(), dataplanestreamingtunnel.Delivery{
+				From:     route.Owner,
+				To:       route.Remote,
+				Protocol: dataplanedatagram.ProtocolDatagram1,
+				Payload:  []byte("secret application payload"),
+			})
 			if !errors.Is(err, injected) {
-				t.Fatalf("send = %v", err)
-			}
-			for range sender.scratchSlots {
-				scratch := <-sender.scratch
-				sender.scratch <- scratch
-				assertSenderScratchWiped(t, scratch)
+				t.Fatalf("send = %v, want %v", err, injected)
 			}
 		})
 	}
@@ -224,59 +343,106 @@ func TestPreparedSenderWipesPartiallySerializedLeaseSet(t *testing.T) {
 
 func TestPreparedSenderWipesCiphertextWhenSessionAdmissionFails(t *testing.T) {
 	writes := 0
-	sender, route := preparedTestSender(t, func() uint64 { return 1000 }, 1, func(context.Context, dataplanetunnel.CircuitToken, dataplanetunnel.Block) error { writes++; return nil })
 	local, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(local.ReleaseSensitive)
-	sender.ratchet, err = dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{MaxSessions: 1})
+	ratchet, err := dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{MaxSessions: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(sender.ratchet.ReleaseSensitive)
+	t.Cleanup(ratchet.ReleaseSensitive)
+	sender, route := preparedTestSenderWithConfig(t, PreparedRouteSenderConfig{Ratchet: ratchet}, func(context.Context, dataplanetunnel.CircuitToken, dataplanetunnel.Block) error {
+		writes++
+		return nil
+	})
 	if err = sender.InstallRoute(route); err != nil {
 		t.Fatal(err)
 	}
-	delivery := dataplanestreamingtunnel.Delivery{From: route.Owner, To: route.Remote, Protocol: dataplanedatagram.ProtocolDatagram1, Payload: []byte("secret before pending-session rejection")}
+	delivery := dataplanestreamingtunnel.Delivery{
+		From:     route.Owner,
+		To:       route.Remote,
+		Protocol: dataplanedatagram.ProtocolDatagram1,
+		Payload:  []byte("secret before pending-session rejection"),
+	}
 	if err = sender.SendTunnel(t.Context(), delivery); err != nil {
 		t.Fatal(err)
 	}
 	// The second handshake seals its output before pending-session admission fails.
 	if err = sender.SendTunnel(t.Context(), delivery); !errors.Is(err, dataplanegarlic.ErrRatchet) {
-		t.Fatalf("full session admission = %v", err)
+		t.Fatalf("full session admission = %v, want %v", err, dataplanegarlic.ErrRatchet)
 	}
 	if writes != 1 {
 		t.Fatalf("writer calls = %d, want 1", writes)
 	}
-	for range sender.scratchSlots {
-		scratch := <-sender.scratch
-		sender.scratch <- scratch
-		assertSenderScratchWiped(t, scratch)
-	}
 }
 
 func TestPreparedSenderReleaseSensitiveDrainsScratch(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		sender := &PreparedRouteSender{scratch: make(chan *streamingSenderScratch, 1), scratchSlots: 1}
-		scratch := &streamingSenderScratch{}
-		view := scratch.data.bytes(1024)
-		view[1023] = 1
-		done := make(chan struct{})
-		go func() { sender.ReleaseSensitive(); close(done) }()
-		synctest.Wait()
-		select {
-		case <-done:
-			t.Fatal("shutdown abandoned an admitted scratch owner")
-		default:
+	local, err := foundation.GenerateLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(local.ReleaseSensitive)
+	ratchet, err := dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ratchet.ReleaseSensitive)
+	inSend := make(chan struct{})
+	callingRelease := make(chan struct{})
+	var inSendOnce sync.Once
+	var nextIDSeq atomic.Uint32
+	var tunnelDispatched atomic.Bool
+	var releaseReturned atomic.Bool
+	sender, route := preparedTestSenderWithConfig(t, PreparedRouteSenderConfig{
+		Ratchet: ratchet,
+		NextID: func() (uint32, error) {
+			inSendOnce.Do(func() {
+				close(inSend)
+				<-callingRelease
+			})
+			return nextIDSeq.Add(1), nil
+		},
+	}, func(context.Context, dataplanetunnel.CircuitToken, dataplanetunnel.Block) error {
+		if releaseReturned.Load() {
+			t.Error("ReleaseSensitive returned while an admitted SendTunnel was still in flight")
 		}
-		sender.releaseScratch(scratch)
-		<-done
-		assertSenderScratchWiped(t, scratch)
-		if sender.scratch != nil {
-			t.Fatal("shutdown retained admission storage")
-		}
+		tunnelDispatched.Store(true)
+		return nil
 	})
+	if err := sender.InstallRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	delivery := dataplanestreamingtunnel.Delivery{
+		From:     route.Owner,
+		To:       route.Remote,
+		Protocol: dataplanedatagram.ProtocolRaw,
+		Payload:  bytes.Repeat([]byte{1}, 1024),
+	}
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- sender.SendTunnel(t.Context(), delivery)
+	}()
+	<-inSend
+
+	done := make(chan struct{})
+	go func() {
+		close(callingRelease)
+		sender.ReleaseSensitive()
+		releaseReturned.Store(true)
+		close(done)
+	}()
+	<-done
+	if !tunnelDispatched.Load() {
+		t.Fatal("ReleaseSensitive returned before in-flight SendTunnel completed")
+	}
+	if err := <-sendDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.SendTunnel(t.Context(), delivery); !errors.Is(err, ErrDataPlaneConfig) {
+		t.Fatalf("SendTunnel after ReleaseSensitive = %v, want %v", err, ErrDataPlaneConfig)
+	}
 }
 
 type scratchTrafficFixture struct {
@@ -287,7 +453,7 @@ type scratchTrafficFixture struct {
 	sequence byte
 }
 
-func newScratchTrafficFixture(t *testing.T) *scratchTrafficFixture {
+func newScratchTrafficFixture(t *testing.T, config PreparedRouteSenderConfig) *scratchTrafficFixture {
 	t.Helper()
 	f := new(scratchTrafficFixture)
 	writer := func(_ context.Context, _ dataplanetunnel.CircuitToken, block dataplanetunnel.Block) error {
@@ -298,17 +464,9 @@ func newScratchTrafficFixture(t *testing.T) *scratchTrafficFixture {
 		if !bytes.Contains(decoded, f.expected) {
 			return errTestDecryptedSenderPayloadChanged
 		}
-		if len(f.sender.scratch) != f.sender.scratchSlots {
-			return errTestScratchPinnedAcrossWrite
-		}
 		return nil
 	}
-	f.sender, f.route = preparedTestSender(t, func() uint64 { return 1000 }, 1, writer)
-	t.Cleanup(func() {
-		if err := f.sender.garlic.Close(); err != nil {
-			t.Error(err)
-		}
-	})
+	f.sender, f.route = preparedTestSenderWithConfig(t, config, writer)
 	return f
 }
 
@@ -317,17 +475,17 @@ func (f *scratchTrafficFixture) send(t *testing.T, protocol uint8, size int) err
 	f.sequence++
 	f.expected = bytes.Repeat([]byte{0xa0 + f.sequence}, size)
 	delivery := dataplanestreamingtunnel.Delivery{From: f.route.Owner, To: f.route.Remote, Protocol: protocol, Payload: f.expected}
-	err := f.sender.SendTunnel(t.Context(), delivery)
-	for range f.sender.scratchSlots {
-		scratch := <-f.sender.scratch
-		f.sender.scratch <- scratch
-		assertSenderScratchWiped(t, scratch)
-	}
-	return err
+	return f.sender.SendTunnel(t.Context(), delivery)
 }
 
 func TestPreparedSenderLegacyMixedTrafficUsesBoundedScratch(t *testing.T) {
-	f := newScratchTrafficFixture(t)
+	garlicSessions := dataplanegarlic.NewSessionManager(dataplanegarlic.SessionManagerConfig{})
+	t.Cleanup(func() {
+		if err := garlicSessions.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	f := newScratchTrafficFixture(t, PreparedRouteSenderConfig{Garlic: garlicSessions})
 	public, private, err := cryptography.GenerateElGamalKeyPair()
 	if err != nil {
 		t.Fatal(err)
@@ -351,13 +509,12 @@ func TestPreparedSenderLegacyMixedTrafficUsesBoundedScratch(t *testing.T) {
 		if err := f.send(t, dataplanestreamingtunnel.ProtocolStreaming, size); err != nil {
 			t.Fatalf("size %d: %v", size, err)
 		}
-		f.sender.garlic.ConfirmOutboundTags(f.route.Remote, 1000)
+		garlicSessions.ConfirmOutboundTags(f.route.Remote, 1000)
 	}
 }
 
 func newRatchetScratchTraffic(t *testing.T) *scratchTrafficFixture {
 	t.Helper()
-	f := newScratchTrafficFixture(t)
 	local, err := foundation.GenerateLocalDestination()
 	if err != nil {
 		t.Fatal(err)
@@ -373,11 +530,12 @@ func newRatchetScratchTraffic(t *testing.T) *scratchTrafficFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(receiver.ReleaseSensitive)
-	f.sender.ratchet, err = dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{})
+	ratchet, err := dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(f.sender.ratchet.ReleaseSensitive)
+	t.Cleanup(ratchet.ReleaseSensitive)
+	f := newScratchTrafficFixture(t, PreparedRouteSenderConfig{Ratchet: ratchet})
 	f.decrypt = func(packet []byte) ([]byte, error) {
 		result, err := receiver.Receive(make([]byte, foundation.I2NPI2PDMaxPayload), make([]byte, 2048), packet, 1000)
 		if err != nil {
@@ -387,7 +545,7 @@ func newRatchetScratchTraffic(t *testing.T) *scratchTrafficFixture {
 			if _, err := receiver.CommitNew(result.Candidate, result.Peer, 1000); err != nil {
 				return nil, err
 			}
-			if _, err := f.sender.ratchet.Receive(make([]byte, 2048), nil, result.Reply, 1000); err != nil {
+			if _, err := ratchet.Receive(make([]byte, 2048), nil, result.Reply, 1000); err != nil {
 				return nil, err
 			}
 		}
@@ -439,25 +597,45 @@ func BenchmarkPreparedSenderScratchReuse(b *testing.B) {
 		{"small", false, 128}, {"large", true, 48 * 1024}, {"small-after-large", true, 128},
 	} {
 		b.Run(workload.name, func(b *testing.B) {
-			var scratch streamingSenderScratch
-			buffers := []*senderScratchBuffer{&scratch.data, &scratch.clove, &scratch.ratchet, &scratch.plain, &scratch.encrypted}
-			warmSize := workload.size
+			local, err := foundation.GenerateLocalDestination()
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(local.ReleaseSensitive)
+			ratchet, err := dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{})
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(ratchet.ReleaseSensitive)
+			sender, route := preparedTestSenderWithConfig(b, PreparedRouteSenderConfig{
+				Ratchet: ratchet,
+				NextID:  func() (uint32, error) { return 1, nil },
+			}, func(context.Context, dataplanetunnel.CircuitToken, dataplanetunnel.Block) error {
+				return nil
+			})
+			if err := sender.InstallRoute(route); err != nil {
+				b.Fatal(err)
+			}
 			if workload.large {
-				warmSize = 48 * 1024
+				warm := dataplanestreamingtunnel.Delivery{
+					From: route.Owner, To: route.Remote, Protocol: dataplanedatagram.ProtocolRaw,
+					Payload: make([]byte, 48*1024),
+				}
+				if err := sender.SendTunnel(b.Context(), warm); err != nil {
+					b.Fatal(err)
+				}
 			}
-			for _, buffer := range buffers {
-				buffer.bytes(warmSize)
+			delivery := dataplanestreamingtunnel.Delivery{
+				From: route.Owner, To: route.Remote, Protocol: dataplanedatagram.ProtocolRaw,
+				Payload: make([]byte, workload.size),
 			}
-			clearStreamingSenderScratch(&scratch)
 			b.ReportAllocs()
-			b.SetBytes(int64(5 * workload.size))
+			b.SetBytes(int64(workload.size))
 			b.ResetTimer()
 			for b.Loop() {
-				for _, buffer := range buffers {
-					view := buffer.bytes(workload.size)
-					view[0], view[len(view)-1] = 1, 2
+				if err := sender.SendTunnel(b.Context(), delivery); err != nil {
+					b.Fatal(err)
 				}
-				clearStreamingSenderScratch(&scratch)
 			}
 		})
 	}

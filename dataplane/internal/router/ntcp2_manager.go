@@ -353,6 +353,10 @@ func (m *NTCP2Manager) HasSession(peer foundation.Hash) bool {
 	return m != nil && m.contextErr() == nil && m.session(peer) != nil
 }
 
+func (m *NTCP2Manager) SessionViable(peer foundation.Hash) bool {
+	return m.HasSession(peer)
+}
+
 func (m *NTCP2Manager) DropSession(peer foundation.Hash) bool {
 	if m == nil {
 		return false

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	dataplanessu2 "gosuda.org/ivnp/dataplane/internal/transport/ssu2"
@@ -29,118 +30,122 @@ func TestSSU2I2NPOversizedPayloadFragments(t *testing.T) {
 }
 
 func TestSSU2DeliversExpectedMessagesIntact(t *testing.T) {
-	aliceConn := newSSU2LoopbackConn(t)
-	bobConn := newSSU2LoopbackConn(t)
-	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
-	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
-	aliceDB := newTransportTestPeers()
-	bobDB := newTransportTestPeers()
-	now := uint64(time.Now().UnixMilli())
-	if err := aliceDB.AdmitRouterInfo(bob.Snapshot(), now); err != nil {
-		t.Fatal(err)
-	}
-	if err := bobDB.AdmitRouterInfo(alice.Snapshot(), now); err != nil {
-		t.Fatal(err)
-	}
-	aliceMetrics, bobMetrics := observability.NewRegistry(), observability.NewRegistry()
-	aliceManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2,
-		Peers: aliceDB, StaticPrivate: aliceStatic, IntroKey: aliceIntro,
-		IdleTimeout: time.Minute, HandshakeTimeout: 2 * time.Second, Metrics: aliceMetrics,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2,
-		Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro,
-		IdleTimeout: time.Minute, HandshakeTimeout: 2 * time.Second, Metrics: bobMetrics,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	const initialMessages = 16
-	const messages = 64
-	expected := make(map[uint32]string, initialMessages+messages)
-	outbound := make([]foundation.I2NPMessage, initialMessages+messages)
-	for i := range outbound {
-		id := uint32(901 + i)
-		payload := fmt.Sprintf("live SSU2 message %d", id)
-		expected[id] = payload
-		outbound[i] = ssu2LiveMessage(id)
-		outbound[i].Payload = []byte(payload)
-	}
-	var deliveredMu sync.Mutex
-	delivered := make(map[uint32]bool, len(expected))
-	deliveredCount := func() int {
-		deliveredMu.Lock()
-		defer deliveredMu.Unlock()
-		return len(delivered)
-	}
-	startSSU2LiveManager(t, ctx, aliceManager, aliceConn, alice, nil)
-	startSSU2LiveManager(t, ctx, bobManager, bobConn, bob, func(message foundation.I2NPMessage, _ uint64, _ bool) error {
-		want, ok := expected[message.Header.ID]
-		if !ok {
-			t.Errorf("received unexpected message ID %d", message.Header.ID)
-			return nil
+	synctest.Test(t, func(t *testing.T) {
+		net_ := newSSU2SimNetwork(t)
+		aliceConn := newSSU2SimConn(t, net_, "alice")
+		bobConn := newSSU2SimConn(t, net_, "bob")
+		alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
+		bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
+		aliceDB := newTransportTestPeers()
+		bobDB := newTransportTestPeers()
+		now := uint64(time.Now().UnixMilli())
+		if err := aliceDB.AdmitRouterInfo(bob.Snapshot(), now); err != nil {
+			t.Fatal(err)
 		}
-		if string(message.Payload) != want {
-			t.Errorf("message %d payload = %q, want %q", message.Header.ID, message.Payload, want)
-			return nil
+		if err := bobDB.AdmitRouterInfo(alice.Snapshot(), now); err != nil {
+			t.Fatal(err)
 		}
-		deliveredMu.Lock()
-		delivered[message.Header.ID] = true
-		deliveredMu.Unlock()
-		return nil
-	})
-	t.Cleanup(func() {
-		cancel()
-		closeSSU2LiveManager(t, aliceManager)
-		closeSSU2LiveManager(t, bobManager)
-		for _, message := range outbound {
-			if !delivered[message.Header.ID] {
-				t.Errorf("message %d was not delivered intact", message.Header.ID)
+		aliceMetrics, bobMetrics := observability.NewRegistry(), observability.NewRegistry()
+		aliceManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2,
+			Peers: aliceDB, StaticPrivate: aliceStatic, IntroKey: aliceIntro,
+			IdleTimeout: time.Minute, HandshakeTimeout: 2 * time.Second, Metrics: aliceMetrics,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bobManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2,
+			Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro,
+			IdleTimeout: time.Minute, HandshakeTimeout: 2 * time.Second, Metrics: bobMetrics,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		const initialMessages = 16
+		const messages = 64
+		expected := make(map[uint32]string, initialMessages+messages)
+		outbound := make([]foundation.I2NPMessage, initialMessages+messages)
+		for i := range outbound {
+			id := uint32(901 + i)
+			payload := fmt.Sprintf("live SSU2 message %d", id)
+			expected[id] = payload
+			outbound[i] = ssu2LiveMessage(id)
+			outbound[i].Payload = []byte(payload)
+		}
+		var deliveredMu sync.Mutex
+		delivered := make(map[uint32]bool, len(expected))
+		initialDone := make(chan struct{})
+		allDone := make(chan struct{})
+		startSSU2SimManager(t, ctx, aliceManager, aliceConn, alice, nil)
+		startSSU2SimManager(t, ctx, bobManager, bobConn, bob, func(message foundation.I2NPMessage, _ uint64, _ bool) error {
+			want, ok := expected[message.Header.ID]
+			if !ok {
+				t.Errorf("received unexpected message ID %d", message.Header.ID)
+				return nil
+			}
+			if string(message.Payload) != want {
+				t.Errorf("message %d payload = %q, want %q", message.Header.ID, message.Payload, want)
+				return nil
+			}
+			deliveredMu.Lock()
+			delivered[message.Header.ID] = true
+			count := len(delivered)
+			deliveredMu.Unlock()
+			if count >= initialMessages {
+				select {
+				case <-initialDone:
+				default:
+					close(initialDone)
+				}
+			}
+			if count == len(expected) {
+				select {
+				case <-allDone:
+				default:
+					close(allDone)
+				}
+			}
+			return nil
+		})
+		t.Cleanup(func() {
+			cancel()
+			closeSSU2LiveManager(t, aliceManager)
+			closeSSU2LiveManager(t, bobManager)
+			for _, message := range outbound {
+				if !delivered[message.Header.ID] {
+					t.Errorf("message %d was not delivered intact", message.Header.ID)
+				}
+			}
+		})
+
+		if err = aliceManager.EnsureSession(ctx, bob.Hash()); err != nil {
+			t.Fatal(err)
+		}
+		for _, message := range outbound[:initialMessages] {
+			if err = aliceManager.Send(ctx, bob.Hash(), message); err != nil {
+				t.Fatal(err)
+			}
+		}
+		<-initialDone
+		net_.Advance(50 * time.Millisecond)
+
+		for _, message := range outbound[initialMessages:] {
+			if err := aliceManager.Send(ctx, bob.Hash(), message); err != nil {
+				t.Fatal(err)
+			}
+		}
+		<-allDone
+		net_.Advance(50 * time.Millisecond)
+
+		for name, snapshot := range map[string]observability.SSU2Snapshot{
+			"alice": aliceMetrics.Snapshot().SSU2,
+			"bob":   bobMetrics.Snapshot().SSU2,
+		} {
+			if snapshot.ReceivedDatagrams != snapshot.EnqueuedDatagrams+snapshot.ReceiveQueueDrops ||
+				snapshot.EnqueuedDatagrams != snapshot.ProcessedDatagrams+snapshot.IngressQueueDepth ||
+				snapshot.SendEnqueuedDatagrams != snapshot.SentDatagrams+snapshot.SendFailedDatagrams+snapshot.SendQueueDrops+snapshot.EgressQueueDepth {
+				t.Fatalf("%s SSU2 conservation failed after live delivery: %+v", name, snapshot)
 			}
 		}
 	})
-
-	if err = aliceManager.EnsureSession(ctx, bob.Hash()); err != nil {
-		t.Fatal(err)
-	}
-	for _, message := range outbound[:initialMessages] {
-		if err = aliceManager.Send(ctx, bob.Hash(), message); err != nil {
-			t.Fatal(err)
-		}
-	}
-	waitForSSU2Live(t, 30*time.Second, func() bool {
-		aliceManager.mu.RLock()
-		session := aliceManager.sessionsByPeer[bob.Hash()]
-		peerTests := len(aliceManager.peerTests)
-		aliceManager.mu.RUnlock()
-		if session == nil || peerTests != 0 || deliveredCount() < initialMessages {
-			return false
-		}
-		session.sendMu.Lock()
-		pending := len(session.sent)
-		session.sendMu.Unlock()
-		return pending == 0
-	}, "initial messages and transport acknowledgments")
-
-	for _, message := range outbound[initialMessages:] {
-		if err := aliceManager.Send(ctx, bob.Hash(), message); err != nil {
-			t.Fatal(err)
-		}
-	}
-	waitForSSU2Live(t, 30*time.Second, func() bool {
-		return deliveredCount() == len(expected)
-	}, "every expected message delivered intact")
-	for name, snapshot := range map[string]observability.SSU2Snapshot{
-		"alice": aliceMetrics.Snapshot().SSU2,
-		"bob":   bobMetrics.Snapshot().SSU2,
-	} {
-		if snapshot.ReceivedDatagrams != snapshot.EnqueuedDatagrams+snapshot.ReceiveQueueDrops ||
-			snapshot.EnqueuedDatagrams != snapshot.ProcessedDatagrams+snapshot.IngressQueueDepth ||
-			snapshot.SendEnqueuedDatagrams != snapshot.SentDatagrams+snapshot.SendFailedDatagrams+snapshot.SendQueueDrops+snapshot.EgressQueueDepth {
-			t.Fatalf("%s SSU2 conservation failed after live delivery: %+v", name, snapshot)
-		}
-	}
 }

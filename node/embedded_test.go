@@ -4,27 +4,74 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"testing"
 
 	"gosuda.org/ivnp/controlplane"
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/simnet"
 	"gosuda.org/ivnp/state"
 )
 
-func embeddedTestConfiguration() state.ConfigurationOperating {
+type embeddedSocketRuntime struct {
+	host *simnet.Host
+}
+
+func (s *embeddedSocketRuntime) ListenStream(_ context.Context, endpoint dataplane.RouterEndpoint) (net.Listener, error) {
+	addr, err := netip.ParseAddrPort(endpoint.Address)
+	if err != nil {
+		return nil, err
+	}
+	return s.host.ListenTCP(netip.AddrPortFrom(s.host.Addr(), addr.Port()))
+}
+
+func (s *embeddedSocketRuntime) DialStream(ctx context.Context, endpoint dataplane.RouterEndpoint) (net.Conn, error) {
+	addr, err := netip.ParseAddrPort(endpoint.Address)
+	if err != nil {
+		return nil, err
+	}
+	return s.host.DialTCP(ctx, addr)
+}
+
+func (s *embeddedSocketRuntime) ListenUDP(_ context.Context, endpoint dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
+	addr, err := netip.ParseAddrPort(endpoint.Address)
+	if err != nil {
+		return nil, err
+	}
+	return s.host.ListenUDP(netip.AddrPortFrom(s.host.Addr(), addr.Port()))
+}
+
+func newSimNetwork(t *testing.T) *simnet.Network {
+	t.Helper()
+	network := simnet.NewNetwork(simnet.Config{})
+	t.Cleanup(func() { _ = network.Close() })
+	return network
+}
+
+func embeddedTestConfiguration(t *testing.T, network *simnet.Network, name string) (state.ConfigurationOperating, controlplane.ControllerOptions) {
+	t.Helper()
+	host := network.Host(name)
+	if host == nil {
+		t.Fatal("simnet host allocation failed")
+	}
 	cfg := state.ConfigurationDefaultOperating()
 	cfg.DataDir, cfg.StateDir, cfg.StatePath, cfg.KeyPath = "", "", "", ""
 	cfg.NTCP2.Enabled, cfg.SSU2.Enabled, cfg.Reseed.Enabled = true, false, false
-	cfg.NTCP2.Bind = state.ConfigurationEndpoint{Host: "127.0.0.1"}
+	endpoint := state.ConfigurationEndpoint{Host: host.Addr().String(), Port: 32768}
+	cfg.NTCP2.Bind = endpoint
+	cfg.NTCP2.Advertised = endpoint
 	cfg.SAM.Enabled, cfg.AddressBook.Enabled = false, false
-	return cfg
+	return cfg, controlplane.ControllerOptions{SocketRuntime: &embeddedSocketRuntime{host: host}}
 }
 
 func TestEmbeddedRouterConstructionContextDoesNotOwnLifetime(t *testing.T) {
+	network := newSimNetwork(t)
+	cfg, options := embeddedTestConfiguration(t, network, "router")
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	router, err := NewEmbeddedRouter(ctx, embeddedTestConfiguration(), controlplane.ControllerOptions{})
+	router, err := NewEmbeddedRouter(ctx, cfg, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,23 +92,24 @@ func TestEmbeddedRouterConstructionContextDoesNotOwnLifetime(t *testing.T) {
 }
 
 func TestEmbeddedRouterPersistentIdentityAndExclusiveOwnership(t *testing.T) {
-	cfg := embeddedTestConfiguration()
+	network := newSimNetwork(t)
+	cfg, options := embeddedTestConfiguration(t, network, "router")
 	cfg.StateDir = t.TempDir()
 	cfg.StatePath = filepath.Join(cfg.StateDir, "router.state")
 	cfg.KeyPath = filepath.Join(cfg.StateDir, "router.keys")
-	first, err := NewEmbeddedRouter(t.Context(), cfg, controlplane.ControllerOptions{})
+	first, err := NewEmbeddedRouter(t.Context(), cfg, options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = first.Close() })
 	hash := first.Hash()
-	if _, err := NewEmbeddedRouter(t.Context(), cfg, controlplane.ControllerOptions{}); !errors.Is(err, controlplane.ErrStateConflict) {
+	if _, err := NewEmbeddedRouter(t.Context(), cfg, options); !errors.Is(err, controlplane.ErrStateConflict) {
 		t.Fatalf("concurrent persistent owner = %v", err)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
-	second, err := NewEmbeddedRouter(t.Context(), cfg, controlplane.ControllerOptions{})
+	second, err := NewEmbeddedRouter(t.Context(), cfg, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +120,8 @@ func TestEmbeddedRouterPersistentIdentityAndExclusiveOwnership(t *testing.T) {
 }
 
 func TestEmbeddedRouterRejectsNamedStateWithoutChangingIdentity(t *testing.T) {
-	cfg := embeddedTestConfiguration()
+	network := newSimNetwork(t)
+	cfg, options := embeddedTestConfiguration(t, network, "router")
 	cfg.StateDir = t.TempDir()
 	cfg.StatePath = filepath.Join(cfg.StateDir, "router.state")
 	cfg.KeyPath = filepath.Join(cfg.StateDir, "router.keys")
@@ -100,7 +149,7 @@ func TestEmbeddedRouterRejectsNamedStateWithoutChangingIdentity(t *testing.T) {
 	if err := store.Save(bundle); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewEmbeddedRouter(t.Context(), cfg, controlplane.ControllerOptions{}); !errors.Is(err, controlplane.ErrStateConflict) {
+	if _, err := NewEmbeddedRouter(t.Context(), cfg, options); !errors.Is(err, controlplane.ErrStateConflict) {
 		t.Fatalf("named state admission = %v", err)
 	}
 	loaded, err := store.Load()
@@ -115,19 +164,16 @@ func TestEmbeddedRouterRejectsNamedStateWithoutChangingIdentity(t *testing.T) {
 
 func TestEmbeddedRouterExportAndImportRouterInfo(t *testing.T) {
 	ctx := t.Context()
-	cfgA := embeddedTestConfiguration()
-	cfgA.NTCP2.Bind = state.ConfigurationEndpoint{Host: "127.0.0.1", Port: 20001}
-	cfgA.NTCP2.Advertised = state.ConfigurationEndpoint{Host: "127.0.0.1", Port: 20001}
-	routerA, err := NewEmbeddedRouter(ctx, cfgA, controlplane.ControllerOptions{})
+	network := newSimNetwork(t)
+	cfgA, optionsA := embeddedTestConfiguration(t, network, "a")
+	routerA, err := NewEmbeddedRouter(ctx, cfgA, optionsA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer routerA.Close()
 
-	cfgB := embeddedTestConfiguration()
-	cfgB.NTCP2.Bind = state.ConfigurationEndpoint{Host: "127.0.0.1", Port: 20002}
-	cfgB.NTCP2.Advertised = state.ConfigurationEndpoint{Host: "127.0.0.1", Port: 20002}
-	routerB, err := NewEmbeddedRouter(ctx, cfgB, controlplane.ControllerOptions{})
+	cfgB, optionsB := embeddedTestConfiguration(t, network, "b")
+	routerB, err := NewEmbeddedRouter(ctx, cfgB, optionsB)
 	if err != nil {
 		t.Fatal(err)
 	}

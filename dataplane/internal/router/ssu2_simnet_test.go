@@ -1,5 +1,3 @@
-//go:build dst || synctest
-
 package router
 
 import (
@@ -11,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -19,32 +18,42 @@ import (
 	"gosuda.org/ivnp/internal/simnet"
 )
 
+func newSSU2SimNetwork(t *testing.T) *simnet.Network {
+	t.Helper()
+	seed := uint64(3)
+	if env := cmp.Or(os.Getenv("DST_SEED"), os.Getenv("IVNP_DST_SEED")); env != "" {
+		if s, err := strconv.ParseUint(env, 10, 64); err == nil {
+			seed = s
+		}
+	}
+	net_ := simnet.NewNetwork(simnet.Config{
+		Seed:        seed,
+		DefaultLink: simnet.LinkConfig{Latency: time.Millisecond},
+	})
+	t.Cleanup(func() { _ = net_.Close() })
+	return net_
+}
+
+func newSSU2SimConn(t *testing.T, net_ *simnet.Network, name string) *simnet.UDPConn {
+	t.Helper()
+	host := net_.Host(name)
+	conn, err := host.ListenUDP(netip.AddrPort{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
 // TestSSU2SimnetSessionExchange runs the same reliable-delivery workload as
 // TestSSU2DeliversExpectedMessagesIntact over simnet virtual UDP sockets
 // inside a synctest bubble — isolating SSU2 session data and ACK flow from
 // kernel networking.
 func TestSSU2SimnetSessionExchange(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		seed := uint64(3)
-		if env := cmp.Or(os.Getenv("DST_SEED"), os.Getenv("IVNP_DST_SEED")); env != "" {
-			if s, err := strconv.ParseUint(env, 10, 64); err == nil {
-				seed = s
-			}
-		}
-		net_ := simnet.NewNetwork(simnet.Config{Seed: seed})
-		defer net_.Close()
-		net_.SetBidirectional(netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2"), simnet.LinkConfig{Latency: time.Millisecond})
-		aliceHost := net_.HostAt("alice", netip.MustParseAddr("192.0.2.1"))
-		bobHost := net_.HostAt("bob", netip.MustParseAddr("192.0.2.2"))
-
-		aliceConn, err := aliceHost.ListenUDP(netip.MustParseAddrPort("192.0.2.1:40002"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		bobConn, err := bobHost.ListenUDP(netip.MustParseAddrPort("192.0.2.2:40002"))
-		if err != nil {
-			t.Fatal(err)
-		}
+		net_ := newSSU2SimNetwork(t)
+		aliceConn := newSSU2SimConn(t, net_, "alice")
+		bobConn := newSSU2SimConn(t, net_, "bob")
 		alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
 		bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
 		aliceDB := newTransportTestPeers()
@@ -72,6 +81,7 @@ func TestSSU2SimnetSessionExchange(t *testing.T) {
 		}
 		var deliveredMu sync.Mutex
 		delivered := make(map[uint32]bool, len(expected))
+		allDelivered := make(chan struct{})
 		startSSU2SimManager(t, ctx, aliceManager, aliceConn, alice, nil)
 		startSSU2SimManager(t, ctx, bobManager, bobConn, bob, func(message foundation.I2NPMessage, _ uint64, _ bool) error {
 			want, ok := expected[message.Header.ID]
@@ -85,7 +95,15 @@ func TestSSU2SimnetSessionExchange(t *testing.T) {
 			}
 			deliveredMu.Lock()
 			delivered[message.Header.ID] = true
+			done := len(delivered) == messages
 			deliveredMu.Unlock()
+			if done {
+				select {
+				case <-allDelivered:
+				default:
+					close(allDelivered)
+				}
+			}
 			return nil
 		})
 		t.Cleanup(func() {
@@ -94,34 +112,33 @@ func TestSSU2SimnetSessionExchange(t *testing.T) {
 			closeSSU2LiveManager(t, bobManager)
 		})
 
-		if err = aliceManager.EnsureSession(ctx, bob.Hash()); err != nil {
+		if err := aliceManager.EnsureSession(ctx, bob.Hash()); err != nil {
 			t.Fatal(err)
 		}
 		for _, message := range outbound {
-			if err = aliceManager.Send(ctx, bob.Hash(), message); err != nil {
+			if err := aliceManager.Send(ctx, bob.Hash(), message); err != nil {
 				t.Fatal(err)
 			}
 		}
-		waitForSSU2Live(t, 30*time.Second, func() bool {
-			deliveredMu.Lock()
-			defer deliveredMu.Unlock()
-			return len(delivered) == messages
-		}, "all simnet SSU2 messages delivered")
-		waitForSSU2Live(t, 30*time.Second, func() bool {
-			aliceManager.mu.RLock()
-			session := aliceManager.sessionsByPeer[bob.Hash()]
-			aliceManager.mu.RUnlock()
-			if session == nil {
-				return false
+		<-allDelivered
+		net_.Advance(50 * time.Millisecond)
+
+		var retransmitted atomic.Int64
+		aliceIP := net_.Host("alice").Addr()
+		net_.SetHook(func(ev simnet.Event) {
+			if ev.Kind == simnet.EventSent && ev.From.Addr() == aliceIP {
+				retransmitted.Add(1)
 			}
-			session.sendMu.Lock()
-			defer session.sendMu.Unlock()
-			return len(session.sent) == 0
-		}, "all simnet SSU2 sends acknowledged")
+		})
+		net_.Advance(time.Second)
+		net_.SetHook(nil)
+		if got := retransmitted.Load(); got != 0 {
+			t.Fatalf("alice retransmitted %d packets after all messages were delivered and acknowledged", got)
+		}
 	})
 }
 
-func startSSU2SimManager(t *testing.T, ctx context.Context, manager *SSU2Manager, conn *simnet.UDPConn, local *transportTestLocal, handle func(foundation.I2NPMessage, uint64, bool) error) {
+func startSSU2SimManager(t *testing.T, ctx context.Context, manager *SSU2Manager, conn UDPSocket, local *transportTestLocal, handle func(foundation.I2NPMessage, uint64, bool) error) {
 	t.Helper()
 	if handle == nil {
 		handle = func(foundation.I2NPMessage, uint64, bool) error { return nil }

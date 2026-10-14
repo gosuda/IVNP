@@ -9,7 +9,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"runtime"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -41,458 +40,626 @@ func TestTunnelNetworkRejectsNonInteroperableX25519DestinationIdentity(t *testin
 }
 
 func TestTunnelNetworkDialListenOrderedBytes(t *testing.T) {
-	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork), zeroSYNACKPorts: true, ackCompleted: make(chan struct{}, 1)}
-	client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
-	listener, err := (stream.ListenerConfig{Network: server}).Listen(context.Background(), ":8080")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-
-	accepted := make(chan net.Conn, 1)
-	acceptErr := make(chan error, 1)
-	go func() {
-		connection, err := listener.Accept()
+	synctest.Test(t, func(t *testing.T) {
+		fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork), zeroSYNACKPorts: true, ackCompleted: make(chan struct{}, 1)}
+		client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
+		listener, err := (stream.ListenerConfig{Network: server}).Listen(context.Background(), ":8080")
 		if err != nil {
-			acceptErr <- err
-			return
+			t.Fatal(err)
 		}
-		accepted <- connection
-	}()
+		t.Cleanup(func() { _ = listener.Close() })
 
-	context, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	outbound, err := client.DialI2PFromPort(context, server.B32()+":8080", 4242)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = outbound.Close() })
-	var inbound net.Conn
-	select {
-	case inbound = <-accepted:
-	case err = <-acceptErr:
-		t.Fatal(err)
-	case <-time.After(time.Second):
-		t.Fatal("listener did not accept synchronized stream")
-	}
-	t.Cleanup(func() { _ = inbound.Close() })
-	if local, ok := outbound.(interface{ LocalI2PPort() uint16 }); !ok || local.LocalI2PPort() != 4242 {
-		t.Fatalf("outbound source port = %T/%v", outbound, ok)
-	}
-	if remote, ok := inbound.(interface{ RemoteI2PPort() uint16 }); !ok || remote.RemoteI2PPort() != 4242 {
-		t.Fatalf("inbound source port = %T/%v", inbound, ok)
-	}
-	initialACKs := fabric.waitInitialACKs(t, context, 1)
-	if initialACKs != 1 {
-		t.Fatalf("SYNACK acknowledgements = %d, want 1", initialACKs)
-	}
+		accepted := make(chan net.Conn, 1)
+		acceptErr := make(chan error, 1)
+		go func() {
+			connection, err := listener.Accept()
+			if err != nil {
+				acceptErr <- err
+				return
+			}
+			accepted <- connection
+		}()
 
-	payload := bytes.Repeat([]byte("tunnel-stream-"), 700)
-	if n, err := outbound.Write(payload); err != nil || n != len(payload) {
-		t.Fatalf("Write() = %d, %v", n, err)
-	}
-	received := make([]byte, len(payload))
-	if _, err := io.ReadFull(inbound, received); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(received, payload) {
-		t.Fatal("received payload differs from transmitted bytes")
-	}
-	fabric.mu.Lock()
-	maxDataPayload := fabric.maxDataPayload
-	maxDataPacket := fabric.maxDataPacket
-	fabric.mu.Unlock()
-	if maxDataPayload != localMaxPayloadSize || maxDataPacket != MaxPacketSize {
-		t.Fatalf("IVNP advertised MSS produced payload/packet %d/%d, want %d/%d", maxDataPayload, maxDataPacket, localMaxPayloadSize, MaxPacketSize)
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		outbound, err := client.DialI2PFromPort(ctx, server.B32()+":8080", 4242)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = outbound.Close() })
+		var inbound net.Conn
+		select {
+		case inbound = <-accepted:
+		case err = <-acceptErr:
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = inbound.Close() })
+		if local, ok := outbound.(interface{ LocalI2PPort() uint16 }); !ok || local.LocalI2PPort() != 4242 {
+			t.Fatalf("outbound source port = %T/%v", outbound, ok)
+		}
+		if remote, ok := inbound.(interface{ RemoteI2PPort() uint16 }); !ok || remote.RemoteI2PPort() != 4242 {
+			t.Fatalf("inbound source port = %T/%v", inbound, ok)
+		}
+		initialACKs := fabric.waitInitialACKs(t, ctx, 1)
+		if initialACKs != 1 {
+			t.Fatalf("SYNACK acknowledgements = %d, want 1", initialACKs)
+		}
 
-	if _, err := inbound.Write([]byte("reply")); err != nil {
-		t.Fatal(err)
-	}
-	reply := make([]byte, len("reply"))
-	if _, err := io.ReadFull(outbound, reply); err != nil || string(reply) != "reply" {
-		t.Fatalf("reply = %q, %v", reply, err)
-	}
-	if err := outbound.Close(); err != nil {
-		t.Fatal(err)
-	}
-	one := make([]byte, 1)
-	if n, err := inbound.Read(one); n != 0 || err != io.EOF {
-		t.Fatalf("Read after peer Close = %d, %v", n, err)
-	}
-	if err := inbound.Close(); err != nil {
-		t.Fatalf("peer Close after EOF = %v", err)
-	}
+		payload := bytes.Repeat([]byte("tunnel-stream-"), 700)
+		if n, err := outbound.Write(payload); err != nil || n != len(payload) {
+			t.Fatalf("Write() = %d, %v", n, err)
+		}
+		received := make([]byte, len(payload))
+		if _, err := io.ReadFull(inbound, received); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(received, payload) {
+			t.Fatal("received payload differs from transmitted bytes")
+		}
+		fabric.mu.Lock()
+		maxDataPayload := fabric.maxDataPayload
+		maxDataPacket := fabric.maxDataPacket
+		fabric.mu.Unlock()
+		if maxDataPayload != localMaxPayloadSize || maxDataPacket != MaxPacketSize {
+			t.Fatalf("IVNP advertised MSS produced payload/packet %d/%d, want %d/%d", maxDataPayload, maxDataPacket, localMaxPayloadSize, MaxPacketSize)
+		}
+
+		if _, err := inbound.Write([]byte("reply")); err != nil {
+			t.Fatal(err)
+		}
+		reply := make([]byte, len("reply"))
+		if _, err := io.ReadFull(outbound, reply); err != nil || string(reply) != "reply" {
+			t.Fatalf("reply = %q, %v", reply, err)
+		}
+		if err := outbound.Close(); err != nil {
+			t.Fatal(err)
+		}
+		one := make([]byte, 1)
+		if n, err := inbound.Read(one); n != 0 || err != io.EOF {
+			t.Fatalf("Read after peer Close = %d, %v", n, err)
+		}
+		if err := inbound.Close(); err != nil {
+			t.Fatalf("peer Close after EOF = %v", err)
+		}
+	})
 }
 
 func TestTunnelNetworkHonorsJavaPeerPayloadMSS(t *testing.T) {
-	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
-	client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
-	listener, err := server.ListenI2P(context.Background(), ":8081")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		connection, acceptErr := listener.Accept()
-		if acceptErr == nil {
-			accepted <- connection
+	synctest.Test(t, func(t *testing.T) {
+		fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
+		client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
+		listener, err := server.ListenI2P(context.Background(), ":8081")
+		if err != nil {
+			t.Fatal(err)
 		}
-	}()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	outbound, err := client.DialI2P(ctx, server.B32()+":8081")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = outbound.Close() })
-	inbound := <-accepted
-	t.Cleanup(func() { _ = inbound.Close() })
+		t.Cleanup(func() { _ = listener.Close() })
 
-	connection := outbound.(*tunnelConn)
-	connection.setPeerMaxPayloadSize(0)
-	if connection.peerMaxPayloadSize != minPeerMaxPayloadSize {
-		t.Fatalf("explicit zero MSS = %d, want Java clamp %d", connection.peerMaxPayloadSize, minPeerMaxPayloadSize)
-	}
-	connection.setPeerMaxPayloadSize(-1)
-	if connection.peerMaxPayloadSize != minPeerMaxPayloadSize {
-		t.Fatalf("omitted MSS changed negotiated value to %d", connection.peerMaxPayloadSize)
-	}
-	connection.setPeerMaxPayloadSize(1812)
-	payload := bytes.Repeat([]byte("java-streaming-mtu"), 1024)
-	if n, writeErr := outbound.Write(payload); writeErr != nil || n != len(payload) {
-		t.Fatalf("Write() = %d, %v", n, writeErr)
-	}
-	received := make([]byte, len(payload))
-	if _, err = io.ReadFull(inbound, received); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(received, payload) {
-		t.Fatal("received payload differs from transmitted bytes")
-	}
-	fabric.mu.Lock()
-	maxDataPayload := fabric.maxDataPayload
-	maxDataPacket := fabric.maxDataPacket
-	fabric.mu.Unlock()
-	if maxDataPayload != 1812 || maxDataPacket != 1812+HeaderLen {
-		t.Fatalf("Java MSS produced payload/packet %d/%d, want %d/%d", maxDataPayload, maxDataPacket, 1812, 1812+HeaderLen)
-	}
+		accepted := make(chan net.Conn, 1)
+		go func() {
+			connection, acceptErr := listener.Accept()
+			if acceptErr == nil {
+				accepted <- connection
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		outbound, err := client.DialI2P(ctx, server.B32()+":8081")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = outbound.Close() })
+		inbound := <-accepted
+		t.Cleanup(func() { _ = inbound.Close() })
+
+		connection := outbound.(*tunnelConn)
+		connection.setPeerMaxPayloadSize(0)
+		if connection.peerMaxPayloadSize != minPeerMaxPayloadSize {
+			t.Fatalf("explicit zero MSS = %d, want Java clamp %d", connection.peerMaxPayloadSize, minPeerMaxPayloadSize)
+		}
+		connection.setPeerMaxPayloadSize(-1)
+		if connection.peerMaxPayloadSize != minPeerMaxPayloadSize {
+			t.Fatalf("omitted MSS changed negotiated value to %d", connection.peerMaxPayloadSize)
+		}
+		connection.setPeerMaxPayloadSize(1812)
+		payload := bytes.Repeat([]byte("java-streaming-mtu"), 1024)
+		if n, writeErr := outbound.Write(payload); writeErr != nil || n != len(payload) {
+			t.Fatalf("Write() = %d, %v", n, writeErr)
+		}
+		received := make([]byte, len(payload))
+		if _, err = io.ReadFull(inbound, received); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(received, payload) {
+			t.Fatal("received payload differs from transmitted bytes")
+		}
+		fabric.mu.Lock()
+		maxDataPayload := fabric.maxDataPayload
+		maxDataPacket := fabric.maxDataPacket
+		fabric.mu.Unlock()
+		if maxDataPayload != 1812 || maxDataPacket != 1812+HeaderLen {
+			t.Fatalf("Java MSS produced payload/packet %d/%d, want %d/%d", maxDataPayload, maxDataPacket, 1812, 1812+HeaderLen)
+		}
+	})
 }
 
 func TestTunnelNetworkRetransmitsLostPacket(t *testing.T) {
-	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork), dropFirstData: true}
-	client, server := newTunnelNetworkPair(t, fabric, 20*time.Millisecond)
-	listener, err := server.ListenI2P(context.Background(), ":77")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		connection, acceptErr := listener.Accept()
-		if acceptErr == nil {
-			accepted <- connection
+	synctest.Test(t, func(t *testing.T) {
+		fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork), dropFirstData: true}
+		client, server := newTunnelNetworkPair(t, fabric, 20*time.Millisecond)
+		listener, err := server.ListenI2P(context.Background(), ":77")
+		if err != nil {
+			t.Fatal(err)
 		}
-	}()
-	context, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	outbound, err := client.DialI2P(context, server.B32()+":77")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = outbound.Close() })
-	var inbound net.Conn
-	select {
-	case inbound = <-accepted:
-	case <-time.After(time.Second):
-		t.Fatal("listener did not accept stream")
-	}
-	t.Cleanup(func() { _ = inbound.Close() })
+		t.Cleanup(func() { _ = listener.Close() })
+		accepted := make(chan net.Conn, 1)
+		go func() {
+			connection, acceptErr := listener.Accept()
+			if acceptErr == nil {
+				accepted <- connection
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		outbound, err := client.DialI2P(ctx, server.B32()+":77")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = outbound.Close() })
+		inbound := <-accepted
+		t.Cleanup(func() { _ = inbound.Close() })
 
-	if _, err := outbound.Write([]byte("retransmit")); err != nil {
-		t.Fatal(err)
-	}
-	if err := inbound.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	received := make([]byte, len("retransmit"))
-	if _, err := io.ReadFull(inbound, received); err != nil || string(received) != "retransmit" {
-		t.Fatalf("retransmitted payload = %q, %v", received, err)
-	}
-	fabric.mu.Lock()
-	dropped := fabric.dropped
-	fabric.mu.Unlock()
-	if !dropped {
-		t.Fatal("test fabric did not drop an initial data packet")
-	}
+		if _, err := outbound.Write([]byte("retransmit")); err != nil {
+			t.Fatal(err)
+		}
+		if err := inbound.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		received := make([]byte, len("retransmit"))
+		if _, err := io.ReadFull(inbound, received); err != nil || string(received) != "retransmit" {
+			t.Fatalf("retransmitted payload = %q, %v", received, err)
+		}
+		fabric.mu.Lock()
+		dropped := fabric.dropped
+		fabric.mu.Unlock()
+		if !dropped {
+			t.Fatal("test fabric did not drop an initial data packet")
+		}
+	})
 }
 
 func TestTunnelNetworkCloseRetransmitsPendingDataBeforeEOF(t *testing.T) {
-	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork), dropFirstData: true}
-	client, server := newTunnelNetworkPair(t, fabric, 20*time.Millisecond)
-	listener, err := server.ListenI2P(context.Background(), ":78")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		connection, acceptErr := listener.Accept()
-		if acceptErr == nil {
-			accepted <- connection
+	synctest.Test(t, func(t *testing.T) {
+		fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork), dropFirstData: true}
+		client, server := newTunnelNetworkPair(t, fabric, 20*time.Millisecond)
+		listener, err := server.ListenI2P(context.Background(), ":78")
+		if err != nil {
+			t.Fatal(err)
 		}
-	}()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	outbound, err := client.DialI2P(ctx, server.B32()+":78")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var inbound net.Conn
-	select {
-	case inbound = <-accepted:
-	case <-time.After(time.Second):
-		t.Fatal("listener did not accept stream")
-	}
-	t.Cleanup(func() { _ = inbound.Close() })
+		t.Cleanup(func() { _ = listener.Close() })
+		accepted := make(chan net.Conn, 1)
+		go func() {
+			connection, acceptErr := listener.Accept()
+			if acceptErr == nil {
+				accepted <- connection
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		outbound, err := client.DialI2P(ctx, server.B32()+":78")
+		if err != nil {
+			t.Fatal(err)
+		}
+		inbound := <-accepted
+		t.Cleanup(func() { _ = inbound.Close() })
 
-	payload := bytes.Repeat([]byte("close-after-data-"), 100)
-	if n, writeErr := outbound.Write(payload); writeErr != nil || n != len(payload) {
-		t.Fatalf("Write() = %d, %v", n, writeErr)
-	}
-	closed := make(chan error, 1)
-	go func() { closed <- outbound.Close() }()
+		payload := bytes.Repeat([]byte("close-after-data-"), 100)
+		if n, writeErr := outbound.Write(payload); writeErr != nil || n != len(payload) {
+			t.Fatalf("Write() = %d, %v", n, writeErr)
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- outbound.Close() }()
 
-	if err = inbound.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	received := make([]byte, len(payload))
-	if _, err = io.ReadFull(inbound, received); err != nil {
-		t.Fatalf("ReadFull() returned before retransmitted data: %v", err)
-	}
-	if !bytes.Equal(received, payload) {
-		t.Fatal("received payload differs after out-of-order CLOSE")
-	}
-	one := make([]byte, 1)
-	if n, readErr := inbound.Read(one); n != 0 || readErr != io.EOF {
-		t.Fatalf("Read after ordered CLOSE = %d, %v", n, readErr)
-	}
-	select {
-	case closeErr := <-closed:
-		if closeErr != nil {
+		if err = inbound.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		received := make([]byte, len(payload))
+		if _, err = io.ReadFull(inbound, received); err != nil {
+			t.Fatalf("ReadFull() returned before retransmitted data: %v", err)
+		}
+		if !bytes.Equal(received, payload) {
+			t.Fatal("received payload differs after out-of-order CLOSE")
+		}
+		one := make([]byte, 1)
+		if n, readErr := inbound.Read(one); n != 0 || readErr != io.EOF {
+			t.Fatalf("Read after ordered CLOSE = %d, %v", n, readErr)
+		}
+		if closeErr := <-closed; closeErr != nil {
 			t.Fatalf("Close() = %v", closeErr)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("Close did not finish after CLOSE acknowledgement")
-	}
+	})
 }
 
 func TestTunnelNetworkCloseCancelsBlockedRetransmission(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		destination, err := foundation.GenerateLegacyLocalDestination()
+		retransmitStarted := make(chan struct{})
+		var dataAttempts int
+		var fabric *streamFabric
+		fabric = &streamFabric{
+			networks: make(map[foundation.Hash]*TunnelNetwork),
+			beforeSend: func(ctx context.Context, delivery Delivery, packet Packet) (bool, error) {
+				if packet.Sequence == 0 || len(packet.Payload) == 0 {
+					return false, nil
+				}
+				fabric.mu.Lock()
+				dataAttempts++
+				attempt := dataAttempts
+				fabric.mu.Unlock()
+				if attempt == 1 {
+					return true, nil
+				}
+				select {
+				case <-retransmitStarted:
+				default:
+					close(retransmitStarted)
+				}
+				<-ctx.Done()
+				return true, ctx.Err()
+			},
+		}
+		client, server := newTunnelNetworkPair(t, fabric, 10*time.Millisecond)
+		listener, err := server.ListenI2P(context.Background(), ":79")
 		if err != nil {
 			t.Fatal(err)
 		}
-		sender := &blockingTunnelSender{started: make(chan struct{})}
-		network, err := NewTunnelNetwork(TunnelNetworkConfig{Destination: destination, Sender: sender, RetransmitAfter: 10 * time.Millisecond})
-		if err != nil {
-			t.Fatal(err)
-		}
-		connection := network.newConn(1, 2, foundation.Hash{1}, foundation.Identity{}, 1, 2, true)
-		if err := network.register(connection); err != nil {
-			_ = network.Close()
-			t.Fatal(err)
-		}
-		connection.mu.Lock()
-		connection.pending[1] = pendingPacket{wire: []byte{1}, sent: time.Now().Add(-time.Second)}
-		connection.mu.Unlock()
-		network.scheduleRetry(connection)
-		<-sender.started
-
-		closed := make(chan struct{})
+		t.Cleanup(func() { _ = listener.Close() })
+		accepted := make(chan net.Conn, 1)
 		go func() {
-			_ = network.Close()
-			close(closed)
+			connection, acceptErr := listener.Accept()
+			if acceptErr == nil {
+				accepted <- connection
+			}
 		}()
-		<-closed
+		outbound, err := client.DialI2P(context.Background(), server.B32()+":79")
+		if err != nil {
+			t.Fatal(err)
+		}
+		inbound := <-accepted
+		t.Cleanup(func() { _ = inbound.Close() })
+
+		if _, err := outbound.Write([]byte("retransmit")); err != nil {
+			t.Fatal(err)
+		}
+		<-retransmitStarted
+		if err := client.Close(); err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
 func TestTunnelNetworkCloseDrainsPacingQueue(t *testing.T) {
-	destination, err := foundation.GenerateLegacyLocalDestination()
-	if err != nil {
-		t.Fatal(err)
-	}
-	sender := &blockingTunnelSender{started: make(chan struct{})}
-	network, err := NewTunnelNetwork(TunnelNetworkConfig{Destination: destination, Sender: sender})
-	if err != nil {
-		t.Fatal(err)
-	}
-	connection := network.newConn(1, 2, foundation.Hash{1}, foundation.Identity{}, 1, 2, true)
-	if err := network.register(connection); err != nil {
-		t.Fatal(err)
-	}
-	results := make(chan error, 2)
-	go func() { results <- connection.sendWire(context.Background(), []byte{1}) }()
-	select {
-	case <-sender.started:
-	case <-time.After(time.Second):
-		t.Fatal("pacing worker did not start sender")
-	}
-	go func() { results <- connection.sendWire(context.Background(), []byte{2}) }()
-	if err := network.Close(); err != nil {
-		t.Fatal(err)
-	}
-	for range 2 {
-		if err := <-results; err == nil {
-			t.Fatal("queued send succeeded after network close")
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		blockData := false
+		var fabric *streamFabric
+		fabric = &streamFabric{
+			networks: make(map[foundation.Hash]*TunnelNetwork),
+			beforeSend: func(ctx context.Context, _ Delivery, packet Packet) (bool, error) {
+				fabric.mu.Lock()
+				shouldBlock := blockData && packet.Sequence != 0 && len(packet.Payload) != 0
+				fabric.mu.Unlock()
+				if !shouldBlock {
+					return false, nil
+				}
+				select {
+				case <-started:
+				default:
+					close(started)
+				}
+				<-ctx.Done()
+				return true, ctx.Err()
+			},
 		}
-	}
-}
-
-func TestSendScheduleDoesNotHeadOfLineBlock(t *testing.T) {
-	now := time.Now()
-	delayed := &tunnelConn{nextPaced: now.Add(time.Second)}
-	ready := &tunnelConn{}
-	var schedule sendSchedule
-	schedule.push(sendRequest{connection: delayed}, delayed.paceDue(now))
-	schedule.push(sendRequest{connection: ready}, ready.paceDue(now))
-	request, ok := schedule.peek()
-	if !ok || request.request.connection != ready || request.due.After(now) {
-		t.Fatalf("send schedule head = %#v; want ready request", request)
-	}
-}
-
-func TestRetryScheduleUpdatesAndRemovesConnection(t *testing.T) {
-	now := time.Now()
-	first := &tunnelConn{}
-	second := &tunnelConn{}
-	schedule := retrySchedule{indices: make(map[*tunnelConn]int)}
-	schedule.upsert(first, now.Add(time.Second))
-	schedule.upsert(second, now.Add(500*time.Millisecond))
-	schedule.upsert(first, now.Add(100*time.Millisecond))
-
-	retry, ok := schedule.peek()
-	if !ok || retry.connection != first {
-		t.Fatalf("retry schedule head = %#v; want updated first connection", retry)
-	}
-	schedule.upsert(first, time.Time{})
-	retry, ok = schedule.peek()
-	if !ok || retry.connection != second {
-		t.Fatalf("retry schedule after removal = %#v; want second connection", retry)
-	}
-}
-
-func TestSendCompletionDrainsAbandonedResult(t *testing.T) {
-	network := &TunnelNetwork{}
-	completion := network.acquireCompletion()
-	completion.release()
-	sendRequest{result: completion}.finish(context.Canceled)
-
-	reused := network.acquireCompletion()
-	select {
-	case err := <-reused.value:
-		t.Fatalf("acquired completion retained stale result %v", err)
-	default:
-	}
-	reused.release()
-	reused.release()
-}
-
-func TestPendingWireLeaseOutlivesPendingOwnerUntilSendFinishes(t *testing.T) {
-	wire, lease, ok := acquireWireLease(HeaderLen)
-	if !ok {
-		t.Fatal("acquireWireLease failed")
-	}
-	wire[0] = 1
-	lease.retain()
-	pendingPacket{wire: wire, lease: lease}.release()
-	if got := lease.refs.Load(); got != 1 {
-		t.Fatalf("wire lease references after pending release = %d, want 1", got)
-	}
-	sendRequest{wire: wire, lease: lease}.finish(nil)
-	if lease.slab != nil {
-		t.Fatal("wire lease retained slab after send completion")
-	}
-}
-
-func TestPendingSendLeaseSurvivesConcurrentNetworkClose(t *testing.T) {
-	destination, err := foundation.GenerateLegacyLocalDestination()
-	if err != nil {
-		t.Fatal(err)
-	}
-	network, err := NewTunnelNetwork(TunnelNetworkConfig{Destination: destination, Sender: discardTunnelSender{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	connection := network.newConn(1, 2, foundation.Hash{1}, foundation.Identity{}, 1, 2, true)
-	if err = network.register(connection); err != nil {
-		t.Fatal(err)
-	}
-
-	network.outboundMu.Lock()
-	writeDone := make(chan error, 1)
-	go func() {
-		_, writeErr := connection.Write([]byte{1})
-		writeDone <- writeErr
-	}()
-	var lease *wireLease
-	deadline := time.After(time.Second)
-	for lease == nil {
-		connection.mu.Lock()
-		for _, pending := range connection.pending {
-			lease = pending.lease
-			break
+		client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
+		listener, err := server.ListenI2P(context.Background(), ":82")
+		if err != nil {
+			t.Fatal(err)
 		}
-		connection.mu.Unlock()
+		t.Cleanup(func() { _ = listener.Close() })
+		accepted := make(chan net.Conn, 1)
+		go func() {
+			connection, acceptErr := listener.Accept()
+			if acceptErr == nil {
+				accepted <- connection
+			}
+		}()
+		outbound, err := client.DialI2P(context.Background(), server.B32()+":82")
+		if err != nil {
+			t.Fatal(err)
+		}
+		inbound := <-accepted
+		t.Cleanup(func() { _ = inbound.Close() })
+
+		fabric.mu.Lock()
+		blockData = true
+		fabric.mu.Unlock()
+
+		results := make(chan error, 2)
+		go func() {
+			_, writeErr := outbound.Write([]byte("first"))
+			results <- writeErr
+		}()
+		<-started
+		go func() {
+			_, writeErr := outbound.Write([]byte("second"))
+			results <- writeErr
+		}()
+		synctest.Wait()
+
+		if err := client.Close(); err != nil {
+			t.Fatal(err)
+		}
+		for range 2 {
+			if err := <-results; !errors.Is(err, net.ErrClosed) {
+				t.Fatalf("queued Write after network Close = %v, want net.ErrClosed", err)
+			}
+		}
+	})
+}
+
+func TestTunnelNetworkMultiStreamFairnessWhenWindowExhausted(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dropStalledPort := true
+		var fabric *streamFabric
+		fabric = &streamFabric{
+			networks: make(map[foundation.Hash]*TunnelNetwork),
+			beforeSend: func(_ context.Context, delivery Delivery, packet Packet) (bool, error) {
+				fabric.mu.Lock()
+				drop := dropStalledPort && delivery.FromPort == 4101 && packet.Sequence != 0 && len(packet.Payload) != 0
+				fabric.mu.Unlock()
+				return drop, nil
+			},
+		}
+		client, server := newTunnelNetworkPair(t, fabric, 20*time.Millisecond)
+		listener, err := server.ListenI2P(context.Background(), ":8085")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = listener.Close() })
+
+		accepted := make(chan net.Conn, 2)
+		go func() {
+			for range 2 {
+				connection, acceptErr := listener.Accept()
+				if acceptErr != nil {
+					return
+				}
+				accepted <- connection
+			}
+		}()
+
+		stalledOut, err := client.DialI2PFromPort(context.Background(), server.B32()+":8085", 4101)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = stalledOut.Close() })
+		stalledIn := <-accepted
+		t.Cleanup(func() { _ = stalledIn.Close() })
+
+		activeOut, err := client.DialI2PFromPort(context.Background(), server.B32()+":8085", 4102)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = activeOut.Close() })
+		activeIn := <-accepted
+		t.Cleanup(func() { _ = activeIn.Close() })
+
+		stalledPayload := bytes.Repeat([]byte("stalled-window-"), 600)
+		stalledWriteErr := make(chan error, 1)
+		go func() {
+			_, writeErr := stalledOut.Write(stalledPayload)
+			stalledWriteErr <- writeErr
+		}()
+		synctest.Wait()
 		select {
-		case <-deadline:
-			network.outboundMu.Unlock()
-			_ = network.Close()
-			t.Fatal("Write did not publish pending wire")
+		case writeErr := <-stalledWriteErr:
+			t.Fatalf("stalled stream Write completed while window was exhausted: %v", writeErr)
 		default:
-			// Yield the single P so the Write goroutine can publish; a bare
-			// select-default spin starves it under GOMAXPROCS=1 once sysmon
-			// retakes are disabled by the dst overlay.
-			runtime.Gosched()
 		}
-	}
 
-	closeDone := make(chan error, 1)
-	go func() { closeDone <- network.Close() }()
-	<-connection.done
-	closeDeadline := time.After(time.Second)
-	for {
-		connection.mu.Lock()
-		pending := len(connection.pending)
-		connection.mu.Unlock()
-		if pending == 0 {
-			break
+		activePayload := bytes.Repeat([]byte("independent-stream-"), 300)
+		activeWriteErr := make(chan error, 1)
+		go func() {
+			_, writeErr := activeOut.Write(activePayload)
+			activeWriteErr <- writeErr
+		}()
+		activeReceived := make([]byte, len(activePayload))
+		if _, err := io.ReadFull(activeIn, activeReceived); err != nil {
+			t.Fatalf("active stream ReadFull while peer stream stalled: %v", err)
 		}
-		select {
-		case <-closeDeadline:
-			network.outboundMu.Unlock()
-			t.Fatal("concurrent close did not release pending owner")
-		default:
-			runtime.Gosched()
+		if !bytes.Equal(activeReceived, activePayload) {
+			t.Fatal("active stream payload mismatch")
 		}
-	}
-	if got := lease.refs.Load(); got != 1 || lease.slab == nil {
-		network.outboundMu.Unlock()
-		t.Fatalf("wire lease after concurrent close = refs %d slab %p; want retained send owner", got, lease.slab)
-	}
-	network.outboundMu.Unlock()
-	if err = <-writeDone; !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("Write during close = %v, want net.ErrClosed", err)
-	}
-	if err = <-closeDone; err != nil {
-		t.Fatal(err)
-	}
-	if lease.slab != nil {
-		t.Fatal("wire lease retained slab after send admission failed")
-	}
+		if err := <-activeWriteErr; err != nil {
+			t.Fatalf("active stream Write: %v", err)
+		}
+
+		fabric.mu.Lock()
+		dropStalledPort = false
+		fabric.mu.Unlock()
+
+		stalledReceived := make([]byte, len(stalledPayload))
+		if _, err := io.ReadFull(stalledIn, stalledReceived); err != nil {
+			t.Fatalf("stalled stream ReadFull after recovery: %v", err)
+		}
+		if !bytes.Equal(stalledReceived, stalledPayload) {
+			t.Fatal("stalled stream payload mismatch after retransmission")
+		}
+		if err := <-stalledWriteErr; err != nil {
+			t.Fatalf("stalled stream Write after recovery: %v", err)
+		}
+	})
+}
+
+func TestTunnelNetworkRetransmissionAndCleanupOnDropAndClose(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		droppedFirst4201 := false
+		var fabric *streamFabric
+		fabric = &streamFabric{
+			networks: make(map[foundation.Hash]*TunnelNetwork),
+			beforeSend: func(_ context.Context, delivery Delivery, packet Packet) (bool, error) {
+				if packet.Sequence == 0 {
+					return false, nil
+				}
+				fabric.mu.Lock()
+				defer fabric.mu.Unlock()
+				if delivery.FromPort == 4202 {
+					return true, nil
+				}
+				if delivery.FromPort == 4201 && len(packet.Payload) != 0 && !droppedFirst4201 {
+					droppedFirst4201 = true
+					return true, nil
+				}
+				return false, nil
+			},
+		}
+		client, server := newTunnelNetworkPair(t, fabric, 20*time.Millisecond)
+		listener, err := server.ListenI2P(context.Background(), ":8086")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = listener.Close() })
+
+		accepted := make(chan net.Conn, 2)
+		go func() {
+			for range 2 {
+				connection, acceptErr := listener.Accept()
+				if acceptErr != nil {
+					return
+				}
+				accepted <- connection
+			}
+		}()
+
+		recoveredOut, err := client.DialI2PFromPort(context.Background(), server.B32()+":8086", 4201)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recoveredIn := <-accepted
+
+		abandonedOut, err := client.DialI2PFromPort(context.Background(), server.B32()+":8086", 4202)
+		if err != nil {
+			t.Fatal(err)
+		}
+		abandonedIn := <-accepted
+
+		if _, err := abandonedOut.Write([]byte("dropped-forever")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := recoveredOut.Write([]byte("retransmitted")); err != nil {
+			t.Fatal(err)
+		}
+		if err := abandonedOut.SetWriteDeadline(time.Now().Add(15 * time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+		if err := abandonedOut.Close(); err == nil {
+			t.Fatal("abandoned Close succeeded without peer acknowledgement")
+		}
+		_ = abandonedIn.Close()
+
+		received := make([]byte, len("retransmitted"))
+		if _, err := io.ReadFull(recoveredIn, received); err != nil || string(received) != "retransmitted" {
+			t.Fatalf("recovered stream ReadFull = %q, %v", received, err)
+		}
+		if err := recoveredOut.Close(); err != nil {
+			t.Fatalf("recoveredOut Close: %v", err)
+		}
+		if err := recoveredIn.Close(); err != nil {
+			t.Fatalf("recoveredIn Close: %v", err)
+		}
+		synctest.Wait()
+		if stats := client.Stats(); stats.Connections != 0 || stats.PendingPackets != 0 {
+			t.Fatalf("client Stats after stream cleanup = %+v, want 0 connections and 0 pending packets", stats)
+		}
+	})
+}
+
+func TestTunnelNetworkCloseDuringBlockedSendPreservesPayloadAndDrains(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		payloadMatch := make(chan bool, 1)
+		blockData := false
+		var fabric *streamFabric
+		fabric = &streamFabric{
+			networks: make(map[foundation.Hash]*TunnelNetwork),
+			beforeSend: func(_ context.Context, delivery Delivery, packet Packet) (bool, error) {
+				fabric.mu.Lock()
+				intercept := blockData && packet.Sequence != 0 && len(packet.Payload) != 0
+				if intercept {
+					blockData = false
+				}
+				fabric.mu.Unlock()
+				if !intercept {
+					return false, nil
+				}
+				snapshot := append([]byte(nil), delivery.Payload...)
+				close(entered)
+				<-release
+				parsedAfterClose, parseErr := dataplanestreaming.Parse(delivery.Payload)
+				payloadMatch <- parseErr == nil &&
+					bytes.Equal(delivery.Payload, snapshot) &&
+					bytes.Equal(parsedAfterClose.Payload, []byte("in-flight-payload"))
+				return true, net.ErrClosed
+			},
+		}
+		client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
+		listener, err := server.ListenI2P(context.Background(), ":8087")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = listener.Close() })
+
+		accepted := make(chan net.Conn, 1)
+		go func() {
+			connection, acceptErr := listener.Accept()
+			if acceptErr == nil {
+				accepted <- connection
+			}
+		}()
+		outbound, err := client.DialI2P(context.Background(), server.B32()+":8087")
+		if err != nil {
+			t.Fatal(err)
+		}
+		inbound := <-accepted
+		t.Cleanup(func() { _ = inbound.Close() })
+
+		fabric.mu.Lock()
+		blockData = true
+		fabric.mu.Unlock()
+
+		writeDone := make(chan error, 1)
+		go func() {
+			_, writeErr := outbound.Write([]byte("in-flight-payload"))
+			writeDone <- writeErr
+		}()
+		<-entered
+		synctest.Wait()
+
+		closeDone := make(chan error, 1)
+		go func() { closeDone <- client.Close() }()
+		synctest.Wait()
+
+		if err := <-writeDone; !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Write during network Close = %v, want net.ErrClosed", err)
+		}
+		close(release)
+		if !<-payloadMatch {
+			t.Fatal("in-flight delivery payload was mutated or corrupted during concurrent network Close")
+		}
+		if err := <-closeDone; err != nil {
+			t.Fatalf("client.Close() = %v", err)
+		}
+	})
 }
 
 func BenchmarkStreamingWireAndCompletionPools(b *testing.B) {
@@ -557,39 +724,41 @@ func TestTunnelNetworkRejectsTamperedSynchronize(t *testing.T) {
 }
 
 func TestTunnelNetworkAcknowledgesRetransmittedSynchronizeReply(t *testing.T) {
-	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork), ackCompleted: make(chan struct{}, 1)}
-	client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
-	listener, err := server.ListenI2P(context.Background(), ":80")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	connection, err := client.DialI2PFromPort(ctx, server.B32()+":80", 1234)
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientConn := connection.(*tunnelConn)
-	t.Cleanup(func() { clientConn.abort(false) })
-	accepted, err := listener.Accept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { accepted.(*tunnelConn).abort(false) })
-	packet := Packet{SendStreamID: clientConn.localID, ReceiveStreamID: clientConn.remoteID, Flags: FlagSynchronize}
-	wire, err := server.signedControl(packet, controlOptions{includeFrom: true, includeMax: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = client.HandleDelivery(ctx, Delivery{From: server.localHash, To: client.localHash, FromPort: 80, ToPort: 1234, Protocol: ProtocolStreaming, Payload: wire})
-	if err != nil {
-		t.Fatal(err)
-	}
-	acknowledgments := fabric.waitInitialACKs(t, ctx, 2)
-	if acknowledgments != 2 {
-		t.Fatalf("SYN reply acknowledgments = %d, want initial and retransmitted reply ACKs", acknowledgments)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork), ackCompleted: make(chan struct{}, 1)}
+		client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
+		listener, err := server.ListenI2P(context.Background(), ":80")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = listener.Close() })
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		connection, err := client.DialI2PFromPort(ctx, server.B32()+":80", 1234)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clientConn := connection.(*tunnelConn)
+		t.Cleanup(func() { clientConn.abort(false) })
+		accepted, err := listener.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { accepted.(*tunnelConn).abort(false) })
+		packet := Packet{SendStreamID: clientConn.localID, ReceiveStreamID: clientConn.remoteID, Flags: FlagSynchronize}
+		wire, err := server.signedControl(packet, controlOptions{includeFrom: true, includeMax: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = client.HandleDelivery(ctx, Delivery{From: server.localHash, To: client.localHash, FromPort: 80, ToPort: 1234, Protocol: ProtocolStreaming, Payload: wire})
+		if err != nil {
+			t.Fatal(err)
+		}
+		acknowledgments := fabric.waitInitialACKs(t, ctx, 2)
+		if acknowledgments != 2 {
+			t.Fatalf("SYN reply acknowledgments = %d, want initial and retransmitted reply ACKs", acknowledgments)
+		}
+	})
 }
 
 func TestTunnelNetworkAcceptsJavaSynchronizePayload(t *testing.T) {
@@ -878,6 +1047,7 @@ type streamFabric struct {
 	initialACKs     int
 	ackCompleted    chan struct{}
 	zeroSYNACKPorts bool
+	beforeSend      func(context.Context, Delivery, Packet) (bool, error)
 }
 
 func (f *streamFabric) waitInitialACKs(t testing.TB, ctx context.Context, want int) int {
@@ -918,6 +1088,12 @@ func (f *streamFabric) SendTunnel(ctx context.Context, delivery Delivery) error 
 	packet, err := dataplanestreaming.Parse(delivery.Payload)
 	if err != nil {
 		return err
+	}
+	if f.beforeSend != nil {
+		handled, hookErr := f.beforeSend(ctx, delivery, packet)
+		if handled || hookErr != nil {
+			return hookErr
+		}
 	}
 	f.mu.Lock()
 	if packet.Sequence != 0 && len(packet.Payload) != 0 {

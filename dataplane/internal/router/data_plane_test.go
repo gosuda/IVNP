@@ -12,7 +12,6 @@ import (
 	"sync"
 	"testing"
 	"testing/synctest"
-	"time"
 
 	dataplanegarlic "gosuda.org/ivnp/dataplane/internal/garlic"
 	dataplanegarlicecies "gosuda.org/ivnp/dataplane/internal/garlic/ecies"
@@ -482,46 +481,91 @@ func TestHandleDestinationDataAcceptsDelayedStreamingSYN(t *testing.T) {
 }
 
 func TestStreamingTunnelSenderReleasesScratchBeforeTunnelIO(t *testing.T) {
-	const now = uint64(1_000)
-	started := make(chan struct{})
-	release := make(chan struct{})
-	bridge := &dataPlaneTunnelSender{handle: func(context.Context, foundation.I2NPMessage) error {
-		close(started)
-		<-release
-		return nil
-	}}
-	runtime := dataplanetunnel.NewRuntime(dataplanetunnel.RuntimeConfig{Sender: bridge, Now: func() uint64 { return now }})
-	const outboundID = uint32(91)
-	circuit, err := runtime.RegisterOutbound(dataplanetunnel.OutboundCircuit{ID: outboundID, FirstHop: foundation.Hash{1}, NextTunnelID: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sender := &PreparedRouteSender{
-		tunnels: runtime,
-		now:     func() uint64 { return now },
-		nextID:  func() (uint32, error) { return 1, nil },
-		scratch: make(chan *streamingSenderScratch, 1),
-	}
-	scratch := new(streamingSenderScratch)
-	encrypted := scratch.encrypted.bytes(1)
-	encrypted[0] = 0xaa
-	done := make(chan error, 1)
-	go func() {
-		done <- sender.finishEncryptedSend(context.Background(), &PreparedRoute{Circuit: circuit, Gateway: foundation.Hash{1}, TunnelID: 3, Expires: now + 1_000}, encrypted, now+1_000, scratch)
-	}()
-	<-started
-	select {
-	case returned := <-sender.scratch:
-		if returned != scratch || encrypted[0] != 0 {
-			t.Fatal("scratch was not cleared before tunnel I/O")
+	synctest.Test(t, func(t *testing.T) {
+		const now = uint64(1_000)
+		const blockedSends = 64
+		entered := make(chan struct{}, blockedSends)
+		release := make(chan struct{})
+		unblockedProbe := make(chan struct{})
+		var calls int
+		var callsMu sync.Mutex
+		bridge := &dataPlaneTunnelSender{handle: func(context.Context, foundation.I2NPMessage) error {
+			callsMu.Lock()
+			calls++
+			current := calls
+			callsMu.Unlock()
+			if current <= blockedSends {
+				entered <- struct{}{}
+				<-release
+				return nil
+			}
+			close(unblockedProbe)
+			return nil
+		}}
+		runtime := dataplanetunnel.NewRuntime(dataplanetunnel.RuntimeConfig{Sender: bridge, Now: func() uint64 { return now }})
+		const outboundID = uint32(91)
+		circuit, err := runtime.RegisterOutbound(dataplanetunnel.OutboundCircuit{ID: outboundID, FirstHop: foundation.Hash{1}, NextTunnelID: 2})
+		if err != nil {
+			t.Fatal(err)
 		}
-	default:
-		t.Fatal("scratch remained held during tunnel I/O")
-	}
-	close(release)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
+		t.Cleanup(func() { runtime.RemoveCircuit(circuit) })
+		owner := foundation.Hash{1}
+		remote := foundation.Hash{2}
+		sender, err := NewPreparedRouteSender(PreparedRouteSenderConfig{
+			Owner:   owner,
+			Garlic:  dataplanegarlic.NewSessionManager(dataplanegarlic.SessionManagerConfig{}),
+			Tunnels: runtime,
+			Now:     func() uint64 { return now },
+			NextID:  func() (uint32, error) { return 1, nil },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(sender.ReleaseSensitive)
+		if err := sender.InstallRoute(PreparedRoute{
+			Owner:      owner,
+			Remote:     remote,
+			Generation: 1,
+			KeyType:    foundation.CryptoX25519,
+			KeyData:    bytes.Repeat([]byte{9}, 32),
+			Circuit:    circuit,
+			Gateway:    foundation.Hash{1},
+			TunnelID:   3,
+			Expires:    now + 1_000,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, blockedSends)
+		for range blockedSends {
+			go func() {
+				done <- sender.SendRatchetReply(t.Context(), remote, []byte{0xaa})
+			}()
+		}
+		for range blockedSends {
+			<-entered
+		}
+		probeDone := make(chan error, 1)
+		go func() {
+			probeDone <- sender.SendRatchetReply(t.Context(), remote, []byte{0xbb})
+		}()
+		synctest.Wait()
+		select {
+		case <-unblockedProbe:
+		default:
+			close(release)
+			t.Fatal("scratch remained held during tunnel I/O and blocked subsequent send")
+		}
+		if err := <-probeDone; err != nil {
+			close(release)
+			t.Fatal(err)
+		}
+		close(release)
+		for range blockedSends {
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
 }
 
 func TestGarlicReceiverDeliversConcurrentNewSessionPayloads(t *testing.T) {
@@ -727,12 +771,26 @@ func TestLegacyGarlicSYNTeachesReceiverSenderLeaseSet(t *testing.T) {
 		Gateway: foundation.Hash{1}, TunnelID: 7, EndDate: now + 120_000,
 	})
 	var nextID uint32
-	sender := &PreparedRouteSender{
-		nextID: func() (uint32, error) {
+	garlicSessions := dataplanegarlic.NewSessionManager(dataplanegarlic.SessionManagerConfig{})
+	t.Cleanup(func() {
+		if err := garlicSessions.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	sender, err := NewPreparedRouteSender(PreparedRouteSenderConfig{
+		Owner:   senderAddress.Hash,
+		Garlic:  garlicSessions,
+		Tunnels: preparedTestWriter(func(context.Context, dataplanetunnel.CircuitToken, dataplanetunnel.Block) error { return nil }),
+		Now:     func() uint64 { return now },
+		NextID: func() (uint32, error) {
 			nextID++
 			return nextID, nil
 		},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(sender.ReleaseSensitive)
 	bundle, err := foundation.NetworkDatabaseMarshalDatabaseStore(senderAddress.Hash, foundation.I2NPStoreLeaseSet, stored, 0, foundation.Hash{}, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -848,60 +906,97 @@ func TestGarlicReceiverDestinationCapacityCanBeReused(t *testing.T) {
 }
 
 func TestGarlicReceiverUnregisterWaitsForInflightAndReleasesStaticKey(t *testing.T) {
-	local, err := foundation.GenerateLegacyLocalDestination()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer local.ReleaseSensitive()
-	ratchet, err := dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ratchet.ReleaseSensitive()
-	static := bytes.Repeat([]byte{0x42}, 32)
-	receiver, err := NewGarlicReceiver(GarlicReceiverConfig{
-		Service: NewService(Sinks{}), ReplyKeys: dataplanegarlic.NewReplyKeyRegistry(1),
-		Now: func() uint64 { return 1_800_000_000_000 }, StaticPrivate: static,
+	synctest.Test(t, func(t *testing.T) {
+		const now = uint64(1_800_000_000_000)
+		local, err := foundation.GenerateLegacyLocalDestination()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer local.ReleaseSensitive()
+		ratchet, err := dataplanegarlic.NewRatchetManager(local, dataplanegarlic.RatchetConfig{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ratchet.ReleaseSensitive()
+		staticBytes := bytes.Repeat([]byte{0x42}, 32)
+		private, err := ecdh.X25519().NewPrivateKey(staticBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inFlight := make(chan struct{})
+		releaseInFlight := make(chan struct{})
+		service := NewService(Sinks{})
+		service.SetGarlicSink(func(I2NPSource, foundation.I2NPMessage) error {
+			close(inFlight)
+			<-releaseInFlight
+			return nil
+		})
+		receiver, err := NewGarlicReceiver(GarlicReceiverConfig{
+			Service: service, ReplyKeys: dataplanegarlic.NewReplyKeyRegistry(1),
+			Now: func() uint64 { return now }, StaticPrivate: staticBytes,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		remove, err := receiver.RegisterDestination(local.Hash(), GarlicDestination{Ratchet: ratchet})
+		if err != nil {
+			t.Fatal(err)
+		}
+		innerMessage := foundation.I2NPMessage{
+			Header:  foundation.I2NPHeader{Type: foundation.I2NPGarlic, ID: 100, Expiration: now + 60_000},
+			Payload: []byte{0, 0, 0, 0},
+		}
+		sealed, err := dataplanegarlicecies.SealRouterMessage(make([]byte, 4096), private.PublicKey().Bytes(), innerMessage, now, bytes.NewReader(bytes.Repeat([]byte{0x77}, 32)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		outerPayload := make([]byte, 4+len(sealed))
+		binary.BigEndian.PutUint32(outerPayload[:4], uint32(len(sealed)))
+		copy(outerPayload[4:], sealed)
+		outerGarlic := foundation.I2NPMessage{
+			Header:  foundation.I2NPHeader{Type: foundation.I2NPGarlic, ID: 1, Expiration: now + 60_000},
+			Payload: outerPayload,
+		}
+		handleDone := make(chan error, 1)
+		go func() {
+			handleDone <- receiver.HandleGarlic(outerGarlic)
+		}()
+		<-inFlight
+
+		removeDone := make(chan struct{})
+		go func() {
+			remove()
+			close(removeDone)
+		}()
+		synctest.Wait()
+		select {
+		case <-removeDone:
+			close(releaseInFlight)
+			t.Fatal("destination unregister returned during in-flight receive")
+		default:
+		}
+		close(releaseInFlight)
+		synctest.Wait()
+		select {
+		case <-removeDone:
+		default:
+			t.Fatal("destination unregister did not pass its in-flight barrier")
+		}
+		if err := <-handleDone; err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := receiver.BandwidthSnapshot(local.Hash()); ok {
+			t.Fatal("unregistered destination remained visible in BandwidthSnapshot")
+		}
+		receiver.ReleaseSensitive()
+		receiver.ReleaseSensitive()
+		if _, err := receiver.RegisterDestination(local.Hash(), GarlicDestination{Ratchet: ratchet}); !errors.Is(err, ErrDataPlaneConfig) {
+			t.Fatalf("RegisterDestination after ReleaseSensitive = %v, want %v", err, ErrDataPlaneConfig)
+		}
+		if err := receiver.HandleGarlic(outerGarlic); !errors.Is(err, ErrDataPlaneConfig) {
+			t.Fatalf("HandleGarlic after ReleaseSensitive = %v, want %v", err, ErrDataPlaneConfig)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	remove, err := receiver.RegisterDestination(local.Hash(), GarlicDestination{Ratchet: ratchet})
-	if err != nil {
-		t.Fatal(err)
-	}
-	receiver.destinationsMu.RLock()
-	state := receiver.destinations[local.Hash()]
-	receiver.destinationsMu.RUnlock()
-	// Hold the destination in-flight directly through acquire/done, the same
-	// bookkeeping HandleGarlicFrom uses around its whole receive. This
-	// exercises retireAndWait's wait-for-in-flight guarantee without relying
-	// on scratch-buffer exhaustion, which no longer blocks now that scratch
-	// buffers come from a lazily-allocating sync.Pool.
-	if !state.acquire() {
-		t.Fatal("destination unexpectedly retired before in-flight receive started")
-	}
-	removeDone := make(chan struct{})
-	go func() {
-		remove()
-		close(removeDone)
-	}()
-	select {
-	case <-removeDone:
-		t.Fatal("destination unregister returned during in-flight receive")
-	case <-time.After(20 * time.Millisecond):
-	}
-	state.done()
-	select {
-	case <-removeDone:
-	case <-time.After(time.Second):
-		t.Fatal("destination unregister did not pass its in-flight barrier")
-	}
-	receiver.ReleaseSensitive()
-	receiver.ReleaseSensitive()
-	if !receiver.released || receiver.hasStatic || receiver.staticPrivate != ([32]byte{}) || len(receiver.destinations) != 0 {
-		t.Fatal("garlic receiver retained sensitive static or destination state")
-	}
 }
 
 func TestGarlicReceiverClearsExpiredRatchetPlaintext(t *testing.T) {
@@ -958,8 +1053,15 @@ func TestGarlicReceiverClearsRejectedLegacyPlaintext(t *testing.T) {
 func assertRejectedGarlicScratchCleared(t *testing.T, destination GarlicDestination, packet []byte, now uint64) {
 	t.Helper()
 	hash := foundation.Hash{1}
+	control := new(dataPlaneControlCapture)
+	service := NewService(Sinks{Control: control})
+	delivered := 0
+	service.SetDestinationSink(func(foundation.Hash, foundation.Hash, foundation.I2NPMessage) error {
+		delivered++
+		return nil
+	})
 	receiver, err := NewGarlicReceiver(GarlicReceiverConfig{
-		Service: NewService(Sinks{}), ReplyKeys: dataplanegarlic.NewReplyKeyRegistry(1),
+		Service: service, ReplyKeys: dataplanegarlic.NewReplyKeyRegistry(1),
 		Now:          func() uint64 { return now },
 		Destinations: map[foundation.Hash]GarlicDestination{hash: destination},
 	})
@@ -967,11 +1069,6 @@ func assertRejectedGarlicScratchCleared(t *testing.T, destination GarlicDestinat
 		t.Fatal(err)
 	}
 	t.Cleanup(receiver.ReleaseSensitive)
-	var scratch *garlicReceiveScratch
-	receiver.destinations[hash].scratch.New = func() any {
-		scratch = new(garlicReceiveScratch)
-		return scratch
-	}
 	payload := make([]byte, 4+len(packet))
 	binary.BigEndian.PutUint32(payload, uint32(len(packet)))
 	copy(payload[4:], packet)
@@ -979,14 +1076,8 @@ func assertRejectedGarlicScratchCleared(t *testing.T, destination GarlicDestinat
 	if !errors.Is(err, ErrGarlicDestination) {
 		t.Fatalf("rejected garlic error = %v, want %v", err, ErrGarlicDestination)
 	}
-	if scratch == nil {
-		t.Fatal("receive did not borrow a decrypt buffer")
-	}
-	if scratch.plaintext != ([foundation.I2NPI2PDMaxPayload]byte{}) {
-		t.Error("rejected garlic retained plaintext in its returned scratch buffer")
-	}
-	if scratch.reply != ([foundation.I2NPI2PDMaxPayload]byte{}) {
-		t.Error("rejected garlic retained reply data in its returned scratch buffer")
+	if delivered != 0 || len(control.messages) != 0 {
+		t.Fatalf("rejected garlic delivered %d destination messages and %d control messages", delivered, len(control.messages))
 	}
 }
 
@@ -1061,13 +1152,13 @@ func TestGarlicReceiverNestedGarlicDeadlockFree(t *testing.T) {
 
 		select {
 		case <-releaseDone:
-		case <-time.After(2 * time.Second):
+		default:
 			t.Fatal("deadlock: ReleaseSensitive did not complete during nested garlic dispatch")
 		}
 
 		select {
 		case <-handleErrCh:
-		case <-time.After(2 * time.Second):
+		default:
 			t.Fatal("deadlock: HandleGarlic did not complete during nested garlic dispatch")
 		}
 	})
@@ -1077,7 +1168,7 @@ func TestGarlicReceiverNestedGarlicDeadlockFree(t *testing.T) {
 // HandleGarlicFrom and ReleaseSensitive under -race: Put on the reply-scratch
 // pool must not race the field reassignment/cleanup.
 func TestGarlicReceiverReleaseSensitiveReplyScratchRace(t *testing.T) {
-	for range 100 {
+	synctest.Test(t, func(t *testing.T) {
 		now := uint64(1_000_000)
 		registry := dataplanegarlic.NewReplyKeyRegistry(128)
 		receiver, err := NewGarlicReceiver(GarlicReceiverConfig{
@@ -1116,5 +1207,5 @@ func TestGarlicReceiverReleaseSensitiveReplyScratchRace(t *testing.T) {
 		}()
 		wg.Wait()
 		receiver.ReleaseSensitive()
-	}
+	})
 }

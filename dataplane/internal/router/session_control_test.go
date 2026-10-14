@@ -68,6 +68,22 @@ func controlTestSession(t *testing.T, conn net.Conn) *ntcp2.Session {
 	return ntcp2.NewSession(conn, direction, nil)
 }
 
+func newConfiguredNTCP2Manager(t *testing.T, peers TransportPeerSource) *NTCP2Manager {
+	t.Helper()
+	privateKey := make([]byte, 32)
+	privateKey[0] = 1
+	manager, err := NewNTCP2Manager(NTCP2ManagerConfig{
+		NetworkID:     2,
+		Peers:         peers,
+		StaticPrivate: privateKey,
+		StaticIV:      make([]byte, 16),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manager
+}
+
 func TestNTCP2ControlCancellationRetiresBlockedSocket(t *testing.T) {
 	testNTCP2ControlCancellation(t, "blocked socket")
 }
@@ -84,7 +100,10 @@ func testNTCP2ControlCancellation(t *testing.T, name string) {
 		replacementConn := newControlWriteConn(false)
 		replacement := controlTestSession(t, replacementConn)
 		peer := foundation.Hash{7}
-		manager := &NTCP2Manager{networkID: 2, started: true, ctx: t.Context(), sessions: map[foundation.Hash]*ntcp2.Session{peer: session}}
+		manager := newConfiguredNTCP2Manager(t, nil)
+		manager.started = true
+		manager.ctx = t.Context()
+		manager.sessions[peer] = session
 		sender, err := manager.PreparedSession(peer)
 		if err != nil {
 			t.Fatal(err)
@@ -142,95 +161,170 @@ func testNTCP2ControlCancellation(t *testing.T, name string) {
 
 func TestSSU2ControlCancellationDoesNotWaitForPacketCipher(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		manager, session := newSSU2SendTestHarness(t)
-		sender, err := manager.PreparedSession(session.peer)
+		net_ := newSSU2SimNetwork(t)
+		rawAliceConn := newSSU2SimConn(t, net_, "alice")
+		bobConn := newSSU2SimConn(t, net_, "bob")
+		aliceConn := &blockingWriteSSU2Conn{
+			UDPConn: rawAliceConn,
+			entered: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
+		bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
+		aliceDB := newTransportTestPeers()
+		bobDB := newTransportTestPeers()
+		now := uint64(time.Now().UnixMilli())
+		if err := aliceDB.AdmitRouterInfo(bob.Snapshot(), now); err != nil {
+			t.Fatal(err)
+		}
+		if err := bobDB.AdmitRouterInfo(alice.Snapshot(), now); err != nil {
+			t.Fatal(err)
+		}
+		aliceManager := newSSU2LiveManager(t, aliceDB, aliceStatic, aliceIntro, time.Minute, time.Minute)
+		bobManager := newSSU2LiveManager(t, bobDB, bobStatic, bobIntro, time.Minute, time.Minute)
+		received := make(chan foundation.I2NPMessage, ssu2EgressSlots+4)
+		startSSU2SimManager(t, t.Context(), aliceManager, aliceConn, alice, nil)
+		startSSU2SimManager(t, t.Context(), bobManager, bobConn, bob, func(msg foundation.I2NPMessage, _ uint64, _ bool) error {
+			received <- msg
+			return nil
+		})
+		t.Cleanup(func() {
+			aliceConn.block.Store(false)
+			select {
+			case <-aliceConn.release:
+			default:
+				close(aliceConn.release)
+			}
+			closeSSU2LiveManager(t, aliceManager)
+			closeSSU2LiveManager(t, bobManager)
+		})
+
+		if err := aliceManager.EnsureSession(t.Context(), bob.Hash()); err != nil {
+			t.Fatal(err)
+		}
+		net_.Advance(20 * time.Millisecond)
+		sender, err := aliceManager.PreparedSession(bob.Hash())
 		if err != nil {
 			t.Fatal(err)
 		}
-		session.packetMu.Lock()
-		locked := true
+
+		// Saturate egress slots while the socket write is blocked so a new send
+		// waits before packet submission.
+		aliceConn.block.Store(true)
+		bulkResults := make([]chan error, ssu2EgressSlots)
+		for i := range bulkResults {
+			bulkResults[i] = make(chan error, 1)
+			go func(ch chan error) {
+				ch <- aliceManager.writeTo([]byte{1}, bobConn.LocalAddr())
+			}(bulkResults[i])
+		}
+		<-aliceConn.entered
+		synctest.Wait()
+
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan error, 1)
-		finished := false
-		defer func() {
-			cancel()
-			if locked {
-				session.packetMu.Unlock()
-			}
-			if !finished {
-				<-done
-			}
-		}()
 		go func() { done <- sender.Send(ctx, managerHotPathMessage()) }()
 		synctest.Wait()
+
 		cancel()
 		synctest.Wait()
 		select {
 		case err := <-done:
-			finished = true
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("control send = %v, want cancellation", err)
 			}
 		default:
-			t.Fatal("control send ignored cancellation while waiting for bulk serialization")
+			t.Fatal("control send ignored cancellation while waiting for egress slot")
 		}
-		session.packetMu.Unlock()
-		locked = false
-		if queued := len(manager.egressQueue); queued != 0 {
-			t.Fatalf("canceled control send queued %d packets", queued)
+
+		aliceConn.block.Store(false)
+		close(aliceConn.release)
+		for _, ch := range bulkResults {
+			if err := <-ch; err != nil {
+				t.Fatalf("bulk write: %v", err)
+			}
 		}
-		resumed := make(chan error, 1)
-		go func() { resumed <- sender.Send(t.Context(), managerHotPathMessage()) }()
-		synctest.Wait()
-		slot := <-manager.egressQueue
-		slot.done <- nil
-		if err := <-resumed; err != nil {
+		if err := sender.Send(t.Context(), managerHotPathMessage()); err != nil {
 			t.Fatalf("send after canceled writer: %v", err)
+		}
+		if got := <-received; got.Header.ID != managerHotPathMessage().Header.ID {
+			t.Fatalf("delivered message ID = %d, want %d", got.Header.ID, managerHotPathMessage().Header.ID)
 		}
 	})
 }
 
 func TestSSU2ControlCancellationReturnsFromEgressWait(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		manager, session := newSSU2SendTestHarness(t)
-		sender, err := manager.PreparedSession(session.peer)
+		net_ := newSSU2SimNetwork(t)
+		rawAliceConn := newSSU2SimConn(t, net_, "alice")
+		bobConn := newSSU2SimConn(t, net_, "bob")
+		aliceConn := &blockingWriteSSU2Conn{
+			UDPConn: rawAliceConn,
+			entered: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
+		bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
+		aliceDB := newTransportTestPeers()
+		bobDB := newTransportTestPeers()
+		now := uint64(time.Now().UnixMilli())
+		if err := aliceDB.AdmitRouterInfo(bob.Snapshot(), now); err != nil {
+			t.Fatal(err)
+		}
+		if err := bobDB.AdmitRouterInfo(alice.Snapshot(), now); err != nil {
+			t.Fatal(err)
+		}
+		aliceManager := newSSU2LiveManager(t, aliceDB, aliceStatic, aliceIntro, time.Minute, time.Minute)
+		bobManager := newSSU2LiveManager(t, bobDB, bobStatic, bobIntro, time.Minute, time.Minute)
+		received := make(chan foundation.I2NPMessage, 4)
+		startSSU2SimManager(t, t.Context(), aliceManager, aliceConn, alice, nil)
+		startSSU2SimManager(t, t.Context(), bobManager, bobConn, bob, func(msg foundation.I2NPMessage, _ uint64, _ bool) error {
+			received <- msg
+			return nil
+		})
+		t.Cleanup(func() {
+			aliceConn.block.Store(false)
+			select {
+			case <-aliceConn.release:
+			default:
+				close(aliceConn.release)
+			}
+			closeSSU2LiveManager(t, aliceManager)
+			closeSSU2LiveManager(t, bobManager)
+		})
+
+		if err := aliceManager.EnsureSession(t.Context(), bob.Hash()); err != nil {
+			t.Fatal(err)
+		}
+		net_.Advance(20 * time.Millisecond)
+		sender, err := aliceManager.PreparedSession(bob.Hash())
 		if err != nil {
 			t.Fatal(err)
 		}
+
+		aliceConn.block.Store(true)
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan error, 1)
-		finished := false
-		defer func() {
-			cancel()
-			if !finished {
-				<-done
-			}
-		}()
 		go func() { done <- sender.Send(ctx, managerHotPathMessage()) }()
+		<-aliceConn.entered
 		synctest.Wait()
+
 		cancel()
 		synctest.Wait()
 		select {
 		case err := <-done:
-			finished = true
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("control send = %v, want cancellation", err)
 			}
 		default:
-			t.Fatal("control send ignored cancellation while waiting for bulk serialization")
+			t.Fatal("control send ignored cancellation while waiting for egress completion")
 		}
-		// The send path no longer pins a bulk mutex: cancellation mid-wait
-		// still escapes promptly, and the admitted egress slot drains and
-		// recycles so later sends are not starved.
-		slot := <-manager.egressQueue
-		slot.done <- nil
+
+		aliceConn.block.Store(false)
+		close(aliceConn.release)
 		synctest.Wait()
-		resumed := make(chan error, 1)
-		go func() { resumed <- sender.Send(t.Context(), managerHotPathMessage()) }()
-		synctest.Wait()
-		slot = <-manager.egressQueue
-		slot.done <- nil
-		if err := <-resumed; err != nil {
+
+		if err := sender.Send(t.Context(), ssu2LiveMessage(77)); err != nil {
 			t.Fatalf("send after canceled writer: %v", err)
 		}
 	})

@@ -173,3 +173,28 @@ func requireStableSSU2RoundTrip(t *testing.T, received <-chan stableSSU2Reply, p
 		t.Fatal("stable router did not return an authenticated I2NP DatabaseStore")
 	}
 }
+
+func waitForSSU2SentPackets(manager *SSU2Manager, peer foundation.Hash, timeout time.Duration) bool {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		manager.mu.RLock()
+		session := manager.sessionsByPeer[peer]
+		manager.mu.RUnlock()
+		if session != nil {
+			session.sendMu.Lock()
+			remaining := len(session.sent)
+			session.sendMu.Unlock()
+			if remaining == 0 {
+				return true
+			}
+		}
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			return false
+		}
+	}
+}

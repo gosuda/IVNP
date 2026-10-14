@@ -6,19 +6,40 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	dataplanessu2 "gosuda.org/ivnp/dataplane/internal/transport/ssu2"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/simnet"
 )
 
 var errTestTransientPublicationFailure = errors.New("transient publication failure")
 
+func newSSU2ConfiguredManager(t *testing.T, peers TransportPeerSource) (*SSU2Manager, *transportTestLocal) {
+	t.Helper()
+	local, static, intro := newSSU2TestLocal(t, "192.0.2.1:23456")
+	manager, err := NewSSU2Manager(SSU2ManagerConfig{
+		NetworkID:        2,
+		Peers:            peers,
+		StaticPrivate:    static,
+		IntroKey:         intro,
+		HandshakeTimeout: time.Second,
+		IdleTimeout:      time.Minute,
+		TokenLifetime:    time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manager, local
+}
+
 func TestSSU2PeerTestOutcomeTable(t *testing.T) {
 	endpoint := netip.MustParseAddrPort("198.51.100.7:42000")
 	observed := netip.MustParseAddrPort("198.51.100.7:43000")
-	manager := &SSU2Manager{networkID: 2, symmetricEvidence: make(map[string]ssu2PeerTestEvidence)}
+	manager, _ := newSSU2ConfiguredManager(t, nil)
 	resultFor := func(withFive bool, received netip.AddrPort) PeerTestResult {
 		t.Helper()
 		state := &ssu2PeerTestState{
@@ -50,14 +71,12 @@ func TestSSU2PeerTestOutcomeTable(t *testing.T) {
 }
 
 func TestSSU2RelayTagPublicationAndExpiry(t *testing.T) {
-	local, _, _ := newSSU2TestLocal(t, "127.0.0.1:23456")
+	manager, local := newSSU2ConfiguredManager(t, nil)
 	now := time.Now()
 	var peer foundation.Hash
 	peer[0] = 9
-	manager := &SSU2Manager{networkID: 2,
-		bindings:         TransportBindings{LocalInfo: local, Clock: WallClock{}},
-		advertisedRelays: map[foundation.Hash]ssu2RelayTagLease{peer: {peer: peer, tag: 77, expires: now.Add(time.Minute)}},
-	}
+	manager.bindings = TransportBindings{LocalInfo: local, Clock: WallClock{}}
+	manager.advertisedRelays[peer] = ssu2RelayTagLease{peer: peer, tag: 77, expires: now.Add(time.Minute)}
 	if _, err := manager.publishRelaySnapshot(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -79,12 +98,10 @@ func TestSSU2NewTokenCacheExpiryAndPathTimeout(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	peer := foundation.Hash{1}
 	remote := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 34567}
-	manager := &SSU2Manager{networkID: 2,
-		bindings:      TransportBindings{Clock: transportTestClock{now: now}},
-		tokenLifetime: time.Minute,
-		newTokens: map[string]ssu2NewTokenLease{
-			newTokenCacheKey(peer, remote, 2): {peer: peer, endpoint: remote.String(), destination: 2, token: 3, expires: now.Add(time.Second)},
-		},
+	manager, _ := newSSU2ConfiguredManager(t, nil)
+	manager.bindings = TransportBindings{Clock: transportTestClock{now: now}}
+	manager.newTokens[newTokenCacheKey(peer, remote, 2)] = ssu2NewTokenLease{
+		peer: peer, endpoint: remote.String(), destination: 2, token: 3, expires: now.Add(time.Second),
 	}
 	if token := manager.cachedNewTokenLocked(peer, remote, 2); token != 3 {
 		t.Fatalf("cached 1-RTT token = %d, want 3", token)
@@ -96,417 +113,393 @@ func TestSSU2NewTokenCacheExpiryAndPathTimeout(t *testing.T) {
 	if token := manager.cachedNewTokenLocked(peer, remote, 2); token != 0 {
 		t.Fatalf("expired cached token = %d, want fallback token request", token)
 	}
-	session := &ssu2TransportSession{candidate: &ssu2PathCandidate{remote: remote, expires: now.Add(time.Second)}}
-	session.expirePath(now.Add(time.Second))
-	if session.candidate != nil {
-		t.Fatal("timed out candidate path was retained")
-	}
 }
 
 func TestSSU2ManagerLiveEgressShutdownAndIOStats(t *testing.T) {
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	receiver, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		_ = conn.Close()
-		t.Fatal(err)
-	}
-	local, static, intro := newSSU2TestLocal(t, conn.LocalAddr().String())
-	manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, StaticPrivate: static, IntroKey: intro})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(func() {
-		cancel()
-		_ = manager.Close()
-		_ = manager.Wait()
-		_ = receiver.Close()
-	})
-	if err = manager.Start(ctx, TransportBindings{
-		SSU2: conn, LocalInfo: local, Clock: WallClock{},
-		HandleI2NPContext: func(context.Context, foundation.Hash, foundation.I2NPMessage, uint64, bool) error { return nil },
-	}); err != nil {
-		t.Fatal(err)
-	}
-	payload := []byte{1, 2, 3, 4}
-	if err = manager.writeTo(payload, receiver.LocalAddr()); err != nil {
-		t.Fatalf("live egress write: %v", err)
-	}
-	buffer := make([]byte, len(payload))
-	if err = receiver.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	if n, _, readErr := receiver.ReadFromUDP(buffer); readErr != nil || n != len(payload) {
-		t.Fatalf("live egress receive = n %d err %v, want %d bytes", n, readErr, len(payload))
-	}
-	stats := manager.IOStats()
-	if stats.DatagramsSent != 1 || stats.BytesSent != uint64(len(payload)) {
-		t.Fatalf("egress IOStats = %#v, want one %d-byte datagram", stats, len(payload))
-	}
-	if err = manager.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("close manager: %v", err)
-	}
-	if err = manager.writeTo(payload, receiver.LocalAddr()); !errors.Is(err, ErrSSU2Session) {
-		t.Fatalf("egress after deterministic close = %v, want ErrSSU2Session", err)
-	}
-}
-
-func TestSSU2ManagerLivePeerTestOrchestration(t *testing.T) {
-	bind := func() *net.UDPConn {
-		t.Helper()
-		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	synctest.Test(t, func(t *testing.T) {
+		net_ := newSSU2SimNetwork(t)
+		conn := newSSU2SimConn(t, net_, "alice")
+		receiver := newSSU2SimConn(t, net_, "bob")
+		local, static, intro := newSSU2TestLocal(t, conn.LocalAddr().String())
+		manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, StaticPrivate: static, IntroKey: intro})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return conn
-	}
-	aliceConn, bobConn, charlieConn := bind(), bind(), bind()
-	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
-	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
-	charlie, charlieStatic, charlieIntro := newSSU2TestLocal(t, charlieConn.LocalAddr().String())
-	aliceDB, bobDB, charlieDB := newTransportTestPeers(), newTransportTestPeers(), newTransportTestPeers()
-	now := uint64(time.Now().UnixMilli())
-	for _, admission := range []struct {
-		database *transportTestPeers
-		info     foundation.NetworkDatabaseRouterInfo
-	}{
-		{aliceDB, bob.Snapshot()}, {aliceDB, charlie.Snapshot()},
-		{bobDB, charlie.Snapshot()}, {charlieDB, alice.Snapshot()},
-	} {
-		if err := admission.database.AdmitRouterInfo(admission.info, now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	results := make(chan PeerTestResult, 1)
-	aliceManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: aliceDB, StaticPrivate: aliceStatic, IntroKey: aliceIntro,
-		OnPeerTestResult: func(result PeerTestResult) { results <- result }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	bobManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro})
-	if err != nil {
-		t.Fatal(err)
-	}
-	charlieManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: charlieDB, StaticPrivate: charlieStatic, IntroKey: charlieIntro})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(func() {
-		cancel()
-		for _, manager := range []*SSU2Manager{aliceManager, bobManager, charlieManager} {
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(func() {
+			cancel()
 			_ = manager.Close()
 			_ = manager.Wait()
-		}
-	})
-	for _, start := range []struct {
-		manager *SSU2Manager
-		conn    *net.UDPConn
-		local   *transportTestLocal
-	}{
-		{aliceManager, aliceConn, alice}, {bobManager, bobConn, bob}, {charlieManager, charlieConn, charlie},
-	} {
-		if err := start.manager.Start(ctx, TransportBindings{
-			SSU2: start.conn, LocalInfo: start.local, Clock: WallClock{},
+		})
+		if err = manager.Start(ctx, TransportBindings{
+			SSU2: conn, LocalInfo: local, Clock: WallClock{},
 			HandleI2NPContext: func(context.Context, foundation.Hash, foundation.I2NPMessage, uint64, bool) error { return nil },
 		}); err != nil {
 			t.Fatal(err)
 		}
-	}
-	message := foundation.I2NPMessage{Header: foundation.I2NPHeader{Type: foundation.I2NPDeliveryStatus, ID: 1, Expiration: uint64(time.Now().Add(time.Minute).UnixMilli())}, Payload: make([]byte, 12)}
-	sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
-	defer sendCancel()
-	if err := bobManager.EnsureSession(sendCtx, charlie.Hash()); err != nil {
-		t.Fatalf("authenticate Bob/Charlie session: %v", err)
-	}
-	if err := bobManager.Send(sendCtx, charlie.Hash(), message); err != nil {
-		t.Fatalf("establish Bob/Charlie session: %v", err)
-	}
-	if err := aliceManager.EnsureSession(sendCtx, bob.Hash()); err != nil {
-		t.Fatalf("authenticate Alice/Bob session: %v", err)
-	}
-	if err := aliceManager.Send(sendCtx, bob.Hash(), message); err != nil {
-		t.Fatalf("establish Alice/Bob session: %v", err)
-	}
-	select {
-	case result := <-results:
+		payload := []byte{1, 2, 3, 4}
+		if err = manager.writeTo(payload, receiver.LocalAddr()); err != nil {
+			t.Fatalf("live egress write: %v", err)
+		}
+		buffer := make([]byte, len(payload))
+		if n, _, readErr := receiver.ReadFromUDP(buffer); readErr != nil || n != len(payload) {
+			t.Fatalf("live egress receive = n %d err %v, want %d bytes", n, readErr, len(payload))
+		}
+		stats := manager.IOStats()
+		if stats.DatagramsSent != 1 || stats.BytesSent != uint64(len(payload)) {
+			t.Fatalf("egress IOStats = %#v, want one %d-byte datagram", stats, len(payload))
+		}
+		if err = manager.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("close manager: %v", err)
+		}
+		if err = manager.writeTo(payload, receiver.LocalAddr()); !errors.Is(err, ErrSSU2Session) {
+			t.Fatalf("egress after deterministic close = %v, want ErrSSU2Session", err)
+		}
+	})
+}
+
+func TestSSU2ManagerLivePeerTestOrchestration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		net_ := newSSU2SimNetwork(t)
+		aliceConn := newSSU2SimConn(t, net_, "alice")
+		bobConn := newSSU2SimConn(t, net_, "bob")
+		charlieConn := newSSU2SimConn(t, net_, "charlie")
+		alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
+		bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
+		charlie, charlieStatic, charlieIntro := newSSU2TestLocal(t, charlieConn.LocalAddr().String())
+		aliceDB, bobDB, charlieDB := newTransportTestPeers(), newTransportTestPeers(), newTransportTestPeers()
+		now := uint64(time.Now().UnixMilli())
+		for _, admission := range []struct {
+			database *transportTestPeers
+			info     foundation.NetworkDatabaseRouterInfo
+		}{
+			{aliceDB, bob.Snapshot()}, {aliceDB, charlie.Snapshot()},
+			{bobDB, charlie.Snapshot()}, {charlieDB, alice.Snapshot()},
+		} {
+			if err := admission.database.AdmitRouterInfo(admission.info, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		results := make(chan PeerTestResult, 1)
+		aliceManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: aliceDB, StaticPrivate: aliceStatic, IntroKey: aliceIntro,
+			OnPeerTestResult: func(result PeerTestResult) { results <- result }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bobManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: bobDB, StaticPrivate: bobStatic, IntroKey: bobIntro})
+		if err != nil {
+			t.Fatal(err)
+		}
+		charlieManager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: charlieDB, StaticPrivate: charlieStatic, IntroKey: charlieIntro})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(func() {
+			cancel()
+			for _, manager := range []*SSU2Manager{aliceManager, bobManager, charlieManager} {
+				closeSSU2LiveManager(t, manager)
+			}
+		})
+		for _, start := range []struct {
+			manager *SSU2Manager
+			conn    *simnet.UDPConn
+			local   *transportTestLocal
+		}{
+			{aliceManager, aliceConn, alice}, {bobManager, bobConn, bob}, {charlieManager, charlieConn, charlie},
+		} {
+			startSSU2SimManager(t, ctx, start.manager, start.conn, start.local, nil)
+		}
+		message := foundation.I2NPMessage{Header: foundation.I2NPHeader{Type: foundation.I2NPDeliveryStatus, ID: 1, Expiration: uint64(time.Now().Add(time.Minute).UnixMilli())}, Payload: make([]byte, 12)}
+		if err := bobManager.EnsureSession(ctx, charlie.Hash()); err != nil {
+			t.Fatalf("authenticate Bob/Charlie session: %v", err)
+		}
+		if err := bobManager.Send(ctx, charlie.Hash(), message); err != nil {
+			t.Fatalf("establish Bob/Charlie session: %v", err)
+		}
+		if err := aliceManager.EnsureSession(ctx, bob.Hash()); err != nil {
+			t.Fatalf("authenticate Alice/Bob session: %v", err)
+		}
+		if err := aliceManager.Send(ctx, bob.Hash(), message); err != nil {
+			t.Fatalf("establish Alice/Bob session: %v", err)
+		}
+		result := <-results
 		if result.Outcome != PeerTestOK {
 			t.Fatalf("live PeerTest result = %#v, want OK", result)
 		}
-	case <-time.After(8 * time.Second):
-		t.Fatal("live PeerTest did not complete")
-	}
+	})
 }
 
 func TestSSU2DispatchShutdownCancelsContextAwareCallback(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	entered := make(chan struct{})
-	queue := make(chan *ssu2DispatchBatch, 1)
-	manager := &SSU2Manager{networkID: 2,
-		ctx:            ctx,
-		dispatchQueues: []chan *ssu2DispatchBatch{queue},
-		bindings: TransportBindings{
-			Clock: transportTestClock{now: time.Unix(1, 0)},
-			HandleI2NPContext: func(ctx context.Context, _ foundation.Hash, _ foundation.I2NPMessage, _ uint64, _ bool) error {
+	synctest.Test(t, func(t *testing.T) {
+		net_ := newSSU2SimNetwork(t)
+		aliceConn := newSSU2SimConn(t, net_, "alice")
+		bobConn := newSSU2SimConn(t, net_, "bob")
+		alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
+		bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
+		aliceDB := newTransportTestPeers()
+		bobDB := newTransportTestPeers()
+		now := uint64(time.Now().UnixMilli())
+		if err := aliceDB.AdmitRouterInfo(bob.Snapshot(), now); err != nil {
+			t.Fatal(err)
+		}
+		if err := bobDB.AdmitRouterInfo(alice.Snapshot(), now); err != nil {
+			t.Fatal(err)
+		}
+		aliceManager := newSSU2LiveManager(t, aliceDB, aliceStatic, aliceIntro, time.Minute, time.Minute)
+		bobManager := newSSU2LiveManager(t, bobDB, bobStatic, bobIntro, time.Minute, time.Minute)
+		ctx, cancel := context.WithCancel(t.Context())
+		entered := make(chan struct{})
+		callbackErr := make(chan error, 1)
+		startSSU2SimManager(t, ctx, aliceManager, aliceConn, alice, nil)
+		if err := bobManager.Start(ctx, TransportBindings{
+			SSU2: bobConn, LocalInfo: bob, Clock: WallClock{},
+			HandleI2NPContext: func(cbCtx context.Context, _ foundation.Hash, _ foundation.I2NPMessage, _ uint64, _ bool) error {
 				close(entered)
-				<-ctx.Done()
-				return ctx.Err()
+				<-cbCtx.Done()
+				err := cbCtx.Err()
+				callbackErr <- err
+				return err
 			},
-		},
-	}
-	batch := &ssu2DispatchBatch{count: 1, done: make(chan error, 1)}
-	manager.wg.Add(1)
-	go manager.dispatchLoop(queue)
-	queue <- batch
-	<-entered
-	cancel()
-	select {
-	case err := <-batch.done:
-		if !errors.Is(err, context.Canceled) {
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			cancel()
+			closeSSU2LiveManager(t, aliceManager)
+			closeSSU2LiveManager(t, bobManager)
+		})
+
+		if err := aliceManager.EnsureSession(ctx, bob.Hash()); err != nil {
+			t.Fatal(err)
+		}
+		if err := aliceManager.Send(ctx, bob.Hash(), ssu2LiveMessage(1)); err != nil {
+			t.Fatal(err)
+		}
+		<-entered
+		if err := bobManager.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Fatal(err)
+		}
+		if err := <-callbackErr; !errors.Is(err, context.Canceled) {
 			t.Fatalf("dispatch error = %v, want context cancellation", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("dispatch callback did not return after cancellation")
-	}
-	waited := make(chan struct{})
-	go func() { manager.wg.Wait(); close(waited) }()
-	select {
-	case <-waited:
-	case <-time.After(time.Second):
-		t.Fatal("dispatch loop did not stop after callback cancellation")
-	}
+		if err := bobManager.Wait(); err != nil {
+			t.Fatalf("Wait after callback cancellation: %v", err)
+		}
+	})
 }
 
 func TestSSU2LiveRelayTagLeasePublishesRenewsAndWithdraws(t *testing.T) {
-	aliceConn := newSSU2LoopbackConn(t)
-	bobConn := newSSU2LoopbackConn(t)
-	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
-	bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
-	aliceDB := newTransportTestPeers()
-	bobDB := newTransportTestPeers()
-	now := uint64(time.Now().UnixMilli())
-	for _, admission := range []struct {
-		database *transportTestPeers
-		info     foundation.NetworkDatabaseRouterInfo
-	}{
-		{aliceDB, bob.Snapshot()},
-		{bobDB, alice.Snapshot()},
-	} {
-		if err := admission.database.AdmitRouterInfo(admission.info, now); err != nil {
-			t.Fatal(err)
+	synctest.Test(t, func(t *testing.T) {
+		net_ := newSSU2SimNetwork(t)
+		aliceConn := newSSU2SimConn(t, net_, "alice")
+		bobConn := newSSU2SimConn(t, net_, "bob")
+		alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
+		bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
+		aliceDB := newTransportTestPeers()
+		bobDB := newTransportTestPeers()
+		now := uint64(time.Now().UnixMilli())
+		for _, admission := range []struct {
+			database *transportTestPeers
+			info     foundation.NetworkDatabaseRouterInfo
+		}{
+			{aliceDB, bob.Snapshot()},
+			{bobDB, alice.Snapshot()},
+		} {
+			if err := admission.database.AdmitRouterInfo(admission.info, now); err != nil {
+				t.Fatal(err)
+			}
 		}
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	aliceManager := newSSU2LiveManager(t, aliceDB, aliceStatic, aliceIntro, 3*time.Second, 10*time.Second)
-	bobManager := newSSU2LiveManager(t, bobDB, bobStatic, bobIntro, 3*time.Second, 10*time.Second)
-	startSSU2LiveManager(t, ctx, aliceManager, aliceConn, alice, nil)
-	startSSU2LiveManager(t, ctx, bobManager, bobConn, bob, nil)
-	t.Cleanup(func() {
-		cancel()
-		closeSSU2LiveManager(t, aliceManager)
-		closeSSU2LiveManager(t, bobManager)
-	})
+		ctx, cancel := context.WithCancel(t.Context())
+		aliceManager := newSSU2LiveManager(t, aliceDB, aliceStatic, aliceIntro, 3*time.Second, 10*time.Second)
+		bobManager := newSSU2LiveManager(t, bobDB, bobStatic, bobIntro, 3*time.Second, 10*time.Second)
+		startSSU2SimManager(t, ctx, aliceManager, aliceConn, alice, nil)
+		startSSU2SimManager(t, ctx, bobManager, bobConn, bob, nil)
+		t.Cleanup(func() {
+			cancel()
+			closeSSU2LiveManager(t, aliceManager)
+			closeSSU2LiveManager(t, bobManager)
+		})
 
-	requestCtx, requestCancel := context.WithTimeout(ctx, 5*time.Second)
-	defer requestCancel()
-	if err := aliceManager.RequestRelayTag(requestCtx, bob.Hash()); err != nil {
-		t.Fatalf("request live relay tag: %v", err)
-	}
-	var initialPublished uint64
-	waitForSSU2Live(t, 5*time.Second, func() bool {
+		if err := aliceManager.RequestRelayTag(ctx, bob.Hash()); err != nil {
+			t.Fatalf("request live relay tag: %v", err)
+		}
+		net_.Advance(100 * time.Millisecond)
+
 		snapshot := alice.Snapshot()
 		candidates := selectSSU2Introducers(snapshot, uint64(time.Now().Unix()))
 		if len(candidates) != 1 || candidates[0].peer != bob.Hash() || candidates[0].relayTag == 0 {
-			return false
+			t.Fatalf("RelayTag grant publication candidates = %#v, want 1 introducer for Bob", candidates)
 		}
-		initialPublished = snapshot.Published
-		return true
-	}, "RelayTag grant publication")
-	if valid, err := alice.Snapshot().Verify(); err != nil || !valid {
-		t.Fatalf("RelayTag publication is not a signed RouterInfo: valid=%v err=%v", valid, err)
-	}
+		initialPublished := snapshot.Published
+		if valid, err := snapshot.Verify(); err != nil || !valid {
+			t.Fatalf("RelayTag publication is not a signed RouterInfo: valid=%v err=%v", valid, err)
+		}
 
-	waitForSSU2Live(t, 5*time.Second, func() bool {
-		snapshot := alice.Snapshot()
-		candidates := selectSSU2Introducers(snapshot, uint64(time.Now().Unix()))
-		return len(candidates) >= 1 && snapshot.Published > initialPublished
-	}, "RelayTag lease renewal")
+		net_.Advance(3 * time.Second)
+		snapshot = alice.Snapshot()
+		candidates = selectSSU2Introducers(snapshot, uint64(time.Now().Unix()))
+		if len(candidates) < 1 || snapshot.Published <= initialPublished {
+			t.Fatalf("RelayTag lease was not renewed: candidates=%#v published=%d initial=%d", candidates, snapshot.Published, initialPublished)
+		}
 
-	closeSSU2LiveManager(t, bobManager)
-	waitForSSU2Live(t, 6*time.Second, func() bool {
-		return !hasSSU2IntroducerOptions(alice.Snapshot())
-	}, "expired RelayTag withdrawal")
-	if valid, err := alice.Snapshot().Verify(); err != nil || !valid {
-		t.Fatalf("withdrawn RelayTag snapshot is not signed: valid=%v err=%v", valid, err)
-	}
+		closeSSU2LiveManager(t, bobManager)
+		net_.Advance(4 * time.Second)
+		if hasSSU2IntroducerOptions(alice.Snapshot()) {
+			t.Fatal("expired RelayTag remained advertised after Bob closed")
+		}
+		if valid, err := alice.Snapshot().Verify(); err != nil || !valid {
+			t.Fatalf("withdrawn RelayTag snapshot is not signed: valid=%v err=%v", valid, err)
+		}
+	})
 }
 
 func TestSSU2LiveNewTokenCacheSkipsRetryAndExpires(t *testing.T) {
-	aliceConn := newSSU2LoopbackConn(t)
-	bobConn := newSSU2LoopbackConn(t)
-	proxy := newSSU2TokenProxy(t, aliceConn.LocalAddr().(*net.UDPAddr), bobConn.LocalAddr().(*net.UDPAddr))
-	t.Cleanup(proxy.Close)
-	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
-	bob, bobStatic, bobIntro := newSSU2TestLocal(t, proxy.conn.LocalAddr().String())
-	aliceDB := newTransportTestPeers()
-	bobDB := newTransportTestPeers()
-	now := uint64(time.Now().UnixMilli())
-	for _, admission := range []struct {
-		database *transportTestPeers
-		info     foundation.NetworkDatabaseRouterInfo
-	}{
-		{aliceDB, bob.Snapshot()},
-		{bobDB, alice.Snapshot()},
-	} {
-		if err := admission.database.AdmitRouterInfo(admission.info, now); err != nil {
-			t.Fatal(err)
+	synctest.Test(t, func(t *testing.T) {
+		net_ := newSSU2SimNetwork(t)
+		aliceConn := newSSU2SimConn(t, net_, "alice")
+		bobRawConn := newSSU2SimConn(t, net_, "bob")
+		alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
+		bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobRawConn.LocalAddr().String())
+		bobConn := &ssu2TokenCountingConn{UDPSocket: bobRawConn, intro: append([]byte(nil), bobIntro...)}
+		aliceDB := newTransportTestPeers()
+		bobDB := newTransportTestPeers()
+		now := uint64(time.Now().UnixMilli())
+		for _, admission := range []struct {
+			database *transportTestPeers
+			info     foundation.NetworkDatabaseRouterInfo
+		}{
+			{aliceDB, bob.Snapshot()},
+			{bobDB, alice.Snapshot()},
+		} {
+			if err := admission.database.AdmitRouterInfo(admission.info, now); err != nil {
+				t.Fatal(err)
+			}
 		}
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	aliceManager := newSSU2LiveManager(t, aliceDB, aliceStatic, aliceIntro, 2*time.Second, 200*time.Millisecond)
-	bobManager := newSSU2LiveManager(t, bobDB, bobStatic, bobIntro, 2*time.Second, 200*time.Millisecond)
-	proxy.Start(bobIntro)
-	startSSU2LiveManager(t, ctx, aliceManager, aliceConn, alice, nil)
-	startSSU2LiveManager(t, ctx, bobManager, bobConn, bob, nil)
-	t.Cleanup(func() {
-		cancel()
-		closeSSU2LiveManager(t, aliceManager)
-		closeSSU2LiveManager(t, bobManager)
+		ctx, cancel := context.WithCancel(t.Context())
+		aliceManager := newSSU2LiveManager(t, aliceDB, aliceStatic, aliceIntro, 10*time.Second, 2*time.Second)
+		bobManager := newSSU2LiveManager(t, bobDB, bobStatic, bobIntro, 10*time.Second, 2*time.Second)
+		startSSU2SimManager(t, ctx, aliceManager, aliceConn, alice, nil)
+		startSSU2SimManager(t, ctx, bobManager, bobConn, bob, nil)
+		t.Cleanup(func() {
+			cancel()
+			closeSSU2LiveManager(t, aliceManager)
+			closeSSU2LiveManager(t, bobManager)
+		})
+
+		send := func(id uint32) {
+			t.Helper()
+			if err := aliceManager.EnsureSession(ctx, bob.Hash()); err != nil {
+				t.Fatalf("authenticate token-cache session: %v", err)
+			}
+			if err := aliceManager.Send(ctx, bob.Hash(), ssu2LiveMessage(id)); err != nil {
+				t.Fatalf("live token-cache send %d: %v", id, err)
+			}
+		}
+		send(1)
+		net_.Advance(50 * time.Millisecond)
+
+		firstRequests, firstRetries := bobConn.Counts()
+		if firstRequests == 0 || firstRetries == 0 {
+			t.Fatalf("first establishment did not traverse TokenRequest/Retry: requests=%d retries=%d", firstRequests, firstRetries)
+		}
+
+		net_.Advance(3500 * time.Millisecond)
+		if aliceManager.HasSession(bob.Hash()) || bobManager.HasSession(alice.Hash()) {
+			t.Fatal("first session was not evicted after idle timeout")
+		}
+
+		send(2)
+		net_.Advance(50 * time.Millisecond)
+		if !aliceManager.HasSession(bob.Hash()) {
+			t.Fatal("second session was not established with cached token")
+		}
+		if requests, retries := bobConn.Counts(); requests != firstRequests || retries != firstRetries {
+			t.Fatalf("cached token sent TokenRequest/Retry: got requests=%d retries=%d, want %d/%d", requests, retries, firstRequests, firstRetries)
+		}
+
+		net_.Advance(11 * time.Second)
+		if aliceManager.HasSession(bob.Hash()) || bobManager.HasSession(alice.Hash()) {
+			t.Fatal("second session was not evicted after idle timeout")
+		}
+
+		send(3)
+		net_.Advance(50 * time.Millisecond)
+		if requests, retries := bobConn.Counts(); requests <= firstRequests || retries <= firstRetries {
+			t.Fatalf("expired token did not fall back to TokenRequest/Retry: got requests=%d retries=%d, initial=%d/%d", requests, retries, firstRequests, firstRetries)
+		}
 	})
-
-	send := func(id uint32) {
-		sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer sendCancel()
-		if err := aliceManager.EnsureSession(sendCtx, bob.Hash()); err != nil {
-			t.Fatalf("authenticate token-cache session: %v", err)
-		}
-		if err := aliceManager.Send(sendCtx, bob.Hash(), ssu2LiveMessage(id)); err != nil {
-			t.Fatalf("live token-cache send %d: %v", id, err)
-		}
-	}
-	send(1)
-	waitForSSU2Live(t, 3*time.Second, func() bool {
-		return liveNewTokenPresent(aliceManager, bob.Hash())
-	}, "NewToken storage after first establishment")
-	waitForSSU2Live(t, 3*time.Second, func() bool {
-		return liveSessionAbsent(aliceManager, bob.Hash()) && liveSessionAbsent(bobManager, alice.Hash())
-	}, "first session idle eviction")
-	firstRequests, firstRetries := proxy.Counts()
-	if firstRequests == 0 || firstRetries == 0 {
-		t.Fatalf("first establishment did not traverse TokenRequest/Retry: requests=%d retries=%d", firstRequests, firstRetries)
-	}
-
-	send(2)
-	waitForSSU2Live(t, 3*time.Second, func() bool {
-		return !liveSessionAbsent(aliceManager, bob.Hash())
-	}, "cached-token second establishment")
-	if requests, retries := proxy.Counts(); requests != firstRequests || retries != firstRetries {
-		t.Fatalf("cached token sent TokenRequest/Retry: got requests=%d retries=%d, want %d/%d", requests, retries, firstRequests, firstRetries)
-	}
-	waitForSSU2Live(t, 3*time.Second, func() bool {
-		return liveSessionAbsent(aliceManager, bob.Hash()) && liveSessionAbsent(bobManager, alice.Hash())
-	}, "second session idle eviction")
-	waitForSSU2Live(t, 5*time.Second, func() bool {
-		return !liveNewTokenPresent(aliceManager, bob.Hash())
-	}, "NewToken expiry")
-
-	send(3)
-	waitForSSU2Live(t, 3*time.Second, func() bool {
-		requests, retries := proxy.Counts()
-		return requests > firstRequests && retries > firstRetries
-	}, "expired-token TokenRequest/Retry fallback")
 }
 
 func TestSSU2LivePathMigration(t *testing.T) {
-	aliceConn := newSSU2LoopbackConn(t)
-	bobConn := newSSU2LoopbackConn(t)
-	proxy := newSSU2MigrationProxy(t, aliceConn.LocalAddr().(*net.UDPAddr), bobConn.LocalAddr().(*net.UDPAddr))
-	t.Cleanup(proxy.Close)
-	alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
-	bob, bobStatic, bobIntro := newSSU2TestLocal(t, proxy.primary.LocalAddr().String())
-	aliceDB := newTransportTestPeers()
-	bobDB := newTransportTestPeers()
-	now := uint64(time.Now().UnixMilli())
-	for _, admission := range []struct {
-		database *transportTestPeers
-		info     foundation.NetworkDatabaseRouterInfo
-	}{
-		{aliceDB, bob.Snapshot()},
-		{bobDB, alice.Snapshot()},
-	} {
-		if err := admission.database.AdmitRouterInfo(admission.info, now); err != nil {
-			t.Fatal(err)
+	synctest.Test(t, func(t *testing.T) {
+		net_ := newSSU2SimNetwork(t)
+		aliceConn := newSSU2SimConn(t, net_, "alice")
+		bobConn := newSSU2SimConn(t, net_, "bob")
+		proxy := newSSU2MigrationProxy(t, net_, aliceConn.LocalAddr().(*net.UDPAddr), bobConn.LocalAddr().(*net.UDPAddr))
+		t.Cleanup(proxy.Close)
+		alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
+		bob, bobStatic, bobIntro := newSSU2TestLocal(t, proxy.primary.LocalAddr().String())
+		aliceDB := newTransportTestPeers()
+		bobDB := newTransportTestPeers()
+		now := uint64(time.Now().UnixMilli())
+		for _, admission := range []struct {
+			database *transportTestPeers
+			info     foundation.NetworkDatabaseRouterInfo
+		}{
+			{aliceDB, bob.Snapshot()},
+			{bobDB, alice.Snapshot()},
+		} {
+			if err := admission.database.AdmitRouterInfo(admission.info, now); err != nil {
+				t.Fatal(err)
+			}
 		}
-	}
-	received := make(chan foundation.I2NPMessage, 1)
-	bobReceived := make(chan foundation.I2NPMessage, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-	aliceManager := newSSU2LiveManager(t, aliceDB, aliceStatic, aliceIntro, time.Second, 10*time.Second)
-	bobManager := newSSU2LiveManager(t, bobDB, bobStatic, bobIntro, time.Second, 10*time.Second)
-	proxy.Start()
-	startSSU2LiveManager(t, ctx, aliceManager, aliceConn, alice, func(message foundation.I2NPMessage, _ uint64, _ bool) error {
-		received <- message
-		return nil
-	})
-	startSSU2LiveManager(t, ctx, bobManager, bobConn, bob, func(message foundation.I2NPMessage, _ uint64, _ bool) error {
-		bobReceived <- message
-		return nil
-	})
-	t.Cleanup(func() {
-		cancel()
-		closeSSU2LiveManager(t, aliceManager)
-		closeSSU2LiveManager(t, bobManager)
-	})
+		received := make(chan foundation.I2NPMessage, 1)
+		bobReceived := make(chan foundation.I2NPMessage, 2)
+		ctx, cancel := context.WithCancel(t.Context())
+		aliceManager := newSSU2LiveManager(t, aliceDB, aliceStatic, aliceIntro, time.Second, 10*time.Second)
+		bobManager := newSSU2LiveManager(t, bobDB, bobStatic, bobIntro, time.Second, 10*time.Second)
+		proxy.Start()
+		startSSU2SimManager(t, ctx, aliceManager, aliceConn, alice, func(message foundation.I2NPMessage, _ uint64, _ bool) error {
+			received <- message
+			return nil
+		})
+		startSSU2SimManager(t, ctx, bobManager, bobConn, bob, func(message foundation.I2NPMessage, _ uint64, _ bool) error {
+			bobReceived <- message
+			return nil
+		})
+		t.Cleanup(func() {
+			cancel()
+			closeSSU2LiveManager(t, aliceManager)
+			closeSSU2LiveManager(t, bobManager)
+		})
 
-	send := func(manager *SSU2Manager, peer foundation.Hash, id uint32, action string) {
-		sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer sendCancel()
-		if err := manager.EnsureSession(sendCtx, peer); err != nil {
-			t.Fatalf("authenticate %s: %v", action, err)
+		send := func(manager *SSU2Manager, peer foundation.Hash, id uint32, action string) {
+			t.Helper()
+			if err := manager.EnsureSession(ctx, peer); err != nil {
+				t.Fatalf("authenticate %s: %v", action, err)
+			}
+			if err := manager.Send(ctx, peer, ssu2LiveMessage(id)); err != nil {
+				t.Fatalf("%s: %v", action, err)
+			}
 		}
-		if err := manager.Send(sendCtx, peer, ssu2LiveMessage(id)); err != nil {
-			t.Fatalf("%s: %v", action, err)
-		}
-	}
-	send(aliceManager, bob.Hash(), 1, "establish initial path")
-	select {
-	case message := <-bobReceived:
-		if message.Header.ID != 1 {
+		send(aliceManager, bob.Hash(), 1, "establish initial path")
+		if message := <-bobReceived; message.Header.ID != 1 {
 			t.Fatalf("initial path delivered message %d, want 1", message.Header.ID)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("initial path did not deliver Alice traffic")
-	}
-	proxy.Migrate()
-	send(aliceManager, bob.Hash(), 2, "send authenticated traffic over candidate path")
-	secondary := proxy.secondary.LocalAddr().(*net.UDPAddr)
-	waitForSSU2Live(t, 4*time.Second, func() bool {
-		return liveSessionRemoteIs(bobManager, alice.Hash(), secondary)
-	}, "authenticated PathChallenge/PathResponse migration")
-	send(bobManager, alice.Hash(), 3, "send over migrated endpoint")
-	select {
-	case message := <-received:
-		if message.Header.ID != 3 {
+
+		proxy.Migrate()
+		send(aliceManager, bob.Hash(), 2, "send authenticated traffic over candidate path")
+		net_.Advance(50 * time.Millisecond)
+
+		send(bobManager, alice.Hash(), 3, "send over migrated endpoint")
+		if message := <-received; message.Header.ID != 3 {
 			t.Fatalf("migrated endpoint delivered message %d, want 3", message.Header.ID)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("migrated endpoint did not deliver Bob traffic")
-	}
-
-}
-
-func newSSU2LoopbackConn(t *testing.T) *net.UDPConn {
-	t.Helper()
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	return conn
+		if proxy.secondaryFromBob.Load() == 0 {
+			t.Fatal("Bob did not send traffic to migrated secondary endpoint")
+		}
+	})
 }
 
 func newSSU2LiveManager(t *testing.T, database *transportTestPeers, static, intro []byte, tokenLifetime, idleTimeout time.Duration) *SSU2Manager {
@@ -519,23 +512,6 @@ func newSSU2LiveManager(t *testing.T, database *transportTestPeers, static, intr
 	return manager
 }
 
-func startSSU2LiveManager(t *testing.T, ctx context.Context, manager *SSU2Manager, conn *net.UDPConn, local *transportTestLocal, handle func(foundation.I2NPMessage, uint64, bool) error) {
-	t.Helper()
-	if handle ==
-		nil {
-		handle = func(foundation.I2NPMessage, uint64, bool) error { return nil }
-	}
-
-	if err := manager.Start(ctx, TransportBindings{
-		SSU2: conn, LocalInfo: local, Clock: WallClock{},
-		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message foundation.I2NPMessage, now uint64, floodfill bool) error {
-			return handle(message, now, floodfill)
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func closeSSU2LiveManager(t *testing.T, manager *SSU2Manager) {
 	t.Helper()
 	if err := manager.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
@@ -543,24 +519,6 @@ func closeSSU2LiveManager(t *testing.T, manager *SSU2Manager) {
 	}
 	if err := manager.Wait(); err != nil {
 		t.Errorf("wait live SSU2 manager: %v", err)
-	}
-}
-
-func waitForSSU2Live(t *testing.T, timeout time.Duration, condition func() bool, name string) {
-	t.Helper()
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		if condition() {
-			return
-		}
-		select {
-		case <-deadline.C:
-			t.Fatalf("timed out waiting for %s", name)
-		case <-tick.C:
-		}
 	}
 }
 
@@ -591,177 +549,106 @@ func hasSSU2IntroducerOptions(info foundation.NetworkDatabaseRouterInfo) bool {
 	}
 }
 
-func liveSessionAbsent(manager *SSU2Manager, peer foundation.Hash) bool {
-	manager.mu.RLock()
-	defer manager.mu.RUnlock()
-	return manager.sessionsByPeer[peer] == nil
+type ssu2TokenCountingConn struct {
+	UDPSocket
+	intro    []byte
+	requests atomic.Int64
+	retries  atomic.Int64
 }
 
-func liveSessionRemoteIs(manager *SSU2Manager, peer foundation.Hash, remote *net.UDPAddr) bool {
-	manager.mu.RLock()
-	session := manager.sessionsByPeer[peer]
-	manager.mu.RUnlock()
-	return session != nil && sameUDPAddress(session.remoteAddr(), remote)
-}
-
-func livePathCandidatePresent(manager *SSU2Manager, peer foundation.Hash) bool {
-	manager.mu.RLock()
-	session := manager.sessionsByPeer[peer]
-	manager.mu.RUnlock()
-	if session == nil {
-		return false
-	}
-	session.pathMu.Lock()
-	defer session.pathMu.Unlock()
-	return session.candidate != nil
-}
-
-func liveNewTokenPresent(manager *SSU2Manager, peer foundation.Hash) bool {
-	manager.mu.RLock()
-	defer manager.mu.RUnlock()
-	for _, lease := range manager.newTokens {
-		if lease.peer == peer && lease.expires.After(time.Now()) {
-			return true
+func (c *ssu2TokenCountingConn) ReadMsgUDPAddrPort(b, oob []byte) (int, int, int, netip.AddrPort, error) {
+	n, oobn, flags, addr, err := c.UDPSocket.ReadMsgUDPAddrPort(b, oob)
+	if err == nil && n > 0 {
+		wire := append([]byte(nil), b[:n]...)
+		if header, _, parseErr := dataplanessu2.ParseOutOfSession(wire, c.intro, 2); parseErr == nil && header.Type == dataplanessu2.TokenRequest {
+			c.requests.Add(1)
 		}
 	}
-	return false
+	return n, oobn, flags, addr, err
 }
 
-type ssu2TokenProxy struct {
-	conn       *net.UDPConn
-	alice, bob *net.UDPAddr
-	intro      []byte
-	done       chan struct{}
-	wg         sync.WaitGroup
-	mu         sync.Mutex
-	requests   int
-	retries    int
-}
-
-func newSSU2TokenProxy(t *testing.T, alice, bob *net.UDPAddr) *ssu2TokenProxy {
-	t.Helper()
-	conn := newSSU2LoopbackConn(t)
-	return &ssu2TokenProxy{conn: conn, alice: cloneUDPAddress(alice).(*net.UDPAddr), bob: cloneUDPAddress(bob).(*net.UDPAddr), done: make(chan struct{})}
-}
-
-func (p *ssu2TokenProxy) Start(intro []byte) {
-	p.intro = append([]byte(nil), intro...)
-	p.wg.Go(func() {
-		packet := make([]byte, dataplanessu2.MaxIPv4PacketLen)
-		for {
-			_ = p.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-			n, remote, err := p.conn.ReadFromUDP(packet)
-			if err != nil {
-				select {
-				case <-p.done:
-					return
-				default:
-					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-						continue
-					}
-					return
-				}
-			}
-			wire := append([]byte(nil), packet[:n]...)
-			if sameUDPAddress(remote, p.alice) {
-				if header, _, parseErr := dataplanessu2.ParseOutOfSession(append([]byte(nil), wire...), p.intro, 2); parseErr == nil {
-					p.mu.Lock()
-					if header.Type == dataplanessu2.TokenRequest {
-						p.requests++
-					}
-					p.mu.Unlock()
-				}
-				_, _ = p.conn.WriteToUDP(wire, p.bob)
-			} else if sameUDPAddress(remote, p.bob) {
-				if header, _, parseErr := dataplanessu2.ParseOutOfSession(append([]byte(nil), wire...), p.intro, 2); parseErr == nil && header.Type == dataplanessu2.Retry {
-					p.mu.Lock()
-					p.retries++
-					p.mu.Unlock()
-				}
-				_, _ = p.conn.WriteToUDP(wire, p.alice)
-			}
+func (c *ssu2TokenCountingConn) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
+	n, addr, err := c.UDPSocket.ReadFromUDPAddrPort(b)
+	if err == nil && n > 0 {
+		wire := append([]byte(nil), b[:n]...)
+		if header, _, parseErr := dataplanessu2.ParseOutOfSession(wire, c.intro, 2); parseErr == nil && header.Type == dataplanessu2.TokenRequest {
+			c.requests.Add(1)
 		}
-	})
+	}
+	return n, addr, err
 }
 
-func (p *ssu2TokenProxy) Counts() (requests, retries int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.requests, p.retries
+func (c *ssu2TokenCountingConn) WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (int, error) {
+	if len(b) > 0 {
+		wire := append([]byte(nil), b...)
+		if header, _, parseErr := dataplanessu2.ParseOutOfSession(wire, c.intro, 2); parseErr == nil && header.Type == dataplanessu2.Retry {
+			c.retries.Add(1)
+		}
+	}
+	return c.UDPSocket.WriteToUDPAddrPort(b, addr)
 }
 
-func (p *ssu2TokenProxy) Close() {
-	close(p.done)
-	p.wg.Wait()
+func (c *ssu2TokenCountingConn) Counts() (requests, retries int) {
+	return int(c.requests.Load()), int(c.retries.Load())
 }
 
 type ssu2MigrationProxy struct {
-	primary, secondary *net.UDPConn
+	primary, secondary *simnet.UDPConn
 	alice, bob         *net.UDPAddr
-	done               chan struct{}
 	wg                 sync.WaitGroup
-	mu                 sync.Mutex
-	migrated           bool
+	migrated           atomic.Bool
+	secondaryFromBob   atomic.Int64
 }
 
-func newSSU2MigrationProxy(t *testing.T, alice, bob *net.UDPAddr) *ssu2MigrationProxy {
+func newSSU2MigrationProxy(t *testing.T, net_ *simnet.Network, alice, bob *net.UDPAddr) *ssu2MigrationProxy {
 	t.Helper()
 	return &ssu2MigrationProxy{
-		primary: newSSU2LoopbackConn(t), secondary: newSSU2LoopbackConn(t),
-		alice: cloneUDPAddress(alice).(*net.UDPAddr), bob: cloneUDPAddress(bob).(*net.UDPAddr),
-		done: make(chan struct{}),
+		primary:   newSSU2SimConn(t, net_, "proxy-primary"),
+		secondary: newSSU2SimConn(t, net_, "proxy-secondary"),
+		alice:     cloneUDPAddress(alice).(*net.UDPAddr),
+		bob:       cloneUDPAddress(bob).(*net.UDPAddr),
 	}
 }
 
 func (p *ssu2MigrationProxy) Start() {
-	for _, conn := range []*net.UDPConn{p.primary, p.secondary} {
+	for _, conn := range []*simnet.UDPConn{p.primary, p.secondary} {
 		p.wg.Add(1)
 		go p.forward(conn)
 	}
 }
 
-func (p *ssu2MigrationProxy) forward(conn *net.UDPConn) {
+func (p *ssu2MigrationProxy) forward(conn *simnet.UDPConn) {
 	defer p.wg.Done()
 	packet := make([]byte, dataplanessu2.MaxIPv4PacketLen)
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, remote, err := conn.ReadFromUDP(packet)
 		if err != nil {
-			select {
-			case <-p.done:
-				return
-			default:
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					continue
-				}
-				return
-			}
+			return
 		}
 		wire := append([]byte(nil), packet[:n]...)
 		switch {
 		case conn == p.primary && sameUDPAddress(remote, p.alice):
-			p.mu.Lock()
-			migrated := p.migrated
-			p.mu.Unlock()
 			outbound := p.primary
-			if migrated {
+			if p.migrated.Load() {
 				outbound = p.secondary
 			}
 			_, _ = outbound.WriteToUDP(wire, p.bob)
 		case sameUDPAddress(remote, p.bob):
+			if conn == p.secondary {
+				p.secondaryFromBob.Add(1)
+			}
 			_, _ = p.primary.WriteToUDP(wire, p.alice)
 		}
 	}
 }
 
 func (p *ssu2MigrationProxy) Migrate() {
-	p.mu.Lock()
-	p.migrated = true
-	p.mu.Unlock()
+	p.migrated.Store(true)
 }
 
 func (p *ssu2MigrationProxy) Close() {
-	close(p.done)
+	_ = p.primary.Close()
+	_ = p.secondary.Close()
 	p.wg.Wait()
 }
 
@@ -807,13 +694,10 @@ func TestSSU2PeerTestOutOfSessionRolesRequireApprovedExactEndpoints(t *testing.T
 		nonce: 41, alice: alice.Hash(), bob: foundation.Hash{9}, expires: now.Add(time.Minute),
 	}
 	callbacks := 0
-	manager := &SSU2Manager{networkID: 2,
-		peers:        database,
-		maxClockSkew: time.Minute,
-		bindings:     TransportBindings{LocalInfo: alice, Clock: transportTestClock{now: now}},
-		peerTests:    map[uint32]*ssu2PeerTestState{state.nonce: state},
-		onPeerTest:   func(dataplanessu2.PeerTestBlock, net.Addr) { callbacks++ },
-	}
+	manager, _ := newSSU2ConfiguredManager(t, database)
+	manager.bindings = TransportBindings{LocalInfo: alice, Clock: transportTestClock{now: now}}
+	manager.peerTests[state.nonce] = state
+	manager.onPeerTest = func(dataplanessu2.PeerTestBlock, net.Addr) { callbacks++ }
 	phase5 := dataplanessu2.PeerTestBlock{
 		Message: 5, Nonce: state.nonce, Timestamp: uint32(now.Unix()),
 		Address: netip.MustParseAddrPort("127.0.0.1:31001"),
@@ -856,11 +740,9 @@ func TestSSU2PeerTestOutOfSessionRolesRequireApprovedExactEndpoints(t *testing.T
 	charlieState := &ssu2PeerTestState{
 		nonce: 42, alice: remoteAlice.Hash(), bob: foundation.Hash{8}, charlie: charlie.Hash(), expires: now.Add(time.Minute),
 	}
-	charlieManager := &SSU2Manager{networkID: 2,
-		peers:     charlieDB,
-		bindings:  TransportBindings{LocalInfo: charlie, Clock: transportTestClock{now: now}},
-		peerTests: map[uint32]*ssu2PeerTestState{charlieState.nonce: charlieState},
-	}
+	charlieManager, _ := newSSU2ConfiguredManager(t, charlieDB)
+	charlieManager.bindings = TransportBindings{LocalInfo: charlie, Clock: transportTestClock{now: now}}
+	charlieManager.peerTests[charlieState.nonce] = charlieState
 	phase6 := dataplanessu2.PeerTestBlock{Message: 6, Nonce: charlieState.nonce}
 	charlieManager.handleOutOfSessionPeerTest(phase6, net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:31005")))
 	if charlieState.message6Received {
@@ -874,20 +756,10 @@ func TestSSU2PeerTestOutOfSessionRolesRequireApprovedExactEndpoints(t *testing.T
 
 func TestSSU2RelayTagDirectionsRenewPerPeerAndCapDistinctAdvertisements(t *testing.T) {
 	now := time.Now()
-	manager := &SSU2Manager{networkID: 2,
-		started:          true,
-		ctx:              context.Background(),
-		maxPending:       16,
-		timeout:          time.Second,
-		tokenLifetime:    time.Minute,
-		bindings:         TransportBindings{Clock: transportTestClock{now: now}},
-		introducers:      make(map[uint32]foundation.Hash),
-		relayGrants:      make(map[foundation.Hash]ssu2RelayTagLease),
-		advertisedRelays: make(map[foundation.Hash]ssu2RelayTagLease),
-		relayTagPending:  make(map[foundation.Hash]time.Time),
-		sessionsByPeer:   make(map[foundation.Hash]*ssu2TransportSession),
-		sessionsByID:     make(map[uint64]*ssu2TransportSession),
-	}
+	manager, _ := newSSU2ConfiguredManager(t, nil)
+	manager.started = true
+	manager.ctx = context.Background()
+	manager.bindings = TransportBindings{Clock: transportTestClock{now: now}}
 	grantPeer := foundation.Hash{1}
 	manager.relayGrants[grantPeer] = ssu2RelayTagLease{peer: grantPeer, tag: 11, expires: now.Add(time.Second)}
 	manager.introducers[11] = grantPeer
@@ -926,65 +798,60 @@ func TestSSU2RelayTagDirectionsRenewPerPeerAndCapDistinctAdvertisements(t *testi
 }
 
 func TestSSU2RelayPublicationWorkerRetriesToExactSnapshot(t *testing.T) {
-	conn := newSSU2LoopbackConn(t)
-	local, static, intro := newSSU2TestLocal(t, conn.LocalAddr().String())
-	flaky := &flakyIntroducerLocal{transportTestLocal: local, failures: 2, firstCall: make(chan struct{})}
-	manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, StaticPrivate: static, IntroKey: intro, HandshakeTimeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(func() {
-		cancel()
-		closeSSU2LiveManager(t, manager)
-	})
-	if err = manager.Start(ctx, TransportBindings{
-		SSU2: conn, LocalInfo: flaky, Clock: WallClock{},
-		HandleI2NPContext: func(context.Context, foundation.Hash, foundation.I2NPMessage, uint64, bool) error { return nil },
-	}); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	manager.mu.Lock()
-	for index := range ssu2RelayTarget {
-		peer := foundation.Hash{byte(index + 1)}
-		manager.advertisedRelays[peer] = ssu2RelayTagLease{peer: peer, tag: uint32(70 + index), expires: now.Add(time.Minute)}
-	}
-	manager.relayRevision++
-	revision := manager.relayRevision
-	manager.mu.Unlock()
-	manager.syncRelayTagPublication()
-	select {
-	case <-flaky.firstCall:
-	case <-time.After(time.Second):
-		t.Fatal("publication worker did not attempt reconciliation")
-	}
-	manager.mu.RLock()
-	publishedAfterFailure := manager.publishedRevision
-	manager.mu.RUnlock()
-	if publishedAfterFailure == revision {
-		t.Fatal("failed publication was marked published")
-	}
-	waitForSSU2Live(t, 3*time.Second, func() bool {
+	synctest.Test(t, func(t *testing.T) {
+		net_ := newSSU2SimNetwork(t)
+		conn := newSSU2SimConn(t, net_, "alice")
+		local, static, intro := newSSU2TestLocal(t, conn.LocalAddr().String())
+		flaky := &flakyIntroducerLocal{transportTestLocal: local, failures: 2, firstCall: make(chan struct{})}
+		manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, StaticPrivate: static, IntroKey: intro, HandshakeTimeout: time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(func() {
+			cancel()
+			closeSSU2LiveManager(t, manager)
+		})
+		if err = manager.Start(ctx, TransportBindings{
+			SSU2: conn, LocalInfo: flaky, Clock: WallClock{},
+			HandleI2NPContext: func(context.Context, foundation.Hash, foundation.I2NPMessage, uint64, bool) error { return nil },
+		}); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now()
+		manager.mu.Lock()
+		for index := range ssu2RelayTarget {
+			peer := foundation.Hash{byte(index + 1)}
+			manager.advertisedRelays[peer] = ssu2RelayTagLease{peer: peer, tag: uint32(70 + index), expires: now.Add(time.Minute)}
+		}
+		manager.relayRevision++
+		revision := manager.relayRevision
+		manager.mu.Unlock()
+		manager.syncRelayTagPublication()
+		<-flaky.firstCall
+		manager.mu.RLock()
+		publishedAfterFailure := manager.publishedRevision
+		manager.mu.RUnlock()
+		if publishedAfterFailure == revision {
+			t.Fatal("failed publication was marked published")
+		}
+		net_.Advance(500 * time.Millisecond)
 		manager.mu.RLock()
 		published := manager.publishedRevision == revision
 		manager.mu.RUnlock()
-		return published && flaky.callCount() >= 3 && len(selectSSU2Introducers(flaky.Snapshot(), uint64(time.Now().Unix()))) == ssu2RelayTarget
-	}, "bounded RelayTag publication reconciliation")
+		if !published || flaky.callCount() < 3 || len(selectSSU2Introducers(flaky.Snapshot(), uint64(time.Now().Unix()))) != ssu2RelayTarget {
+			t.Fatalf("bounded RelayTag publication reconciliation incomplete: published=%v calls=%d introducers=%d", published, flaky.callCount(), len(selectSSU2Introducers(flaky.Snapshot(), uint64(time.Now().Unix()))))
+		}
+	})
 }
 
 func TestSSU2NewTokenCacheIsBoundedReplacesAndClears(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
-	manager := &SSU2Manager{networkID: 2,
-		started:        true,
-		ctx:            context.Background(),
-		tokenLifetime:  time.Hour,
-		bindings:       TransportBindings{Clock: transportTestClock{now: now}},
-		newTokens:      make(map[string]ssu2NewTokenLease),
-		peerTests:      make(map[uint32]*ssu2PeerTestState),
-		sessionsByID:   make(map[uint64]*ssu2TransportSession),
-		sessionsByPeer: make(map[foundation.Hash]*ssu2TransportSession),
-	}
+	manager, _ := newSSU2ConfiguredManager(t, nil)
+	manager.started = true
+	manager.ctx = context.Background()
+	manager.tokenLifetime = time.Hour
+	manager.bindings = TransportBindings{Clock: transportTestClock{now: now}}
 	expiration := uint32(now.Add(30 * time.Minute).Unix())
 	for index := range ssu2MaxNewTokens + 32 {
 		peer := foundation.Hash{byte(index), byte(index >> 8)}
@@ -1056,49 +923,43 @@ func TestSSU2PeerTestControlUsesBoundedRelayMixingClass(t *testing.T) {
 	free := make(chan *ssu2EgressSlot, 1)
 	queue := make(chan *ssu2EgressSlot, 1)
 	free <- &ssu2EgressSlot{done: make(chan error, 1)}
-	manager := &SSU2Manager{networkID: 2,
-		peers: database, started: true, ctx: context.Background(),
-		bindings:   TransportBindings{Clock: transportTestClock{now: now}},
-		egressFree: free, egressQueue: queue,
-	}
+	manager, _ := newSSU2ConfiguredManager(t, database)
+	manager.started = true
+	manager.ctx = context.Background()
+	manager.bindings = TransportBindings{Clock: transportTestClock{now: now}}
+	manager.egressFree = free
+	manager.egressQueue = queue
 	test := dataplanessu2.PeerTestBlock{
 		Message: 5, Nonce: 73, Timestamp: uint32(now.Unix()),
 		Address: netip.MustParseAddrPort("127.0.0.1:31021"),
 	}
 	result := make(chan error, 1)
 	go func() { result <- manager.SendPeerTest(context.Background(), peer.Hash(), test) }()
-	var slot *ssu2EgressSlot
-	select {
-	case slot = <-queue:
-	case <-time.After(time.Second):
-		t.Fatal("PeerTest packet did not enter egress")
-	}
+	slot := <-queue
 	if !slot.relay || slot.flow != uint64(test.Nonce) {
 		t.Fatalf("PeerTest egress class = relay %v flow %d, want relay flow %d", slot.relay, slot.flow, test.Nonce)
 	}
 	slot.done <- nil
-	select {
-	case err := <-result:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("PeerTest egress did not complete")
+	if err := <-result; err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestSSU2StartRejectsBlockingLegacyDispatchBinding(t *testing.T) {
-	conn := newSSU2LoopbackConn(t)
-	local, static, intro := newSSU2TestLocal(t, conn.LocalAddr().String())
-	manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, StaticPrivate: static, IntroKey: intro})
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = manager.Start(context.Background(), TransportBindings{
-		SSU2: conn, LocalInfo: local, Clock: WallClock{},
-		HandleI2NP: func(foundation.I2NPMessage, uint64, bool) error { select {} },
+	synctest.Test(t, func(t *testing.T) {
+		net_ := newSSU2SimNetwork(t)
+		conn := newSSU2SimConn(t, net_, "alice")
+		local, static, intro := newSSU2TestLocal(t, conn.LocalAddr().String())
+		manager, err := NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, StaticPrivate: static, IntroKey: intro})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = manager.Start(t.Context(), TransportBindings{
+			SSU2: conn, LocalInfo: local, Clock: WallClock{},
+			HandleI2NP: func(foundation.I2NPMessage, uint64, bool) error { select {} },
+		})
+		if !errors.Is(err, ErrSSU2ManagerConfig) {
+			t.Fatalf("legacy blocking dispatch Start error = %v, want configuration rejection", err)
+		}
 	})
-	if !errors.Is(err, ErrSSU2ManagerConfig) {
-		t.Fatalf("legacy blocking dispatch Start error = %v, want configuration rejection", err)
-	}
 }

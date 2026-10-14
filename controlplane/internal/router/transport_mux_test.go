@@ -875,3 +875,110 @@ func TestMissingSessionIsRecoverableWithoutRetryingUnknownWrites(t *testing.T) {
 		t.Fatal("unknown write failure was treated as safe to retry")
 	}
 }
+
+type muxInspectableNTCP2Transport struct {
+	*muxSessionTransport
+	reachable bool
+}
+
+var _ dataplane.RouterNTCP2PeerInspector = (*muxInspectableNTCP2Transport)(nil)
+
+func (m *muxInspectableNTCP2Transport) PeerReachable(foundation.NetworkDatabaseRouterInfo) bool {
+	return m.reachable
+}
+
+type muxInspectableSSU2Transport struct {
+	*muxViableCountedTransport
+	capabilities       dataplane.RouterSSU2PeerCapabilities
+	introducerRequired bool
+	introducerCount    int
+	lastInspectNow     uint64
+}
+
+var (
+	_ dataplane.RouterSSU2PeerInspector       = (*muxInspectableSSU2Transport)(nil)
+	_ dataplane.RouterSessionLivenessRegistry = (*muxInspectableSSU2Transport)(nil)
+)
+
+func (m *muxInspectableSSU2Transport) InspectPeer(_ foundation.NetworkDatabaseRouterInfo, now uint64) dataplane.RouterSSU2PeerCapabilities {
+	m.lastInspectNow = now
+	return m.capabilities
+}
+
+func (m *muxInspectableSSU2Transport) IntroducerStatus(bool) (bool, int) {
+	return m.introducerRequired, m.introducerCount
+}
+
+func TestTransportMuxClockAndPolymorphicPeerInspectors(t *testing.T) {
+	database, peer := muxTestPeer(t, true, true)
+	ref, ok := database.Routers().Get(peer)
+	if !ok {
+		t.Fatal("test peer was not admitted")
+	}
+	current := time.UnixMilli(int64(ref.Info.Published))
+	ntcp2 := &muxInspectableNTCP2Transport{muxSessionTransport: newMuxSessionTransport()}
+	ssu2 := &muxInspectableSSU2Transport{
+		muxViableCountedTransport: &muxViableCountedTransport{
+			muxCountedSessionTransport: &muxCountedSessionTransport{
+				muxSessionTransport: newMuxSessionTransport(),
+				count:               minimumSSU2IPv4Peers,
+			},
+		},
+	}
+	mux, err := NewTransportMux(TransportMuxConfig{
+		Database: database,
+		NTCP2:    ntcp2,
+		SSU2:     ssu2,
+		Clock:    func() time.Time { return current },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if mux.CanBuildTunnel(peer) {
+		t.Fatal("peer was eligible for tunnel build while both inspectors reported unreachable/indirect")
+	}
+	if want := uint64(current.Unix()); ssu2.lastInspectNow != want {
+		t.Fatalf("SSU2 inspector timestamp = %d, want injected clock %d", ssu2.lastInspectNow, want)
+	}
+	ntcp2.reachable = true
+	if !mux.CanBuildTunnel(peer) {
+		t.Fatal("NTCP2 inspector reachable peer was rejected for tunnel build")
+	}
+	ntcp2.reachable = false
+	ssu2.capabilities = dataplane.RouterSSU2PeerCapabilities{Direct: true, Introducer: true}
+	if !mux.CanBuildTunnel(peer) {
+		t.Fatal("SSU2 inspector direct peer was rejected for tunnel build")
+	}
+
+	ssu2.introducerRequired = true
+	ssu2.introducerCount = minimumIntroducers - 1
+	mux.random = bytes.NewReader([]byte{1}).Read
+	ssu2.ensureRelease <- nil
+	if err := mux.EnsureSession(t.Context(), peer); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ssu2.ensureStarted:
+	default:
+		t.Fatal("SSU2 introducer deficit did not prefer SSU2 session setup")
+	}
+	if !mux.HasSession(peer) || mux.SessionViable(peer) {
+		t.Fatal("unviable SSU2 session did not distinguish existence from liveness")
+	}
+	ssu2.viable = true
+	if !mux.SessionViable(peer) {
+		t.Fatal("viable SSU2 session was not reported")
+	}
+	if !ssu2.DropSession(peer) || mux.HasSession(peer) {
+		t.Fatal("DropSession did not clear SSU2 session")
+	}
+
+	current = current.Add(time.Duration(controlplanenetdb.ReseedRouterInfoMaxAgeMillis+1) * time.Millisecond)
+	if mux.CanSend(peer) {
+		t.Fatal("peer remained send-capable after injected clock passed RouterInfo freshness window")
+	}
+	if err := mux.EnsureSession(t.Context(), peer); !errors.Is(err, ErrTransportUnavailable) {
+		t.Fatalf("EnsureSession with stale RouterInfo = %v, want ErrTransportUnavailable", err)
+	}
+}

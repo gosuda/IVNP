@@ -56,6 +56,7 @@ type TransportMuxConfig struct {
 	NTCP2    dataplane.RouterTransportManager
 	SSU2     dataplane.RouterTransportManager
 	Metrics  *observability.Registry
+	Clock    func() time.Time
 }
 
 // TransportMux reuses an authenticated session before opening another
@@ -67,6 +68,7 @@ type TransportMux struct {
 	ntcp2    dataplane.RouterTransportManager
 	ssu2     dataplane.RouterTransportManager
 	metrics  *observability.Registry
+	now      func() time.Time
 
 	lifecycleMu  sync.Mutex
 	started      bool
@@ -89,6 +91,10 @@ func NewTransportMux(config TransportMuxConfig) (*TransportMux, error) {
 	if config.Database == nil || (config.NTCP2 == nil && config.SSU2 == nil) {
 		return nil, ErrTransportMuxConfig
 	}
+	clock := config.Clock
+	if clock == nil {
+		clock = time.Now
+	}
 	providers := make([]dataplane.RouterEstablishedSessionRegistry, 0, 2)
 	for _, manager := range []dataplane.RouterTransportManager{config.NTCP2, config.SSU2} {
 		if provider, ok := manager.(dataplane.RouterEstablishedSessionRegistry); ok {
@@ -100,6 +106,7 @@ func NewTransportMux(config TransportMuxConfig) (*TransportMux, error) {
 		ntcp2:      config.NTCP2,
 		ssu2:       config.SSU2,
 		metrics:    config.Metrics,
+		now:        clock,
 		random:     newMuxRandom(config.Database.Routers().Local()),
 		setupSlots: make(chan struct{}, 64),
 		dataSender: dataplane.RouterNewEstablishedSender(providers...),
@@ -332,7 +339,7 @@ func (m *TransportMux) sessionDegraded(manager dataplane.RouterTransportManager,
 // send. Managers that distinguish liveness from existence (SSU2 congestion
 // degradation) override SessionViable; others fall back to HasSession.
 func (m *TransportMux) sessionViable(manager dataplane.RouterTransportManager, peer foundation.Hash) bool {
-	if viable, ok := manager.(interface{ SessionViable(foundation.Hash) bool }); ok {
+	if viable, ok := manager.(dataplane.RouterSessionLivenessRegistry); ok {
 		return viable.SessionViable(peer)
 	}
 	if sessions, ok := manager.(preferredSessionManager); ok {
@@ -387,8 +394,8 @@ func (m *TransportMux) preferSSU2(capabilities transportCapabilities) bool {
 	}
 	prefer := counter.ActiveSessionCount() < minimum
 	if !prefer && capabilities.ssu2Introducer {
-		if manager, concrete := capabilities.ssu2.(*dataplane.RouterSSU2Manager); concrete {
-			required, count := manager.IntroducerStatus(capabilities.ssu2IPv6)
+		if inspector, ok := capabilities.ssu2.(dataplane.RouterSSU2PeerInspector); ok {
+			required, count := inspector.IntroducerStatus(capabilities.ssu2IPv6)
 			prefer = required && count < minimumIntroducers
 		}
 	}
@@ -404,6 +411,13 @@ func (m *TransportMux) preferSSU2(capabilities transportCapabilities) bool {
 
 func (m *TransportMux) configuredManagers() [2]dataplane.RouterTransportManager {
 	return [2]dataplane.RouterTransportManager{m.ssu2, m.ntcp2}
+}
+
+func (m *TransportMux) currentTime() time.Time {
+	if m != nil && m.now != nil {
+		return m.now()
+	}
+	return time.Now()
 }
 
 // UsableRemoteRouterInfos counts peers whose verified transport address can be
@@ -439,7 +453,7 @@ func (m *TransportMux) HasSession(peer foundation.Hash) bool {
 		return false
 	}
 	for _, manager := range m.configuredManagers() {
-		if sessions, ok := manager.(interface{ HasSession(foundation.Hash) bool }); ok && sessions.HasSession(peer) {
+		if sessions, ok := manager.(preferredSessionManager); ok && sessions.HasSession(peer) {
 			return true
 		}
 	}
@@ -466,12 +480,12 @@ func (m *TransportMux) CanBuildTunnel(peer foundation.Hash) bool {
 	if !ok {
 		return false
 	}
-	now := time.Now()
+	now := m.currentTime()
 	nowMillis := uint64(now.UnixMilli())
 	ntcp2OK := m.ntcp2 != nil && dataplane.RouterNTCP2PeerCapable(ref.Info, nowMillis)
 	if ntcp2OK {
-		if manager, concrete := m.ntcp2.(*dataplane.RouterNTCP2Manager); concrete {
-			ntcp2OK = manager.PeerReachable(ref.Info)
+		if inspector, ok := m.ntcp2.(dataplane.RouterNTCP2PeerInspector); ok {
+			ntcp2OK = inspector.PeerReachable(ref.Info)
 		}
 	}
 	ssu2OK := m.ssu2 != nil && m.directSSU2RouterInfoCapable(ref.Info, uint64(now.Unix()))
@@ -503,7 +517,7 @@ func (m *TransportMux) capabilities(peer foundation.Hash) (transportCapabilities
 	if !ok {
 		return transportCapabilities{}, false
 	}
-	now := time.Now()
+	now := m.currentTime()
 	nowMillis := uint64(now.UnixMilli())
 	if err := controlplanenetdb.ReseedRouterInfoFresh(ref.Info, nowMillis); err != nil {
 		return transportCapabilities{}, false
@@ -515,8 +529,8 @@ func (m *TransportMux) capabilities(peer foundation.Hash) (transportCapabilities
 	if m.ssu2 != nil && dataplane.RouterSSU2PeerCapable(ref.Info, uint64(now.Unix())) {
 		capabilities.ssu2 = m.ssu2
 		inspection := dataplane.RouterInspectSSU2Peer(ref.Info, uint64(now.Unix()))
-		if manager, concrete := m.ssu2.(*dataplane.RouterSSU2Manager); concrete {
-			inspection = manager.InspectPeer(ref.Info, uint64(now.Unix()))
+		if inspector, ok := m.ssu2.(dataplane.RouterSSU2PeerInspector); ok {
+			inspection = inspector.InspectPeer(ref.Info, uint64(now.Unix()))
 		}
 		capabilities.directSSU2 = inspection.Direct
 		capabilities.ssu2IPv6 = inspection.IPv6
@@ -526,11 +540,11 @@ func (m *TransportMux) capabilities(peer foundation.Hash) (transportCapabilities
 }
 
 func (m *TransportMux) directSSU2RouterInfoCapable(info foundation.NetworkDatabaseRouterInfo, now uint64) bool {
-	manager, concrete := m.ssu2.(*dataplane.RouterSSU2Manager)
-	if !concrete {
+	inspector, ok := m.ssu2.(dataplane.RouterSSU2PeerInspector)
+	if !ok {
 		return dataplane.RouterSSU2DirectPeerCapable(info, now)
 	}
-	return manager.InspectPeer(info, now).Direct
+	return inspector.InspectPeer(info, now).Direct
 }
 
 // IsRetryableTransportError reports failures that occurred before an I2NP

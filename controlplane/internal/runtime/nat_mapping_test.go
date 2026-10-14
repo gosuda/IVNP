@@ -6,11 +6,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net"
 	"net/netip"
 	"net/url"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"gosuda.org/ivnp/controlplane/internal/nat/natpmp"
@@ -113,93 +113,84 @@ func (f *fakeUPnPClient) DeletePortMapping(context.Context, upnp.Gateway, string
 	return nil
 }
 
-type wildcardSockets struct{}
-
-func (wildcardSockets) ListenStream(context.Context, dataplane.RouterEndpoint) (net.Listener, error) {
-	return net.Listen("tcp4", "0.0.0.0:0")
-}
-func (wildcardSockets) DialStream(ctx context.Context, endpoint dataplane.RouterEndpoint) (net.Conn, error) {
-	return (&net.Dialer{}).DialContext(ctx, endpoint.Network, endpoint.Address)
-}
-func (wildcardSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
-	return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
-}
-
 func TestDaemonRemainsRunningWhenInitialMappingFailsAndRetries(t *testing.T) {
-	cfg := daemonTestConfig(t)
-	cfg.NTCP2 = state.ConfigurationTransport{Enabled: true, Bind: state.ConfigurationEndpoint{Host: "0.0.0.0"}, MaxSessions: 4}
-	cfg.NAT.NATPMPEndpoint = netip.MustParseAddrPort("10.2.0.1:5351")
-	calls := make(chan int, 4)
-	natClient := &fakeNATPMPClient{publicErr: errors.New("NAT-PMP unavailable"), publicCalls: calls}
-	upnpClient := &fakeUPnPClient{discoverErr: errors.New("UPnP unavailable")}
-	waited := make(chan time.Duration, 2)
-	var waitMu sync.Mutex
-	waitCalls := 0
-	virtualWait := func(ctx context.Context, delay time.Duration) bool {
-		waited <- delay
-		waitMu.Lock()
-		waitCalls++
-		first := waitCalls == 1
-		waitMu.Unlock()
-		if first {
-			return true
+	synctest.Test(t, func(t *testing.T) {
+		cfg := daemonTestConfig(t)
+		cfg.NTCP2 = state.ConfigurationTransport{Enabled: true, Bind: state.ConfigurationEndpoint{Host: "0.0.0.0"}, MaxSessions: 4}
+		cfg.NAT.NATPMPEndpoint = netip.MustParseAddrPort("10.2.0.1:5351")
+		calls := make(chan int, 4)
+		natClient := &fakeNATPMPClient{publicErr: errors.New("NAT-PMP unavailable"), publicCalls: calls}
+		upnpClient := &fakeUPnPClient{discoverErr: errors.New("UPnP unavailable")}
+		waited := make(chan time.Duration, 2)
+		var waitMu sync.Mutex
+		waitCalls := 0
+		virtualWait := func(ctx context.Context, delay time.Duration) bool {
+			waited <- delay
+			waitMu.Lock()
+			waitCalls++
+			first := waitCalls == 1
+			waitMu.Unlock()
+			if first {
+				return true
+			}
+			<-ctx.Done()
+			return false
 		}
-		<-ctx.Done()
-		return false
-	}
-	d, err := NewController(cfg, ControllerOptions{
-		SocketRuntime: wildcardSockets{},
-		Logger:        discardNATLogger(),
-		NAT: testNATRuntime{
-			newNATPMP: func(netip.AddrPort) natPMPClient { return natClient },
-			upnp:      upnpClient,
-			prefixes: func() ([]netip.Prefix, error) {
-				return []netip.Prefix{netip.MustParsePrefix("10.2.0.2/32")}, nil
+		d, err := NewController(cfg, ControllerOptions{
+			SocketRuntime: newSimSocketRuntime(t),
+			Logger:        discardNATLogger(),
+			NAT: testNATRuntime{
+				newNATPMP: func(netip.AddrPort) natPMPClient { return natClient },
+				upnp:      upnpClient,
+				prefixes: func() ([]netip.Prefix, error) {
+					return []netip.Prefix{netip.MustParsePrefix("10.2.0.2/32")}, nil
+				},
+				route: func(context.Context, string, uint16) (netip.Addr, error) {
+					return netip.MustParseAddr("10.2.0.2"), nil
+				},
+				wait: virtualWait,
 			},
-			route: func(context.Context, string, uint16) (netip.Addr, error) {
-				return netip.MustParseAddr("10.2.0.2"), nil
-			},
-			wait: virtualWait,
-		},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = d.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if !d.Status().Running {
+			t.Fatal("daemon stopped after both automatic mappers failed")
+		}
+		synctest.Wait()
+		for want := 1; want <= 2; want++ {
+			select {
+			case got := <-calls:
+				if got != want {
+					t.Fatalf("NAT-PMP attempt = %d, want %d", got, want)
+				}
+			default:
+				t.Fatalf("NAT-PMP attempt %d was not observed", want)
+			}
+		}
+		for range 2 {
+			select {
+			case delay := <-waited:
+				if delay != 30*time.Second {
+					t.Fatalf("mapping retry delay = %s, want 30s", delay)
+				}
+			default:
+				t.Fatal("default 30-second retry was not scheduled")
+			}
+		}
+		if upnpClient.addCalls != 0 {
+			t.Fatal("UPnP mapping was added despite discovery failure")
+		}
+		if err = d.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err = d.Wait(); err != nil {
+			t.Fatal(err)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = d.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !d.Status().Running {
-		t.Fatal("daemon stopped after both automatic mappers failed")
-	}
-	for want := 1; want <= 2; want++ {
-		select {
-		case got := <-calls:
-			if got != want {
-				t.Fatalf("NAT-PMP attempt = %d, want %d", got, want)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("NAT-PMP attempt %d was not observed", want)
-		}
-	}
-	for range 2 {
-		select {
-		case delay := <-waited:
-			if delay != 30*time.Second {
-				t.Fatalf("mapping retry delay = %s, want 30s", delay)
-			}
-		case <-time.After(time.Second):
-			t.Fatal("default 30-second retry was not scheduled")
-		}
-	}
-	if upnpClient.addCalls != 0 {
-		t.Fatal("UPnP mapping was added despite discovery failure")
-	}
-	if err = d.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err = d.Wait(); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestAutomaticMappingUsesNATPMPFirstAndObservedLease(t *testing.T) {
@@ -218,7 +209,7 @@ func TestAutomaticMappingUsesNATPMPFirstAndObservedLease(t *testing.T) {
 	}
 	publisher.upnp = fallback
 
-	listener, err := net.Listen("tcp4", "0.0.0.0:0")
+	listener, err := newSimSocketRuntime(t).ListenStream(t.Context(), dataplane.RouterEndpoint{Network: "tcp4", Address: "0.0.0.0:0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +276,7 @@ func TestAutomaticMappingFallsBackToUPnP(t *testing.T) {
 	publisher.newNATPMP = func(netip.AddrPort) natPMPClient { return natClient }
 	publisher.upnp = upnpClient
 
-	listener, err := net.Listen("tcp4", "0.0.0.0:0")
+	listener, err := newSimSocketRuntime(t).ListenStream(t.Context(), dataplane.RouterEndpoint{Network: "tcp4", Address: "0.0.0.0:0"})
 	if err != nil {
 		t.Fatal(err)
 	}

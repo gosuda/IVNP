@@ -1,5 +1,3 @@
-//go:build dst || synctest
-
 // Package simnet is a deterministic in-process network simulator. It provides
 // virtual UDP sockets and TCP streams whose addressing, latency, jitter,
 // packet loss, duplication, and bandwidth are controlled by a shared Network.

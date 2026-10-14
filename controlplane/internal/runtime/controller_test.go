@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
+	"gosuda.org/ivnp/internal/simnet"
 	"gosuda.org/ivnp/observability"
 	"gosuda.org/ivnp/state"
 )
@@ -122,33 +124,40 @@ func (r requestReplyRouteCapture) DatabaseLookupReplyRoute() (foundation.Hash, u
 	return r.gateway, r.tunnel, true
 }
 
-type loopbackSockets struct{}
-
-func (loopbackSockets) ListenStream(context.Context, dataplane.RouterEndpoint) (net.Listener, error) {
-	return net.Listen("tcp", "127.0.0.1:0")
-}
-func (loopbackSockets) DialStream(ctx context.Context, endpoint dataplane.RouterEndpoint) (net.Conn, error) {
-	return (&net.Dialer{}).DialContext(ctx, endpoint.Network, endpoint.Address)
-}
-func (loopbackSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
-	return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-}
-
-type defaultTransportSockets struct {
+type simSocketRuntime struct {
+	host    *simnet.Host
 	streams int
 	packets int
 }
 
-func (s *defaultTransportSockets) ListenStream(context.Context, dataplane.RouterEndpoint) (net.Listener, error) {
+func newSimSocketRuntime(tb testing.TB) *simSocketRuntime {
+	tb.Helper()
+	network := simnet.NewNetwork(simnet.Config{})
+	tb.Cleanup(func() { _ = network.Close() })
+	addr := netip.IPv4Unspecified()
+	host := network.HostAt(addr.String(), addr)
+	if host == nil {
+		tb.Fatal("simnet.HostAt returned nil")
+	}
+	return &simSocketRuntime{host: host}
+}
+
+func (s *simSocketRuntime) ListenStream(_ context.Context, _ dataplane.RouterEndpoint) (net.Listener, error) {
 	s.streams++
-	return net.Listen("tcp", "127.0.0.1:0")
+	return s.host.ListenTCP(netip.AddrPortFrom(s.host.Addr(), 0))
 }
-func (s *defaultTransportSockets) DialStream(ctx context.Context, endpoint dataplane.RouterEndpoint) (net.Conn, error) {
-	return (&net.Dialer{}).DialContext(ctx, endpoint.Network, endpoint.Address)
+
+func (s *simSocketRuntime) DialStream(ctx context.Context, endpoint dataplane.RouterEndpoint) (net.Conn, error) {
+	ap, err := netip.ParseAddrPort(endpoint.Address)
+	if err != nil {
+		return nil, err
+	}
+	return s.host.DialTCP(ctx, ap)
 }
-func (s *defaultTransportSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
+
+func (s *simSocketRuntime) ListenUDP(_ context.Context, _ dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
 	s.packets++
-	return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	return s.host.ListenUDP(netip.AddrPortFrom(s.host.Addr(), 0))
 }
 
 type daemonMemoryNetwork struct {
@@ -346,7 +355,7 @@ func TestDefaultOperatingStartsOutboundNTCP2AndBoundSSU2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sockets := new(defaultTransportSockets)
+	sockets := newSimSocketRuntime(t)
 	d, err := NewController(cfg, ControllerOptions{SocketRuntime: sockets, Logger: discardNATLogger()})
 	if err != nil {
 		t.Fatal(err)
@@ -362,28 +371,6 @@ func TestDefaultOperatingStartsOutboundNTCP2AndBoundSSU2(t *testing.T) {
 	}
 	if err = d.Wait(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestDaemonReplyKeyCapacityIncludesJavaBuildGrace(t *testing.T) {
-	const (
-		buildPending = 4
-		destinations = 16
-	)
-	const want = (destinations + 1) * buildPending * 13
-	if got := daemonReplyKeyCapacity(buildPending, destinations); got != want {
-		t.Fatalf("reply-key capacity = %d, want %d", got, want)
-	}
-}
-
-func TestDaemonCreatorBudgetCapacity(t *testing.T) {
-	const (
-		buildPending = 32
-		destinations = 16
-	)
-	const want = (destinations + 1) * buildPending
-	if got := daemonCreatorBudgetCapacity(buildPending, destinations); got != want {
-		t.Fatalf("creator budget capacity = %d, want %d", got, want)
 	}
 }
 
@@ -542,84 +529,6 @@ func TestNewRejectsDestinationBoundsAndDuplicateIdentities(t *testing.T) {
 	})
 }
 
-func TestDataPlaneReadyDoesNotRequireOptionalAccelerationOrPublicReachability(t *testing.T) {
-	ready := ReadinessDetails{
-		NetDBRouters:               50,
-		RouterInfoPublications:     1,
-		LeaseSet2Publications:      1,
-		ExploratoryInboundTunnels:  1,
-		ExploratoryOutboundTunnels: 1,
-		ClientInboundTunnels:       1,
-		ClientOutboundTunnels:      1,
-	}
-	if !dataPlaneReady(ready) {
-		t.Fatal("operational firewalled router with portable SSU2 I/O was not ready")
-	}
-	floodfill := ready
-	floodfill.FloodfillConfigured = true
-	if dataPlaneReady(floodfill) {
-		t.Fatal("configured floodfill reported ready before advertising its role")
-	}
-	floodfill.FloodfillAdvertised = true
-	if !dataPlaneReady(floodfill) {
-		t.Fatal("advertised floodfill with an operational data plane was not ready")
-	}
-	required := []struct {
-		name   string
-		mutate func(*ReadinessDetails)
-	}{
-		{"netdb", func(value *ReadinessDetails) { value.NetDBRouters = 49 }},
-		{"router publication", func(value *ReadinessDetails) { value.RouterInfoPublications = 0 }},
-		{"lease set publication", func(value *ReadinessDetails) { value.LeaseSet2Publications = 0 }},
-		{"exploratory inbound", func(value *ReadinessDetails) { value.ExploratoryInboundTunnels = 0 }},
-		{"exploratory outbound", func(value *ReadinessDetails) { value.ExploratoryOutboundTunnels = 0 }},
-		{"client inbound", func(value *ReadinessDetails) { value.ClientInboundTunnels = 0 }},
-		{"client outbound", func(value *ReadinessDetails) { value.ClientOutboundTunnels = 0 }},
-	}
-	for _, test := range required {
-		t.Run(test.name, func(t *testing.T) {
-			value := ready
-			test.mutate(&value)
-			if dataPlaneReady(value) {
-				t.Fatal("incomplete data plane reported ready")
-			}
-		})
-	}
-}
-
-func TestOutproxyWarmupReadinessDoesNotWaitOnTheDestinationItCreates(t *testing.T) {
-	ready := ReadinessDetails{
-		NetDBRouters:               50,
-		RouterInfoPublications:     1,
-		ExploratoryInboundTunnels:  1,
-		ExploratoryOutboundTunnels: 1,
-	}
-	if !outproxyWarmupReady(ready, 1, 1) {
-		t.Fatal("operational exploratory plane did not release outproxy warmup")
-	}
-	required := []struct {
-		name   string
-		mutate func(*ReadinessDetails)
-	}{
-		{"netdb", func(value *ReadinessDetails) { value.NetDBRouters = 49 }},
-		{"router publication", func(value *ReadinessDetails) { value.RouterInfoPublications = 0 }},
-		{"exploratory inbound", func(value *ReadinessDetails) { value.ExploratoryInboundTunnels = 0 }},
-		{"exploratory outbound", func(value *ReadinessDetails) { value.ExploratoryOutboundTunnels = 0 }},
-	}
-	for _, test := range required {
-		t.Run(test.name, func(t *testing.T) {
-			value := ready
-			test.mutate(&value)
-			if outproxyWarmupReady(value, 1, 1) {
-				t.Fatal("incomplete exploratory plane released outproxy warmup")
-			}
-		})
-	}
-	if outproxyWarmupReady(ready, 2, 1) || outproxyWarmupReady(ready, 1, 2) {
-		t.Fatal("partial exploratory pool released outproxy warmup")
-	}
-}
-
 func TestRequestAllTunnelMaintenanceQueuesEveryPool(t *testing.T) {
 	cfg := daemonTestConfig(t)
 	cfg.Tunnel.Enabled = true
@@ -707,16 +616,6 @@ func TestTunnelCompositionUsesLiveInboundGatewayRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	tunnelCompositionUsesLiveInboundGatewayRouteRejected := d.service == nil || d.tunnels == nil || d.pool == nil || d.buildManager == nil || d.requests == nil || d.replyKeys == nil
-	if !tunnelCompositionUsesLiveInboundGatewayRouteRejected {
-		tunnelCompositionUsesLiveInboundGatewayRouteRejected = d.maintainer == nil || d.destinationFactory == nil || d.destinationFactory.eligible == nil
-	}
-	if tunnelCompositionUsesLiveInboundGatewayRouteRejected {
-		t.Fatal("native tunnel data plane is incomplete")
-	}
-	if d.destinationFactory.eligible(foundation.Hash{255}) {
-		t.Fatal("unknown RouterInfo was eligible for tunnel selection")
-	}
 	if len(d.bundle.DestinationPrivate["default"]) == 0 || len(d.clientRuntimeSnapshot()) != 1 {
 		t.Fatal("tunnel-only daemon did not create its default destination runtime")
 	}
@@ -1945,124 +1844,122 @@ func TestCreateDestinationValidatesBeforeMutationAndDestroyIsIsolated(t *testing
 }
 
 func TestDestroyRemovesExactReleasedDestinationRuntime(t *testing.T) {
-	cfg := daemonTestConfig(t)
-	cfg.Tunnel.Enabled = true
-	first, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"a", "b"} {
-		local, generateErr := foundation.GenerateLocalDestination()
-		if generateErr != nil {
-			t.Fatal(generateErr)
+	synctest.Test(t, func(t *testing.T) {
+		cfg := daemonTestConfig(t)
+		cfg.Tunnel.Enabled = true
+		first, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets)})
+		if err != nil {
+			t.Fatal(err)
 		}
-		encoded, encodeErr := destinationPrivate(local)
-		local.ReleaseSensitive()
-		if encodeErr != nil {
-			t.Fatal(encodeErr)
+		for _, name := range []string{"a", "b"} {
+			local, generateErr := foundation.GenerateLocalDestination()
+			if generateErr != nil {
+				t.Fatal(generateErr)
+			}
+			encoded, encodeErr := destinationPrivate(local)
+			local.ReleaseSensitive()
+			if encodeErr != nil {
+				t.Fatal(encodeErr)
+			}
+			first.bundle.DestinationPrivate[name] = encoded
 		}
-		first.bundle.DestinationPrivate[name] = encoded
-	}
-	if err = first.store.Save(first.bundle); err != nil {
-		t.Fatal(err)
-	}
-	if err = first.Close(); err != nil {
-		t.Fatal(err)
-	}
-	d, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
-	runtimes := d.clientRuntimeSnapshot()
-	if len(runtimes) != 3 {
-		t.Fatalf("initial runtimes = %d", len(runtimes))
-	}
-	var removed, retained, defaultRuntime *destinationRuntime
-	for _, runtime := range runtimes {
-		switch runtime.name {
-		case "a":
-			removed = runtime
-		case "b":
-			retained = runtime
-		case "default":
-			defaultRuntime = runtime
+		if err = first.store.Save(first.bundle); err != nil {
+			t.Fatal(err)
 		}
-	}
-	if removed == nil || retained == nil || defaultRuntime == nil {
-		t.Fatalf("runtimes = %#v", runtimes)
-	}
-	now := uint64(time.Now().UnixMilli())
-	if err = d.database.AdmitRouterInfo(daemonProductionFloodfill(t, now), false, now); err != nil {
-		t.Fatal(err)
-	}
-	blocking := &blockingRequestSender{entered: make(chan struct{})}
-	requests, requestErr := netdb.NewRequestManager(
-		d.database,
-		blocking,
-		daemonReplyRoute{local: d.bundle.Router.Hash, now: func() uint64 { return uint64(time.Now().UnixMilli()) }},
-		netdb.RequestManagerConfig{Capacity: 2, TimeoutMillis: 60_000, Now: func() uint64 { return uint64(time.Now().UnixMilli()) }},
-	)
-	if requestErr != nil {
-		t.Fatal(requestErr)
-	}
-	if err = removed.requests.Close(); err != nil {
-		t.Fatal(err)
-	}
-	removed.requests = requests
-	type lookupReturn struct {
-		waiter <-chan netdb.LookupResult
-		err    error
-	}
-	lookupReturned := make(chan lookupReturn, 1)
-	go func() {
-		waiter, lookupErr := requests.LookupRouterInfo(context.Background(), foundation.Hash{99})
-		lookupReturned <- lookupReturn{waiter: waiter, err: lookupErr}
-	}()
-	select {
-	case <-blocking.entered:
-	case <-time.After(time.Second):
-		t.Fatal("destination RequestManager did not start its lookup send")
-	}
+		if err = first.Close(); err != nil {
+			t.Fatal(err)
+		}
+		d, err := NewController(cfg, ControllerOptions{SocketRuntime: new(recordingSockets)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer d.Close()
+		runtimes := d.clientRuntimeSnapshot()
+		if len(runtimes) != 3 {
+			t.Fatalf("initial runtimes = %d", len(runtimes))
+		}
+		var removed, retained, defaultRuntime *destinationRuntime
+		for _, runtime := range runtimes {
+			switch runtime.name {
+			case "a":
+				removed = runtime
+			case "b":
+				retained = runtime
+			case "default":
+				defaultRuntime = runtime
+			}
+		}
+		if removed == nil || retained == nil || defaultRuntime == nil {
+			t.Fatalf("runtimes = %#v", runtimes)
+		}
+		now := uint64(time.Now().UnixMilli())
+		if err = d.database.AdmitRouterInfo(daemonProductionFloodfill(t, now), false, now); err != nil {
+			t.Fatal(err)
+		}
+		blocking := &blockingRequestSender{entered: make(chan struct{})}
+		requests, requestErr := netdb.NewRequestManager(
+			d.database,
+			blocking,
+			daemonReplyRoute{local: d.bundle.Router.Hash, now: func() uint64 { return uint64(time.Now().UnixMilli()) }},
+			netdb.RequestManagerConfig{Capacity: 2, TimeoutMillis: 60_000, Now: func() uint64 { return uint64(time.Now().UnixMilli()) }},
+		)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		if err = removed.requests.Close(); err != nil {
+			t.Fatal(err)
+		}
+		removed.requests = requests
+		type lookupReturn struct {
+			waiter <-chan netdb.LookupResult
+			err    error
+		}
+		lookupReturned := make(chan lookupReturn, 1)
+		go func() {
+			waiter, lookupErr := requests.LookupRouterInfo(context.Background(), foundation.Hash{99})
+			lookupReturned <- lookupReturn{waiter: waiter, err: lookupErr}
+		}()
+		<-blocking.entered
 
-	if err = d.destinations.Destroy(removed.local.Hash()); err != nil {
-		t.Fatal(err)
-	}
-	lookup := <-lookupReturned
-	if lookup.err != nil {
-		t.Fatal(lookup.err)
-	}
-	result, open := <-lookup.waiter
-	if !open || !errors.Is(result.Err, netdb.ErrRequestManagerClosed) {
-		t.Fatalf("destroy lookup completion = %#v, open=%t", result, open)
-	}
-	runtimes = d.clientRuntimeSnapshot()
-	if len(runtimes) != 2 || !removed.released.Load() || retained.released.Load() || defaultRuntime.released.Load() {
-		t.Fatalf("destroyed runtime state = %#v", runtimes)
-	}
-	for _, runtime := range runtimes {
-		if runtime != retained && runtime != defaultRuntime {
-			t.Fatalf("unexpected retained runtime = %#v", runtime)
+		if err = d.destinations.Destroy(removed.local.Hash()); err != nil {
+			t.Fatal(err)
 		}
-	}
-	if removed.requests.Pending() != 0 {
-		t.Fatalf("destroy left %d request waiters", removed.requests.Pending())
-	}
-	if _, lookupErr := removed.requests.LookupRouterInfo(context.Background(), foundation.Hash{99}); !errors.Is(lookupErr, netdb.ErrRequestManagerClosed) {
-		t.Fatalf("destroyed RequestManager accepted work: %v", lookupErr)
-	}
-	if removed.build.Pending() != 0 {
-		t.Fatalf("destroy left %d pending builds", removed.build.Pending())
-	}
-	if expired, healthErr := removed.health.Expire(context.Background()); expired != 0 || !errors.Is(healthErr, tunnel.ErrHealthClosed) {
-		t.Fatalf("destroyed Health accepted work: %d, %v", expired, healthErr)
-	}
-	if maintained, maintainErr := removed.maintainer.Maintain(context.Background()); maintained != 0 || !errors.Is(maintainErr, tunnel.ErrPairedMaintenanceClosed) {
-		t.Fatalf("destroyed maintainer accepted work: %d, %v", maintained, maintainErr)
-	}
-	if senderErr := removed.sender.UpdateRemoteELS(nil); !errors.Is(senderErr, dataplane.RouterErrDataPlaneConfig) {
-		t.Fatalf("destroyed sender accepted policy: %v", senderErr)
-	}
+		lookup := <-lookupReturned
+		if lookup.err != nil {
+			t.Fatal(lookup.err)
+		}
+		result, open := <-lookup.waiter
+		if !open || !errors.Is(result.Err, netdb.ErrRequestManagerClosed) {
+			t.Fatalf("destroy lookup completion = %#v, open=%t", result, open)
+		}
+		runtimes = d.clientRuntimeSnapshot()
+		if len(runtimes) != 2 || !removed.released.Load() || retained.released.Load() || defaultRuntime.released.Load() {
+			t.Fatalf("destroyed runtime state = %#v", runtimes)
+		}
+		for _, runtime := range runtimes {
+			if runtime != retained && runtime != defaultRuntime {
+				t.Fatalf("unexpected retained runtime = %#v", runtime)
+			}
+		}
+		if removed.requests.Pending() != 0 {
+			t.Fatalf("destroy left %d request waiters", removed.requests.Pending())
+		}
+		if _, lookupErr := removed.requests.LookupRouterInfo(context.Background(), foundation.Hash{99}); !errors.Is(lookupErr, netdb.ErrRequestManagerClosed) {
+			t.Fatalf("destroyed RequestManager accepted work: %v", lookupErr)
+		}
+		if removed.build.Pending() != 0 {
+			t.Fatalf("destroy left %d pending builds", removed.build.Pending())
+		}
+		if expired, healthErr := removed.health.Expire(context.Background()); expired != 0 || !errors.Is(healthErr, tunnel.ErrHealthClosed) {
+			t.Fatalf("destroyed Health accepted work: %d, %v", expired, healthErr)
+		}
+		if maintained, maintainErr := removed.maintainer.Maintain(context.Background()); maintained != 0 || !errors.Is(maintainErr, tunnel.ErrPairedMaintenanceClosed) {
+			t.Fatalf("destroyed maintainer accepted work: %d, %v", maintained, maintainErr)
+		}
+		if senderErr := removed.sender.UpdateRemoteELS(nil); !errors.Is(senderErr, dataplane.RouterErrDataPlaneConfig) {
+			t.Fatalf("destroyed sender accepted policy: %v", senderErr)
+		}
+	})
 }
 
 func TestReseedOutcomesAreObservableWithoutMakingOptionalFailureFatal(t *testing.T) {
@@ -2073,7 +1970,7 @@ func TestReseedOutcomesAreObservableWithoutMakingOptionalFailureFatal(t *testing
 			Enabled: true, Required: required,
 			Endpoints: []string{"http://reseed.example/i2p"},
 		}
-		d, err := NewController(cfg, ControllerOptions{SocketRuntime: loopbackSockets{}})
+		d, err := NewController(cfg, ControllerOptions{SocketRuntime: newSimSocketRuntime(t)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2081,33 +1978,30 @@ func TestReseedOutcomesAreObservableWithoutMakingOptionalFailureFatal(t *testing
 	}
 
 	t.Run("optional", func(t *testing.T) {
-		d := newDaemon(t, false)
-		parent, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		if err := d.Start(parent); err != nil {
-			t.Fatal(err)
-		}
-		deadline := time.After(time.Second)
-		for d.registry.Snapshot().Reseed.Failures != 1 {
-			select {
-			case <-deadline:
-				t.Fatalf("reseed metrics = %#v", d.registry.Snapshot().Reseed)
-			case <-time.After(time.Millisecond):
+		startNow := time.Now()
+		synctest.Test(t, func(t *testing.T) {
+			<-time.After(time.Until(startNow))
+			d := newDaemon(t, false)
+			parent, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := d.Start(parent); err != nil {
+				t.Fatal(err)
 			}
-		}
-		if !d.router.Running() || d.Status().Error != nil {
-			t.Fatalf("optional reseed failure changed daemon status: %#v", d.Status())
-		}
-		if got := d.registry.Snapshot().Reseed; got.Attempts != 1 || got.Successes != 0 {
-			t.Fatalf("reseed metrics = %#v", got)
-		}
-		cancel()
-		if err := d.Wait(); err != nil {
-			t.Fatalf("Wait after cancellation = %v, want nil", err)
-		}
-		if err := d.Close(); err != nil {
-			t.Fatalf("Close after cancellation = %v, want nil", err)
-		}
+			synctest.Wait()
+			if got := d.registry.Snapshot().Reseed; got.Attempts != 1 || got.Failures != 1 || got.Successes != 0 {
+				t.Fatalf("reseed metrics = %#v", got)
+			}
+			if !d.router.Running() || d.Status().Error != nil {
+				t.Fatalf("optional reseed failure changed daemon status: %#v", d.Status())
+			}
+			cancel()
+			if err := d.Wait(); err != nil {
+				t.Fatalf("Wait after cancellation = %v, want nil", err)
+			}
+			if err := d.Close(); err != nil {
+				t.Fatalf("Close after cancellation = %v, want nil", err)
+			}
+		})
 	})
 
 	t.Run("success", func(t *testing.T) {

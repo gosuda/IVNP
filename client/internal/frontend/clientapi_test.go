@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"gosuda.org/ivnp/controlplane"
@@ -900,102 +901,156 @@ func TestSOCKS5DialCancelsWhenClientDisconnects(t *testing.T) {
 	}
 }
 
-func TestSOCKS5ResetsHandshakeDeadlineForDialFailure(t *testing.T) {
-	dialStarted := make(chan struct{})
-	releaseDial := make(chan struct{})
-	proxy, err := NewSOCKS5Proxy(SOCKS5Config{
-		Network: &testNetwork{dial: func(context.Context, string) (net.Conn, error) {
-			close(dialStarted)
-			<-releaseDial
-			return nil, errTestDialFailed
-		}},
-		ListenAddress:    "127.0.0.1:0",
-		HandshakeTimeout: 5 * time.Millisecond,
-		DialTimeout:      100 * time.Millisecond,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := proxy.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = proxy.Close()
-		_ = proxy.Wait()
-	})
-	connection, err := net.Dial("tcp", proxy.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer connection.Close()
-	_, _ = connection.Write([]byte{5, 1, 0})
-	method := make([]byte, 2)
-	if _, err := io.ReadFull(connection, method); err != nil {
-		t.Fatal(err)
-	}
-	request := append([]byte{5, 1, 0, 3, byte(len(testB32))}, []byte(testB32)...)
-	request = append(request, 0, 80)
-	_, _ = connection.Write(request)
-	<-dialStarted
-	timer := time.NewTimer(20 * time.Millisecond)
-	<-timer.C
-	close(releaseDial)
-	reply := make([]byte, 10)
-	if _, err := io.ReadFull(connection, reply); err != nil || reply[1] != 4 {
-		t.Fatalf("SOCKS dial reply = %v, %v", reply, err)
+type pipeListener struct {
+	conns chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+}
+
+func newPipeListener() *pipeListener {
+	return &pipeListener{
+		conns: make(chan net.Conn),
+		done:  make(chan struct{}),
 	}
 }
 
-func TestControlWaitIncludesActiveHandler(t *testing.T) {
-	started := make(chan struct{}, 1)
-	canceled := make(chan struct{}, 1)
-	release := make(chan struct{})
-	control, err := NewControl(ControlConfig{
-		ListenAddress: "127.0.0.1:0",
-		BearerToken:   "secret",
-		Status:        blockingStatus{started: started, canceled: canceled, release: release},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := control.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	connection, err := net.Dial("tcp", control.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer connection.Close()
-	_, _ = io.WriteString(connection, "GET /status HTTP/1.1\r\nHost: control\r\nAuthorization: Bearer secret\r\n\r\n")
+func (l *pipeListener) Accept() (net.Conn, error) {
 	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("status handler did not start")
+	case conn := <-l.conns:
+		return conn, nil
+	case <-l.done:
+		return nil, net.ErrClosed
 	}
-	if err := control.Close(); err != nil {
-		t.Fatal(err)
-	}
+}
+
+func (l *pipeListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return nil
+}
+
+func (l *pipeListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
+}
+
+func (l *pipeListener) dial() (net.Conn, error) {
+	client, server := net.Pipe()
 	select {
-	case <-canceled:
-	case <-time.After(time.Second):
-		t.Fatal("status handler context was not canceled")
+	case l.conns <- server:
+		return client, nil
+	case <-l.done:
+		_ = client.Close()
+		_ = server.Close()
+		return nil, net.ErrClosed
 	}
-	waited := make(chan error, 1)
-	go func() { waited <- control.Wait() }()
-	select {
-	case err := <-waited:
-		t.Fatalf("Wait returned before handler finished: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-	close(release)
-	select {
-	case err := <-waited:
+}
+
+func TestSOCKS5ResetsHandshakeDeadlineForDialFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		listener := newPipeListener()
+		dialStarted := make(chan struct{})
+		dialFinished := make(chan struct{})
+		proxy, err := NewSOCKS5Proxy(SOCKS5Config{
+			Network: &testNetwork{dial: func(ctx context.Context, _ string) (net.Conn, error) {
+				close(dialStarted)
+				<-ctx.Done()
+				close(dialFinished)
+				return nil, errTestDialFailed
+			}},
+			ListenAddress:    "127.0.0.1:0",
+			HandshakeTimeout: 1 * time.Second,
+			DialTimeout:      5 * time.Second,
+			Listen: func(context.Context, string, string) (net.Listener, error) {
+				return listener, nil
+			},
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("Wait did not finish with handler")
-	}
+		if err := proxy.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			_ = proxy.Close()
+			_ = proxy.Wait()
+		}()
+		connection, err := listener.dial()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close()
+		_, _ = connection.Write([]byte{5, 1, 0})
+		method := make([]byte, 2)
+		if _, err := io.ReadFull(connection, method); err != nil {
+			t.Fatal(err)
+		}
+		request := append([]byte{5, 1, 0, 3, byte(len(testB32))}, []byte(testB32)...)
+		request = append(request, 0, 80)
+		start := time.Now()
+		_, _ = connection.Write(request)
+		<-dialStarted
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		<-timer.C
+		synctest.Wait()
+		select {
+		case <-dialFinished:
+			t.Fatal("dial failed before full dial timeout")
+		default:
+		}
+		reply := make([]byte, 10)
+		if _, err := io.ReadFull(connection, reply); err != nil || reply[1] != 4 {
+			t.Fatalf("SOCKS dial reply = %v, %v", reply, err)
+		}
+		if elapsed := time.Since(start); elapsed != 5*time.Second {
+			t.Fatalf("dial failed after %v, want %v", elapsed, 5*time.Second)
+		}
+	})
+}
+
+func TestControlWaitIncludesActiveHandler(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		listener := newPipeListener()
+		started := make(chan struct{}, 1)
+		canceled := make(chan struct{}, 1)
+		release := make(chan struct{})
+		control, err := NewControl(ControlConfig{
+			ListenAddress: "127.0.0.1:0",
+			BearerToken:   "secret",
+			Status:        blockingStatus{started: started, canceled: canceled, release: release},
+			Listen: func(context.Context, string, string) (net.Listener, error) {
+				return listener, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := control.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		connection, err := listener.dial()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close()
+		_, _ = io.WriteString(connection, "GET /status HTTP/1.1\r\nHost: control\r\nAuthorization: Bearer secret\r\n\r\n")
+		<-started
+		if err := control.Close(); err != nil {
+			t.Fatal(err)
+		}
+		<-canceled
+		waited := make(chan error, 1)
+		go func() { waited <- control.Wait() }()
+		synctest.Wait()
+		select {
+		case err := <-waited:
+			t.Fatalf("Wait returned before handler finished: %v", err)
+		default:
+		}
+		close(release)
+		if err := <-waited; err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestRelayPreservesHalfClose(t *testing.T) {

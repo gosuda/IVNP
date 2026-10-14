@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -182,55 +183,54 @@ func TestUDPBatchCloseUnblocksRead(t *testing.T) {
 }
 
 func TestDispatcherBackpressureCopiesPacketsAndCloses(t *testing.T) {
-	started := make(chan string, 1)
-	release := make(chan struct{})
-	var first sync.Once
-	dispatcher, err := NewDispatcher(1, 1, 16, func(packet Datagram) {
-		started <- string(packet.Data[:packet.Len])
-		first.Do(func() { <-release })
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan string, 1)
+		release := make(chan struct{})
+		var first sync.Once
+		dispatcher, err := NewDispatcher(1, 1, 16, func(packet Datagram) {
+			started <- string(packet.Data[:packet.Len])
+			first.Do(func() { <-release })
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		payload := []byte("original")
+		packet := Datagram{Data: payload, Len: len(payload)}
+		if err := dispatcher.Dispatch(context.Background(), packet); err != nil {
+			t.Fatal(err)
+		}
+		copy(payload, "changed!")
+		if got := <-started; got != "original" {
+			t.Fatalf("handler packet = %q, want copied original", got)
+		}
+		if err := dispatcher.Dispatch(context.Background(), Datagram{Data: []byte("queued"), Len: 6}); err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+		defer cancel()
+		if err := dispatcher.Dispatch(ctx, Datagram{Data: []byte("blocked"), Len: 7}); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("blocked Dispatch error = %v, want context deadline", err)
+		}
+
+		closed := make(chan struct{})
+		go func() {
+			dispatcher.Close()
+			close(closed)
+		}()
+		synctest.Wait()
+		select {
+		case <-closed:
+			t.Fatal("Close returned while a handler was still active")
+		default:
+		}
+		close(release)
+		<-closed
+		if err := dispatcher.Dispatch(context.Background(), packet); !errors.Is(err, ErrDispatcherClosed) {
+			t.Fatalf("Dispatch after Close error = %v, want ErrDispatcherClosed", err)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	payload := []byte("original")
-	packet := Datagram{Data: payload, Len: len(payload)}
-	if err := dispatcher.Dispatch(context.Background(), packet); err != nil {
-		t.Fatal(err)
-	}
-	copy(payload, "changed!")
-	if got := <-started; got != "original" {
-		t.Fatalf("handler packet = %q, want copied original", got)
-	}
-	if err := dispatcher.Dispatch(context.Background(), Datagram{Data: []byte("queued"), Len: 6}); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-	defer cancel()
-	if err := dispatcher.Dispatch(ctx, Datagram{Data: []byte("blocked"), Len: 7}); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("blocked Dispatch error = %v, want context deadline", err)
-	}
-
-	closed := make(chan struct{})
-	go func() {
-		dispatcher.Close()
-		close(closed)
-	}()
-	select {
-	case <-closed:
-		t.Fatal("Close returned while a handler was still active")
-	case <-time.After(10 * time.Millisecond):
-	}
-	close(release)
-	select {
-	case <-closed:
-	case <-time.After(time.Second):
-		t.Fatal("Close did not finish after handler returned")
-	}
-	if err := dispatcher.Dispatch(context.Background(), packet); !errors.Is(err, ErrDispatcherClosed) {
-		t.Fatalf("Dispatch after Close error = %v, want ErrDispatcherClosed", err)
-	}
 }
 
 func listenUDP(t *testing.T) *net.UDPConn {

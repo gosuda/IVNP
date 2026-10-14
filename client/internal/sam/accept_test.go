@@ -6,7 +6,7 @@ import (
 	"net"
 	"sync"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/interfaces/destination"
@@ -80,126 +80,122 @@ func (c *metadataConn) LocalI2PPort() uint16      { return c.to }
 func (c *metadataConn) RemoteI2PPort() uint16     { return c.from }
 
 func TestStreamAcceptAttachmentsAreFIFO(t *testing.T) {
-	loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
-	controller := &fifoController{loop: loop, endpoint: make(chan *fifoEndpoint, 1)}
-	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, SessionQueue: 4})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = server.Start(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = server.Close(); _ = server.Wait() }()
-	control, controlReader := samDial(t, server.Addr().String())
-	defer control.Close()
-	_, _ = io.WriteString(control, "SESSION CREATE STYLE=STREAM ID=fifo DESTINATION=TRANSIENT\n")
-	if line := readSAMLine(t, controlReader); line[:24] != "SESSION STATUS RESULT=OK" {
-		t.Fatal(line)
-	}
-	endpoint := <-controller.endpoint
+	synctest.Test(t, func(t *testing.T) {
+		listener := newSAMPipeListener()
+		loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
+		controller := &fifoController{loop: loop, endpoint: make(chan *fifoEndpoint, 1)}
+		server, err := NewServer(ServerConfig{
+			Address: "127.0.0.1:0", Controller: controller, SessionQueue: 4,
+			Listen: func(context.Context, string, string) (net.Listener, error) {
+				return listener, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = server.Start(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = server.Close(); _ = server.Wait() }()
+		control, controlReader := listener.dial(t)
+		defer control.Close()
+		_, _ = io.WriteString(control, "SESSION CREATE STYLE=STREAM ID=fifo DESTINATION=TRANSIENT\n")
+		if line := readSAMLine(t, controlReader); line[:24] != "SESSION STATUS RESULT=OK" {
+			t.Fatal(line)
+		}
+		endpoint := <-controller.endpoint
 
-	firstAttachment, firstReader := samDial(t, server.Addr().String())
-	defer firstAttachment.Close()
-	_, _ = io.WriteString(firstAttachment, "STREAM ACCEPT ID=fifo\n")
-	waitForSAMCondition(t, time.Second, func() bool {
+		firstAttachment, firstReader := listener.dial(t)
+		defer firstAttachment.Close()
+		_, _ = io.WriteString(firstAttachment, "STREAM ACCEPT ID=fifo\n")
+		synctest.Wait()
 		server.mu.RLock()
 		session := server.sessions["fifo"]
 		server.mu.RUnlock()
-		return session != nil && session.acceptAdmissions.Load() >= 1
-	}, "first FIFO accept request admission")
-	secondAttachment, secondReader := samDial(t, server.Addr().String())
-	defer secondAttachment.Close()
-	_, _ = io.WriteString(secondAttachment, "STREAM ACCEPT ID=fifo\n")
-	waitForSAMCondition(t, time.Second, func() bool {
-		server.mu.RLock()
-		session := server.sessions["fifo"]
-		server.mu.RUnlock()
-		return session != nil && session.acceptAdmissions.Load() >= 2
-	}, "second FIFO accept request admission")
+		if session == nil || session.acceptAdmissions.Load() < 1 {
+			t.Fatal("first FIFO accept request was not admitted")
+		}
+		secondAttachment, secondReader := listener.dial(t)
+		defer secondAttachment.Close()
+		_, _ = io.WriteString(secondAttachment, "STREAM ACCEPT ID=fifo\n")
+		synctest.Wait()
+		if session.acceptAdmissions.Load() < 2 {
+			t.Fatal("second FIFO accept request was not admitted")
+		}
 
-	firstSAM, firstPeer := net.Pipe()
-	secondSAM, secondPeer := net.Pipe()
-	defer firstPeer.Close()
-	defer secondPeer.Close()
-	endpoint.listener.incoming <- &metadataConn{Conn: firstSAM, remote: []byte("FIRST"), from: 11, to: 21}
-	endpoint.listener.incoming <- &metadataConn{Conn: secondSAM, remote: []byte("SECOND"), from: 12, to: 22}
-	if line := readSAMLine(t, firstReader); line != "STREAM STATUS RESULT=OK" {
-		t.Fatal(line)
-	}
-	if line := readSAMLine(t, firstReader); line != "FIRST FROM_PORT=11 TO_PORT=21" {
-		t.Fatalf("first attachment = %q", line)
-	}
-	if line := readSAMLine(t, secondReader); line != "STREAM STATUS RESULT=OK" {
-		t.Fatal(line)
-	}
-	if line := readSAMLine(t, secondReader); line != "SECOND FROM_PORT=12 TO_PORT=22" {
-		t.Fatalf("second attachment = %q", line)
-	}
+		firstSAM, firstPeer := net.Pipe()
+		secondSAM, secondPeer := net.Pipe()
+		defer firstPeer.Close()
+		defer secondPeer.Close()
+		endpoint.listener.incoming <- &metadataConn{Conn: firstSAM, remote: []byte("FIRST"), from: 11, to: 21}
+		endpoint.listener.incoming <- &metadataConn{Conn: secondSAM, remote: []byte("SECOND"), from: 12, to: 22}
+		if line := readSAMLine(t, firstReader); line != "STREAM STATUS RESULT=OK" {
+			t.Fatal(line)
+		}
+		if line := readSAMLine(t, firstReader); line != "FIRST FROM_PORT=11 TO_PORT=21" {
+			t.Fatalf("first attachment = %q", line)
+		}
+		if line := readSAMLine(t, secondReader); line != "STREAM STATUS RESULT=OK" {
+			t.Fatal(line)
+		}
+		if line := readSAMLine(t, secondReader); line != "SECOND FROM_PORT=12 TO_PORT=22" {
+			t.Fatalf("second attachment = %q", line)
+		}
+	})
 }
 
 func TestStreamAcceptDeadFirstAttachmentDoesNotConsumeInbound(t *testing.T) {
-	loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
-	controller := &fifoController{loop: loop, endpoint: make(chan *fifoEndpoint, 1)}
-	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: controller, SessionQueue: 4})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = server.Start(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = server.Close(); _ = server.Wait() }()
-	control, controlReader := samDial(t, server.Addr().String())
-	defer control.Close()
-	_, _ = io.WriteString(control, "SESSION CREATE STYLE=STREAM ID=dead-first DESTINATION=TRANSIENT\n")
-	if line := readSAMLine(t, controlReader); line[:24] != "SESSION STATUS RESULT=OK" {
-		t.Fatal(line)
-	}
-	endpoint := <-controller.endpoint
+	synctest.Test(t, func(t *testing.T) {
+		listener := newSAMPipeListener()
+		loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
+		controller := &fifoController{loop: loop, endpoint: make(chan *fifoEndpoint, 1)}
+		server, err := NewServer(ServerConfig{
+			Address: "127.0.0.1:0", Controller: controller, SessionQueue: 4,
+			Listen: func(context.Context, string, string) (net.Listener, error) {
+				return listener, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = server.Start(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = server.Close(); _ = server.Wait() }()
+		control, controlReader := listener.dial(t)
+		defer control.Close()
+		_, _ = io.WriteString(control, "SESSION CREATE STYLE=STREAM ID=dead-first DESTINATION=TRANSIENT\n")
+		if line := readSAMLine(t, controlReader); line[:24] != "SESSION STATUS RESULT=OK" {
+			t.Fatal(line)
+		}
+		endpoint := <-controller.endpoint
 
-	first, _ := samDial(t, server.Addr().String())
-	_, _ = io.WriteString(first, "STREAM ACCEPT ID=dead-first\n")
-	waitForSAMCondition(t, time.Second, func() bool {
+		first, _ := listener.dial(t)
+		_, _ = io.WriteString(first, "STREAM ACCEPT ID=dead-first\n")
+		synctest.Wait()
 		server.mu.RLock()
 		session := server.sessions["dead-first"]
 		server.mu.RUnlock()
-		return session != nil && session.acceptAdmissions.Load() >= 1
-	}, "dead accept request admission")
-	_ = first.Close()
-	waitForSAMCondition(t, time.Second, func() bool {
-		server.mu.RLock()
-		session := server.sessions["dead-first"]
-		server.mu.RUnlock()
-		return session != nil && session.acceptCancellations.Load() >= 1
-	}, "dead accept request cancellation")
-
-	second, secondReader := samDial(t, server.Addr().String())
-	defer second.Close()
-	_, _ = io.WriteString(second, "STREAM ACCEPT ID=dead-first\n")
-	inbound, peer := net.Pipe()
-	defer peer.Close()
-	endpoint.listener.incoming <- &metadataConn{Conn: inbound, remote: []byte("LIVE"), from: 31, to: 41}
-	if line := readSAMLine(t, secondReader); line != "STREAM STATUS RESULT=OK" {
-		t.Fatal(line)
-	}
-	if line := readSAMLine(t, secondReader); line != "LIVE FROM_PORT=31 TO_PORT=41" {
-		t.Fatalf("second attachment = %q", line)
-	}
-}
-
-func waitForSAMCondition(t *testing.T, timeout time.Duration, condition func() bool, name string) {
-	t.Helper()
-	deadline := time.NewTimer(timeout)
-	ticker := time.NewTicker(time.Millisecond)
-	defer deadline.Stop()
-	defer ticker.Stop()
-	for {
-		if condition() {
-			return
+		if session == nil || session.acceptAdmissions.Load() < 1 {
+			t.Fatal("dead accept request was not admitted")
 		}
-		select {
-		case <-deadline.C:
-			t.Fatal(name + " did not complete")
-		case <-ticker.C:
+		_ = first.Close()
+		synctest.Wait()
+		if session.acceptCancellations.Load() < 1 {
+			t.Fatal("dead accept request was not canceled")
 		}
-	}
+
+		second, secondReader := listener.dial(t)
+		defer second.Close()
+		_, _ = io.WriteString(second, "STREAM ACCEPT ID=dead-first\n")
+		inbound, peer := net.Pipe()
+		defer peer.Close()
+		endpoint.listener.incoming <- &metadataConn{Conn: inbound, remote: []byte("LIVE"), from: 31, to: 41}
+		if line := readSAMLine(t, secondReader); line != "STREAM STATUS RESULT=OK" {
+			t.Fatal(line)
+		}
+		if line := readSAMLine(t, secondReader); line != "LIVE FROM_PORT=31 TO_PORT=41" {
+			t.Fatalf("second attachment = %q", line)
+		}
+	})
 }
