@@ -258,31 +258,92 @@ func TestDestroyDestinationUsesBoundedIndependentContext(t *testing.T) {
 		}
 	})
 }
+
+type samPipeListener struct {
+	conns chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+}
+
+func newSAMPipeListener() *samPipeListener {
+	return &samPipeListener{
+		conns: make(chan net.Conn),
+		done:  make(chan struct{}),
+	}
+}
+
+func (l *samPipeListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.conns:
+		return conn, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *samPipeListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return nil
+}
+
+func (l *samPipeListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
+}
+
+func (l *samPipeListener) dial(t *testing.T) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	client, server := net.Pipe()
+	select {
+	case l.conns <- server:
+	case <-l.done:
+		_ = client.Close()
+		_ = server.Close()
+		t.Fatal("listener closed")
+	}
+	reader := bufio.NewReader(client)
+	if _, err := io.WriteString(client, "HELLO VERSION MIN=3.3 MAX=3.3\n"); err != nil {
+		t.Fatal(err)
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil || !strings.Contains(line, "RESULT=OK VERSION=3.3") {
+		t.Fatalf("hello = %q, %v", line, err)
+	}
+	return client, reader
+}
+
 func TestEmbeddedServerKeepsIdleRootSessionAlive(t *testing.T) {
-	controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
-	server, err := NewServer(ServerConfig{
-		Address: "127.0.0.1:0", Controller: controller, MaxSessions: 4,
-		CommandTimeout: 40 * time.Millisecond,
+	synctest.Test(t, func(t *testing.T) {
+		listener := newSAMPipeListener()
+		controller := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
+		server, err := NewServer(ServerConfig{
+			Address: "127.0.0.1:0", Controller: controller, MaxSessions: 4,
+			CommandTimeout: 1 * time.Second,
+			Listen: func(context.Context, string, string) (net.Listener, error) {
+				return listener, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = server.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = server.Close(); _ = server.Wait() }()
+		control, reader := listener.dial(t)
+		defer control.Close()
+		_, _ = io.WriteString(control, "SESSION CREATE STYLE=STREAM ID=idle-root DESTINATION=TRANSIENT\n")
+		if line := readSAMLine(t, reader); !strings.Contains(line, "RESULT=OK DESTINATION=") {
+			t.Fatalf("session create = %q", line)
+		}
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		<-timer.C
+		synctest.Wait()
+		_, _ = io.WriteString(control, "PING root-still-live\n")
+		if line := readSAMLine(t, reader); line != "PONG root-still-live" {
+			t.Fatalf("idle root ping = %q", line)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = server.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = server.Close(); _ = server.Wait() }()
-	control, reader := samDial(t, server.Addr().String())
-	defer control.Close()
-	_, _ = io.WriteString(control, "SESSION CREATE STYLE=STREAM ID=idle-root DESTINATION=TRANSIENT\n")
-	if line := readSAMLine(t, reader); !strings.Contains(line, "RESULT=OK DESTINATION=") {
-		t.Fatalf("session create = %q", line)
-	}
-	timer := time.NewTimer(3 * 40 * time.Millisecond)
-	<-timer.C
-	_, _ = io.WriteString(control, "PING root-still-live\n")
-	if line := readSAMLine(t, reader); line != "PONG root-still-live" {
-		t.Fatalf("idle root ping = %q", line)
-	}
 }
 
 func TestEmbeddedServerLiveLoopbackStylesAndRecovery(t *testing.T) {

@@ -22,6 +22,26 @@ type SSU2PeerCapabilities struct {
 	Introduced bool
 }
 
+// NTCP2PeerInspector evaluates whether a verified RouterInfo has a reachable
+// NTCP2 address for the local manager's network configuration.
+type NTCP2PeerInspector interface {
+	PeerReachable(foundation.NetworkDatabaseRouterInfo) bool
+}
+
+// SSU2PeerInspector evaluates SSU2 address capabilities and local introducer
+// requirements for a verified RouterInfo.
+type SSU2PeerInspector interface {
+	InspectPeer(foundation.NetworkDatabaseRouterInfo, uint64) SSU2PeerCapabilities
+	IntroducerStatus(bool) (required bool, count int)
+}
+
+// SessionLivenessRegistry reports both session existence and send viability.
+type SessionLivenessRegistry interface {
+	HasSession(foundation.Hash) bool
+	SessionViable(foundation.Hash) bool
+	DropSession(foundation.Hash) bool
+}
+
 func InspectSSU2Peer(info foundation.NetworkDatabaseRouterInfo, now uint64) SSU2PeerCapabilities {
 	return inspectSSU2Peer(info, now, true)
 }

@@ -149,7 +149,7 @@ func packageLayer(path string) (int, bool) {
 	}
 	relative := strings.TrimPrefix(path, modulePath+"/")
 	switch {
-	case strings.HasPrefix(relative, "cmd/"), strings.HasPrefix(relative, "integration/"):
+	case strings.HasPrefix(relative, "cmd/"), strings.HasPrefix(relative, "integration/"), strings.HasPrefix(relative, "tests/integration/"):
 		return 9, true
 	case path == modulePath:
 		return 8, true

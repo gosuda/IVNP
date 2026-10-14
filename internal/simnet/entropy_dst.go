@@ -1,5 +1,3 @@
-//go:build dst || synctest
-
 package simnet
 
 import (

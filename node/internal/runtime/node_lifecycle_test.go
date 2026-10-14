@@ -5,27 +5,67 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/internal/simnet"
 	"gosuda.org/ivnp/state"
 )
 
-type nodeSockets struct{}
+type nodeSockets struct {
+	mu   sync.Mutex
+	net  *simnet.Network
+	host *simnet.Host
+}
 
-func (nodeSockets) ListenStream(context.Context, dataplane.RouterEndpoint) (net.Listener, error) {
-	return net.Listen("tcp", "127.0.0.1:0")
+func (s *nodeSockets) Close() {
+	s.mu.Lock()
+	net_ := s.net
+	s.mu.Unlock()
+	if net_ != nil {
+		_ = net_.Close()
+	}
 }
-func (nodeSockets) DialStream(ctx context.Context, endpoint dataplane.RouterEndpoint) (net.Conn, error) {
-	return (&net.Dialer{}).DialContext(ctx, endpoint.Network, endpoint.Address)
+
+func (s *nodeSockets) ensureHost() *simnet.Host {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.host == nil {
+		s.net = simnet.NewNetwork(simnet.Config{Seed: 1})
+		s.host = s.net.HostAt("node", netip.MustParseAddr("127.0.0.1"))
+	}
+	return s.host
 }
-func (nodeSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
-	return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+
+func (s *nodeSockets) ListenStream(_ context.Context, endpoint dataplane.RouterEndpoint) (net.Listener, error) {
+	ap, err := netip.ParseAddrPort(endpoint.Address)
+	if err != nil {
+		ap = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 0)
+	}
+	return s.ensureHost().ListenTCP(ap)
+}
+
+func (s *nodeSockets) DialStream(ctx context.Context, endpoint dataplane.RouterEndpoint) (net.Conn, error) {
+	ap, err := netip.ParseAddrPort(endpoint.Address)
+	if err != nil {
+		return nil, err
+	}
+	return s.ensureHost().DialTCP(ctx, ap)
+}
+
+func (s *nodeSockets) ListenUDP(_ context.Context, endpoint dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
+	ap, err := netip.ParseAddrPort(endpoint.Address)
+	if err != nil {
+		ap = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 0)
+	}
+	return s.ensureHost().ListenUDP(ap)
 }
 
 var errTestNoConnectedPeers = errors.New("no connected peers")
@@ -62,8 +102,10 @@ func TestStartRollsBackWhenMetricsListenerFails(t *testing.T) {
 	cfg := nodeTestConfig(t)
 	cfg.Metrics = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 4}
 	listenErr := errors.New("metrics listener failed")
+	sockets := &nodeSockets{}
+	defer sockets.Close()
 	d, err := New(cfg, Options{
-		SocketRuntime: nodeSockets{},
+		SocketRuntime: sockets,
 		Listener: ListenerFunc(func(context.Context, string, string) (net.Listener, error) {
 			return nil, listenErr
 		}),
@@ -86,16 +128,14 @@ func TestWaitDoesNotRaceStartRegistration(t *testing.T) {
 	cfg := nodeTestConfig(t)
 	cfg.NTCP2.Enabled = false
 	cfg.Metrics = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 1}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			t.Error(err)
-		}
-	})
 	synctest.Test(t, func(t *testing.T) {
+		sockets := &nodeSockets{}
+		defer sockets.Close()
+		listener, err := sockets.ListenStream(t.Context(), dataplane.RouterEndpoint{Network: "tcp", Address: "127.0.0.1:0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = listener.Close() }()
 		entered := make(chan struct{})
 		release := make(chan struct{})
 		d, err := New(cfg, Options{
@@ -158,16 +198,14 @@ func TestCloseWaitsForStartupBeforeReleasingResources(t *testing.T) {
 	cfg := nodeTestConfig(t)
 	cfg.NTCP2.Enabled = false
 	cfg.Metrics = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, MaxConnections: 1}
-	returned, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := returned.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			t.Error(err)
-		}
-	})
 	synctest.Test(t, func(t *testing.T) {
+		sockets := &nodeSockets{}
+		defer sockets.Close()
+		returned, err := sockets.ListenStream(t.Context(), dataplane.RouterEndpoint{Network: "tcp", Address: "127.0.0.1:0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = returned.Close() }()
 		entered := make(chan struct{})
 		canceled := make(chan struct{})
 		release := make(chan struct{})
@@ -222,8 +260,8 @@ func TestCloseWaitsForStartupBeforeReleasingResources(t *testing.T) {
 		if err := <-closed; err != nil {
 			t.Fatalf("Close error = %v", err)
 		}
-		if err := returned.Close(); !errors.Is(err, net.ErrClosed) {
-			t.Fatalf("returned listener remained open: Close() = %v", err)
+		if _, err := returned.Accept(); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("returned listener remained open: Accept() error = %v", err)
 		}
 		if d.Status().Running {
 			t.Fatal("canceled startup left a listener or server running")
@@ -240,7 +278,13 @@ func TestCloseWaitsForStartupBeforeReleasingResources(t *testing.T) {
 func TestMetricsBearerAuthentication(t *testing.T) {
 	cfg := nodeTestConfig(t)
 	cfg.Metrics = state.ConfigurationListener{Enabled: true, Address: state.ConfigurationEndpoint{Host: "127.0.0.1"}, BearerToken: "metrics-token", MaxConnections: 1}
-	d, err := New(cfg, Options{SocketRuntime: nodeSockets{}})
+	sockets := &nodeSockets{}
+	d, err := New(cfg, Options{
+		SocketRuntime: sockets,
+		Listener: ListenerFunc(func(ctx context.Context, network, address string) (net.Listener, error) {
+			return sockets.ListenStream(ctx, dataplane.RouterEndpoint{Network: network, Address: address})
+		}),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,8 +295,15 @@ func TestMetricsBearerAuthentication(t *testing.T) {
 		_ = d.Close()
 		_ = d.Wait()
 	})
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+				return sockets.DialStream(ctx, dataplane.RouterEndpoint{Network: network, Address: address})
+			},
+		},
+	}
 	url := "http://" + d.metricsListener.Addr().String() + "/metrics"
-	response, err := http.Get(url)
+	response, err := client.Get(url)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +316,7 @@ func TestMetricsBearerAuthentication(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.Header.Set("Authorization", "Bearer metrics-token")
-	response, err = http.DefaultClient.Do(request)
+	response, err = client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,13 +337,13 @@ func embeddedDaemonConfig(t *testing.T, proxy bool) state.ConfigurationOperating
 	return cfg
 }
 
-func ephemeralListener(context.Context, string, string) (net.Listener, error) {
-	return net.Listen("tcp", "127.0.0.1:0")
+func ephemeralListener(ctx context.Context, network, address string) (net.Listener, error) {
+	return (&nodeSockets{}).ListenStream(ctx, dataplane.RouterEndpoint{Network: network, Address: address})
 }
 
 func TestEmbeddedDaemonMaintainsProxyDestination(t *testing.T) {
 	d, err := New(embeddedDaemonConfig(t, true), Options{
-		Embedded: true, Transport: &idleNodeTransport{}, SocketRuntime: nodeSockets{}, Listener: ListenerFunc(ephemeralListener),
+		Embedded: true, Transport: &idleNodeTransport{}, SocketRuntime: &nodeSockets{}, Listener: ListenerFunc(ephemeralListener),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -322,7 +373,7 @@ func TestEmbeddedDaemonMaintainsProxyDestination(t *testing.T) {
 
 func TestEmbeddedDaemonWithoutProxyKeepsZeroDestinations(t *testing.T) {
 	d, err := New(embeddedDaemonConfig(t, false), Options{
-		Embedded: true, Transport: &idleNodeTransport{}, SocketRuntime: nodeSockets{}, Listener: ListenerFunc(ephemeralListener),
+		Embedded: true, Transport: &idleNodeTransport{}, SocketRuntime: &nodeSockets{}, Listener: ListenerFunc(ephemeralListener),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -347,7 +398,7 @@ func TestDaemonDoesNotDuplicatePersistentProxyDestination(t *testing.T) {
 	cfg.HTTPProxy.Enabled = true
 	cfg.HTTPProxy.Address = state.ConfigurationEndpoint{Host: "127.0.0.1"}
 	d, err := New(cfg, Options{
-		Transport: &idleNodeTransport{}, SocketRuntime: nodeSockets{}, Listener: ListenerFunc(ephemeralListener),
+		Transport: &idleNodeTransport{}, SocketRuntime: &nodeSockets{}, Listener: ListenerFunc(ephemeralListener),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -390,7 +441,7 @@ func nodeTestConfig(t *testing.T) state.ConfigurationOperating {
 
 func TestTaintedCopyAllowsConcurrentInstancesWithoutLockConflict(t *testing.T) {
 	cfg := nodeTestConfig(t)
-	primary, err := New(cfg, Options{SocketRuntime: nodeSockets{}})
+	primary, err := New(cfg, Options{SocketRuntime: &nodeSockets{}})
 	if err != nil {
 		t.Fatalf("primary New error = %v", err)
 	}
@@ -400,7 +451,7 @@ func TestTaintedCopyAllowsConcurrentInstancesWithoutLockConflict(t *testing.T) {
 	}()
 
 	// Second instance without tainted copy must fail due to locked state directory
-	_, err = New(cfg, Options{SocketRuntime: nodeSockets{}})
+	_, err = New(cfg, Options{SocketRuntime: &nodeSockets{}})
 	if err == nil {
 		t.Fatal("expected second instance without tainted copy to fail with lock conflict, got nil")
 	}
@@ -408,7 +459,7 @@ func TestTaintedCopyAllowsConcurrentInstancesWithoutLockConflict(t *testing.T) {
 	// Second instance with TaintedCopy = true must succeed
 	taintedCfg := cfg
 	taintedCfg.State.TaintedCopy = true
-	secondary, err := New(taintedCfg, Options{SocketRuntime: nodeSockets{}, TaintedCopy: true})
+	secondary, err := New(taintedCfg, Options{SocketRuntime: &nodeSockets{}, TaintedCopy: true})
 	if err != nil {
 		t.Fatalf("secondary New with TaintedCopy error = %v", err)
 	}
@@ -441,7 +492,7 @@ func TestTaintedCopyCustomTempDir(t *testing.T) {
 	cfg.TempDir = customTemp
 	cfg.State.TaintedCopy = true
 
-	d, err := New(cfg, Options{SocketRuntime: nodeSockets{}, TaintedCopy: true})
+	d, err := New(cfg, Options{SocketRuntime: &nodeSockets{}, TaintedCopy: true})
 	if err != nil {
 		t.Fatalf("New error = %v", err)
 	}
@@ -461,99 +512,100 @@ func TestTaintedCopyCustomTempDir(t *testing.T) {
 
 func TestTaintedCopyOpportunisticMasterPromotion(t *testing.T) {
 	cfg := nodeTestConfig(t)
+	cfg.NTCP2.Enabled = false
 
-	// 1. Start primary daemon holding the master lock
-	primary, err := New(cfg, Options{SocketRuntime: nodeSockets{}})
-	if err != nil {
-		t.Fatalf("primary New error = %v", err)
-	}
-
-	// 2. Start secondary daemon with TaintedCopy = true and short LockRetryInterval
-	taintedCfg := cfg
-	taintedCfg.State.TaintedCopy = true
-	taintedCfg.State.PromoteToMaster = true
-	taintedCfg.State.LockRetryInterval = 50 * time.Millisecond
-
-	secondary, err := New(taintedCfg, Options{
-		SocketRuntime:     nodeSockets{},
-		TaintedCopy:       true,
-		LockRetryInterval: 50 * time.Millisecond,
-	})
-	if err != nil {
-		_ = primary.Close()
-		t.Fatalf("secondary New error = %v", err)
-	}
-	defer func() {
-		_ = secondary.Close()
-		_ = secondary.Wait()
-	}()
-
-	if err := secondary.Start(context.Background()); err != nil {
-		_ = primary.Close()
-		t.Fatalf("secondary Start error = %v", err)
-	}
-
-	taintedDir := secondary.TaintedDir()
-	if taintedDir == "" {
-		t.Fatal("expected secondary to have non-empty TaintedDir")
-	}
-	if secondary.IsPromoted() {
-		t.Fatal("secondary should not be promoted while primary is alive")
-	}
-
-	// 3. Stop primary daemon (simulating old container shutdown in rolling update)
-	if err := primary.Close(); err != nil {
-		t.Fatalf("primary Close error = %v", err)
-	}
-	_ = primary.Wait()
-
-	// 4. Secondary's background retry loop should detect primary's exit and promote itself to master!
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-	timeout := time.After(3 * time.Second)
-	for !secondary.IsPromoted() {
-		select {
-		case <-ticker.C:
-		case <-timeout:
-			t.Fatal("secondary failed to promote to master within deadline")
+	synctest.Test(t, func(t *testing.T) {
+		// 1. Start primary daemon holding the master lock
+		primary, err := New(cfg, Options{Transport: &idleNodeTransport{}})
+		if err != nil {
+			t.Fatalf("primary New error = %v", err)
 		}
-	}
 
-	if secondary.TaintedDir() != "" {
-		t.Fatalf("expected TaintedDir to be empty after promotion, got %s", secondary.TaintedDir())
-	}
+		// 2. Start secondary daemon with TaintedCopy = true and LockRetryInterval
+		taintedCfg := cfg
+		taintedCfg.State.TaintedCopy = true
+		taintedCfg.State.PromoteToMaster = true
+		taintedCfg.State.LockRetryInterval = 500 * time.Millisecond
 
-	if _, err := os.Stat(taintedDir); !os.IsNotExist(err) {
-		t.Fatalf("expected tainted dir %s to be deleted after promotion, err = %v", taintedDir, err)
-	}
+		secondary, err := New(taintedCfg, Options{
+			Transport:         &idleNodeTransport{},
+			TaintedCopy:       true,
+			LockRetryInterval: 500 * time.Millisecond,
+		})
+		if err != nil {
+			_ = primary.Close()
+			t.Fatalf("secondary New error = %v", err)
+		}
+		defer func() {
+			_ = secondary.Close()
+			_ = secondary.Wait()
+			synctest.Wait()
+		}()
 
-	// 5. Verify that secondary now holds the master lock
-	third, err := New(cfg, Options{SocketRuntime: nodeSockets{}})
-	if third != nil {
-		_ = third.Close()
-		t.Fatal("third instance should have failed to lock master")
-	}
-	if err == nil {
-		t.Fatal("third instance should have failed with lock error")
-	}
+		if err := secondary.Start(context.Background()); err != nil {
+			_ = primary.Close()
+			t.Fatalf("secondary Start error = %v", err)
+		}
 
-	// 6. Stop secondary daemon cleanly
-	if err := secondary.Close(); err != nil {
-		t.Fatalf("secondary Close error = %v", err)
-	}
-	_ = secondary.Wait()
+		taintedDir := secondary.TaintedDir()
+		if taintedDir == "" {
+			t.Fatal("expected secondary to have non-empty TaintedDir")
+		}
+		if secondary.IsPromoted() {
+			t.Fatal("secondary should not be promoted while primary is alive")
+		}
 
-	// 7. After secondary stops, master lock is released so a fresh daemon can open master
-	fourth, err := New(cfg, Options{SocketRuntime: nodeSockets{}})
-	if err != nil {
-		t.Fatalf("fourth instance failed to open master state: %v", err)
-	}
-	defer func() {
-		_ = fourth.Close()
-		_ = fourth.Wait()
-	}()
+		// 3. Stop primary daemon (simulating old container shutdown in rolling update)
+		if err := primary.Close(); err != nil {
+			t.Fatalf("primary Close error = %v", err)
+		}
+		_ = primary.Wait()
 
-	if fourth.Hash() != secondary.Hash() {
-		t.Fatalf("fourth router hash %x != promoted router hash %x", fourth.Hash(), secondary.Hash())
-	}
+		// 4. Advance virtual time so secondary's background retry loop detects primary's exit and promotes itself to master.
+		timer := time.NewTimer(500 * time.Millisecond)
+		defer timer.Stop()
+		<-timer.C
+		synctest.Wait()
+		if !secondary.IsPromoted() {
+			t.Fatal("secondary failed to promote to master within retry interval")
+		}
+
+		if secondary.TaintedDir() != "" {
+			t.Fatalf("expected TaintedDir to be empty after promotion, got %s", secondary.TaintedDir())
+		}
+
+		if _, err := os.Stat(taintedDir); !os.IsNotExist(err) {
+			t.Fatalf("expected tainted dir %s to be deleted after promotion, err = %v", taintedDir, err)
+		}
+
+		// 5. Verify that secondary now holds the master lock
+		third, err := New(cfg, Options{Transport: &idleNodeTransport{}})
+		if third != nil {
+			_ = third.Close()
+			t.Fatal("third instance should have failed to lock master")
+		}
+		if err == nil {
+			t.Fatal("third instance should have failed with lock error")
+		}
+
+		// 6. Stop secondary daemon cleanly
+		if err := secondary.Close(); err != nil {
+			t.Fatalf("secondary Close error = %v", err)
+		}
+		_ = secondary.Wait()
+
+		// 7. After secondary stops, master lock is released so a fresh daemon can open master
+		fourth, err := New(cfg, Options{Transport: &idleNodeTransport{}})
+		if err != nil {
+			t.Fatalf("fourth instance failed to open master state: %v", err)
+		}
+		defer func() {
+			_ = fourth.Close()
+			_ = fourth.Wait()
+		}()
+
+		if fourth.Hash() != secondary.Hash() {
+			t.Fatalf("fourth router hash %x != promoted router hash %x", fourth.Hash(), secondary.Hash())
+		}
+	})
 }

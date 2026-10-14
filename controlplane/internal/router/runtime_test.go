@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	controlplanenetdb "gosuda.org/ivnp/controlplane/internal/netdb"
@@ -42,21 +45,56 @@ func (l *eventLog) index(event string) int {
 	return -1
 }
 
-type fakeListener struct{ log *eventLog }
+type fakeListener struct {
+	log    *eventLog
+	closed atomic.Bool
+}
 
 func (l *fakeListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
-func (l *fakeListener) Close() error              { l.log.add("listener-close"); return nil }
-func (l *fakeListener) Addr() net.Addr            { return fakeAddr("ntcp2") }
+func (l *fakeListener) Close() error {
+	l.closed.Store(true)
+	if l.log != nil {
+		l.log.add("listener-close")
+	}
+	return nil
+}
+func (l *fakeListener) Addr() net.Addr { return fakeAddr("ntcp2") }
 
-type fakePacketConn struct{ log *eventLog }
+type fakePacketConn struct {
+	log    *eventLog
+	closed atomic.Bool
+}
+
+var _ dataplane.RouterUDPSocket = (*fakePacketConn)(nil)
 
 func (p *fakePacketConn) ReadFrom([]byte) (int, net.Addr, error)    { return 0, nil, net.ErrClosed }
 func (p *fakePacketConn) WriteTo(b []byte, _ net.Addr) (int, error) { return len(b), nil }
-func (p *fakePacketConn) Close() error                              { p.log.add("packet-close"); return nil }
-func (p *fakePacketConn) LocalAddr() net.Addr                       { return fakeAddr("ssu2") }
-func (p *fakePacketConn) SetDeadline(time.Time) error               { return nil }
-func (p *fakePacketConn) SetReadDeadline(time.Time) error           { return nil }
-func (p *fakePacketConn) SetWriteDeadline(time.Time) error          { return nil }
+func (p *fakePacketConn) ReadFromUDP([]byte) (int, *net.UDPAddr, error) {
+	return 0, nil, net.ErrClosed
+}
+func (p *fakePacketConn) WriteToUDP(b []byte, _ *net.UDPAddr) (int, error) {
+	return len(b), nil
+}
+func (p *fakePacketConn) ReadFromUDPAddrPort([]byte) (int, netip.AddrPort, error) {
+	return 0, netip.AddrPort{}, net.ErrClosed
+}
+func (p *fakePacketConn) WriteToUDPAddrPort(b []byte, _ netip.AddrPort) (int, error) {
+	return len(b), nil
+}
+func (p *fakePacketConn) ReadMsgUDPAddrPort(_, _ []byte) (int, int, int, netip.AddrPort, error) {
+	return 0, 0, 0, netip.AddrPort{}, net.ErrClosed
+}
+func (p *fakePacketConn) Close() error {
+	p.closed.Store(true)
+	if p.log != nil {
+		p.log.add("packet-close")
+	}
+	return nil
+}
+func (p *fakePacketConn) LocalAddr() net.Addr              { return fakeAddr("ssu2") }
+func (p *fakePacketConn) SetDeadline(time.Time) error      { return nil }
+func (p *fakePacketConn) SetReadDeadline(time.Time) error  { return nil }
+func (p *fakePacketConn) SetWriteDeadline(time.Time) error { return nil }
 
 type fakeAddr string
 
@@ -80,7 +118,7 @@ func (s *fakeSockets) ListenUDP(context.Context, dataplane.RouterEndpoint) (data
 	if s.packetErr != nil {
 		return nil, s.packetErr
 	}
-	return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	return &fakePacketConn{log: s.log}, nil
 }
 
 type fakeLocalInfo struct{ log *eventLog }
@@ -104,12 +142,14 @@ func (a *fakeAddresses) Addresses(context.Context) ([]PublishedAddress, error) {
 }
 
 type fakeTransport struct {
-	log       *eventLog
-	wait      chan struct{}
-	closeOnce sync.Once
-	waitErr   error
-	startErr  error
-	bindings  dataplane.RouterTransportBindings
+	log         *eventLog
+	wait        chan struct{}
+	waitRelease <-chan struct{}
+	onClose     func()
+	closeOnce   sync.Once
+	waitErr     error
+	startErr    error
+	bindings    dataplane.RouterTransportBindings
 }
 
 func newFakeTransport(log *eventLog) *fakeTransport {
@@ -123,6 +163,9 @@ func (t *fakeTransport) Start(_ context.Context, bindings dataplane.RouterTransp
 }
 func (t *fakeTransport) Close() error {
 	t.log.add("transport-close")
+	if t.onClose != nil {
+		t.onClose()
+	}
 	t.closeOnce.Do(func() { close(t.wait) })
 	return nil
 }
@@ -132,6 +175,9 @@ func (t *fakeTransport) complete(err error) {
 }
 func (t *fakeTransport) Wait() error {
 	<-t.wait
+	if t.waitRelease != nil {
+		<-t.waitRelease
+	}
 	t.log.add("transport-wait")
 	return t.waitErr
 }
@@ -315,31 +361,53 @@ func TestRouterStreamForwardingLifecycle(t *testing.T) {
 }
 
 func TestRouterClosesSocketsBeforeTransportAndWaits(t *testing.T) {
-	log := new(eventLog)
-	transport := newFakeTransport(log)
-	router := newRuntimeForTest(t, &fakeSockets{log: log}, transport, log)
-	if err := router.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !router.Running() || transport.bindings.NTCP2 == nil || transport.bindings.SSU2 == nil {
-		t.Fatal("router did not publish running transport bindings")
-	}
-	if err := router.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if state := router.Status().State; state != StateStopped {
-		t.Fatalf("state after Close = %v", state)
-	}
-	if err := router.Close(); err != nil {
-		t.Fatalf("second Close = %v", err)
-	}
-	listenerClose, transportClose := log.index("listener-close"), log.index("transport-close")
-	if listenerClose < 0 || transportClose < 0 || listenerClose > transportClose {
-		t.Fatalf("close ordering = %#v", log.events)
-	}
-	if log.index("addresses") > log.index("transport-start") || log.index("publish") > log.index("transport-start") {
-		t.Fatalf("startup ordering = %#v", log.events)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		log := new(eventLog)
+		transportClosed := make(chan bool, 1)
+		releaseWait := make(chan struct{})
+		transport := newFakeTransport(log)
+		transport.waitRelease = releaseWait
+		transport.onClose = func() {
+			listener, _ := transport.bindings.NTCP2.(*fakeListener)
+			transportClosed <- listener != nil && listener.closed.Load()
+		}
+		router := newRuntimeForTest(t, &fakeSockets{log: log}, transport, log)
+		if err := router.Start(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if !router.Running() || transport.bindings.NTCP2 == nil || transport.bindings.SSU2 == nil {
+			t.Fatal("router did not publish running transport bindings")
+		}
+
+		closeDone := make(chan error, 1)
+		go func() { closeDone <- router.Close() }()
+		synctest.Wait()
+
+		select {
+		case listenerClosedFirst := <-transportClosed:
+			if !listenerClosedFirst {
+				t.Fatal("transport closed before bound listener socket was closed")
+			}
+		default:
+			t.Fatal("Close did not close transport")
+		}
+		select {
+		case err := <-closeDone:
+			t.Fatalf("Close returned %v before Transport.Wait completed", err)
+		default:
+		}
+
+		close(releaseWait)
+		if err := <-closeDone; err != nil {
+			t.Fatal(err)
+		}
+		if state := router.Status().State; state != StateStopped {
+			t.Fatalf("state after Close = %v", state)
+		}
+		if err := router.Close(); err != nil {
+			t.Fatalf("second Close = %v", err)
+		}
+	})
 }
 
 func TestRouterRollsBackSocketOnStartupFailure(t *testing.T) {

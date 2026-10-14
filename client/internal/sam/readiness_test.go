@@ -252,77 +252,99 @@ func TestLocalReadinessCancelsAndJoinsSlowPreparation(t *testing.T) {
 
 func TestSessionStatusWaitsForReadinessAndTimesOut(t *testing.T) {
 	t.Run("waits", func(t *testing.T) {
-		ready := make(chan struct{})
-		entered := make(chan struct{})
-		loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
-		server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: readinessController{loop: loop, ready: ready, entered: entered}, ReadinessTimeout: time.Second})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = server.Start(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = server.Close(); _ = server.Wait() }()
-		connection, reader := samDial(t, server.Addr().String())
-		defer connection.Close()
-		if _, err = connection.Write([]byte("SESSION CREATE STYLE=STREAM ID=ready DESTINATION=TRANSIENT\n")); err != nil {
-			t.Fatal(err)
-		}
-		<-entered
-		close(ready)
-		line := readSAMLine(t, reader)
-		if !strings.Contains(line, "RESULT=OK DESTINATION=") {
-			t.Fatal(line)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			listener := newSAMPipeListener()
+			ready := make(chan struct{})
+			entered := make(chan struct{})
+			loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
+			server, err := NewServer(ServerConfig{
+				Address: "127.0.0.1:0", Controller: readinessController{loop: loop, ready: ready, entered: entered},
+				ReadinessTimeout: time.Second,
+				Listen:           func(context.Context, string, string) (net.Listener, error) { return listener, nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = server.Start(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = server.Close(); _ = server.Wait() }()
+			connection, reader := listener.dial(t)
+			defer connection.Close()
+			if _, err = connection.Write([]byte("SESSION CREATE STYLE=STREAM ID=ready DESTINATION=TRANSIENT\n")); err != nil {
+				t.Fatal(err)
+			}
+			<-entered
+			close(ready)
+			line := readSAMLine(t, reader)
+			if !strings.Contains(line, "RESULT=OK DESTINATION=") {
+				t.Fatal(line)
+			}
+		})
 	})
 
 	t.Run("timeout", func(t *testing.T) {
-		ready := make(chan struct{})
-		loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
-		server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: readinessController{loop: loop, ready: ready}, ReadinessTimeout: 30 * time.Millisecond})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = server.Start(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = server.Close(); _ = server.Wait() }()
-		connection, reader := samDial(t, server.Addr().String())
-		defer connection.Close()
-		_, _ = connection.Write([]byte("SESSION CREATE STYLE=STREAM ID=timeout DESTINATION=TRANSIENT\n"))
-		line := readSAMLine(t, reader)
-		if line != "SESSION STATUS RESULT=I2P_ERROR MESSAGE=SESSION_NOT_READY" {
-			t.Fatal(line)
-		}
-		loop.mu.Lock()
-		defer loop.mu.Unlock()
-		for _, endpoint := range loop.endpoints {
-			endpoint.mu.Lock()
-			closed := endpoint.closed
-			endpoint.mu.Unlock()
-			if !closed {
-				t.Fatal("timed-out destination remained active")
+		synctest.Test(t, func(t *testing.T) {
+			listener := newSAMPipeListener()
+			ready := make(chan struct{})
+			loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
+			server, err := NewServer(ServerConfig{
+				Address: "127.0.0.1:0", Controller: readinessController{loop: loop, ready: ready},
+				ReadinessTimeout: time.Second,
+				Listen:           func(context.Context, string, string) (net.Listener, error) { return listener, nil },
+			})
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
+			if err = server.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = server.Close(); _ = server.Wait() }()
+			connection, reader := listener.dial(t)
+			defer connection.Close()
+			_, _ = connection.Write([]byte("SESSION CREATE STYLE=STREAM ID=timeout DESTINATION=TRANSIENT\n"))
+			line := readSAMLine(t, reader)
+			if line != "SESSION STATUS RESULT=I2P_ERROR MESSAGE=SESSION_NOT_READY" {
+				t.Fatal(line)
+			}
+			loop.mu.Lock()
+			defer loop.mu.Unlock()
+			for _, endpoint := range loop.endpoints {
+				endpoint.mu.Lock()
+				closed := endpoint.closed
+				endpoint.mu.Unlock()
+				if !closed {
+					t.Fatal("timed-out destination remained active")
+				}
+			}
+		})
 	})
 
 	t.Run("disconnect", func(t *testing.T) {
-		ready := make(chan struct{})
-		loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
-		server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: readinessController{loop: loop, ready: ready}, ReadinessTimeout: time.Minute})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = server.Start(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = server.Close(); _ = server.Wait() }()
-		connection, _ := samDial(t, server.Addr().String())
-		if _, err = connection.Write([]byte("SESSION CREATE STYLE=STREAM ID=disconnect DESTINATION=TRANSIENT\n")); err != nil {
-			t.Fatal(err)
-		}
-		_ = connection.Close()
-		waitForSAMCondition(t, time.Second, func() bool {
+		synctest.Test(t, func(t *testing.T) {
+			listener := newSAMPipeListener()
+			ready := make(chan struct{})
+			entered := make(chan struct{})
+			loop := &loopController{endpoints: make(map[foundation.Hash]*loopEndpoint)}
+			server, err := NewServer(ServerConfig{
+				Address: "127.0.0.1:0", Controller: readinessController{loop: loop, ready: ready, entered: entered},
+				ReadinessTimeout: time.Minute,
+				Listen:           func(context.Context, string, string) (net.Listener, error) { return listener, nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = server.Start(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = server.Close(); _ = server.Wait() }()
+			connection, _ := listener.dial(t)
+			go func() {
+				_, _ = connection.Write([]byte("SESSION CREATE STYLE=STREAM ID=disconnect DESTINATION=TRANSIENT\n"))
+			}()
+			<-entered
+			_ = connection.Close()
+			synctest.Wait()
 			loop.mu.Lock()
 			count, allClosed := len(loop.endpoints), true
 			for _, endpoint := range loop.endpoints {
@@ -331,7 +353,9 @@ func TestSessionStatusWaitsForReadinessAndTimesOut(t *testing.T) {
 				endpoint.mu.Unlock()
 			}
 			loop.mu.Unlock()
-			return count != 0 && allClosed
-		}, "disconnected readiness destination cleanup")
+			if count == 0 || !allClosed {
+				t.Fatalf("disconnected readiness destination cleanup: count=%d allClosed=%v", count, allClosed)
+			}
+		})
 	})
 }

@@ -99,6 +99,7 @@ type (
 	RouterMessageIDSource            = router.MessageIDSource
 	RouterNTCP2Manager               = router.NTCP2Manager
 	RouterNTCP2ManagerConfig         = router.NTCP2ManagerConfig
+	RouterNTCP2PeerInspector         = router.NTCP2PeerInspector
 	RouterNativeSocketRuntime        = router.NativeSocketRuntime
 	RouterPeerAdmission              = router.PeerAdmission
 	RouterPeerAdmissionFunc          = router.PeerAdmissionFunc
@@ -121,7 +122,9 @@ type (
 	RouterSSU2Manager             = router.SSU2Manager
 	RouterSSU2ManagerConfig       = router.SSU2ManagerConfig
 	RouterSSU2PeerCapabilities    = router.SSU2PeerCapabilities
+	RouterSSU2PeerInspector       = router.SSU2PeerInspector
 	RouterService                 = router.Service
+	RouterSessionLivenessRegistry = router.SessionLivenessRegistry
 	RouterSessionProvider         = router.SessionProvider
 	// RouterSessionSender borrows one session and consumes Payload before returning.
 	// A write error may follow partial delivery; do not blindly replay the message.

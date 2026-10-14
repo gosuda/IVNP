@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"gosuda.org/ivnp/node"
@@ -113,45 +114,41 @@ func TestWebUIAccessPolicy(t *testing.T) {
 
 func TestReseedActionOutlivesRequest(t *testing.T) {
 	server := newTestWebUIServer(t, WebUIConfig{ListenAddress: "127.0.0.1:0"})
-	reseedDone := make(chan struct{})
-	reseedContext := make(chan context.Context, 1)
-	server.triggerReseed = func(ctx context.Context) (<-chan struct{}, error) {
-		reseedContext <- ctx
-		return reseedDone, nil
-	}
-	parent, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	if err := server.Start(parent); err != nil {
-		t.Fatalf("start WebUI server: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := server.Close(); err != nil {
-			t.Errorf("close WebUI server: %v", err)
+	synctest.Test(t, func(t *testing.T) {
+		reseedDone := make(chan struct{})
+		reseedContext := make(chan context.Context, 1)
+		server.triggerReseed = func(ctx context.Context) (<-chan struct{}, error) {
+			reseedContext <- ctx
+			return reseedDone, nil
+		}
+		parent, cancel := context.WithCancel(context.Background())
+		server.ctx, server.cancel = parent, cancel
+		defer func() {
+			cancel()
+			server.wg.Wait()
+		}()
+
+		requestCtx, requestCancel := context.WithCancel(context.Background())
+		request := httptest.NewRequestWithContext(requestCtx, http.MethodPost, "http://localhost:7070/api/actions/reseed", nil)
+		request.RemoteAddr = "127.0.0.1:42000"
+		request.Host = "localhost:7070"
+		record := httptest.NewRecorder()
+		server.wrapMiddleware(http.HandlerFunc(server.handleActionReseed)).ServeHTTP(record, request)
+		requestCancel()
+		if record.Code != http.StatusAccepted {
+			t.Fatalf("POST reseed status = %d", record.Code)
+		}
+		actionContext := <-reseedContext
+		synctest.Wait()
+		if err := actionContext.Err(); err != nil {
+			t.Fatalf("reseed context canceled when HTTP request completed: %v", err)
+		}
+		close(reseedDone)
+		synctest.Wait()
+		if err := actionContext.Err(); err == nil {
+			t.Fatal("reseed context not released after work completed")
 		}
 	})
-
-	response, err := http.Post("http://"+server.listener.Addr().String()+"/api/actions/reseed", "application/json", nil)
-	if err != nil {
-		t.Fatalf("POST reseed: %v", err)
-	}
-	if err = response.Body.Close(); err != nil {
-		t.Fatalf("close reseed response: %v", err)
-	}
-	if response.StatusCode != http.StatusAccepted {
-		t.Fatalf("POST reseed status = %d", response.StatusCode)
-	}
-	actionContext := <-reseedContext
-	select {
-	case <-actionContext.Done():
-		t.Fatal("reseed context canceled when HTTP request completed")
-	case <-time.After(50 * time.Millisecond):
-	}
-	close(reseedDone)
-	select {
-	case <-actionContext.Done():
-	case <-time.After(time.Second):
-		t.Fatal("reseed context not released after work completed")
-	}
 }
 
 func TestWebUILoopbackMiddlewareRejectsRemoteHostAndOrigin(t *testing.T) {

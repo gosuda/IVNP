@@ -86,13 +86,23 @@ func TestEmbeddedServerLiveUDPIngressForwardingAndBinding(t *testing.T) {
 		_, _ = wrongSource.Write([]byte("3.3 udp " + destination + "\nbad"))
 		_ = wrongSource.Close()
 	}
-	_ = receiver.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-	if n, _, err = receiver.ReadFromUDP(buffer); err == nil {
-		t.Fatalf("malformed UDP packet forwarded: %q", buffer[:n])
+	// Send a valid follow-up datagram on the same UDP socket; because the single
+	// UDP read loop processes datagrams in arrival order, receiving this valid
+	// datagram guarantees the preceding malformed packets were already rejected.
+	if _, err = sender.Write([]byte("3.3 udp " + destination + " FROM_PORT=5 TO_PORT=0\nflush")); err != nil {
+		t.Fatal(err)
 	}
-	waitForSAMCondition(t, time.Second, func() bool {
-		return metrics.Snapshot().SAM.UDPInvalid >= 3
-	}, "SAM UDP invalid accounting")
+	_ = receiver.SetReadDeadline(time.Now().Add(time.Second))
+	n, _, err = receiver.ReadFromUDP(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(string(buffer[:n]), "\n\nflush") {
+		t.Fatalf("unexpected datagram before flush = %q", buffer[:n])
+	}
+	if got := metrics.Snapshot().SAM.UDPInvalid; got < 3 {
+		t.Fatalf("SAM UDP invalid accounting = %d, want >= 3", got)
+	}
 }
 
 func TestEmbeddedServerPrimaryRawChildUDPHeader(t *testing.T) {

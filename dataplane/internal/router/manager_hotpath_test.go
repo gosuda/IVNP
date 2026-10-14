@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	dataplanentcp2 "gosuda.org/ivnp/dataplane/internal/transport/ntcp2"
@@ -37,79 +38,58 @@ func TestNTCP2ReplayAdmissionUsesBoundedRing(t *testing.T) {
 }
 
 func TestSSU2ManagerDataFramingUsesReceiveAndSessionBuffers(t *testing.T) {
-	message := managerHotPathMessage()
-	var payloadStorage [dataplanessu2.MaxIPv4PacketLen]byte
-	payload, err := marshalSSU2I2NPTo(payloadStorage[:], message)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var key [32]byte
-	key[0] = 1
-	send, err := dataplanessu2.NewDataCipher(key[:], key[:], key[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	receive, err := dataplanessu2.NewDataCipher(key[:], key[:], key[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	var delivered foundation.I2NPMessage
-	manager := &SSU2Manager{networkID: 2, bindings: TransportBindings{
-		Clock: transportTestClock{now: time.Unix(1, 0)},
-		HandleI2NPContext: func(_ context.Context, _ foundation.Hash, message foundation.I2NPMessage, _ uint64, _ bool) error {
-			delivered = message
-			return nil
-		},
-	}}
-	session := &ssu2TransportSession{receiveID: 7, receive: receive}
-	packetBuffer := make([]byte, dataplanessu2.MaxIPv4PacketLen)
-	seal := func() []byte {
-		packet, err := send.SealDataTo(packetBuffer, dataplanessu2.ShortHeader{DestinationID: 7, PacketNumber: 1, Type: dataplanessu2.Data}, payload)
-		if err != nil {
+	synctest.Test(t, func(t *testing.T) {
+		net_ := newSSU2SimNetwork(t)
+		aliceConn := newSSU2SimConn(t, net_, "alice")
+		bobConn := newSSU2SimConn(t, net_, "bob")
+		alice, aliceStatic, aliceIntro := newSSU2TestLocal(t, aliceConn.LocalAddr().String())
+		bob, bobStatic, bobIntro := newSSU2TestLocal(t, bobConn.LocalAddr().String())
+		aliceDB := newTransportTestPeers()
+		bobDB := newTransportTestPeers()
+		now := uint64(time.Now().UnixMilli())
+		if err := aliceDB.AdmitRouterInfo(bob.Snapshot(), now); err != nil {
 			t.Fatal(err)
 		}
-		return packet
-	}
-	manager.handleData(session, seal())
-	wantHeader := message.Header
-	expiration, ok := foundation.I2NPEncodeTransportExpiration(message.Header.Expiration)
-	if !ok {
-		t.Fatal("test expiration is not encodable")
-	}
-	wantHeader.Expiration = foundation.I2NPDecodeTransportExpiration(expiration)
-	if delivered.Header != wantHeader || string(delivered.Payload) != string(message.Payload) {
-		t.Fatalf("SSU2 data framing delivered %#v, want header %#v payload %x", delivered, wantHeader, message.Payload)
-	}
-
-	output, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer output.Close()
-	manager.started = true
-	manager.ctx = context.Background()
-	manager.conn = output
-	manager.sessionsByID = map[uint64]*ssu2TransportSession{7: session}
-	manager.sessionsByPeer = map[foundation.Hash]*ssu2TransportSession{foundation.Hash{}: session}
-	session.peer = foundation.Hash{}
-	session.remote = output.LocalAddr()
-	session.sendID = 9
-	session.send = send
-	session.nextPacket = 1
-	session.sent = make(map[uint32]*ssu2SentPacket)
-	if err := manager.sendSessionData(session, payload, false); err != nil {
-		t.Fatal(err)
-	}
-	output.SetReadDeadline(time.Now().Add(time.Second))
-	wire := make([]byte, dataplanessu2.MaxIPv4PacketLen)
-	n, _, err := output.ReadFromUDP(wire)
-	if err != nil {
-		t.Fatal(err)
-	}
-	opened := make([]byte, len(payload))
-	if _, plain, err := receive.OpenDataTo(opened, wire[:n]); err != nil || string(plain) != string(payload) {
-		t.Fatalf("SSU2 data send frame = %x, %v", plain, err)
-	}
+		if err := bobDB.AdmitRouterInfo(alice.Snapshot(), now); err != nil {
+			t.Fatal(err)
+		}
+		aliceManager := newSSU2LiveManager(t, aliceDB, aliceStatic, aliceIntro, time.Minute, time.Minute)
+		bobManager := newSSU2LiveManager(t, bobDB, bobStatic, bobIntro, time.Minute, time.Minute)
+		ctx, cancel := context.WithCancel(t.Context())
+		message := managerHotPathMessage()
+		var delivered foundation.I2NPMessage
+		haveDelivered := make(chan struct{}, 1)
+		startSSU2SimManager(t, ctx, aliceManager, aliceConn, alice, nil)
+		startSSU2SimManager(t, ctx, bobManager, bobConn, bob, func(incoming foundation.I2NPMessage, _ uint64, _ bool) error {
+			delivered = incoming
+			select {
+			case haveDelivered <- struct{}{}:
+			default:
+			}
+			return nil
+		})
+		t.Cleanup(func() {
+			cancel()
+			closeSSU2LiveManager(t, aliceManager)
+			closeSSU2LiveManager(t, bobManager)
+		})
+		if err := aliceManager.EnsureSession(ctx, bob.Hash()); err != nil {
+			t.Fatal(err)
+		}
+		if err := aliceManager.Send(ctx, bob.Hash(), message); err != nil {
+			t.Fatal(err)
+		}
+		<-haveDelivered
+		wantHeader := message.Header
+		expiration, ok := foundation.I2NPEncodeTransportExpiration(message.Header.Expiration)
+		if !ok {
+			t.Fatal("test expiration is not encodable")
+		}
+		wantHeader.Expiration = foundation.I2NPDecodeTransportExpiration(expiration)
+		if delivered.Header != wantHeader || string(delivered.Payload) != string(message.Payload) {
+			t.Fatalf("SSU2 data framing delivered %#v, want header %#v payload %x", delivered, wantHeader, message.Payload)
+		}
+	})
 }
 
 func TestNTCP2ManagerWriteFramesI2NP(t *testing.T) {

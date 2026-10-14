@@ -3,16 +3,24 @@ package addressbook
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 func newDestinationString(t *testing.T) string {
 	t.Helper()
@@ -40,41 +48,62 @@ func TestLocalPrecedenceNormalizationAndSubscriptionRefresh(t *testing.T) {
 	if err := os.WriteFile(hostsPath, []byte("service.i2p="+remoteDestination+"\nlocal.i2p="+userDestination+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	var requests atomic.Int32
-	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requests.Add(1)
-		if request.Header.Get("If-None-Match") == "book-v1" {
-			writer.WriteHeader(http.StatusNotModified)
-			return
+	synctest.Test(t, func(t *testing.T) {
+		var requests atomic.Int32
+		client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requests.Add(1)
+			if request.Header.Get("If-None-Match") == "book-v1" {
+				return &http.Response{
+					StatusCode: http.StatusNotModified,
+					Header:     make(http.Header),
+					Body:       http.NoBody,
+					Request:    request,
+				}, nil
+			}
+			header := make(http.Header)
+			header.Set("ETag", "book-v1")
+			body := fmt.Sprintf("service.i2p=%s\nremote.i2p=%s\n", remoteDestination, remoteDestination)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Request:    request,
+			}, nil
+		})}
+		service, err := NewService(Config{
+			PrivateHostsPath: privatePath, UserHostsPath: userPath, HostsPath: hostsPath, StatePath: statePath,
+			Subscriptions: []string{"https://subscriptions.example/hosts.txt"}, HTTPClient: client,
+			RefreshInterval: time.Minute, RetryInterval: time.Minute, RequestTimeout: time.Second,
+			MaxEntries: 100, MaxFileBytes: 1 << 20, MaxResponseBytes: 1 << 20, MaxRedirects: 2,
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
-		writer.Header().Set("ETag", "book-v1")
-		_, _ = fmt.Fprintf(writer, "service.i2p=%s\nremote.i2p=%s\n", remoteDestination, remoteDestination)
-	}))
-	defer server.Close()
-	service, err := NewService(Config{PrivateHostsPath: privatePath, UserHostsPath: userPath, HostsPath: hostsPath, StatePath: statePath, Subscriptions: []string{server.URL}, HTTPClient: server.Client(), RefreshInterval: 20 * time.Millisecond, RetryInterval: 20 * time.Millisecond, RequestTimeout: time.Second, MaxEntries: 100, MaxFileBytes: 1 << 20, MaxResponseBytes: 1 << 20, MaxRedirects: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if value, err := service.ResolveDestination(context.Background(), "SERVICE.I2P.ALT"); err != nil || value != privateDestination {
-		t.Fatalf("private precedence = %q, %v", value, err)
-	}
-	if err = service.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = service.Close(); _ = service.Wait() }()
-	waitForAddressbookCondition(t, 2*time.Second, func() bool {
-		value, lookupErr := service.ResolveDestination(context.Background(), "remote.i2p")
-		return lookupErr == nil && value == remoteDestination
-	}, "remote subscription refresh")
-	if value, err := service.ResolveDestination(context.Background(), "service.i2p"); err != nil || value != privateDestination {
-		t.Fatalf("remote overwrote local = %q, %v", value, err)
-	}
-	waitForAddressbookCondition(t, time.Second, func() bool {
-		return requests.Load() >= 2
-	}, "conditional refresh")
-	if _, err = os.Stat(statePath); err != nil {
-		t.Fatalf("atomic state missing: %v", err)
-	}
+		if value, err := service.ResolveDestination(context.Background(), "SERVICE.I2P.ALT"); err != nil || value != privateDestination {
+			t.Fatalf("private precedence = %q, %v", value, err)
+		}
+		if err = service.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = service.Close(); _ = service.Wait() }()
+		synctest.Wait()
+		if value, lookupErr := service.ResolveDestination(context.Background(), "remote.i2p"); lookupErr != nil || value != remoteDestination {
+			t.Fatalf("remote subscription refresh = %q, %v", value, lookupErr)
+		}
+		if value, err := service.ResolveDestination(context.Background(), "service.i2p"); err != nil || value != privateDestination {
+			t.Fatalf("remote overwrote local = %q, %v", value, err)
+		}
+		timer := time.NewTimer(time.Minute)
+		defer timer.Stop()
+		<-timer.C
+		synctest.Wait()
+		if got := requests.Load(); got < 2 {
+			t.Fatalf("conditional refresh requests = %d, want >= 2", got)
+		}
+		if _, err = os.Stat(statePath); err != nil {
+			t.Fatalf("atomic state missing: %v", err)
+		}
+	})
 }
 
 func TestSubscriptionTransportPolicy(t *testing.T) {
@@ -86,24 +115,6 @@ func TestSubscriptionTransportPolicy(t *testing.T) {
 	for _, raw := range []string{"https://example.com/hosts.txt", "http://reg.i2p/export/hosts.txt", "http://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxyz234567.b32.i2p/hosts.txt", "http://127.0.0.1/hosts.txt", "http://localhost/hosts.txt"} {
 		if _, err := subscriptionURL(raw); err != nil {
 			t.Fatalf("subscriptionURL(%q) rejected: %v", raw, err)
-		}
-	}
-}
-
-func waitForAddressbookCondition(t *testing.T, timeout time.Duration, condition func() bool, name string) {
-	t.Helper()
-	deadline := time.NewTimer(timeout)
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer deadline.Stop()
-	defer ticker.Stop()
-	for {
-		if condition() {
-			return
-		}
-		select {
-		case <-deadline.C:
-			t.Fatal(name + " did not complete")
-		case <-ticker.C:
 		}
 	}
 }

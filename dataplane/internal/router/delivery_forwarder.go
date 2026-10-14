@@ -3,11 +3,14 @@ package router
 import (
 	"context"
 	"encoding/binary"
+	"time"
 
 	"gosuda.org/ivnp/dataplane/internal/tunnel"
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/packet"
 )
+
+const deliveryForwardSendTimeout = 10 * time.Second
 
 type DeliveryForwarderConfig struct {
 	Local   foundation.Hash
@@ -29,7 +32,9 @@ func (f *DeliveryForwarder) ForwardRouter(target foundation.Hash, message founda
 	if target == (foundation.Hash{}) || target == f.config.Local {
 		return ErrDataPlaneConfig
 	}
-	return f.config.Sender.Send(context.Background(), target, message)
+	ctx, cancel := context.WithTimeout(context.Background(), deliveryForwardSendTimeout)
+	defer cancel()
+	return f.config.Sender.Send(ctx, target, message)
 }
 
 func (f *DeliveryForwarder) ForwardTunnel(target foundation.Hash, tunnelID uint32, message foundation.I2NPMessage) error {
@@ -72,5 +77,7 @@ func (f *DeliveryForwarder) ForwardTunnel(target foundation.Hash, tunnelID uint3
 		Header:  foundation.I2NPHeader{Type: foundation.I2NPTunnelGateway, ID: f.config.NextID(), Expiration: message.Header.Expiration},
 		Payload: payload,
 	}
-	return f.config.Sender.Send(context.Background(), target, gateway)
+	ctx, cancel := context.WithTimeout(context.Background(), deliveryForwardSendTimeout)
+	defer cancel()
+	return f.config.Sender.Send(ctx, target, gateway)
 }
