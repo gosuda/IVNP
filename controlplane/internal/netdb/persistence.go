@@ -73,7 +73,15 @@ func (s *RouterInfoStore) Path() string { return s.path }
 
 // MaxBytes is the largest accepted complete snapshot for this table capacity.
 func (s *RouterInfoStore) MaxBytes() int {
-	return routerSnapshotHeader + s.max*(8+2+foundation.NetworkDatabaseMaxRouterInfoBytes+routerSnapshotDigest)
+	return int(RouterSnapshotMaxBytes(s.database.Routers().BucketCapacity()))
+}
+
+// RouterSnapshotMaxBytes bounds a snapshot before its router database exists.
+func RouterSnapshotMaxBytes(bucketCapacity int) int64 {
+	if bucketCapacity <= 4 {
+		bucketCapacity = DefaultBucketCapacity
+	}
+	return int64(routerSnapshotHeader) + int64(BucketCount)*int64(bucketCapacity)*int64(8+2+foundation.NetworkDatabaseMaxRouterInfoBytes+routerSnapshotDigest)
 }
 
 // Dirty reports whether table state has changed since the last complete save.
