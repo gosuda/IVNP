@@ -122,11 +122,28 @@ func (r *LookupResponder) Enqueue(lookup foundation.I2NPDatabaseLookupMessage) e
 			return err
 		}
 	}
+	totalBytes := len(lookup.Excluded) + len(lookup.ReplyKey) + len(lookup.ReplyTags) + len(lookup.ReplyPublicKey)
+	var backing []byte
+	if totalBytes != 0 {
+		backing = make([]byte, totalBytes)
+	}
+	offset := 0
+	copySlice := func(src []byte) []byte {
+		if len(src) == 0 {
+			return nil
+		}
+		dst := backing[offset : offset+len(src)]
+		copy(dst, src)
+		offset += len(src)
+		return dst
+	}
 	job := lookupJob{lookup: foundation.I2NPDatabaseLookupMessage{
 		Key: lookup.Key, From: lookup.From, Flags: lookup.Flags, ReplyTunnelID: lookup.ReplyTunnelID,
-		Excluded: append([]byte(nil), lookup.Excluded...), ReplyKey: append([]byte(nil), lookup.ReplyKey...),
-		ReplyTags: append([]byte(nil), lookup.ReplyTags...), ReplyTagLen: lookup.ReplyTagLen,
-		ReplyPublicKey: append([]byte(nil), lookup.ReplyPublicKey...),
+		Excluded:       copySlice(lookup.Excluded),
+		ReplyKey:       copySlice(lookup.ReplyKey),
+		ReplyTags:      copySlice(lookup.ReplyTags),
+		ReplyTagLen:    lookup.ReplyTagLen,
+		ReplyPublicKey: copySlice(lookup.ReplyPublicKey),
 	}}
 	r.mu.Lock()
 	if r.closed {
@@ -171,9 +188,11 @@ func clearLookupJob(job *lookupJob) {
 	if job == nil {
 		return
 	}
+	clear(job.lookup.Excluded)
 	clear(job.lookup.ReplyKey)
 	clear(job.lookup.ReplyTags)
 	clear(job.lookup.ReplyPublicKey)
+	job.lookup.Excluded = nil
 	job.lookup.ReplyKey = nil
 	job.lookup.ReplyTags = nil
 	job.lookup.ReplyPublicKey = nil
@@ -255,32 +274,39 @@ func routerInfoCurrentForLookup(info foundation.NetworkDatabaseRouterInfo, now u
 	return info.Published <= now && now-info.Published <= lookupResponderRouterInfoMaxAgeMillis
 }
 
+var searchReplyExcludedPool = sync.Pool{
+	New: func() any {
+		return make(map[foundation.Hash]struct{}, 16)
+	},
+}
+
 func (r *LookupResponder) searchReply(lookup foundation.I2NPDatabaseLookupMessage) []byte {
-	excluded := make(map[foundation.Hash]struct{}, lookup.ExcludedCount())
-	for off := 0; off < len(lookup.Excluded); off += foundation.HashLength {
-		var hash foundation.Hash
-		copy(hash[:], lookup.Excluded[off:off+foundation.HashLength])
-		excluded[hash] = struct{}{}
-	}
-	var refs []RouterRef
-	if LookupType(lookup.LookupType()) == ExplorationLookup {
-		refs = r.database.Routers().ClosestRoutingNonFloodfillsExcludingInto(make([]RouterRef, 16), RoutingKey(lookup.Key, r.now()), excluded)
-	} else {
-		refs = r.database.Routers().ClosestFloodfillsExcludingInto(make([]RouterRef, 16), RoutingKey(lookup.Key, r.now()), excluded)
-	}
-	peers := make([]foundation.Hash, 0, 3)
-	for _, ref := range refs {
-		peers = append(peers, ref.Hash)
-		if len(peers) == 3 {
-			break
+	var excluded map[foundation.Hash]struct{}
+	if len(lookup.Excluded) != 0 {
+		excluded = searchReplyExcludedPool.Get().(map[foundation.Hash]struct{})
+		defer func() {
+			clear(excluded)
+			searchReplyExcludedPool.Put(excluded)
+		}()
+		for off := 0; off < len(lookup.Excluded); off += foundation.HashLength {
+			var hash foundation.Hash
+			copy(hash[:], lookup.Excluded[off:off+foundation.HashLength])
+			excluded[hash] = struct{}{}
 		}
 	}
-	payload := make([]byte, 32+1+len(peers)*foundation.HashLength+32)
+	var refBuf [3]RouterRef
+	var refs []RouterRef
+	if LookupType(lookup.LookupType()) == ExplorationLookup {
+		refs = r.database.Routers().ClosestRoutingNonFloodfillsExcludingInto(refBuf[:0], RoutingKey(lookup.Key, r.now()), excluded)
+	} else {
+		refs = r.database.Routers().ClosestFloodfillsExcludingInto(refBuf[:0], RoutingKey(lookup.Key, r.now()), excluded)
+	}
+	payload := make([]byte, 32+1+len(refs)*foundation.HashLength+32)
 	copy(payload[:32], lookup.Key[:])
-	payload[32] = byte(len(peers))
+	payload[32] = byte(len(refs))
 	off := 33
-	for _, peer := range peers {
-		copy(payload[off:off+foundation.HashLength], peer[:])
+	for _, ref := range refs {
+		copy(payload[off:off+foundation.HashLength], ref.Hash[:])
 		off += foundation.HashLength
 	}
 	copy(payload[off:], r.local[:])

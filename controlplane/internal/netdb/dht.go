@@ -1,23 +1,33 @@
 package netdb
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"errors"
 	"math/bits"
+	"net/netip"
+	"slices"
 	"sync"
 
 	"gosuda.org/ivnp/foundation"
 	"gosuda.org/ivnp/internal/parallelism"
 )
 
-const BucketCount = foundation.HashLength * 8
+const (
+	BucketCount              = foundation.HashLength * 8
+	DefaultBucketSubnetQuota = 2
+)
 
 var ErrInvalidSignature = errors.New("netdb: signature verification failed")
 
+type routingSubnet [8]byte
+
 type routerEntry struct {
-	info      foundation.NetworkDatabaseRouterInfo
-	floodfill bool
-	lastSeen  uint64
+	info        foundation.NetworkDatabaseRouterInfo
+	floodfill   bool
+	lastSeen    uint64
+	subnets     [4]routingSubnet
+	subnetCount uint8
 }
 
 // RouterRef is a borrowed snapshot. Its RouterInfo aliases the bytes supplied
@@ -42,6 +52,7 @@ type Table struct {
 	generation    uint64
 	selectionPool chan *routerSelectionBuffer
 	routerLimit   int
+	subnetQuota   int
 }
 
 func NewTable(local foundation.Hash, bucketCapacity int) *Table {
@@ -52,11 +63,21 @@ func NewTable(local foundation.Hash, bucketCapacity int) *Table {
 	table := &Table{
 		local: local, routers: make(map[foundation.Hash]routerEntry), routing: newKBucketSet(bucketCapacity),
 		selectionPool: make(chan *routerSelectionBuffer, selectionWorkers),
+		subnetQuota:   DefaultBucketSubnetQuota,
 	}
 	for range selectionWorkers {
 		table.selectionPool <- new(routerSelectionBuffer)
 	}
 	return table
+}
+
+// SetBucketSubnetQuota bounds how many routers sharing an IPv4 /16 or IPv6 /48
+// prefix may occupy the same local XOR distance bucket in the routing index. A
+// nonpositive quota disables per-subnet filtering.
+func (t *Table) SetBucketSubnetQuota(quota int) {
+	t.mu.Lock()
+	t.subnetQuota = quota
+	t.mu.Unlock()
 }
 
 // SetRouterLimit bounds retained RouterInfos independently of the routing index.
@@ -232,13 +253,14 @@ func (t *Table) Store(info foundation.NetworkDatabaseRouterInfo, floodfill bool,
 }
 
 // StoreVerified admits a previously verified RouterInfo. As in Java I2P, the
-// DataStore retains it independently even when the RejectTrimmer declines to
-// add its hash to a full terminal KBucket.
+// DataStore retains it independently even when the RejectTrimmer or per-bucket
+// subnet quota declines to add its hash to the KBucketSet routing index.
 func (t *Table) StoreVerified(info foundation.NetworkDatabaseRouterInfo, floodfill bool, seenAt uint64) {
 	hash := info.Hash()
 	if subtle.ConstantTimeCompare(hash[:], t.local[:]) == 1 {
 		return
 	}
+	subnets, subnetCount := routingSubnetsOf(info)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if old, exists := t.routers[hash]; exists {
@@ -249,19 +271,122 @@ func (t *Table) StoreVerified(info foundation.NetworkDatabaseRouterInfo, floodfi
 			return
 		}
 		old.info, old.floodfill = info, floodfill
+		old.subnets, old.subnetCount = subnets, subnetCount
 		if seenAt > old.lastSeen {
 			old.lastSeen = seenAt
 		}
 		t.routers[hash] = old
+		if !t.routingAllowsSubnetsLocked(hash, subnets[:subnetCount]) {
+			t.routing.remove(t.local, hash)
+		}
 		t.generation++
 		return
 	}
 	if t.routerLimit > 0 && len(t.routers) >= t.routerLimit {
 		t.evictOldestLocked()
 	}
-	t.routing.add(t.local, hash, seenAt)
-	t.routers[hash] = routerEntry{info: info, floodfill: floodfill, lastSeen: seenAt}
+	if t.routingAllowsSubnetsLocked(hash, subnets[:subnetCount]) {
+		t.routing.add(t.local, hash, seenAt)
+	}
+	t.routers[hash] = routerEntry{
+		info:        info,
+		floodfill:   floodfill,
+		lastSeen:    seenAt,
+		subnets:     subnets,
+		subnetCount: subnetCount,
+	}
 	t.generation++
+}
+
+func (t *Table) routingAllowsSubnetsLocked(candidate foundation.Hash, subnets []routingSubnet) bool {
+	if t.subnetQuota <= 0 || len(subnets) == 0 {
+		return true
+	}
+	targetBand := distanceBucket(t.local, candidate)
+	var counts [4]int
+	for _, bucket := range t.routing.buckets {
+		for _, member := range bucket.members {
+			if member == candidate || distanceBucket(t.local, member) != targetBand {
+				continue
+			}
+			entry, ok := t.routers[member]
+			if !ok || entry.subnetCount == 0 {
+				continue
+			}
+			if accumulateSubnetMatches(&counts, subnets, entry.subnets[:entry.subnetCount], t.subnetQuota) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func accumulateSubnetMatches(counts *[4]int, subnets, existing []routingSubnet, quota int) bool {
+	for i, subnet := range subnets {
+		if slices.Contains(existing, subnet) {
+			counts[i]++
+			if counts[i] >= quota {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func routingSubnetsOf(info foundation.NetworkDatabaseRouterInfo) ([4]routingSubnet, uint8) {
+	var out [4]routingSubnet
+	var count uint8
+	addresses := info.Addresses()
+	for count < uint8(len(out)) {
+		address, ok, err := addresses.Next()
+		if err != nil || !ok {
+			break
+		}
+		var host []byte
+		options := address.Options.Iterator()
+		for {
+			key, value, optOK, optErr := options.Next()
+			if optErr != nil || !optOK {
+				break
+			}
+			if bytes.Equal(key, []byte("host")) {
+				host = value
+				break
+			}
+		}
+		if len(host) == 0 {
+			continue
+		}
+		ip, err := netip.ParseAddr(string(host))
+		if err != nil || ip.IsLoopback() {
+			continue
+		}
+		var subnet routingSubnet
+		if ip.Is4() {
+			octets := ip.As4()
+			if octets[0] == 192 && octets[1] == 0 && octets[2] == 2 {
+				continue
+			}
+			subnet = routingSubnet{1, octets[0], octets[1]}
+		} else if ip.Is6() {
+			octets := ip.As16()
+			subnet = routingSubnet{2, octets[0], octets[1], octets[2], octets[3], octets[4], octets[5]}
+		} else {
+			continue
+		}
+		duplicate := false
+		for i := range count {
+			if out[i] == subnet {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			out[count] = subnet
+			count++
+		}
+	}
+	return out, count
 }
 
 func (t *Table) Remove(hash foundation.Hash) bool {

@@ -310,3 +310,40 @@ func TestLookupResponderDropsAllZeroSearchKey(t *testing.T) {
 		t.Fatalf("all-zero lookup produced replies: %#v", capture.messages)
 	}
 }
+
+func BenchmarkLookupResponderSearchReply(b *testing.B) {
+	local, from, key := foundation.Hash{1}, foundation.Hash{2}, foundation.Hash{3}
+	database := NewDatabase(local, DefaultBucketCapacity)
+	for seed := byte(10); seed < 40; seed++ {
+		database.Routers().StoreVerified(routerWithSeed(seed), false, 1)
+	}
+	responder, err := NewLookupResponder(LookupResponderConfig{
+		Database: database,
+		Sender:   &lookupReplyCapture{ready: make(chan struct{}, 1)},
+		Local:    local,
+		Now:      func() uint64 { return 100 },
+		Random:   func() uint32 { return 7 },
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	excluded := make([]byte, 4*foundation.HashLength)
+	for i := range 4 {
+		info := routerWithSeed(byte(10 + i))
+		hash := info.Hash()
+		copy(excluded[i*foundation.HashLength:], hash[:])
+	}
+	lookup := foundation.I2NPDatabaseLookupMessage{
+		Key:      key,
+		From:     from,
+		Flags:    uint8(ExplorationLookup << 2),
+		Excluded: excluded,
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		reply := responder.searchReply(lookup)
+		if len(reply) == 0 {
+			b.Fatal("empty search reply")
+		}
+	}
+}

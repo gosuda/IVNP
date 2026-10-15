@@ -140,3 +140,119 @@ func TestJavaKBucketSplitReinsertionRejectsTerminalOverflow(t *testing.T) {
 		t.Fatalf("terminal members = %d, want RejectTrimmer cap 5", len(terminal.members))
 	}
 }
+
+func bucketZeroSeed(t *testing.T, ordinal int) byte {
+	t.Helper()
+	var local foundation.Hash
+	found := 0
+	for candidate := 0; candidate < 256; candidate++ {
+		info := routerWithSeed(byte(candidate))
+		if distanceBucket(local, info.Hash()) == 0 {
+			if found == ordinal {
+				return byte(candidate)
+			}
+			found++
+		}
+	}
+	t.Fatalf("insufficient bucket-0 seeds for ordinal %d", ordinal)
+	return 0
+}
+
+func routerWithSeedAndHost(t *testing.T, seed byte, host string, published uint64) foundation.NetworkDatabaseRouterInfo {
+	t.Helper()
+	info := routerWithSeed(seed)
+	entries := []foundation.MappingEntry{
+		{Key: []byte("host"), Value: []byte(host)},
+		{Key: []byte("port"), Value: []byte("12345")},
+	}
+	optionsLen, err := foundation.MappingEncodedLen(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	optionsRaw := make([]byte, optionsLen)
+	if _, err := foundation.MarshalMappingTo(optionsRaw, entries); err != nil {
+		t.Fatal(err)
+	}
+	emptyRaw := []byte{0, 0}
+	wire := make([]byte, 0, 512)
+	wire = append(wire, info.Identity.Bytes()...)
+	var header [9]byte
+	header[8] = 1
+	wire = append(wire, header[:]...)
+	var addrHeader [9]byte
+	addrHeader[0] = 5
+	wire = append(wire, addrHeader[:]...)
+	wire = append(wire, byte(len("NTCP2")))
+	wire = append(wire, "NTCP2"...)
+	wire = append(wire, optionsRaw...)
+	wire = append(wire, 0)
+	wire = append(wire, emptyRaw...)
+	wire = append(wire, make([]byte, 40)...)
+	parsed, err := foundation.NetworkDatabaseParseRouterInfo(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed.Published = published
+	return parsed
+}
+
+func TestRoutingBucketSubnetDiversityQuota(t *testing.T) {
+	var local foundation.Hash
+	table := NewTable(local, 8)
+
+	s1 := bucketZeroSeed(t, 0)
+	s2 := bucketZeroSeed(t, 1)
+	s3 := bucketZeroSeed(t, 2)
+	s4 := bucketZeroSeed(t, 3)
+	first := routerWithSeedAndHost(t, s1, "198.51.100.1", 10)
+	second := routerWithSeedAndHost(t, s2, "198.51.100.2", 10)
+	thirdSameV4Subnet := routerWithSeedAndHost(t, s3, "198.51.100.3", 10)
+	distinctV4Subnet := routerWithSeedAndHost(t, s4, "203.0.113.1", 10)
+	for _, candidate := range []foundation.NetworkDatabaseRouterInfo{first, second, thirdSameV4Subnet, distinctV4Subnet} {
+		if band := distanceBucket(local, candidate.Hash()); band != 0 {
+			t.Fatalf("candidate distanceBucket = %d, want 0", band)
+		}
+		table.StoreVerified(candidate, false, 10)
+	}
+
+	// All 4 verified RouterInfos remain in the independent data store.
+	if got := table.Len(); got != 4 {
+		t.Fatalf("table.Len() = %d, want 4", got)
+	}
+	// Only 2 from 198.51.0.0/16 plus 1 from 203.0.0.0/16 may enter the routing index.
+	routing := table.ClosestRoutingInto(make([]RouterRef, 0, 8), local)
+	if len(routing) != 3 {
+		t.Fatalf("routing count = %d, want 3 (2 from /16 + 1 distinct)", len(routing))
+	}
+	for _, ref := range routing {
+		if ref.Hash == thirdSameV4Subnet.Hash() {
+			t.Fatal("third router in same IPv4 /16 subnet admitted to routing bucket")
+		}
+	}
+
+	// Updating distinctV4Subnet to rebind into the saturated 198.51.0.0/16 subnet
+	// must evict it from the routing index while keeping its newer RouterInfo in the store.
+	rebound := routerWithSeedAndHost(t, s4, "198.51.100.99", 20)
+	table.StoreVerified(rebound, false, 20)
+	routing = table.ClosestRoutingInto(make([]RouterRef, 0, 8), local)
+	if len(routing) != 2 {
+		t.Fatalf("routing count after subnet-rebinding update = %d, want 2", len(routing))
+	}
+
+	// Verify IPv6 /48 per-bucket quota as well.
+	v6first := routerWithSeedAndHost(t, bucketZeroSeed(t, 4), "2001:db8:abcd:1::1", 10)
+	v6second := routerWithSeedAndHost(t, bucketZeroSeed(t, 5), "2001:db8:abcd:2::1", 10)
+	v6thirdSame48 := routerWithSeedAndHost(t, bucketZeroSeed(t, 6), "2001:db8:abcd:3::1", 10)
+	for _, candidate := range []foundation.NetworkDatabaseRouterInfo{v6first, v6second, v6thirdSame48} {
+		table.StoreVerified(candidate, false, 10)
+	}
+	routing = table.ClosestRoutingInto(make([]RouterRef, 0, 8), local)
+	if len(routing) != 4 {
+		t.Fatalf("routing count after IPv6 /48 admission = %d, want 4", len(routing))
+	}
+	for _, ref := range routing {
+		if ref.Hash == v6thirdSame48.Hash() {
+			t.Fatal("third router in same IPv6 /48 subnet admitted to routing bucket")
+		}
+	}
+}
