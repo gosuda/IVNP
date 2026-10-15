@@ -74,8 +74,8 @@ L0 packages have zero internal dependencies and rely only on the Go standard lib
 - **`cryptography_subsystem.go`**: Package doc and L1 boundary marker.
 - **`sensitive.go`**: `Sensitive` interface (`ReleaseSensitive()`) and `ErrSensitiveReleased`.
 - **`chacha.go`**: `ChaCha20Poly1305` stateful AEAD wrapper (`SealTo`, `OpenTo`, `ReleaseSensitive`), stateless zero-allocation `SealChaCha20Poly1305To` / `OpenChaCha20Poly1305To`, and `NewChaCha20Stream` (initializing block counter to `1`).
-- **`x25519.go`**: `X25519PrivateKey` holding only a raw `[32]byte` scalar, constructing stdlib ECDH keys on demand and wiping intermediate secrets after each operation.
-- **`field25519.go`**: Constant-time 4-limb (`[4]uint64`) arithmetic in $\mathbb{F}_{2^{255}-19}$ (`add`, `sub`, `mul`, `square`, `invert`, `pow22523`, `fieldSqrtRatio`) using `math/bits` and branchless bitmask selection.
+- **`x25519.go`**: `X25519PrivateKey` holding a raw `[32]byte` scalar and precomputed `[32]byte` public key, executing zero-allocation `PublicKey` and `ECDH` via `x25519ScalarMult` and wiping both arrays on `ReleaseSensitive()`.
+- **`field25519.go`**: Constant-time 4-limb (`[4]uint64`) arithmetic in $\mathbb{F}_{2^{255}-19}$ (`add`, `sub`, `mul`, `square`, `mulA24`, `invert`, `pow22523`, `fieldSqrtRatio`) and RFC 7748 Montgomery ladder (`x25519ScalarMult`) using unrolled `math/bits.Mul64` and branchless bitmask selection.
 - **`elligator.go`**: Constant-time `EncodeElligator2`, `DecodeElligator2`, and `GenerateElligator2X25519` for indistinguishable 256-bit X25519 ephemeral public keys in NTCP2, SSU2, and ECIES NewSession messages.
 - **`elgamal.go`**: Legacy I2P 2048-bit MODP Group 14 `EncryptElGamal` and `DecryptElGamal` (514-byte wire ciphertext with `0xFF || SHA256(222B plaintext) || plaintext` framing).
 - **`mlkem.go`**: Post-quantum FIPS-203 `MLKEMPublicKey` and `MLKEMPrivateKey` (64-byte seed retention) for `MLKEM768X25519` (type 6, 1184B pubkey, 1088B ciphertext) and `MLKEM1024X25519` (type 7, 1568B pubkey, 1568B ciphertext).
@@ -143,7 +143,7 @@ L0 packages have zero internal dependencies and rely only on the Go standard lib
   - `handshake.go`: `Noise_XKchaobfse+hs1+hs2+hs3_25519_ChaChaPoly_SHA256` `Initiator`/`Responder`, `ConfirmedReassembler` (up to 15 fragments), and `DataCipher`.
   - `block.go` & `ack.go`: TLV block codecs (types 0..20, 254) and `ACKTracker` (up to 64 ACK ranges).
   - `introduction.go`, `peertest.go`, `path.go`: Signed `RelayRequest`/`RelayIntro`/`RelayResponse`, 7-message `PeerTestBlock`, and `PathValidator` migration challenges.
-  - `batch.go`, `batch_linux_amd64.go`, `batch_portable.go`, `dispatch.go`: Linux `recvmmsg`/`sendmmsg` + `SO_RXQ_OVFL` drop counter, portable UDP batching, and bounded `Dispatcher`.
+  - `batch.go`, `batch_linux_vector.go`, `batch_linux_amd64.go`, `batch_linux_arm64.go`, `batch_stub.go`, `batch_portable.go`, `dispatch.go`: Linux 64-bit (`amd64` and `arm64`) `recvmmsg`/`sendmmsg` + `SO_RXQ_OVFL` drop counter, portable UDP batching, and bounded `Dispatcher`.
 - **`dataplane/internal/tunnel/`**:
   - `crypto.go`: Double-IV AES-256-CBC `LayerCipher` (`EncryptInPlace`, `DecryptInPlace`) with pooled CBC block modes.
   - `blocks.go`, `gateway.go`, `reassembly.go`: `DeliveryBlock` codec, 1028-byte `Gateway` encoder/fragmenter (up to 64 fragments), `Endpoint` checksum verifier, and slab-backed out-of-order `Reassembler` (`maxEntries = 128`, `45s` TTL).
@@ -155,14 +155,14 @@ L0 packages have zero internal dependencies and rely only on the Go standard lib
   - `garlic/ratchet.go`, `reply_keys.go`, `lookup_reply.go`: Sharded `RatchetManager` with global `tagRoutes` index, `ReserveInboundReply` ordering gate, and `ReplyKeyRegistry`.
   - `garlic/clove.go`, `serialize.go`, `newsession.go`, `send.go`, `receive.go`, `session.go`, `manager.go`, `tags.go`: Legacy ElGamal/AES+SessionTag compatibility stack and clove codecs.
 - **`dataplane/internal/streaming/` & `dataplane/internal/streaming/tunnel/`**:
-  - `packet.go`, `encode.go`, `reliability.go`, `state.go`, `conn.go`: 22-byte streaming header codec, Jacobson/Karels `RTOEstimator`, slow-start/congestion-avoidance `CongestionWindow`, and TCB state machine.
-  - `tunnel/tunnel.go` & `deadline.go`: `TunnelNetwork` and `tunnelConn` implementing `net.Conn` and `net.Listener`, SYN target-hash replay protection, offline signature verification, selective NACK fast retransmit, and min-heap send pacing (`1ms..10ms`).
+  - `packet.go`, `encode.go`, `reliability.go`, `state.go`, `conn.go`: 22-byte streaming header codec, Jacobson/Karels `RTOEstimator`, slow-start/congestion-avoidance `CongestionWindow` (with distinct `FastRecovery()` and `Loss()` transitions), and TCB state machine.
+  - `tunnel/tunnel.go` & `deadline.go`: `TunnelNetwork` and `tunnelConn` implementing `net.Conn` and `net.Listener`, SYN target-hash replay protection, offline signature verification, selective NACK fast retransmit, and min-heap send pacing (`250µs..10ms`).
 - **`dataplane/internal/datagram/`**:
   - `datagram.go` & `modern.go`: `Raw` (18), `V1` (17), replay-resistant target-bound `V2` (19), and `V3` (20) codecs and verifiers.
 - **`dataplane/internal/router/`**:
   - `router.go`, `network.go`, `control_queue.go`: I2NP expiration check, 64-shard time-bucketed Bloom `replayFilter`, `SocketRuntime` (`NativeSocketRuntime`), and two-tier bounded `ControlQueue`.
-  - `data_plane.go`, `destination.go`, `destination_bandwidth.go`, `prepared_routes.go`, `prepared_sender.go`: `DataPlane` coordinator, `GarlicReceiver` (including I2CP 10-byte gzip payload framing), `DestinationSession`, token-bucket bandwidth limiter, and `PreparedRouteSender`.
-  - `ntcp2_manager.go` & `ssu2_manager.go` (+ `ssu2_introduction.go`, `ssu2_setup_queue.go`, `ssu2_send_mutex.go`): Full transport connection managers, crossed-connection tie-breaking, SSU2 `setupQueue` vs. `authQueue` isolation, introducer relay management, and Fisher-Yates relay packet shuffling.
+  - `data_plane.go`, `destination.go`, `destination_bandwidth.go`, `prepared_routes.go`, `prepared_sender.go`: `DataPlane` coordinator, `GarlicReceiver` (including I2CP 10-byte gzip payload framing, zero-allocation stored-block fast path, and pooled `flate.Resetter` fallback), `DestinationSession`, token-bucket bandwidth limiter, and `PreparedRouteSender`.
+  - `ntcp2_manager.go` & `ssu2_manager.go` (+ `ssu2_introduction.go`, `ssu2_setup_queue.go`, `ssu2_send_mutex.go`): Full transport connection managers, crossed-connection tie-breaking, SSU2 `setupQueue` vs. `authQueue` isolation, sub-second RTO deadline timer (`retransmitAndNextDue`), introducer relay management, and Fisher-Yates relay packet shuffling.
   - `session_sender.go`, `established_sender.go`, `delivery_forwarder.go`: Control-capable vs. established-only packet senders.
 
 ---
@@ -171,7 +171,7 @@ L0 packages have zero internal dependencies and rely only on the Go standard lib
 
 - **`controlplane_subsystem.go`**: Sole public gateway for L5.
 - **`controlplane/internal/netdb/`**:
-  - `dht.go` & `kbucket.go`: Split `Table` (`routers` map + Kademlia $b=4$ `kBucketSet` over 2048 ranges with Java `RejectTrimmer` flood resistance), `RoutingKey` (`SHA256(key || YYYYMMDD)`), and pooled zero-allocation XOR selection buffers.
+  - `dht.go` & `kbucket.go`: Split `Table` (`routers` map + Kademlia $b=4$ `kBucketSet` over 2048 ranges with Java `RejectTrimmer` flood resistance and per-bucket `/16` IPv4 and `/48` IPv6 subnet diversity quotas), `RoutingKey` (`SHA256(key || YYYYMMDD)`), and pooled zero-allocation XOR selection buffers.
   - `database.go` & `store.go`: `Database` store admission, gzip bomb protection (`<= 4096 B`), version monotonicity, and `published` vs. private lookup-derived LeaseSet separation.
   - `local_router.go`, `local.go`, `local_ls2.go`, `local_encrypted_ls2.go`, `encrypted_resolution.go`: Local `RouterInfo`, `LeaseSet`, `LeaseSet2`, and two-layer ChaCha20 + HKDF `EncryptedLeaseSet` construction and decryption (`ELS2_L1K`, `ELS2_L2K`, `ELS2_XCA` DH auth, `ELS2PSKA` PSK auth).
   - `requests.go`, `explorer.go`, `lookup_responder.go`, `store_flooder.go`, `confirmation.go`, `publication.go`, `router_publication.go`, `responder_profiles.go`, `persistence.go`, `responder_persistence.go`: Iterative DHT lookups, K-bucket exploration, floodfill responder/flooder (with UTC midnight rollover), `DeliveryStatus`-confirmed publication, and atomic `netdb.routers` / `netdb.responders` persistence.

@@ -85,7 +85,7 @@ When an application sends a streaming packet or datagram to a remote destination
 
 ### 2.2 Bounded Subscriptions & Bandwidth Limiting (`destination.go`, `destination_bandwidth.go`)
 
-- **Demultiplexing by `(Protocol, ToPort)`**: Inbound destination payloads are dispatched to `SubscribeBounded(DestinationRoute{Protocol, ToPort}, maxPackets, maxBytes, budget)`. Exact `(Protocol, ToPort)` subscriptions take precedence over wildcard port (`ToPort = 0`) or wildcard protocol (`Protocol = 0`) subscriptions.
+- **Demultiplexing by `(Protocol, ToPort)`**: Inbound destination payloads are parsed by `parseDestinationData` (`data_plane.go`), which validates the 10-byte I2CP gzip header (magic `1f 8b`, method `08`, and zero flags), checks the trailer CRC-32 and ISIZE, takes a zero-allocation slice fast path on single uncompressed DEFLATE stored blocks (`0x01 || LE16(len) || LE16(^len)`), and falls back to a pooled `flate.Resetter` reader (`destinationDataFlatePool`) for compressed blocks before dispatching to `SubscribeBounded(DestinationRoute{Protocol, ToPort}, maxPackets, maxBytes, budget)`. Exact `(Protocol, ToPort)` subscriptions take precedence over wildcard port (`ToPort = 0`) or wildcard protocol (`Protocol = 0`) subscriptions.
 - **`DestinationBandwidthLimiter`**: Enforces token-bucket rate limits (`bytesPerSecond`, `burstBytes`) on both destination ingress and egress before queueing.
 
 ---
@@ -101,7 +101,7 @@ When an application sends a streaming packet or datagram to a remote destination
 
 ### 3.2 `SSU2Manager` (`ssu2_manager.go`, `ssu2_setup_queue.go`, `ssu2_introduction.go`, `ssu2_send_mutex.go`)
 
-`SSU2Manager` manages all UDP sessions over a single `UDPBatchConn` using seven specialized worker loops:
+`SSU2Manager` manages all UDP sessions over a single `UDPBatchConn` (`recvmmsg`/`sendmmsg` on `linux/amd64` and `linux/arm64`) using seven specialized worker loops:
 
 | Worker Loop | Queue / Trigger | Responsibility |
 | :--- | :--- | :--- |
@@ -111,7 +111,7 @@ When an application sends a streaming packet or datagram to a remote destination
 | `dispatchLoop` | `dispatchQueues` | Delivers authenticated I2NP messages to `Service.HandleFrom` (`ssu2DispatchStall = 4s` timeout guard) |
 | `ackLoop` | `1ms` coalesce timer | Batches pending ACK ranges (`ACKTracker`) into outbound `Data` packets |
 | `egressLoop` | `egressQueue` (`32` slots) | Shuffles consecutive relay/peer-test packets via CSPRNG Fisher-Yates (`shuffleRelaySlots`) and flushes vector batches via `WriteBatchPrefix` |
-| `retransmitLoop` | `1s` ticker | Runs RFC 6298 RTO retransmission (`max 5` retries, `maxRTO = 1m`), 3-NACK fast retransmit, congestion window + MTU probing (`1280..1500`), and fragment/challenge expiry |
+| `retransmitLoop` | `1s` ticker + sub-second `dueTimer` | Schedules exact `sentAt + rto` wakeup deadlines (`retransmitAndNextDue`) for RFC 6298 RTO retransmission (`max 5` retries, `maxRTO = 1m`), 3-NACK fast retransmit, congestion window + MTU probing (`1280..1500`), and fragment/challenge expiry |
 
 ---
 

@@ -95,12 +95,12 @@ When a local outbound tunnel endpoint (OBEP) is asked to forward a message to a 
 | File | Primary Types | Responsibility |
 | :--- | :--- | :--- |
 | `kbucket.go` | `kBucketSet`, `kBucket` | Kademlia $b=4$ routing tree over ranges `[0, 2047]`; splits through bucket 0 and rejects overflow via Java `RejectTrimmer` semantics |
-| `dht.go` | `Table`, `RoutingKey`, `routerSelectionBuffer` | Split `routers` map + `kBucketSet`; UTC daily routing key (`SHA256(key \|\| YYYYMMDD)`); CPU-pooled zero-allocation XOR partial sort |
+| `dht.go` | `Table`, `RoutingKey`, `routerSelectionBuffer` | Split `routers` map + `kBucketSet`; per-bucket `/16` IPv4 and `/48` IPv6 routing subnet quota (`DefaultBucketSubnetQuota = 2`); UTC daily routing key (`SHA256(key \|\| YYYYMMDD)`); CPU-pooled zero-allocation XOR partial sort |
 | `database.go`, `store.go` | `Database`, `leaseEntry` | Pooled gzip inflation (`<= 4096 B`), version monotonicity, min-heap `leaseExpiries` eviction (`maxLeases = 4096`), and `published` flag isolation |
 | `local_router.go`, `local_ls2.go` | `LocalRouterInfo`, `LocalLeaseSet2` | Signs and caches local `RouterInfo` and multi-key `LeaseSet2` (capping lease `EndDate` at `Offline.Expires` when offline-signed) |
 | `local_encrypted_ls2.go`, `encrypted_resolution.go` | `LocalEncryptedLeaseSet`, `DecryptEncryptedLeaseSet` | Daily `Red25519` key blinding, two-layer ChaCha20 encryption (`ELS2_L1K`, `ELS2_L2K`), and per-client DH (`ELS2_XCA`) / PSK (`ELS2PSKA`) authorization |
 | `requests.go`, `explorer.go` | `RequestManager`, `Explorer` | Coalesced iterative Kademlia lookups (`20s` budget, `3s` step) and 256-bucket deficit exploration |
-| `lookup_responder.go`, `store_flooder.go` | `LookupResponder`, `StoreFlooder` | Bounded 64-slot floodfill query responder and 3-target `DatabaseStore` flooder with UTC midnight rollover |
+| `lookup_responder.go`, `store_flooder.go` | `LookupResponder`, `StoreFlooder` | Bounded 64-slot floodfill query responder (with coalesced enqueue copies and pooled `searchReply` referral generation) and 3-target `DatabaseStore` flooder with UTC midnight rollover |
 | `confirmation.go`, `publication.go`, `router_publication.go` | `PublicationTokenRegistry`, `LeaseSetPublisher`, `RouterInfoPublisher` | 31-bit `DeliveryStatus` token correlation and multi-wave floodfill publication (`K=4` for LeaseSets, `K=5` for RouterInfo) |
 | `persistence.go`, `responder_persistence.go` | `RouterInfoStore`, `ResponderProfileStore` | Atomic `0600` disk snapshots (`netdb.routers` magic `"IVNPNDB\x00"`, `netdb.responders` magic `"IVNPRSP\x00"`) with SHA-256 digests |
 

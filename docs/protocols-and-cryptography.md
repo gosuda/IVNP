@@ -10,7 +10,7 @@ This document specifies the cryptographic primitives in Layer L1 (`cryptography`
 
 I2P's modern handshake protocols (NTCP2, SSU2, and `ECIES-X25519-AEAD-Ratchet`) obfuscate ephemeral X25519 public keys on the wire so passive middleboxes cannot distinguish handshake packets from uniform random bytes by testing whether a 32-byte prefix lies on Curve25519.
 
-`cryptography/field25519.go` implements constant-time arithmetic over $p = 2^{255}-19$ using four 64-bit little-endian limbs (`type field25519 [4]uint64`) with `math/bits` carry/borrow chains and branchless bitmask selection (`fieldSelect`, `equalMask`, `lessOrEqualMask`).
+`cryptography/field25519.go` implements constant-time arithmetic over $p = 2^{255}-19$ using four 64-bit little-endian limbs (`type field25519 [4]uint64`) with unrolled `math/bits.Mul64` schoolbook multiplication (`mul`), symmetrical squaring (`square`), scalar multiplication by $a_{24} = 121665$ (`mulA24`), single-pass $2^{256} \equiv 38 \pmod p$ folding (`fieldFold`), 11-multiplication addition chains for `invert` and `pow22523`, and a stack-allocated RFC 7748 Montgomery ladder (`x25519ScalarMult`).
 
 `cryptography/elligator.go` implements Elligator2 for the Montgomery curve $y^2 = x^3 + 486662 x^2 + x$:
 
@@ -26,7 +26,7 @@ I2P's modern handshake protocols (NTCP2, SSU2, and `ECIES-X25519-AEAD-Ratchet`) 
 
 ### 1.2 X25519 Scalar Isolation (`cryptography/x25519.go`)
 
-Standard library `*ecdh.PrivateKey` structs hold internal copies of key material that callers cannot directly zero. `cryptography.X25519PrivateKey` retains only a raw `[32]byte` array (`scalar`). Whenever `PublicKey` or `ECDH` runs, it constructs a temporary `*ecdh.PrivateKey`, copies the result into caller-provided `[32]byte` storage, and zeroes any temporary slice (`clear(secret)`). Calling `ReleaseSensitive()` zeroes `scalar[:]` and causes all subsequent operations to return `ErrSensitiveReleased`.
+Standard library `*ecdh.PrivateKey` structs allocate unwiped copies of key material on the Go heap. `cryptography.X25519PrivateKey` stores only the raw `[32]byte` secret scalar (`scalar`) and the precomputed `[32]byte` public key (`public`) in value storage. `NewX25519PrivateKey` and `GenerateX25519PrivateKey` derive `public` once with `x25519ScalarMult(&key.public, &key.scalar, &fieldBasepoint)`, so `PublicKey(dst *[32]byte)` is a fixed-size copy (`0 B/op, 0 allocs/op`). `ECDH(dst *[32]byte, peer []byte)` copies the peer coordinate into a stack array, runs the clamped Montgomery ladder on stack-allocated `field25519` values (`0 B/op, 0 allocs/op`), and rejects the all-zero output produced by small-order peer points with `subtle.ConstantTimeCompare`, clearing `dst` and returning `ErrLowOrderPoint`. Peer encodings with bit 255 set or u-coordinates in `[p, 2^255)` are accepted and reduced as RFC 7748 requires. `TestX25519RFC7748Vectors` pins the RFC 7748 section 5.2 and 6.1 vectors, and `TestX25519MatchesStandardLibrary` cross-checks 2,000 random and non-canonical inputs against `crypto/ecdh`. `ReleaseSensitive()` zeroes both `scalar[:]` and `public[:]`; every later call returns `ErrSensitiveReleased`.
 
 ### 1.3 ChaCha20 & ChaCha20-Poly1305 (`cryptography/chacha.go`)
 

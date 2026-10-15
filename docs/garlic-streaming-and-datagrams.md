@@ -131,9 +131,9 @@ stateDiagram-v2
 ```
 
 - **Jacobson/Karels `RTOEstimator`**: `InitialRTO = 9s`, `MinRTO = 100ms`, `MaxRTO = 60s`. `Observe(rtt, retransmitted)` ignores retransmitted packets (Karn's rule) and updates `SRTT`, `RTTVAR`, and `RTO = clamp(SRTT + 4*RTTVAR, 100ms, 60s)`. Timeout expiration doubles `RTO` up to `60s`.
-- **`CongestionWindow`**: `InitialWindow = 3` packets, `MinWindow = 1`, `MaxWindow = 128`, `MaxResends = 8`. Grows by `1` packet per ACK during slow start (`cwnd < ssthresh`) and by `1/cwnd` during congestion avoidance; on loss, sets `ssthresh = max(cwnd/2, 1)` and resets `cwnd = 1`.
-- **Selective NACKs & Fast Retransmit**: Out-of-order packets within `MaxWindow = 128` of `recvNext` are buffered in `reordered`. Outbound ACKs list all missing sequence numbers between `recvNext` and the highest buffered packet in the `NACKs` array. When an unacknowledged outbound packet accumulates `3` NACK reports (`pending.nacks == 3`), `maintain()` triggers an immediate fast retransmit without waiting for the RTO timer.
-- **Min-Heap Send Pacing**: Rather than bursting a full window into a tunnel at once, `maintain()` schedules outbound packets on a min-heap (`sendSchedule`) spaced by `clamp(RTO / (cwnd * 8), 1ms, 10ms)` and coalesces pure ACKs for `ackHoldInterval = 50ms`.
+- **`CongestionWindow`**: `InitialWindow = 3` packets, `MinWindow = 1`, `MaxWindow = 128`, `MaxResends = 8`. Grows by `1` packet per ACK during slow start (`cwnd < ssthresh`) and by `1/cwnd` during congestion avoidance; on 3-NACK fast retransmit (`FastRecovery()`), sets `ssthresh = max(cwnd/2, 1)` and `cwnd = ssthresh`, whereas RTO timeout expiration (`Loss()`) sets `ssthresh = max(cwnd/2, 1)` and resets `cwnd = 1`.
+- **Selective NACKs & Fast Retransmit**: Out-of-order packets within `MaxWindow = 128` of `recvNext` are buffered in `reordered`. Outbound ACKs list all missing sequence numbers between `recvNext` and the highest buffered packet in the `NACKs` array. When an unacknowledged outbound packet accumulates `3` NACK reports (`pending.nacks == 3`), `maintain()` triggers an immediate fast retransmit and enters `FastRecovery()` without waiting for the RTO timer.
+- **Min-Heap Send Pacing**: Rather than bursting a full window into a tunnel at once, `maintain()` schedules outbound packets on a min-heap (`sendSchedule`) spaced by `clamp(RTO / (cwnd * 8), 250µs, 10ms)` and coalesces pure ACKs for `ackHoldInterval = 50ms`.
 
 ---
 

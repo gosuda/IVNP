@@ -96,7 +96,7 @@ LongHeader (32 bytes = ShortHeader[16B] + Source Connection ID[8B] + Token[8B])
 To prevent expensive handshake cryptography or gzip `RouterInfo` decompression from delaying established-session ACKs, `SSU2Manager` separates packet processing into dedicated stages:
 
 ```
-UDP Socket (recvmmsg on linux/amd64, SO_RXQ_OVFL drop tracking)
+UDP Socket (recvmmsg on linux/amd64 and linux/arm64, SO_RXQ_OVFL drop tracking)
        │
        ▼
    readLoop (4 batches × 32 packets)

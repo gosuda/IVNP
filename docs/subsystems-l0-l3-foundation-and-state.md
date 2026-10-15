@@ -85,8 +85,8 @@ All L1 files reside directly in `/Users/user/work/work3/IVNP/cryptography`:
 | :--- | :--- | :--- |
 | `sensitive.go` | `Sensitive`, `ErrSensitiveReleased` | Common interface (`ReleaseSensitive()`) implemented by all stateful key/cipher structs |
 | `chacha.go` | `ChaCha20Poly1305`, `SealChaCha20Poly1305To`, `OpenChaCha20Poly1305To`, `NewChaCha20Stream` | Zero-allocation AEAD sealing/opening into `dst[:0]`; stateless RFC 8439 Poly1305 authenticator with stack-buffer wiping |
-| `x25519.go` | `X25519PrivateKey`, `GenerateX25519PrivateKey` | Stores only `scalar [32]byte`; builds short-lived `*ecdh.PrivateKey` per call and zeroes intermediate slices |
-| `field25519.go` | `field25519 [4]uint64`, `fieldSqrtRatio` | Constant-time $\mathbb{F}_{2^{255}-19}$ limb arithmetic (`add`, `sub`, `mul`, `square`, `invert`, `pow22523`) |
+| `x25519.go` | `X25519PrivateKey`, `GenerateX25519PrivateKey` | Stores `[32]byte` `scalar` and precomputed `[32]byte` `public`; executes zero-allocation `PublicKey` and `ECDH` via `x25519ScalarMult` and zeroes both arrays on `ReleaseSensitive()` |
+| `field25519.go` | `field25519 [4]uint64`, `fieldSqrtRatio`, `x25519ScalarMult` | Unrolled constant-time $\mathbb{F}_{2^{255}-19}$ limb arithmetic (`add`, `sub`, `mul`, `square`, `mulA24`, `invert`, `pow22523`) and RFC 7748 Montgomery ladder |
 | `elligator.go` | `EncodeElligator2`, `DecodeElligator2`, `GenerateElligator2X25519` | Checks quadratic residue eligibility before drawing entropy; masks top 2 bits (`0xc0`) of byte 31 |
 | `elgamal.go` | `ElGamalPublicKey`, `ElGamalPrivateKey`, `EncryptElGamal`, `DecryptElGamal` | 2048-bit MODP Group 14; 222B plaintext -> 514B ciphertext (`0x00 \|\| a[256] \|\| 0x00 \|\| b[256]`) |
 | `mlkem.go` | `MLKEMPublicKey`, `MLKEMPrivateKey`, `GenerateMLKEM`, `Encapsulate` | FIPS-203 ML-KEM-768 (type 6) and ML-KEM-1024 (type 7); stores 64-byte seed in `MLKEMPrivateKey` |
