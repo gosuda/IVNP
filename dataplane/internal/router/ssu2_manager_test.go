@@ -2376,3 +2376,58 @@ func TestSSU2TerminationStillDrainsI2NPDispatchBatch(t *testing.T) {
 	default:
 	}
 }
+
+func TestSSU2RetransmitLoopSubSecondDeadlineAvoidsTickQuantization(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, session := newSSU2SendTestHarness(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		manager.ctx = ctx
+		manager.relayTagPending = map[foundation.Hash]time.Time{session.peer: time.Now().Add(time.Hour)}
+		t.Cleanup(func() {
+			cancel()
+			manager.wg.Wait()
+		})
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case slot := <-manager.egressQueue:
+					slot.done <- nil
+					manager.egressFree <- slot
+				}
+			}
+		}()
+		manager.wg.Add(1)
+		go manager.retransmitLoop()
+		synctest.Wait()
+
+		<-time.After(250 * time.Millisecond)
+		payload := []byte{dataplanessu2.BlockPadding, 0, 5, 0, 0, 0, 0, 0}
+		session.sendMu.Lock()
+		sent := session.retainPayload(payload, time.Now())
+		sent.latestPacket = 1
+		session.sent[1] = sent
+		session.nextPacket = 2
+		session.sendMu.Unlock()
+
+		<-time.After(750 * time.Millisecond)
+		synctest.Wait()
+		session.sendMu.Lock()
+		attemptsAtTick := sent.attempts
+		session.sendMu.Unlock()
+		if attemptsAtTick != 0 {
+			t.Fatalf("packet retransmitted before RTO at 1s tick: attempts=%d", attemptsAtTick)
+		}
+
+		<-time.After(250 * time.Millisecond)
+		synctest.Wait()
+		session.sendMu.Lock()
+		attemptsAtDue := sent.attempts
+		latestAtDue := sent.latestPacket
+		session.sendMu.Unlock()
+		if attemptsAtDue != 1 || latestAtDue != 2 {
+			t.Fatalf("sub-second RTO deadline did not retransmit at t=1.25s: attempts=%d latest=%d", attemptsAtDue, latestAtDue)
+		}
+	})
+}

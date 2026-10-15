@@ -2186,39 +2186,105 @@ func (m *SSU2Manager) retransmitLoop() {
 	defer m.wg.Done()
 	ticker := time.NewTicker(ssu2RetransmitInterval)
 	defer ticker.Stop()
+	dueTimer := time.NewTimer(time.Hour)
+	if !dueTimer.Stop() {
+		select {
+		case <-dueTimer.C:
+		default:
+		}
+	}
+	defer dueTimer.Stop()
+	var dueC <-chan time.Time
+	var nextTick time.Time
+	var sessions []*ssu2TransportSession
+	armDueTimer := func(now, nextDue time.Time) {
+		if dueC != nil {
+			if !dueTimer.Stop() {
+				select {
+				case <-dueTimer.C:
+				default:
+				}
+			}
+			dueC = nil
+		}
+		if nextDue.IsZero() || (!nextTick.IsZero() && !nextDue.Before(nextTick)) {
+			return
+		}
+		dueTimer.Reset(max(time.Nanosecond, nextDue.Sub(now)))
+		dueC = dueTimer.C
+	}
 	for {
 		select {
 		case <-m.contextDone():
 			return
 		case now := <-ticker.C:
+			nextTick = now.Add(ssu2RetransmitInterval)
 			m.mu.RLock()
-			sessions := make([]*ssu2TransportSession, 0, len(m.sessionsByID))
+			sessions = sessions[:0]
 			for _, session := range m.sessionsByID {
 				sessions = append(sessions, session)
 			}
 			m.mu.RUnlock()
+			var nextDue time.Time
 			for _, session := range sessions {
-				if session.idle(now, m.idleTimeout) || m.retransmitOne(session, now) {
+				if session.idle(now, m.idleTimeout) {
 					m.removeSession(session)
 					continue
+				}
+				expired, sessionDue := m.retransmitAndNextDue(session, now)
+				if expired {
+					m.removeSession(session)
+					continue
+				}
+				if !sessionDue.IsZero() && (nextDue.IsZero() || sessionDue.Before(nextDue)) {
+					nextDue = sessionDue
 				}
 				session.expireFragments(now)
 				session.expirePath(now)
 				session.maintainSentCapacity()
 			}
+			clear(sessions)
 			m.expireIntroductions(now)
 			m.expireExtensions(now)
+			armDueTimer(now, nextDue)
+		case now := <-dueC:
+			dueC = nil
+			m.mu.RLock()
+			sessions = sessions[:0]
+			for _, session := range m.sessionsByID {
+				sessions = append(sessions, session)
+			}
+			m.mu.RUnlock()
+			var nextDue time.Time
+			for _, session := range sessions {
+				expired, sessionDue := m.retransmitAndNextDue(session, now)
+				if expired {
+					m.removeSession(session)
+					continue
+				}
+				if !sessionDue.IsZero() && (nextDue.IsZero() || sessionDue.Before(nextDue)) {
+					nextDue = sessionDue
+				}
+			}
+			clear(sessions)
+			armDueTimer(now, nextDue)
 		}
 	}
 }
 
 func (m *SSU2Manager) retransmitOne(session *ssu2TransportSession, now time.Time) bool {
+	expired, _ := m.retransmitAndNextDue(session, now)
+	return expired
+}
+
+func (m *SSU2Manager) retransmitAndNextDue(session *ssu2TransportSession, now time.Time) (bool, time.Time) {
 	session.packetMu.Lock()
 	defer session.packetMu.Unlock()
 
 	for {
 		session.sendMu.Lock()
 		var target *ssu2SentPacket
+		var nextDue time.Time
 		for number, sent := range session.sent {
 			if sent.latestPacket == 0 || number != sent.latestPacket {
 				continue
@@ -2227,29 +2293,33 @@ func (m *SSU2Manager) retransmitOne(session *ssu2TransportSession, now time.Time
 				target = sent
 				break
 			}
+			due := sent.sentAt.Add(session.rto)
+			if nextDue.IsZero() || due.Before(nextDue) {
+				nextDue = due
+			}
 		}
 		if target == nil {
 			session.sendMu.Unlock()
-			return false
+			return false, nextDue
 		}
 		if target.attempts >= ssu2MaxRetransmits {
 			session.sendMu.Unlock()
-			return true
+			return true, time.Time{}
 		}
 		if session.closing || session.send == nil {
 			session.sendMu.Unlock()
-			return false
+			return false, time.Time{}
 		}
 		packetNumber := session.nextPacket
 		if packetNumber == 0 {
 			session.sendMu.Unlock()
-			return true
+			return true, time.Time{}
 		}
 		session.noteCongestionLocked(now, target)
 		packet, err := session.send.SealDataTo(session.sendPacket[:], ssu2DataHeader(session.sendID, packetNumber, session.shouldRequestImmediateACKLocked()), target.payload)
 		if err != nil {
 			session.sendMu.Unlock()
-			return false
+			return false, time.Time{}
 		}
 		session.nextPacket++
 		target.sentAt = now
@@ -2262,7 +2332,7 @@ func (m *SSU2Manager) retransmitOne(session *ssu2TransportSession, now time.Time
 		session.sendMu.Unlock()
 
 		if m.writeTo(packet, remote) != nil {
-			return true
+			return true, time.Time{}
 		}
 		session.touch(now)
 	}
