@@ -599,6 +599,19 @@ func marshalDestinationDataTo(dst []byte, delivery dataplanestreamingtunnel.Deli
 	return dst, nil
 }
 
+type pooledFlateReader struct {
+	source bytes.Reader
+	reader io.ReadCloser
+}
+
+var destinationDataFlatePool = sync.Pool{
+	New: func() any {
+		entry := new(pooledFlateReader)
+		entry.reader = flate.NewReader(&entry.source)
+		return entry
+	},
+}
+
 func parseDestinationData(payload []byte) (protocol uint8, fromPort, toPort uint16, decoded []byte, err error) {
 	data, err := foundation.I2NPParseData(payload)
 	if err != nil {
@@ -612,7 +625,27 @@ func parseDestinationData(payload []byte) (protocol uint8, fromPort, toPort uint
 	if size > foundation.I2NPI2PDMaxPayload {
 		return 0, 0, 0, nil, foundation.I2NPErrPayloadTooLarge
 	}
-	inflater := flate.NewReader(bytes.NewReader(gzip[10 : len(gzip)-8]))
+	expectedCRC := binary.LittleEndian.Uint32(gzip[len(gzip)-8 : len(gzip)-4])
+	deflate := gzip[10 : len(gzip)-8]
+	if size <= int(^uint16(0)) && len(deflate) == 5+size && deflate[0] == 0x01 &&
+		int(binary.LittleEndian.Uint16(deflate[1:3])) == size &&
+		binary.LittleEndian.Uint16(deflate[3:5]) == ^uint16(size) {
+		decoded = deflate[5 : 5+size]
+		if crc32.ChecksumIEEE(decoded) != expectedCRC {
+			return 0, 0, 0, nil, ErrGarlicPacket
+		}
+		return gzip[9], binary.BigEndian.Uint16(gzip[4:6]), binary.BigEndian.Uint16(gzip[6:8]), decoded, nil
+	}
+	pooled := destinationDataFlatePool.Get().(*pooledFlateReader)
+	defer func() {
+		pooled.source.Reset(nil)
+		destinationDataFlatePool.Put(pooled)
+	}()
+	pooled.source.Reset(deflate)
+	if resetErr := pooled.reader.(flate.Resetter).Reset(&pooled.source, nil); resetErr != nil {
+		return 0, 0, 0, nil, ErrGarlicPacket
+	}
+	inflater := pooled.reader
 	decoded = make([]byte, size)
 	if _, err = io.ReadFull(inflater, decoded); err != nil {
 		_ = inflater.Close()
@@ -623,7 +656,7 @@ func parseDestinationData(payload []byte) (protocol uint8, fromPort, toPort uint
 		_ = inflater.Close()
 		return 0, 0, 0, nil, ErrGarlicPacket
 	}
-	if err = inflater.Close(); err != nil || crc32.ChecksumIEEE(decoded) != binary.LittleEndian.Uint32(gzip[len(gzip)-8:len(gzip)-4]) {
+	if err = inflater.Close(); err != nil || crc32.ChecksumIEEE(decoded) != expectedCRC {
 		return 0, 0, 0, nil, ErrGarlicPacket
 	}
 	return gzip[9], binary.BigEndian.Uint16(gzip[4:6]), binary.BigEndian.Uint16(gzip[6:8]), decoded, nil

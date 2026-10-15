@@ -369,6 +369,59 @@ func TestDestinationDataUsesI2CPGzipHeader(t *testing.T) {
 	if err != nil || !bytes.Equal(roundTrip, payload) {
 		t.Fatalf("stored-block round trip = %q, %v", roundTrip, err)
 	}
+	if allocs := testing.AllocsPerRun(100, func() {
+		_, _, _, _, _ = parseDestinationData(encoded)
+	}); allocs != 0 {
+		t.Fatalf("stored-block parseDestinationData allocs = %v, want 0", allocs)
+	}
+	corrupted := append([]byte(nil), encoded...)
+	corrupted[len(corrupted)-5] ^= 0xff
+	if _, _, _, _, err = parseDestinationData(corrupted); !errors.Is(err, ErrGarlicPacket) {
+		t.Fatalf("corrupted stored-block CRC error = %v, want %v", err, ErrGarlicPacket)
+	}
+}
+
+func BenchmarkParseDestinationDataStoredBlock(b *testing.B) {
+	payload := bytes.Repeat([]byte("ivnp-streaming-data-"), 64)
+	encoded, err := marshalDestinationDataTo(make([]byte, 4+destinationDataHeaderLen+len(payload)), dataplanestreamingtunnel.Delivery{
+		Protocol: dataplanestreamingtunnel.ProtocolStreaming, FromPort: 1234, ToPort: 5678, Payload: payload,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	for b.Loop() {
+		if _, _, _, _, err := parseDestinationData(encoded); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkParseDestinationDataCompressed(b *testing.B) {
+	payload := bytes.Repeat([]byte("ivnp-streaming-data-"), 64)
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(payload); err != nil {
+		b.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		b.Fatal(err)
+	}
+	gzipPayload := compressed.Bytes()
+	binary.BigEndian.PutUint16(gzipPayload[4:6], 1234)
+	binary.BigEndian.PutUint16(gzipPayload[6:8], 5678)
+	gzipPayload[9] = dataplanestreamingtunnel.ProtocolStreaming
+	data := make([]byte, 4+len(gzipPayload))
+	binary.BigEndian.PutUint32(data[:4], uint32(len(gzipPayload)))
+	copy(data[4:], gzipPayload)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	for b.Loop() {
+		if _, _, _, _, err := parseDestinationData(data); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 func TestHandleDestinationDataAcceptsDelayedStreamingSYN(t *testing.T) {
