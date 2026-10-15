@@ -995,6 +995,15 @@ func TestTunnelReliabilityKarnFastRetransmitAndNACKs(t *testing.T) {
 	if got := connection.congestion.Window(); got != dataplanestreaming.MinWindow {
 		t.Fatalf("fast retransmit window = %d, want %d", got, dataplanestreaming.MinWindow)
 	}
+	connection.congestion = dataplanestreaming.NewCongestionWindow(16)
+	connection.pending[5] = pendingPacket{wire: []byte{5}, sent: now}
+	nack5 := []byte{0, 0, 0, 5}
+	for range 3 {
+		_ = connection.acknowledgeLocked(6, nack5, now)
+	}
+	if got, want := connection.congestion.Window(), uint16(8); got != want {
+		t.Fatalf("high-window fast retransmit window = %d, want %d", got, want)
+	}
 
 	connection.expect = 1
 	connection.reordered[3] = receivedPacket{payload: []byte("late")}

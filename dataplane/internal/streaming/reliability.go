@@ -102,4 +102,11 @@ func (c *CongestionWindow) Loss() {
 	c.credit = 0
 }
 
+func (c *CongestionWindow) FastRecovery() {
+	threshold := max(c.cwnd/2, MinWindow)
+	c.ssthresh = threshold
+	c.cwnd = threshold
+	c.credit = 0
+}
+
 func (c CongestionWindow) SlowStartThreshold() uint16 { return c.ssthresh }

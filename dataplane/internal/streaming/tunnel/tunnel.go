@@ -1358,8 +1358,8 @@ func (c *tunnelConn) advancePace(now time.Time) {
 	c.mu.Lock()
 	window := time.Duration(c.congestion.Window())
 	interval := c.rto.RTO() / (window * 8)
-	if interval < time.Millisecond {
-		interval = time.Millisecond
+	if interval < 250*time.Microsecond {
+		interval = 250 * time.Microsecond
 	} else if interval > 10*time.Millisecond {
 		interval = 10 * time.Millisecond
 	}
@@ -1644,7 +1644,10 @@ func (c *tunnelConn) acknowledgeLocked(through uint32, nacks []byte, now time.Ti
 		c.signalWakeLocked()
 	}
 	if len(resend) != 0 {
-		c.congestion.Loss()
+		c.congestion.FastRecovery()
+		if len(c.pending) < int(c.congestion.Window()) {
+			c.signalWakeLocked()
+		}
 	}
 	return resend
 }

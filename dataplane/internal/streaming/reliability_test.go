@@ -53,4 +53,13 @@ func TestCongestionWindowSlowStartAvoidanceAndLoss(t *testing.T) {
 	if got, want := window.SlowStartThreshold(), uint16((MinWindow+3)/2); got != want {
 		t.Fatalf("ssthresh = %d, want %d", got, want)
 	}
+
+	fast := NewCongestionWindow(16)
+	fast.FastRecovery()
+	if got, want := fast.Window(), uint16(8); got != want {
+		t.Fatalf("fast recovery window = %d, want %d", got, want)
+	}
+	if got, want := fast.SlowStartThreshold(), uint16(8); got != want {
+		t.Fatalf("fast recovery ssthresh = %d, want %d", got, want)
+	}
 }
