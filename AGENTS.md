@@ -32,8 +32,14 @@ IVNP follows a strict unidirectional layered DAG architecture. Subsystems are or
 - **Zero-Allocation Parsing & Serialization**: Wire parsers must provide views over caller-owned input without allocating memory on the heap. Serializers must write directly into caller-provided fixed-capacity storage and must never dynamically grow destinations.
 - **Sensitive Memory Management**: Private cryptographic keys and sensitive credentials must be explicitly cleared/wiped from memory upon release or termination.
 
+## Documentation & Technical Writing
+
+- **Automatic Documentation Synchronization**: Whenever a code change alters public APIs, subsystem boundaries, wire formats, protocol state machines, configuration keys, CLI flags, or operational defaults, automatically load and apply the `technical-writing` skill (`.agents/skills/technical-writing/SKILL.md`) to update all affected documentation (`README.md`, `docs/*.md`, and `cmd/ivnp-reseed/README.md`) in the same task.
+- **Editorial Discipline**: Write all documentation in clear, authoritative English prose suitable for a staff systems engineer. Never use em-dashes (`U+2014`) or spaced en-dashes (`U+2013`) as clause separators; use colons, semicolons, parentheses, commas, or periods instead. Eliminate all AI-slop phrasing, marketing clichés, and low-density filler in accordance with the `technical-writing` and `zero-slop` skills.
+
 ## Pre-Completion Verification & Formatting
 
 Before completing any task, always:
+- Audit whether your code changes invalidate or outdate any statements, signatures, tables, or diagrams in `README.md`, `docs/`, or `cmd/ivnp-reseed/README.md`, and update them using the `technical-writing` skill.
 - Run `gosuda.org/ivnp/tools/importformatter` to format and consolidate Go imports canonically (`go run gosuda.org/ivnp/tools/importformatter -write`).
 - Run the `gojgp` linter to ensure code quality and guideline compliance (`gojgp lint ./...`).
