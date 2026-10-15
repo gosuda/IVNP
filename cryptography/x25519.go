@@ -1,15 +1,20 @@
 package cryptography
 
 import (
-	"crypto/ecdh"
+	"crypto/rand"
+	"crypto/subtle"
+	"errors"
 	"io"
 )
 
+var ErrLowOrderPoint = errors.New("cryptx: X25519 low-order point")
+
 // X25519PrivateKey holds an X25519 private key scalar.
-// Standard library ecdh.PrivateKey objects are instantiated on demand for each operation
-// so that sensitive material is not retained in opaque internal structs.
+// Scalar operations run directly on fixed-size arrays so that sensitive
+// material is never copied into opaque heap-allocated structs.
 type X25519PrivateKey struct {
 	scalar   [32]byte
+	public   [32]byte
 	released bool
 }
 
@@ -20,62 +25,53 @@ func NewX25519PrivateKey(encoded []byte) (*X25519PrivateKey, error) {
 	if len(encoded) != 32 {
 		return nil, ErrKeyLength
 	}
-	if _, err := ecdh.X25519().NewPrivateKey(encoded); err != nil {
-		return nil, err
-	}
 	key := new(X25519PrivateKey)
 	copy(key.scalar[:], encoded)
+	x25519ScalarMult(&key.public, &key.scalar, &fieldBasepoint)
 	return key, nil
 }
 
 // GenerateX25519PrivateKey generates a new random X25519 private key using the given random source.
 func GenerateX25519PrivateKey(random io.Reader) (*X25519PrivateKey, error) {
-	private, err := ecdh.X25519().GenerateKey(random)
-	if err != nil {
-		return nil, err
+	if random == nil {
+		random = rand.Reader
 	}
 	key := new(X25519PrivateKey)
-	copy(key.scalar[:], private.Bytes())
+	if _, err := io.ReadFull(random, key.scalar[:]); err != nil {
+		clear(key.scalar[:])
+		return nil, err
+	}
+	x25519ScalarMult(&key.public, &key.scalar, &fieldBasepoint)
 	return key, nil
 }
 
-func (k *X25519PrivateKey) privateKey() (*ecdh.PrivateKey, error) {
-	if k == nil || k.released {
-		return nil, ErrSensitiveReleased
-	}
-	return ecdh.X25519().NewPrivateKey(k.scalar[:])
-}
-
-// PublicKey computes and writes the 32-byte public key into dst.
+// PublicKey writes the 32-byte public key into dst.
 func (k *X25519PrivateKey) PublicKey(dst *[32]byte) error {
-	private, err := k.privateKey()
-	if err != nil {
+	if k == nil || k.released {
 		clear(dst[:])
-		return err
+		return ErrSensitiveReleased
 	}
-	copy(dst[:], private.PublicKey().Bytes())
+	*dst = k.public
 	return nil
 }
 
 // ECDH computes the Diffie-Hellman shared secret with peer and writes it into dst.
 func (k *X25519PrivateKey) ECDH(dst *[32]byte, peer []byte) error {
-	private, err := k.privateKey()
-	if err != nil {
+	if k == nil || k.released {
 		clear(dst[:])
-		return err
+		return ErrSensitiveReleased
 	}
-	public, err := ecdh.X25519().NewPublicKey(peer)
-	if err != nil {
+	if len(peer) != 32 {
 		clear(dst[:])
-		return err
+		return ErrKeyLength
 	}
-	secret, err := private.ECDH(public)
-	if err != nil {
+	var peerPoint, zero [32]byte
+	copy(peerPoint[:], peer)
+	x25519ScalarMult(dst, &k.scalar, &peerPoint)
+	if subtle.ConstantTimeCompare(dst[:], zero[:]) == 1 {
 		clear(dst[:])
-		return err
+		return ErrLowOrderPoint
 	}
-	copy(dst[:], secret)
-	clear(secret)
 	return nil
 }
 
@@ -85,5 +81,6 @@ func (k *X25519PrivateKey) ReleaseSensitive() {
 		return
 	}
 	clear(k.scalar[:])
+	clear(k.public[:])
 	k.released = true
 }
