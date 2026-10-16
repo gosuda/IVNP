@@ -10,7 +10,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"math"
 	"net"
@@ -482,6 +481,9 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		lockRetryInterval = 15 * time.Second
 	}
 
+	stateCopyLimit := cmp.Or(cfg.State.MaxBytes, int64(state.SecureStateDefaultMaxStateBytes))
+	routerSnapshotCopyLimit := netdb.RouterSnapshotMaxBytes(cfg.NetDB.BucketCapacity)
+
 	createTainted := func() error {
 		tempBase := cmp.Or(cfg.TempDir, os.TempDir())
 		if mkErr := os.MkdirAll(tempBase, 0o700); mkErr != nil {
@@ -496,24 +498,30 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 
 		stateBase := filepath.Base(masterStatePath)
 		workingStatePath = filepath.Join(taintedDir, stateBase)
-		if cpErr := copyFileIfExists(masterStatePath, workingStatePath); cpErr != nil {
+		if cpErr := state.FilesystemStoreCopyPrivateBoundedIfExists(masterStatePath, workingStatePath, stateCopyLimit); cpErr != nil {
 			return fmt.Errorf("daemon: failed to copy state file for tainted mode: %w", cpErr)
 		}
 
 		if masterKeyPath != "" {
 			keyBase := filepath.Base(masterKeyPath)
 			workingKeyPath = filepath.Join(taintedDir, keyBase)
-			if cpErr := copyFileIfExists(masterKeyPath, workingKeyPath); cpErr != nil {
+			if cpErr := state.FilesystemStoreCopyPrivateBoundedIfExists(masterKeyPath, workingKeyPath, 32); cpErr != nil {
 				return fmt.Errorf("daemon: failed to copy keys file for tainted mode: %w", cpErr)
 			}
 		}
 
 		if masterNetdbDir != "" {
-			_ = copyFileIfExists(filepath.Join(masterNetdbDir, "netdb.routers"), filepath.Join(taintedDir, "netdb.routers"))
-			_ = copyFileIfExists(filepath.Join(masterNetdbDir, "netdb.responders"), filepath.Join(taintedDir, "netdb.responders"))
+			if cpErr := state.FilesystemStoreCopyPrivateBoundedIfExists(filepath.Join(masterNetdbDir, "netdb.routers"), filepath.Join(taintedDir, "netdb.routers"), routerSnapshotCopyLimit); cpErr != nil {
+				return fmt.Errorf("daemon: failed to copy NetDB routers snapshot for tainted mode: %w", cpErr)
+			}
+			if cpErr := state.FilesystemStoreCopyPrivateBoundedIfExists(filepath.Join(masterNetdbDir, "netdb.responders"), filepath.Join(taintedDir, "netdb.responders"), netdb.DefaultResponderSnapshotMaxBytes); cpErr != nil {
+				return fmt.Errorf("daemon: failed to copy NetDB responders snapshot for tainted mode: %w", cpErr)
+			}
 		}
 		if cfg.AddressBook.StatePath != "" {
-			_ = copyFileIfExists(cfg.AddressBook.StatePath, filepath.Join(taintedDir, filepath.Base(cfg.AddressBook.StatePath)))
+			if cpErr := state.FilesystemStoreCopyPrivateBoundedIfExists(cfg.AddressBook.StatePath, filepath.Join(taintedDir, filepath.Base(cfg.AddressBook.StatePath)), cfg.AddressBook.MaxFileBytes); cpErr != nil {
+				return fmt.Errorf("daemon: failed to copy address book for tainted mode: %w", cpErr)
+			}
 		}
 		workingNetdbDir = taintedDir
 		return nil
@@ -3053,7 +3061,11 @@ func (d *Controller) tryPromoteToMaster() (bool, error) {
 
 	if d.config.AddressBook.StatePath != "" && d.taintedDir != "" {
 		taintedAB := filepath.Join(d.taintedDir, filepath.Base(d.config.AddressBook.StatePath))
-		_ = copyFileIfExists(taintedAB, d.config.AddressBook.StatePath)
+		if cpErr := state.FilesystemStoreCopyPrivateBoundedIfExists(taintedAB, d.config.AddressBook.StatePath, d.config.AddressBook.MaxFileBytes); cpErr != nil {
+			_ = masterLock.Close()
+			_ = masterStore.Close()
+			return false, fmt.Errorf("daemon: failed to copy address book during promotion: %w", cpErr)
+		}
 	}
 
 	if d.stateLock != nil {
@@ -3082,30 +3094,4 @@ func (d *Controller) tryPromoteToMaster() (bool, error) {
 	}
 
 	return true, nil
-}
-
-func copyFileIfExists(srcPath, dstPath string) (err error) {
-	src, err := os.Open(srcPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-
-	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := dst.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}()
-
-	if _, err = io.Copy(dst, src); err != nil {
-		return err
-	}
-	return dst.Sync()
 }

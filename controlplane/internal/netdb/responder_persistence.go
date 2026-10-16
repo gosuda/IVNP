@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	responderSnapshotVersion = uint16(1)
-	responderSnapshotHeader  = 8 + 2 + 4 + foundation.HashLength + 4
-	responderSnapshotRecord  = foundation.HashLength + 8
+	responderSnapshotVersion         = uint16(1)
+	responderSnapshotHeader          = 8 + 2 + 4 + foundation.HashLength + 4
+	responderSnapshotRecord          = foundation.HashLength + 8
+	DefaultResponderSnapshotMaxBytes = responderSnapshotHeader + defaultResponderProfilePeers*responderSnapshotRecord + sha256.Size
 )
 
 var (
