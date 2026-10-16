@@ -199,7 +199,7 @@ L0 packages have zero internal dependencies and rely only on the Go standard lib
 - **`client/internal/registration/`**:
   - `regi2p.go`: `reg.i2p` `#!sig=` authentication string generator.
 - **`client/internal/frontend/`**:
-  - `server.go`, `control.go`, `http_proxy.go`, `socks5.go`, `relay.go`, `target.go`: Connection-limited listeners (`trackedListener`), Bearer-authenticated management `Control` server (`127.0.0.1:7657`), `HTTPProxy` (`127.0.0.1:4444` eepsite and clearnet outproxy gateway with background outproxy warmup), and `SOCKS5Proxy` (`127.0.0.1:4447`).
+  - `server.go`, `control.go`, `http_proxy.go`, `socks5.go`, `relay.go`, `target.go`: Connection-limited listeners (`trackedListener`), Bearer-authenticated management `Control` server (`127.0.0.1:7650` in `DefaultOperating`), `HTTPProxy` (`127.0.0.1:4444` eepsite and clearnet outproxy gateway with background outproxy warmup), and `SOCKS5Proxy` (`127.0.0.1:4447`).
 - **`client/internal/sam/`**:
   - `server.go`, `protocol.go`, `command.go`, `session.go`, `stream.go`, `accept.go`, `datagram.go`, `udp.go`, `private_destination.go`, `budget.go`: Full SAM v3.3 server (`127.0.0.1:7656` TCP / `7655` UDP) supporting `STREAM`, `DATAGRAM`, `DATAGRAM2`, `DATAGRAM3`, `RAW`, `PRIMARY` subsessions, offline signatures, FIFO `STREAM ACCEPT` matching, and bounded byte accounting.
   - `network.go`: External SAM v3.1-v3.3 client adapter.
@@ -227,8 +227,8 @@ L0 packages have zero internal dependencies and rely only on the Go standard lib
 ## Layer L9: Binaries, Integration Tests & Simulation (`cmd/`, `tests/`, `tools/`, `sim_*`)
 
 - **`cmd/ivnpd/`**:
-  - `main.go`, `signal_unix.go`, `signal_windows.go`: Daemon CLI entrypoint, `-memory` mode, PID file management, and `SIGHUP` live log-level reload.
-  - `webui_server.go`, `webui_api.go`, `webui_config.go`, `webui/`: Embedded SvelteKit web console (`127.0.0.1:7070`), CSP script-hash calculation, Bearer/Origin validation, `/api/*` REST handlers, and `/api/events` 1-second SSE stream.
+  - `main.go`, `signal_unix.go`, `signal_windows.go`: Daemon CLI entrypoint, `-memory` mode, PID file management, in-process node restart supervisor, and `SIGHUP` live log-level reload.
+  - `webui_server.go`, `webui_api.go`, `webui_config.go`, `webui_config_schema.go`, `webui_history.go`, `webui/`: Embedded SvelteKit web console (`127.0.0.1:7070`), CSP script-hash calculation, Bearer/Origin/write-policy enforcement, schema-driven INI patching and `.bak` rollback, 60-minute history ring buffer, `/api/*` REST handlers, and `/api/events` 1-second SSE stream.
 - **`cmd/ivnp-reseed/`**:
   - `main.go`, `crawler.go`, `prober.go`, `selector.go`, `store.go`, `packager.go`, `server.go`, `dashboard.go`: Standalone floodfill DHT crawler, token-bucket TCP prober, 4-stage Max-Min XOR peer selector, deterministic HKDF/RSA-4096 SU3 packager, and HTTP server.
 - **`tests/integration/`**: Live network eepsite proxy and two-router round-trip tests (`//go:build integration`).

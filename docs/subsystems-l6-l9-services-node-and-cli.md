@@ -23,7 +23,7 @@ This document provides a code-level structural reference for Layers **L6** (`cli
 | File | Primary Types & Functions | Code Mechanics & Invariants |
 | :--- | :--- | :--- |
 | `server.go` | `server`, `trackedListener`, `trackedConn` | Enforces loopback binding unless `AllowRemote` is set; bounds concurrent connections with `sem chan struct{}` and tracks active sockets for forced teardown on `Close()` |
-| `control.go` | `Control`, `ControlConfig` | Loopback management HTTP server (`127.0.0.1:7657`); requires constant-time SHA-256 `BearerToken` auth; serves `GET /readyz`, `GET /status`, and `GET /destinations` |
+| `control.go` | `Control`, `ControlConfig` | Loopback management HTTP server (`127.0.0.1:7650` in `DefaultOperating`, `127.0.0.1:7657` standalone fallback); requires constant-time SHA-256 `BearerToken` auth; serves `GET /readyz`, `GET /status`, and `GET /destinations` |
 | `http_proxy.go` | `HTTPProxy`, `HTTPProxyConfig` | Loopback HTTP/CONNECT proxy (`127.0.0.1:4444`); strips hop-by-hop and `X-Forwarded-*` headers; routes `.i2p` hosts directly (`User-Agent: MYOB/6.66 (AN/ON)`) and clearnet hosts across round-robin `Outproxies` with 5-minute `warmOutproxyLoop` |
 | `socks5.go` | `SOCKS5Proxy`, `SOCKS5Config` | Loopback SOCKS5 `CONNECT` proxy (`127.0.0.1:4447`); requires `ATYP = 0x03` (domain name); runs a background `reader.Peek(1)` goroutine during `DialI2P` to cancel aborted client dials |
 | `target.go`, `relay.go` | `targetAddress`, `relayConnections` | Validates 52-char `.b32.i2p` and base64 targets; wraps `internal/relay.BidirectionalContained` with `BoundaryClientConnection` panic recovery |
@@ -45,7 +45,7 @@ This document provides a code-level structural reference for Layers **L6** (`cli
 ## 2. Layer L7: Node Lifecycle (`node/`)
 
 - **`node/internal/runtime/node.go` (`Daemon`)**:
-  - Embeds `*controlplane.Controller` and owns the ordered slice `services []nodeService` (`addressBook`, `sam`, `control`, `httpProxy`, `socks5`) plus `metricsServer`.
+  - Embeds `*controlplane.Controller` and owns the ordered slice `services []nodeService` (`addressBook`, `sam`, `control`, `httpProxy`, `socks5`) plus `metricsServer`, exposing bound listener state via `ServiceListeners()`.
   - `newAddressBookTransport`: Custom `http.RoundTripper` that routes `.i2p` subscription URLs over `core.DialI2P` (after resolving the host via `AddressBook`) and clearnet `https://` URLs over `net.Dialer`.
   - `startProxyDestination`: When running in embedded/in-memory mode with `HTTPProxy` or `SOCKS5` enabled, automatically provisions the `"default"` client destination so proxy listeners can dial immediately.
 - **`node/embedded.go` (`EmbeddedRouter`, `NetworkSpec`)**:
@@ -72,8 +72,8 @@ All root package files reside in `/Users/user/work/work3/IVNP`:
 ## 4. Layer L9: CLI Binaries, Tooling & Simulation (`cmd/`, `tools/`, `sim_*`)
 
 ### 4.1 `cmd/ivnpd` (Standalone Daemon & WebUI)
-- **`main.go`, `signal_unix.go`, `signal_windows.go`**: Parses CLI flags (`-config`, `-memory`, `-webui`, `-webui-listen`, `-webui-auth`, `-webui-token`, `-http-proxy`, `-socks5`, `-data-dir`, `-log-level`, `-log-format`, `-test-config`, `-pidfile`, `-version`), manages PID files, and reloads `log.level` on `SIGHUP`.
-- **`webui_server.go`, `webui_api.go`, `webui_config.go`**: Serves the embedded SvelteKit app (`cmd/ivnpd/webui/build`), computes startup SHA-256 CSP hashes for inline scripts (`inlineScriptCSPHashes`), enforces constant-time Bearer token and same-origin checks, and implements `/api/status`, `/api/metrics`, `/api/tunnels`, `/api/netdb`, `/api/destinations`, `/api/config`, `/api/actions/{reseed,tunnel-probe}`, and 1-second `/api/events` SSE streaming.
+- **`main.go`, `signal_unix.go`, `signal_windows.go`**: Parses CLI flags (`-config`, `-memory`, `-webui`, `-webui-listen`, `-webui-auth`, `-webui-token`, `-webui-remote-write`, `-webui-show-peers`, `-http-proxy`, `-socks5`, `-data-dir`, `-log-level`, `-log-format`, `-test-config`, `-pidfile`, `-version`), manages PID files, runs the in-process node restart supervisor, and reloads `log.level` on `SIGHUP`.
+- **`webui_server.go`, `webui_api.go`, `webui_config.go`, `webui_config_schema.go`, `webui_history.go`**: Serves the embedded SvelteKit app (`cmd/ivnpd/webui/build`), computes startup SHA-256 CSP hashes for inline scripts (`inlineScriptCSPHashes`), enforces constant-time Bearer token, same-origin, write-policy, and peer-visibility checks, and implements `/api/status`, `/api/metrics`, `/api/history`, `/api/tunnels`, `/api/netdb`, `/api/peers`, `/api/destinations`, `/api/config` (`GET`, `PATCH`), `/api/config/rollback`, `/api/actions/{reseed,tunnel-probe,restart,log}`, and 1-second `/api/events` SSE streaming.
 
 ### 4.2 `cmd/ivnp-reseed` (Autonomous Indexer & SU3 Server)
 - **`crawler.go`**: Runs an embedded floodfill `node.Subsystem`, harvests verified `RouterInfo`s every `4s`, records tunnel participation, and executes deficit-weighted prefix-tree exploration (`TreeExplore`).

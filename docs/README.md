@@ -32,11 +32,13 @@ This directory contains the architectural specifications, subsystem maps, and wi
 
 - **[Control Plane & NetDB](controlplane-and-netdb.md)**
   Explains Layer L5 (`controlplane`): split NetDB storage (`Table` + Kademlia $b=4$ `kBucketSet`), daily UTC routing keys, iterative `RequestManager` lookups, `LookupResponder` private-vs-published LeaseSet isolation, `StoreFlooder` with UTC midnight rollover, confirmed `DeliveryStatus` publication, two-layer ChaCha20 `EncryptedLeaseSet` client authorization (`DH` and `PSK`), `PairedPoolMaintainer` tunnel bootstrap ordering, SipHash-2-4 hop tiering, eclipse-resistant SU3 reseed ingestion, and NAT-PMP/UPnP port mapping.
-- **[Client Services, Public API & Simulation](client-services-and-api.md)**
-  Covers Layers L6 through L9 (`client`, `node`, root `gosuda.org/ivnp`, `cmd/ivnpd`, and `internal/simnet`):
+- **[Client Services & Public API](client-services-and-api.md)**
+  Covers Layers L6 through L9 (`client`, `node`, root `gosuda.org/ivnp`, and `cmd/ivnpd`):
   - Root Go API (`Router`, `Destination`, multi-network Happy Eyeballs dialing, merged listeners, and `PacketConn` vs. `UnauthPacketConn`).
   - SAM v3.3 server and external client, HTTP/HTTPS-CONNECT eepsite and outproxy gateway, SOCKS5 proxy, and lock-free AddressBook service.
-  - `ivnpd` daemon CLI, INI configuration schema, WebUI REST/SSE endpoints, and deterministic simulation testing (`simnet` and `tools/dstoverlay`).
+  - `ivnpd` daemon CLI, INI configuration schema, and WebUI REST/SSE endpoints.
+- **[Verification, Simulation & Tooling](testing-and-simulation.md)**
+  Documents standard verification commands (`go test`, `importformatter`, `gojgp lint`, `architecture_test.go`), deterministic multi-router simulation testing (`internal/simnet`, `tools/dstoverlay`, `sim_*.go`), and live network integration tests (`tests/integration`).
 - **[Standalone Reseed Server (`ivnp-reseed`)](../cmd/ivnp-reseed/README.md)**
   Documents the standalone network crawler, token-bucket TCP reachability prober, 4-stage Max-Min XOR peer selector, deterministic RSA-4096 SU3 packager, and HTTP server.
 

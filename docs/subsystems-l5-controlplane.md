@@ -33,6 +33,8 @@ Controller
  └── destinations: map[string]*destinationRuntime (Isolated per-destination control/data runtimes)
 ```
 
+- **Readiness & Peer Telemetry (`management_types.go`, `controller.go`)**: `UnmetReadinessConditions(readiness ReadinessDetails)` evaluates the 8 ordered data-plane readiness requirements (`netdb_routers >= 50`, `router_info_publication`, `lease_set2_publication`, exploratory/client tunnel pools, and `floodfill_advertisement`) as the single source of truth shared by `dataPlaneReady` and the WebUI status API. `Controller.PeerProfileSnapshots(peers)` exports rolling tunnel build outcome and latency profiles per peer hash.
+
 ### 1.2 Isolated Client Destination Runtime (`destination_runtime.go`, `client_destination.go`)
 
 Every client destination created via `CreateDestination` or `EnsureDestination` runs inside its own self-contained `destinationRuntime`. Client destinations never share tunnels, lookup paths, or ratchet tables with the router or with sibling destinations:

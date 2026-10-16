@@ -109,18 +109,23 @@ Passing a raw or `datagram3` network string to `ListenPacket` fails with an expl
 
 ## 4. `ivnpd` Web Console & REST/SSE API (`cmd/ivnpd`)
 
-`ivnpd` embeds a compiled SvelteKit dashboard (`cmd/ivnpd/webui/build`) served on `127.0.0.1:7070` (`webui_server.go`, `webui_api.go`, `webui_config.go`). At startup, `inlineScriptCSPHashes` computes SHA-256 Content-Security-Policy hashes for every embedded inline script.
+`ivnpd` embeds a compiled SvelteKit application (`cmd/ivnpd/webui/build`) served on `127.0.0.1:7070` (`webui_server.go`, `webui_api.go`, `webui_config.go`, `webui_config_schema.go`, `webui_history.go`). At startup, `inlineScriptCSPHashes` computes SHA-256 Content-Security-Policy hashes for every embedded inline script. The frontend exposes URL-addressable operational views (`/`, `/tunnels/`, `/tunnels/[id]/`, `/peers/[b32]/`, `/destinations/`, `/destinations/[name]/`, `/network/`, `/settings/`) with a global `⌘K` / `/` command palette.
 
 | Method & Path | Purpose |
 | :--- | :--- |
-| `GET /api/status` | Router state, readiness breakdown, router hash, uptime, tunnel counts, peer counts, 1s/15s bandwidth, NAT port mapping, and transport status |
-| `GET /api/metrics` | Structured counters, gauges, histograms, health checks, and tunnel build success rate |
-| `GET /api/tunnels` | Active inbound, outbound, and participating circuits with hop hashes and latencies |
-| `GET /api/netdb?limit=N&q=...` | Paginated, searchable `RouterInfo` and `LeaseSet` entries in local NetDB |
-| `GET /api/destinations` | Active local destinations, `.b32.i2p` addresses, LeaseSet policies, and port bindings |
-| `GET /api/config`, `POST /api/config` | Read or atomically update `ivnp.conf` (`log.level` applies live; returns `restart_required` fields) |
+| `GET /api/status` | Router state, readiness breakdown, `unmet_conditions`, client `capabilities`, router hash, uptime, reachability, transports, reseed counters, and per-service `listening` state |
+| `GET /api/metrics` | Structured bandwidth, tunnel, NetDB, transport, proxy, and Go runtime counters |
+| `GET /api/history` | 60-minute ring buffer (`720` samples at `5s` intervals) of bandwidth, tunnel, NetDB, and heap telemetry retained across node restarts |
+| `GET /api/tunnels` | Active exploratory and client tunnels with 10-minute build window deltas (`recent_build_successes`, `recent_build_failures`) and policy-gated hop/gateway `.b32.i2p` identities |
+| `GET /api/netdb?limit=N&q=...` | Searchable `RouterInfo` entries in the local NetDB with total `matched` count |
+| `GET /api/peers?b32=...` | Batch lookup of up to `64` comma-separated `.b32.i2p` router identities with `PeerProfileSnapshot` tunnel build latency and outcome histories (requires loopback listener or `-webui-show-peers`) |
+| `GET /api/destinations` | Active local destinations, `.b32.i2p` addresses, and token-bucket bandwidth snapshots |
+| `GET /api/config`, `PATCH /api/config` | Read the schema-driven configuration descriptor (`fields`, SHA-256 `revision`, `running` vs. on-disk `value`, `pending` restart flags) or atomically patch modified INI keys with `<config>.bak` backup (`0600`) and live `log.level` application |
+| `POST /api/config/rollback` | Atomically swap `<config>.bak` and `ivnp.conf` after revision and parser validation |
 | `POST /api/actions/reseed` | Trigger an immediate SU3 reseed pass |
 | `POST /api/actions/tunnel-probe` | Trigger an immediate tunnel health probe pass |
+| `POST /api/actions/restart` | Schedule an in-process router restart supervised by `main.go` while keeping the WebUI listener online |
+| `GET /api/actions/log` | Most recent `50` administrative actions (`reseed`, `probe`, `restart`, `config`, `rollback`), newest first |
 | `GET /api/events` | 1-second Server-Sent Events (`text/event-stream`) telemetry stream |
 
 ---

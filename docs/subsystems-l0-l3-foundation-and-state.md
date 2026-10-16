@@ -139,7 +139,7 @@ All L1 files reside directly in `/Users/user/work/work3/IVNP/cryptography`:
 
 #### INI Configuration Parser (`state/internal/configuration/config.go`, `operating.go`)
 - `Parse(text)` enforces `maxConfigBytes = 1 MiB` and `maxConfigEntries = 4096`, strips `#` and `;` comments outside double-quoted strings, and rejects duplicate `(section, key)` pairs.
-- `Operating.Validate()` enforces loopback-only binding on `http_proxy`, `socks5`, and `sam`, requires a `16..4096` byte `bearer_token` on `control` and non-loopback `metrics` listeners, and requires `0600` file permissions whenever any `bearer_token` is present in `ivnp.conf`.
+- `ParseOperating` and `LoadOperating` enforce loopback-only binding on `http_proxy`, `socks5`, and `sam` UDP (`udp_host`), require a `16..4096` byte `bearer_token` on `control` and any non-loopback `sam` or `metrics` listener, and require `0600` file permissions whenever any `bearer_token` is present in `ivnp.conf`.
 
 #### Encrypted State Bundle Wire Format (`state/internal/secure_store/state.go`)
 

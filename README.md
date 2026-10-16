@@ -46,16 +46,16 @@ ivnpd -memory
 
 | Service | Default Bind Address | Protocol / Purpose |
 | :--- | :--- | :--- |
-| **Web Console** | `http://127.0.0.1:7070` | Real-time dashboard, live SSE telemetry, NetDB inspector, and INI config editor |
+| **Web Console** | `http://127.0.0.1:7070` | Operational console, SSE telemetry, 60-minute history, object views, and schema-driven INI editor |
 | **HTTP Proxy** | `127.0.0.1:4444` | `.i2p` eepsite proxy and clearnet outproxy forwarding (`HTTP` and `CONNECT`) |
 | **SOCKS5 Proxy** | `127.0.0.1:4447` | SOCKS5 `CONNECT` proxy for `.b32.i2p` and base64 destinations (enable with `-socks5`) |
 | **SAM v3.3 Bridge** | `127.0.0.1:7656` (TCP) / `7655` (UDP) | Simple Anonymous Messaging v3.1-v3.3 control and datagram sockets |
-| **Control API** | `127.0.0.1:7657` | Bearer-authenticated JSON status and readiness endpoints (`/readyz`, `/status`, `/destinations`) |
-| **Metrics & Probes** | `127.0.0.1:9100` | Prometheus `/metrics`, `/varz`, `/healthz`, `/livez`, and `/readyz` |
+| **Control API** | `127.0.0.1:7650` | Bearer-authenticated JSON status and readiness endpoints (`/readyz`, `/status`, `/destinations`; opt-in) |
+| **Metrics & Probes** | `127.0.0.1:9090` | Dedicated Prometheus `/metrics` and `/healthz`, `/livez`, `/readyz` listener (opt-in; `/healthz`, `/livez`, `/readyz`, `/varz` are also served on `:7070`) |
 
 ### Daemon Configuration & Flags
 
-On first start with the default `-config ivnp.conf` path, `ivnpd` generates a commented configuration file and stores AES-256-GCM encrypted router state (`router.state`), master keys (`router.keys`), and NetDB snapshots under `./data`.
+On first start with the default `-config ivnp.conf` path, `ivnpd` creates `ivnp.conf` (`0600`) if absent and stores AES-256-GCM encrypted router state (`router.state`), master keys (`router.keys`), and NetDB snapshots under `./data`.
 
 ```ini
 [paths]
@@ -63,17 +63,20 @@ data_dir = /var/lib/ivnp
 
 [router]
 floodfill = false
-max_participating_tunnels = 512
+transit = true
 
 [http_proxy]
 enabled = true
-listen = 127.0.0.1:4444
+listen_host = 127.0.0.1
+listen_port = 4444
 outproxies = exit.stormycloud.i2p
 
 [sam]
 enabled = true
-listen = 127.0.0.1:7656
-udp_listen = 127.0.0.1:7655
+listen_host = 127.0.0.1
+listen_port = 7656
+udp_host = 127.0.0.1
+udp_port = 7655
 ```
 
 Common CLI flags:
@@ -82,6 +85,8 @@ Common CLI flags:
 - `-data-dir <dir>`: Override `[paths] data_dir`.
 - `-webui=false` / `-webui-listen <addr:port>`: Disable or rebind the embedded WebUI server.
 - `-webui-auth` / `-webui-token <secret>`: Require Bearer authentication on `/api/*` endpoints (or set `IVNPD_WEBUI_TOKEN`).
+- `-webui-remote-write`: Permit WebUI configuration writes, rollbacks, and router restarts from non-loopback clients.
+- `-webui-show-peers`: Expose peer router `.b32.i2p` identities in `/api/tunnels` and `/api/peers` when the WebUI listener is not loopback-bound.
 - `-http-proxy` / `-socks5`: Enable or disable proxy listeners from the command line.
 - `-log-level <debug|info|warn|error>` / `-log-format <text|json>`: Configure structured logging (`SIGHUP` reloads `log.level` at runtime on Unix).
 - `-test-config`: Validate configuration syntax and security invariants, then exit.
@@ -247,45 +252,13 @@ Detailed architectural guides, codebase maps, and wire-level protocol references
 | [**Transports & Tunnels**](docs/transports-and-tunnels.md) | NTCP2 and SSU2 handshakes, header protection, NAT hole punching, peer test, 1024-byte AES-256-CBC tunnel framing, gateway fragmentation, endpoint reassembly, and STBM/VTBM tunnel builds |
 | [**Garlic, Streaming & Datagrams**](docs/garlic-streaming-and-datagrams.md) | `ECIES-X25519-AEAD-Ratchet` state machine, two-phase `NewSession` commit, I2P Streaming TCB, congestion control, and Datagram1/Raw/Datagram2/Datagram3 codecs |
 | [**Control Plane & NetDB**](docs/controlplane-and-netdb.md) | Split Kademlia XOR NetDB, floodfill operations, iterative lookups, confirmed publication, paired tunnel pool maintenance, SU3 reseed verification, and UPnP/NAT-PMP port mapping |
-| [**Client Services, Public API & Simulation**](docs/client-services-and-api.md) | Root Go API (`gosuda.org/ivnp`), SAM v3.3 server/client, HTTP & SOCKS5 proxies, AddressBook, `ivnpd` WebUI API, and deterministic simulation testing (`simnet` & `dstoverlay`) |
+| [**Client Services & Public API**](docs/client-services-and-api.md) | Root Go API (`gosuda.org/ivnp`), SAM v3.3 server/client, HTTP & SOCKS5 proxies, AddressBook, and `ivnpd` WebUI REST/SSE API |
+| [**Verification, Simulation & Tooling**](docs/testing-and-simulation.md) | Standard test/lint commands, architectural DAG checks, deterministic simulation testing (`simnet` & `dstoverlay`), and live network integration tests |
 | [**Subsystem Reference: L0-L3 (Utilities, Crypto, Foundation & State)**](docs/subsystems-l0-l3-foundation-and-state.md) | Code-level reference for `internal/*`, `cryptography`, `foundation`, `observability`, `interfaces/*`, and `state` (`router.state` binary bundle layout) |
 | [**Subsystem Reference: L4 (`dataplane`)**](docs/subsystems-l4-dataplane.md) | Code-level walkthrough of `DataPlane`, `Service`, 64-shard Bloom replay filter, `GarlicReceiver`, `NTCP2Manager`, `SSU2Manager` worker loops, and 64-shard `tunnel.Runtime` |
 | [**Subsystem Reference: L5 (`controlplane`)**](docs/subsystems-l5-controlplane.md) | Code-level walkthrough of `Controller`, isolated `destinationRuntime`, `StreamingTunnelSender`, OBEP `replyRouterInfoSeeds`, NetDB, and STBM/VTBM tunnel builders |
 | [**Subsystem Reference: L6-L9 (Services, Node, Root API & CLI)**](docs/subsystems-l6-l9-services-node-and-cli.md) | Code-level walkthrough of `client`, `node`, root `gosuda.org/ivnp` files, `cmd/ivnpd`, `cmd/ivnp-reseed`, and `tools/dstoverlay` |
 | [**Reseed Server Manual (`ivnp-reseed`)**](cmd/ivnp-reseed/README.md) | Autonomous DHT crawler, TCP prober, Max-Min XOR peer selector, deterministic RSA-4096 SU3 packager, and HTTP server |
-
----
-
-## Verification, Simulation & Tooling
-
-Run the standard test suite, race detector, canonical import formatter, and static analyzer:
-
-```sh
-go test ./...
-go test -race ./...
-go run gosuda.org/ivnp/tools/importformatter -write
-gojgp lint ./...
-```
-
-### Deterministic Simulation Testing (DST)
-
-IVNP includes a deterministic multi-router simulation suite built on Go's `testing/synctest` virtual clock and `internal/simnet`. Build the runtime overlay first with `tools/dstoverlay`, then run the simulation tests:
-
-```sh
-overlay=$(mktemp /tmp/ivnp-dst-overlay.XXXXXX.json)
-go run ./tools/dstoverlay -o "$overlay"
-GODEBUG=asyncpreemptoff=1,cryptocustomrand=1 \
-  go test -tags=dst -overlay="$overlay" -run '^TestSim|^TestDeterministic' .
-rm -f "$overlay"
-```
-
-### Live Network Integration Tests
-
-```sh
-IVNP_EEPSITE_PROXY=http://127.0.0.1:4444 IVNP_SAM_ADDRESS=127.0.0.1:7656 \
-  go test -tags=integration -run '^TestHTTPProxyCompletesI2PChallengeRoundTrip$' \
-  -count=1 -timeout=12m ./tests/integration
-```
 
 ---
 
