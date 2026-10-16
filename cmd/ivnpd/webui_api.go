@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base32"
 	"errors"
 	"net"
 	"net/http"
@@ -12,7 +13,9 @@ import (
 
 	"gosuda.org/ivnp/controlplane"
 	"gosuda.org/ivnp/foundation"
+	"gosuda.org/ivnp/node"
 	"gosuda.org/ivnp/observability"
+	"gosuda.org/ivnp/state"
 )
 
 type ivnpObservabilitySnapshot = observability.Snapshot
@@ -28,22 +31,39 @@ type transportStatus struct {
 type serviceStatus struct {
 	Enabled bool   `json:"enabled"`
 	Address string `json:"address"`
+	// Listening is nil when the service is disabled.
+	Listening *bool `json:"listening"`
+}
+
+type unmetCondition struct {
+	Key      string  `json:"key"`
+	Current  *uint64 `json:"current"`
+	Required *uint64 `json:"required"`
+}
+
+type statusCapabilities struct {
+	ConfigWritable    bool   `json:"config_writable"`
+	ConfigWriteReason string `json:"config_write_reason"`
+	Restart           bool   `json:"restart"`
+	PeerIdentities    bool   `json:"peer_identities"`
 }
 
 type statusResponse struct {
-	Ready               bool   `json:"ready"`
-	State               string `json:"state"`
-	RouterHash          string `json:"router_hash"`
-	RouterB32           string `json:"router_b32"`
-	NetworkID           uint32 `json:"network_id"`
-	Version             string `json:"version"`
-	Family              string `json:"family"`
-	UptimeSeconds       uint64 `json:"uptime_seconds"`
-	Reachability        string `json:"reachability"`
-	FloodfillConfigured bool   `json:"floodfill_configured"`
-	FloodfillAdvertised bool   `json:"floodfill_advertised"`
-	TransitConfigured   bool   `json:"transit_configured"`
-	Readiness           any    `json:"readiness"`
+	Ready               bool               `json:"ready"`
+	State               string             `json:"state"`
+	RouterHash          string             `json:"router_hash"`
+	RouterB32           string             `json:"router_b32"`
+	NetworkID           uint32             `json:"network_id"`
+	Version             string             `json:"version"`
+	Family              string             `json:"family"`
+	UptimeSeconds       uint64             `json:"uptime_seconds"`
+	Reachability        string             `json:"reachability"`
+	FloodfillConfigured bool               `json:"floodfill_configured"`
+	FloodfillAdvertised bool               `json:"floodfill_advertised"`
+	TransitConfigured   bool               `json:"transit_configured"`
+	Readiness           any                `json:"readiness"`
+	UnmetConditions     []unmetCondition   `json:"unmet_conditions"`
+	Capabilities        statusCapabilities `json:"capabilities"`
 	Transports          struct {
 		NTCP2 transportStatus `json:"ntcp2"`
 		SSU2  transportStatus `json:"ssu2"`
@@ -61,6 +81,7 @@ type statusResponse struct {
 		SOCKS5      serviceStatus `json:"socks5"`
 		SAM         serviceStatus `json:"sam"`
 		Metrics     serviceStatus `json:"metrics"`
+		Control     serviceStatus `json:"control"`
 		AddressBook struct {
 			Enabled       bool `json:"enabled"`
 			Subscriptions int  `json:"subscriptions"`
@@ -148,6 +169,10 @@ type tunnelsResponse struct {
 	BuildSuccesses            uint64       `json:"build_successes"`
 	BuildFailures             uint64       `json:"build_failures"`
 	ForwardedMessages         uint64       `json:"forwarded_messages"`
+	PeerIdentities            bool         `json:"peer_identities"`
+	RecentWindowSeconds       int          `json:"recent_window_seconds"`
+	RecentBuildSuccesses      uint64       `json:"recent_build_successes"`
+	RecentBuildFailures       uint64       `json:"recent_build_failures"`
 	Tunnels                   []tunnelItem `json:"tunnels"`
 }
 
@@ -168,7 +193,25 @@ type netDBResponse struct {
 	FloodfillRouters uint64            `json:"floodfill_routers"`
 	LookupsTotal     uint64            `json:"lookups_total"`
 	LookupsFailed    uint64            `json:"lookups_failed"`
+	Matched          int               `json:"matched"`
 	Routers          []netDBRouterItem `json:"routers"`
+}
+
+type peerProfileView struct {
+	Successes     int    `json:"successes"`
+	Failures      int    `json:"failures"`
+	MeanLatencyMS uint64 `json:"mean_latency_ms"`
+	Samples       int    `json:"samples"`
+}
+
+type peerItem struct {
+	netDBRouterItem
+	Profile *peerProfileView `json:"profile"`
+}
+
+type peersResponse struct {
+	Peers   []peerItem `json:"peers"`
+	Missing []string   `json:"missing"`
 }
 
 type destinationItem struct {
@@ -194,12 +237,13 @@ func (s *WebUIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	clientStatus, err := s.node.ClientStatus(r.Context())
+	current := s.requestNode(r)
+	clientStatus, err := current.ClientStatus(r.Context())
 	if err != nil && !clientStatus.Ready {
 		s.logger.Debug("webui status reports runtime error", "error", err)
 	}
-	config := s.node.Config()
-	snapshot := s.node.RegistrySnapshot()
+	config := current.Config()
+	snapshot := current.RegistrySnapshot()
 	uptime := uint64(max(0, time.Since(s.started).Seconds()))
 	reachability := "firewalled"
 	switch {
@@ -225,6 +269,8 @@ func (s *WebUIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		FloodfillAdvertised: clientStatus.Readiness.FloodfillAdvertised,
 		TransitConfigured:   config.Router.Transit,
 		Readiness:           clientStatus.Readiness,
+		UnmetConditions:     unmetConditionViews(controlplane.UnmetReadinessConditions(clientStatus.Readiness)),
+		Capabilities:        s.capabilities(r),
 	}
 	response.Transports.NTCP2 = transportStatus{
 		Enabled: config.NTCP2.Enabled, BindAddress: endpointString(config.NTCP2.Bind),
@@ -242,13 +288,53 @@ func (s *WebUIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	response.Reseed.Attempts = snapshot.Reseed.Attempts
 	response.Reseed.Successes = snapshot.Reseed.Successes
 	response.Reseed.Failures = snapshot.Reseed.Failures
-	response.Services.HTTPProxy = serviceStatus{Enabled: config.HTTPProxy.Enabled, Address: endpointString(config.HTTPProxy.Address)}
-	response.Services.SOCKS5 = serviceStatus{Enabled: config.SOCKS5.Enabled, Address: endpointString(config.SOCKS5.Address)}
-	response.Services.SAM = serviceStatus{Enabled: config.SAM.Enabled, Address: endpointString(config.SAM.Address)}
-	response.Services.Metrics = serviceStatus{Enabled: config.Metrics.Enabled, Address: endpointString(config.Metrics.Address)}
+	listeners := current.ServiceListeners()
+	response.Services.HTTPProxy = newServiceStatus(config.HTTPProxy.Enabled, config.HTTPProxy.Address, listeners.HTTPProxy)
+	response.Services.SOCKS5 = newServiceStatus(config.SOCKS5.Enabled, config.SOCKS5.Address, listeners.SOCKS5)
+	response.Services.SAM = newServiceStatus(config.SAM.Enabled, config.SAM.Address, listeners.SAM)
+	response.Services.Metrics = newServiceStatus(config.Metrics.Enabled, config.Metrics.Address, listeners.Metrics)
+	response.Services.Control = newServiceStatus(config.Control.Enabled, config.Control.Address, listeners.Control)
 	response.Services.AddressBook.Enabled = config.AddressBook.Enabled
 	response.Services.AddressBook.Subscriptions = len(config.AddressBook.Subscriptions)
 	writeJSONResponse(w, http.StatusOK, response)
+}
+
+func newServiceStatus(enabled bool, address state.ConfigurationEndpoint, listening bool) serviceStatus {
+	status := serviceStatus{Enabled: enabled, Address: endpointString(address)}
+	if enabled {
+		status.Listening = &listening
+	}
+	return status
+}
+
+func unmetConditionViews(conditions []controlplane.ReadinessCondition) []unmetCondition {
+	views := make([]unmetCondition, 0, len(conditions))
+	for _, condition := range conditions {
+		view := unmetCondition{Key: condition.Key}
+		if condition.Numeric {
+			current, required := condition.Current, condition.Required
+			view.Current, view.Required = &current, &required
+		}
+		views = append(views, view)
+	}
+	return views
+}
+
+// capabilities reports the actions available to the requesting client.
+func (s *WebUIServer) capabilities(r *http.Request) statusCapabilities {
+	reason := s.configWriteBlockedReason(r)
+	return statusCapabilities{
+		ConfigWritable:    reason == "",
+		ConfigWriteReason: reason,
+		Restart:           s.config.ConfigPath != "" && s.restartHook != nil,
+		PeerIdentities:    s.peerIdentitiesVisible(),
+	}
+}
+
+// peerIdentitiesVisible applies the peer identity policy: loopback-bound
+// listeners always show peers; other listeners require -webui-show-peers.
+func (s *WebUIServer) peerIdentitiesVisible() bool {
+	return s.policy.loopback || s.config.ShowPeers
 }
 
 func (s *WebUIServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -256,15 +342,14 @@ func (s *WebUIServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	writeJSONResponse(w, http.StatusOK, s.currentMetricsResponse())
+	writeJSONResponse(w, http.StatusOK, s.metricsResponse(s.requestNode(r)))
 }
 
-func (s *WebUIServer) currentMetricsResponse() metricsResponse {
-	return s.metricsResponse(s.node.RegistrySnapshot())
+func (s *WebUIServer) metricsResponse(current *node.Subsystem) metricsResponse {
+	return s.metricsFromSnapshot(current.Config(), current.RegistrySnapshot())
 }
 
-func (s *WebUIServer) metricsResponse(snapshot ivnpObservabilitySnapshot) metricsResponse {
-	config := s.node.Config()
+func (s *WebUIServer) metricsFromSnapshot(config state.ConfigurationOperating, snapshot ivnpObservabilitySnapshot) metricsResponse {
 	s.trafficMu.RLock()
 	traffic := s.traffic
 	s.trafficMu.RUnlock()
@@ -311,9 +396,12 @@ func (s *WebUIServer) handleTunnels(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	config := s.node.Config()
-	snapshot := s.node.RegistrySnapshot()
-	now := uint64(time.Now().UnixMilli())
+	current := s.requestNode(r)
+	config := current.Config()
+	snapshot := current.RegistrySnapshot()
+	nowTime := time.Now()
+	now := uint64(nowTime.UnixMilli())
+	showPeers := s.peerIdentitiesVisible()
 	response := tunnelsResponse{
 		ExploratoryInboundActive:  snapshot.Tunnel.ExploratoryInboundActive,
 		ExploratoryInboundTarget:  config.Tunnel.ExploratoryInboundTarget,
@@ -329,9 +417,12 @@ func (s *WebUIServer) handleTunnels(w http.ResponseWriter, r *http.Request) {
 		BuildSuccesses:            snapshot.Tunnel.BuildSuccesses,
 		BuildFailures:             snapshot.Tunnel.BuildFailures,
 		ForwardedMessages:         snapshot.Tunnel.ParticipatingForwarded,
+		PeerIdentities:            showPeers,
 		Tunnels:                   make([]tunnelItem, 0),
 	}
-	for _, runtime := range s.node.TunnelEntriesSnapshot() {
+	response.RecentWindowSeconds, response.RecentBuildSuccesses, response.RecentBuildFailures =
+		s.history.recentBuilds(nowTime.UnixMilli(), snapshot.Tunnel.BuildSuccesses, snapshot.Tunnel.BuildFailures)
+	for _, runtime := range current.TunnelEntriesSnapshot() {
 		entry := runtime.Entry
 		remaining := uint64(0)
 		if entry.Expires > now {
@@ -352,10 +443,10 @@ func (s *WebUIServer) handleTunnels(w http.ResponseWriter, r *http.Request) {
 		if entry.Owner != (foundation.Hash{}) {
 			item.Owner = foundation.B32(entry.Owner)
 		}
-		if entry.Gateway != (foundation.Hash{}) {
+		if showPeers && entry.Gateway != (foundation.Hash{}) {
 			item.Gateway = foundation.B32(entry.Gateway)
 		}
-		if entry.HopCount > 0 {
+		if showPeers && entry.HopCount > 0 {
 			item.Hops = make([]string, 0, entry.HopCount)
 			for index := range int(entry.HopCount) {
 				item.Hops = append(item.Hops, foundation.B32(entry.Hops[index]))
@@ -393,9 +484,10 @@ func (s *WebUIServer) handleNetDB(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = parsed
 	}
+	current := s.requestNode(r)
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	now := uint64(time.Now().UnixMilli())
-	routers := s.node.NetDBRoutersSnapshot()
+	routers := current.NetDBRoutersSnapshot()
 	sort.Slice(routers, func(i, j int) bool {
 		if routers[i].LastSeen == routers[j].LastSeen {
 			return bytes.Compare(routers[i].Hash[:], routers[j].Hash[:]) < 0
@@ -403,22 +495,112 @@ func (s *WebUIServer) handleNetDB(w http.ResponseWriter, r *http.Request) {
 		return routers[i].LastSeen > routers[j].LastSeen
 	})
 	items := make([]netDBRouterItem, 0, min(limit, len(routers)))
-	for _, router := range routers {
-		item := netDBRouterView(router, now)
-		if query != "" && !netDBRouterMatches(item, query) {
-			continue
+	matched := 0
+	if query == "" {
+		matched = len(routers)
+		for _, router := range routers[:min(limit, len(routers))] {
+			items = append(items, netDBRouterView(router, now))
 		}
-		items = append(items, item)
-		if len(items) == limit {
-			break
+	} else {
+		for _, router := range routers {
+			item := netDBRouterView(router, now)
+			if !netDBRouterMatches(item, query) {
+				continue
+			}
+			matched++
+			if len(items) < limit {
+				items = append(items, item)
+			}
 		}
 	}
-	snapshot := s.node.RegistrySnapshot()
+	snapshot := current.RegistrySnapshot()
 	writeJSONResponse(w, http.StatusOK, netDBResponse{
 		TotalRouters: snapshot.NetDB.Routers, FloodfillRouters: snapshot.NetDB.Floodfills,
 		LookupsTotal: snapshot.NetDB.Lookups, LookupsFailed: snapshot.NetDB.LookupFailures,
-		Routers: items,
+		Matched: matched, Routers: items,
 	})
+}
+
+const maxPeerLookup = 64
+
+func (s *WebUIServer) handlePeers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if !s.peerIdentitiesVisible() {
+		writeAPIError(w, http.StatusForbidden, "peer identities are hidden; start ivnpd with -webui-show-peers to show them")
+		return
+	}
+	requested, hashes, err := parsePeerAddresses(r.URL.Query().Get("b32"))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	current := s.requestNode(r)
+	wanted := make(map[foundation.Hash]struct{}, len(hashes))
+	for _, hash := range hashes {
+		wanted[hash] = struct{}{}
+	}
+	now := uint64(time.Now().UnixMilli())
+	found := make(map[foundation.Hash]netDBRouterItem, len(hashes))
+	for _, router := range current.NetDBRoutersSnapshot() {
+		if _, ok := wanted[router.Hash]; ok {
+			found[router.Hash] = netDBRouterView(router, now)
+		}
+	}
+	profiles := current.PeerProfileSnapshots(hashes)
+	response := peersResponse{Peers: make([]peerItem, 0, len(found)), Missing: make([]string, 0)}
+	for index, hash := range hashes {
+		item, ok := found[hash]
+		if !ok {
+			response.Missing = append(response.Missing, requested[index])
+			continue
+		}
+		peer := peerItem{netDBRouterItem: item}
+		if profile, ok := profiles[hash]; ok {
+			peer.Profile = &peerProfileView{
+				Successes: profile.Successes, Failures: profile.Failures,
+				MeanLatencyMS: profile.MeanLatencyMillis, Samples: profile.Samples,
+			}
+		}
+		response.Peers = append(response.Peers, peer)
+	}
+	writeJSONResponse(w, http.StatusOK, response)
+}
+
+var errPeerLookupInput = errors.New("b32 must list 1 to 64 comma-separated .b32.i2p router addresses")
+
+// parsePeerAddresses decodes a comma-separated list of router B32 addresses,
+// dropping duplicates while preserving request order.
+func parsePeerAddresses(raw string) ([]string, []foundation.Hash, error) {
+	parts := strings.Split(raw, ",")
+	if strings.TrimSpace(raw) == "" || len(parts) > maxPeerLookup {
+		return nil, nil, errPeerLookupInput
+	}
+	addresses := make([]string, 0, len(parts))
+	hashes := make([]foundation.Hash, 0, len(parts))
+	seen := make(map[foundation.Hash]struct{}, len(parts))
+	for _, part := range parts {
+		address := strings.ToLower(strings.TrimSpace(part))
+		encoded, ok := strings.CutSuffix(address, ".b32.i2p")
+		if !ok {
+			return nil, nil, errPeerLookupInput
+		}
+		decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(encoded))
+		if err != nil || len(decoded) != foundation.HashLength {
+			return nil, nil, errPeerLookupInput
+		}
+		var hash foundation.Hash
+		copy(hash[:], decoded)
+		if _, duplicate := seen[hash]; duplicate {
+			continue
+		}
+		seen[hash] = struct{}{}
+		addresses = append(addresses, address)
+		hashes = append(hashes, hash)
+	}
+	return addresses, hashes, nil
 }
 
 func netDBRouterView(router controlplane.NetworkDatabaseRouterRef, now uint64) netDBRouterItem {
@@ -426,6 +608,7 @@ func netDBRouterView(router controlplane.NetworkDatabaseRouterRef, now uint64) n
 		Hash: foundation.EncodeI2PBase64(router.Hash[:]), B32: foundation.B32(router.Hash),
 		Floodfill: router.Floodfill, Published: router.Info.Published,
 		Version: mappingValue(router.Info.Options, "router.version"), Caps: mappingValue(router.Info.Options, "caps"),
+		Transports: make([]string, 0), Addresses: make([]string, 0),
 	}
 	if now > router.LastSeen {
 		item.LastSeenAgoSeconds = (now - router.LastSeen) / uint64(time.Second/time.Millisecond)
@@ -481,7 +664,8 @@ func (s *WebUIServer) handleDestinations(w http.ResponseWriter, r *http.Request)
 		methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	destinations, err := s.node.ListDestinations(r.Context())
+	current := s.requestNode(r)
+	destinations, err := current.ListDestinations(r.Context())
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "cannot list destinations")
 		return
@@ -489,7 +673,7 @@ func (s *WebUIServer) handleDestinations(w http.ResponseWriter, r *http.Request)
 	items := make([]destinationItem, 0, len(destinations))
 	for _, destination := range destinations {
 		item := destinationItem{Name: destination.Name, Address: destination.Address, Default: destination.Default}
-		if bandwidth, ok := s.node.DestinationBandwidthSnapshot(destination.Name); ok {
+		if bandwidth, ok := current.DestinationBandwidthSnapshot(destination.Name); ok {
 			item.Bandwidth = &struct {
 				RateBytesPerSecond uint64 `json:"rate_bytes_per_second"`
 				BurstBytes         uint64 `json:"burst_bytes"`
@@ -514,10 +698,12 @@ func (s *WebUIServer) handleActionReseed(w http.ResponseWriter, r *http.Request)
 		methodNotAllowed(w, http.MethodPost)
 		return
 	}
-	if err := s.startReseedAction(); err != nil {
+	if err := s.startReseedAction(s.requestNode(r)); err != nil {
+		s.recordAction(actionReseed, err, "")
 		writeAPIError(w, http.StatusConflict, err.Error())
 		return
 	}
+	s.recordAction(actionReseed, nil, "reseed started")
 	writeJSONResponse(w, http.StatusAccepted, map[string]string{"result": "reseed started"})
 }
 
@@ -526,15 +712,55 @@ func (s *WebUIServer) handleActionTunnelProbe(w http.ResponseWriter, r *http.Req
 		methodNotAllowed(w, http.MethodPost)
 		return
 	}
-	if err := s.node.TriggerTunnelProbe(r.Context()); err != nil {
+	if err := s.requestNode(r).TriggerTunnelProbe(r.Context()); err != nil {
 		status := http.StatusConflict
 		if !errors.Is(err, controlplane.TunnelErrProbeNotReady) && !errors.Is(err, controlplane.TunnelErrProbePending) {
 			status = http.StatusServiceUnavailable
 		}
+		s.recordAction(actionProbe, err, "")
 		writeAPIError(w, status, err.Error())
 		return
 	}
+	s.recordAction(actionProbe, nil, "probe sent")
 	writeJSONResponse(w, http.StatusAccepted, map[string]string{"result": "probe sent"})
+}
+
+var (
+	errRestartMemoryMode  = errors.New("restart is unavailable in memory mode")
+	errRestartUnavailable = errors.New("restart is unavailable")
+	errRestartInProgress  = errors.New("router is already restarting")
+)
+
+func (s *WebUIServer) handleActionRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if !s.remoteWriteAllowed(r) {
+		writeAPIError(w, http.StatusForbidden, configRemoteWriteReason)
+		return
+	}
+	var err error
+	switch {
+	case s.config.ConfigPath == "":
+		err = errRestartMemoryMode
+	case s.restartHook == nil:
+		err = errRestartUnavailable
+	case s.restarting.Swap(true):
+		err = errRestartInProgress
+	default:
+		if err = s.restartHook(); err != nil {
+			s.restarting.Store(false)
+		}
+	}
+	if err != nil {
+		s.recordAction(actionRestart, err, "")
+		writeAPIError(w, http.StatusConflict, err.Error())
+		return
+	}
+	s.logger.Info("webui restart requested", "remote", r.RemoteAddr)
+	s.recordAction(actionRestart, nil, "restart scheduled")
+	writeJSONResponse(w, http.StatusAccepted, map[string]string{"result": "restart scheduled"})
 }
 
 func routerHashB32(encoded string) string {

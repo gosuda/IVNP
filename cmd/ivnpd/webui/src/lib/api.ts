@@ -1,60 +1,89 @@
 import { browser } from '$app/environment';
 import { get, writable } from 'svelte/store';
 import type {
+	ActionLogEntry,
+	ActionLogResponse,
+	ConfigResponse,
 	ConfigUpdateResult,
+	ConfigValue,
 	DestinationsResponse,
+	HistoryResponse,
+	HistorySample,
 	NetDBResponse,
 	ObservabilityMetricsResponse,
-	RouterConfigData,
-	RouterConfigUpdate,
+	PeerItem,
+	PeersResponse,
 	RouterStatusResponse,
 	RouterTunnelsResponse,
-	TelemetryPoint,
 	ToastMessage
 } from './types';
 
 const accessTokenKey = 'ivnp-webui-token';
-const historyWindowMs = 120_000;
-let toastSequence = 0;
+const historyLimit = 720;
+const historyIntervalMs = 5_000;
+
+export type Resource = 'status' | 'metrics' | 'tunnels' | 'destinations' | 'history' | 'config' | 'actions';
+export interface CollectionState {
+	loading: boolean;
+	error: string | null;
+	lastSuccess: number | null;
+}
+
+export const resourceLabels: Record<Resource, string> = {
+	status: 'Router status',
+	metrics: 'Live metrics',
+	tunnels: 'Tunnels',
+	destinations: 'Destinations',
+	history: 'History',
+	config: 'Configuration',
+	actions: 'Activity'
+};
+
+const idle = (): CollectionState => ({ loading: false, error: null, lastSuccess: null });
 
 export const routerStatus = writable<RouterStatusResponse | null>(null);
 export const metrics = writable<ObservabilityMetricsResponse | null>(null);
 export const tunnelsData = writable<RouterTunnelsResponse | null>(null);
-export const netdbData = writable<NetDBResponse | null>(null);
 export const destinationsData = writable<DestinationsResponse | null>(null);
-export const telemetryHistory = writable<TelemetryPoint[]>([]);
-export const metricsStreamState = writable<'connecting' | 'open' | 'error' | 'closed'>('closed');
-export const netdbQuery = writable('');
-export type DataResource = 'status' | 'metrics' | 'tunnels' | 'netdb' | 'destinations';
-type CollectionState = { loading: boolean; error: string | null; lastSuccess: number | null };
-export const resourceLabels: Record<DataResource, string> = {
-	status: 'Router status', metrics: 'Metrics', tunnels: 'Tunnels', netdb: 'NetDB', destinations: 'Destinations'
-};
-export const collectionState = writable<Record<DataResource, CollectionState>>({
-	status: { loading: false, error: null, lastSuccess: null },
-	metrics: { loading: false, error: null, lastSuccess: null },
-	tunnels: { loading: false, error: null, lastSuccess: null },
-	netdb: { loading: false, error: null, lastSuccess: null },
-	destinations: { loading: false, error: null, lastSuccess: null }
+export const history = writable<HistorySample[]>([]);
+export const configData = writable<ConfigResponse | null>(null);
+export const actionLog = writable<ActionLogEntry[]>([]);
+export const collection = writable<Record<Resource, CollectionState>>({
+	status: idle(),
+	metrics: idle(),
+	tunnels: idle(),
+	destinations: idle(),
+	history: idle(),
+	config: idle(),
+	actions: idle()
 });
-const requestSequence: Record<DataResource, number> = { status: 0, metrics: 0, tunnels: 0, netdb: 0, destinations: 0 };
-let netdbLimit = 50;
+export const streamState = writable<'connecting' | 'live' | 'reconnecting' | 'offline'>('offline');
+export const restarting = writable(false);
 export const authRequired = writable(false);
-export const lastUpdated = writable<Date | null>(null);
-export const isConfigModalOpen = writable(false);
 export const toasts = writable<ToastMessage[]>([]);
+
+const sequence: Record<Resource, number> = { status: 0, metrics: 0, tunnels: 0, destinations: 0, history: 0, config: 0, actions: 0 };
+const recoveryListeners = new Set<() => void>();
+let toastSequence = 0;
+
+/** Registers a callback that runs once the router answers again after a restart. */
+export function onRecovered(listener: () => void): () => void {
+	recoveryListeners.add(listener);
+	return () => recoveryListeners.delete(listener);
+}
 
 export class APIError extends Error {
 	constructor(
 		public readonly status: number,
-		message: string
+		message: string,
+		public readonly body: Record<string, unknown> = {}
 	) {
 		super(message);
 	}
 }
 
 export function getAccessToken(): string {
-	return browser ? sessionStorage.getItem(accessTokenKey) ?? '' : '';
+	return browser ? (sessionStorage.getItem(accessTokenKey) ?? '') : '';
 }
 
 export function setAccessToken(token: string): void {
@@ -65,200 +94,215 @@ export function setAccessToken(token: string): void {
 	authRequired.set(false);
 }
 
-export function clearAccessToken(): void {
-	if (browser) sessionStorage.removeItem(accessTokenKey);
-	authRequired.set(true);
-	metricsStreamState.set('closed');
-}
-
 export function addToast(message: Omit<ToastMessage, 'id'>): void {
 	const toast = { ...message, id: ++toastSequence };
-	toasts.update((items) => [...items, toast]);
-	if (browser) {
-		window.setTimeout(() => removeToast(toast.id), 4200);
-	}
+	toasts.update((items) => [...items.slice(-4), toast]);
+	// Errors stay until dismissed so the reason can be read and acted on.
+	if (browser && toast.type !== 'error') window.setTimeout(() => removeToast(toast.id), 5000);
 }
 
 export function removeToast(id: number): void {
 	toasts.update((items) => items.filter((item) => item.id !== id));
 }
 
-async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+function markRecovered(): void {
+	if (!get(restarting)) return;
+	restarting.set(false);
+	for (const listener of recoveryListeners) listener();
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 	const headers = new Headers(init.headers);
 	headers.set('Accept', 'application/json');
 	const token = getAccessToken();
 	if (token) headers.set('Authorization', `Bearer ${token}`);
 	const response = await fetch(path, { ...init, headers });
 	if (!response.ok) {
+		let body: Record<string, unknown> = {};
 		let message = `${response.status} ${response.statusText}`;
 		try {
-			const payload = (await response.json()) as { error?: string };
-			if (payload.error) message = payload.error;
+			body = (await response.json()) as Record<string, unknown>;
+			if (typeof body.error === 'string') message = body.error;
 		} catch {
-			// The status text remains the useful fallback.
+			// Plain-text middleware errors keep the status line as the message.
 		}
 		if (response.status === 401) authRequired.set(true);
-		throw new APIError(response.status, message);
+		if (response.status === 503 && body.restarting === true) restarting.set(true);
+		throw new APIError(response.status, message, body);
 	}
+	const answersDuringRestart =
+		path === '/api/history' || path === '/api/actions/log' || (path === '/api/config' && (init.method ?? 'GET') === 'GET');
+	if (!answersDuringRestart) markRecovered();
 	return (await response.json()) as T;
 }
 
-function updateCollection(resource: DataResource, update: Partial<CollectionState>): void {
-	collectionState.update((states) => ({ ...states, [resource]: { ...states[resource], ...update } }));
+function update(resource: Resource, patch: Partial<CollectionState>): void {
+	collection.update((states) => ({ ...states, [resource]: { ...states[resource], ...patch } }));
 }
 
-export function markMetricsInterrupted(message: string): void {
-	updateCollection('metrics', { error: message });
-}
-
-async function collect<T>(resource: DataResource, path: string, accept: (response: T) => void): Promise<T | null> {
-	const sequence = ++requestSequence[resource];
-	updateCollection(resource, { loading: true });
+async function collect<T>(resource: Resource, path: string, accept: (value: T) => void): Promise<T | null> {
+	const current = ++sequence[resource];
+	update(resource, { loading: true });
 	try {
-		const response = await apiRequest<T>(path, { signal: AbortSignal.timeout(10_000) });
-		if (sequence !== requestSequence[resource]) return null;
-		accept(response);
-		updateCollection(resource, { loading: false, error: null, lastSuccess: Date.now() });
-		return response;
+		const value = await request<T>(path, { signal: AbortSignal.timeout(10_000) });
+		if (current !== sequence[resource]) return null;
+		accept(value);
+		update(resource, { loading: false, error: null, lastSuccess: Date.now() });
+		return value;
 	} catch (error) {
-		if (sequence === requestSequence[resource]) {
-			updateCollection(resource, { loading: false, error: error instanceof Error ? error.message : 'Collection failed' });
+		if (current === sequence[resource]) {
+			const restartingNow = error instanceof APIError && error.body.restarting === true;
+			update(resource, { loading: false, error: restartingNow ? null : errorMessage(error) });
 		}
 		return null;
 	}
 }
 
-export async function fetchStatus(): Promise<RouterStatusResponse | null> {
-	return collect<RouterStatusResponse>('status', '/api/status', (response) => {
-		routerStatus.set(response);
-		authRequired.set(false);
-	});
+export function errorMessage(error: unknown): string {
+	if (error instanceof DOMException && error.name === 'TimeoutError') return 'The router did not answer within 10 seconds.';
+	if (error instanceof TypeError) return 'The console cannot reach ivnpd.';
+	return error instanceof Error ? error.message : 'Request failed';
 }
 
-export function applyMetrics(response: ObservabilityMetricsResponse): void {
-	if (!Number.isFinite(response.sampled_at)) throw new Error('Invalid metrics timestamp');
+export const fetchStatus = () => collect<RouterStatusResponse>('status', '/api/status', (value) => routerStatus.set(value));
+export const fetchTunnels = () => collect<RouterTunnelsResponse>('tunnels', '/api/tunnels', (value) => tunnelsData.set(value));
+export const fetchDestinations = () => collect<DestinationsResponse>('destinations', '/api/destinations', (value) => destinationsData.set(value));
+export const fetchConfig = () => collect<ConfigResponse>('config', '/api/config', (value) => configData.set(value));
+export const fetchActionLog = () => collect<ActionLogResponse>('actions', '/api/actions/log', (value) => actionLog.set(value.entries));
+export const fetchHistory = () => collect<HistoryResponse>('history', '/api/history', (value) => history.set(value.samples.slice(-historyLimit)));
+export const fetchMetrics = () => collect<ObservabilityMetricsResponse>('metrics', '/api/metrics', applyMetrics);
+
+/** Accepts one live metrics sample and extends the server history at its 5 s cadence. */
+export function applyMetrics(value: ObservabilityMetricsResponse): void {
+	if (!Number.isFinite(value.sampled_at)) throw new Error('Invalid metrics timestamp');
 	const previous = get(metrics);
-	if (previous && response.sampled_at < previous.sampled_at) return;
-	const builds = response.tunnels.build_successes + response.tunnels.build_failures;
-	const buildSuccessRate = builds > 0 ? (response.tunnels.build_successes / builds) * 100 : null;
-	const point: TelemetryPoint = {
-		timestamp: response.sampled_at,
-		inRate: response.bandwidth.in_rate_bps,
-		outRate: response.bandwidth.out_rate_bps,
-		activeTunnels: response.tunnels.active,
-		buildSuccessRate,
-		routers: response.netdb.routers,
-		floodfills: response.netdb.floodfills,
-		goroutines: response.process.goroutines,
-		heapBytes: response.process.heap_inuse_bytes
-	};
-	requestSequence.metrics++;
-	metrics.set(response);
-	updateCollection('metrics', { loading: false, error: null, lastSuccess: Date.now() });
-	telemetryHistory.update((points) => [
-		...points.filter((existing) => existing.timestamp > point.timestamp - historyWindowMs && existing.timestamp < point.timestamp),
-		point
-	]);
-}
-
-export async function fetchMetrics(): Promise<ObservabilityMetricsResponse | null> {
-	return collect<ObservabilityMetricsResponse>('metrics', '/api/metrics', applyMetrics);
-}
-
-export async function fetchTunnels(): Promise<RouterTunnelsResponse | null> {
-	return collect<RouterTunnelsResponse>('tunnels', '/api/tunnels', tunnelsData.set);
-}
-
-export async function fetchNetDB(query = get(netdbQuery), limit = netdbLimit): Promise<NetDBResponse | null> {
-	const appliedQuery = query.trim();
-	if (appliedQuery !== get(netdbQuery) || limit !== netdbLimit) {
-		netdbData.set(null);
-		updateCollection('netdb', { lastSuccess: null, error: null });
-	}
-	netdbQuery.set(appliedQuery);
-	netdbLimit = limit;
-	const params = new URLSearchParams({ limit: String(limit) });
-	if (appliedQuery) params.set('q', appliedQuery);
-	return collect<NetDBResponse>('netdb', `/api/netdb?${params}`, netdbData.set);
-}
-
-export async function fetchDestinations(): Promise<DestinationsResponse | null> {
-	return collect<DestinationsResponse>('destinations', '/api/destinations', destinationsData.set);
-}
-
-export async function fetchConfig(): Promise<RouterConfigData> {
-	return apiRequest<RouterConfigData>('/api/config');
-}
-
-export async function updateConfig(update: RouterConfigUpdate): Promise<ConfigUpdateResult> {
-	return apiRequest<ConfigUpdateResult>('/api/config', {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(update)
+	if (previous && value.sampled_at < previous.sampled_at) return;
+	metrics.set(value);
+	update('metrics', { loading: false, error: null, lastSuccess: Date.now() });
+	history.update((samples) => {
+		const last = samples.at(-1);
+		if (last && value.sampled_at - last.t < historyIntervalMs) return samples;
+		const sample: HistorySample = {
+			t: value.sampled_at,
+			in_rate_bps: value.bandwidth.in_rate_bps,
+			out_rate_bps: value.bandwidth.out_rate_bps,
+			active_tunnels: value.tunnels.active,
+			build_successes: value.tunnels.build_successes,
+			build_failures: value.tunnels.build_failures,
+			netdb_routers: value.netdb.routers,
+			floodfills: value.netdb.floodfills,
+			goroutines: value.process.goroutines,
+			heap_inuse_bytes: value.process.heap_inuse_bytes
+		};
+		return [...samples.slice(-(historyLimit - 1)), sample];
 	});
-}
-
-export async function triggerReseed(): Promise<string> {
-	const response = await apiRequest<{ result: string }>('/api/actions/reseed', { method: 'POST' });
-	return response.result;
-}
-
-export async function triggerTunnelProbe(): Promise<string> {
-	const response = await apiRequest<{ result: string }>('/api/actions/tunnel-probe', { method: 'POST' });
-	return response.result;
 }
 
 export function metricsEventURL(): string {
 	const token = getAccessToken();
-	if (!token) return '/api/events';
-	return `/api/events?token=${encodeURIComponent(token)}`;
+	return token ? `/api/events?token=${encodeURIComponent(token)}` : '/api/events';
 }
 
-export async function refreshDashboard(): Promise<{ failed: DataResource[] }> {
-	const resources: DataResource[] = ['status', 'metrics', 'tunnels', 'netdb', 'destinations'];
-	const responses = await Promise.all([fetchStatus(), fetchMetrics(), fetchTunnels(), fetchNetDB(), fetchDestinations()]);
-	const failed = resources.filter((_, index) => responses[index] === null);
-	if (failed.length === 0) lastUpdated.set(new Date());
-	return { failed };
+export async function refreshAll(): Promise<void> {
+	await Promise.all([fetchStatus(), fetchMetrics(), fetchTunnels(), fetchDestinations(), fetchConfig(), fetchActionLog()]);
 }
 
-export async function retryResource(resource: DataResource): Promise<unknown> {
-	const requests = { status: fetchStatus, metrics: fetchMetrics, tunnels: fetchTunnels, netdb: fetchNetDB, destinations: fetchDestinations };
-	return requests[resource]();
+export function retry(resource: Resource): Promise<unknown> {
+	const calls: Record<Resource, () => Promise<unknown>> = {
+		status: fetchStatus,
+		metrics: fetchMetrics,
+		tunnels: fetchTunnels,
+		destinations: fetchDestinations,
+		history: fetchHistory,
+		config: fetchConfig,
+		actions: fetchActionLog
+	};
+	return calls[resource]();
 }
 
-export function formatBytes(value: number, decimals = 1): string {
-	if (!Number.isFinite(value) || value <= 0) return '0 B';
-	const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-	const index = Math.max(0, Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1));
-	return `${(value / 1024 ** index).toFixed(index === 0 && Number.isInteger(value) ? 0 : decimals)} ${units[index]}`;
+export async function searchNetDB(query: string, limit = 50): Promise<NetDBResponse> {
+	const params = new URLSearchParams({ limit: String(limit) });
+	if (query.trim()) params.set('q', query.trim());
+	return request<NetDBResponse>(`/api/netdb?${params}`, { signal: AbortSignal.timeout(10_000) });
 }
 
-export function formatRate(value: number, decimals = 1): string {
-	return `${formatBytes(value, decimals)}/s`;
+const peerCache = new Map<string, { at: number; peer: PeerItem | null }>();
+
+/** Resolves peers by B32 with a 15 s cache; unknown addresses map to null. */
+export async function fetchPeers(addresses: string[]): Promise<Map<string, PeerItem | null>> {
+	const now = Date.now();
+	const result = new Map<string, PeerItem | null>();
+	const wanted = Array.from(new Set(addresses.filter(Boolean)));
+	const stale = wanted.filter((address) => {
+		const cached = peerCache.get(address);
+		if (cached && now - cached.at < 15_000) {
+			result.set(address, cached.peer);
+			return false;
+		}
+		return true;
+	});
+	for (let offset = 0; offset < stale.length; offset += 64) {
+		const batch = stale.slice(offset, offset + 64);
+		const response = await request<PeersResponse>(`/api/peers?b32=${encodeURIComponent(batch.join(','))}`);
+		for (const peer of response.peers) {
+			peerCache.set(peer.b32, { at: now, peer });
+			result.set(peer.b32, peer);
+		}
+		for (const address of response.missing) {
+			peerCache.set(address, { at: now, peer: null });
+			result.set(address, null);
+		}
+	}
+	return result;
 }
 
-export function formatDuration(seconds: number): string {
-	if (!Number.isFinite(seconds) || seconds < 0) return '—';
-	const days = Math.floor(seconds / 86400);
-	const hours = Math.floor((seconds % 86400) / 3600);
-	const minutes = Math.floor((seconds % 3600) / 60);
-	if (days > 0) return `${days}d ${hours}h`;
-	if (hours > 0) return `${hours}h ${minutes}m`;
-	return `${minutes}m ${Math.floor(seconds % 60)}s`;
+async function action(path: string): Promise<string> {
+	try {
+		const response = await request<{ result: string }>(path, { method: 'POST' });
+		return response.result;
+	} finally {
+		void fetchActionLog();
+	}
 }
 
-export function shortHash(value: string, head = 10, tail = 6): string {
-	if (!value) return '—';
-	if (value.length <= head + tail + 1) return value;
-	return `${value.slice(0, head)}…${value.slice(-tail)}`;
+export const triggerReseed = () => action('/api/actions/reseed');
+export const triggerTunnelProbe = () => action('/api/actions/tunnel-probe');
+
+export async function triggerRestart(): Promise<string> {
+	const result = await action('/api/actions/restart');
+	restarting.set(true);
+	return result;
+}
+
+export async function patchConfig(revision: string, changes: Record<string, ConfigValue>): Promise<ConfigUpdateResult> {
+	try {
+		return await request<ConfigUpdateResult>('/api/config', {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ revision, changes })
+		});
+	} finally {
+		void fetchActionLog();
+	}
+}
+
+export async function rollbackConfig(revision: string): Promise<ConfigUpdateResult> {
+	try {
+		return await request<ConfigUpdateResult>('/api/config/rollback', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ revision })
+		});
+	} finally {
+		void fetchActionLog();
+	}
 }
 
 export async function copyText(value: string, label: string): Promise<void> {
 	try {
 		await navigator.clipboard.writeText(value);
-		addToast({ type: 'success', title: label });
+		addToast({ type: 'success', title: `${label} copied` });
 	} catch {
-		addToast({ type: 'error', title: 'Clipboard unavailable' });
+		addToast({ type: 'error', title: 'Clipboard unavailable', description: 'The browser blocked clipboard access for this page.' });
 	}
 }

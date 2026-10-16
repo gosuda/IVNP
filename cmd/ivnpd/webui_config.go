@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,134 +13,76 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
-	"sort"
-	"strconv"
 	"strings"
-	"time"
 
 	"gosuda.org/ivnp/state"
 )
 
-type webUIConfigView struct {
-	Network struct {
-		ID   uint32 `json:"id"`
-		IPv4 bool   `json:"ipv4"`
-		IPv6 bool   `json:"ipv6"`
-	} `json:"network"`
-	Router struct {
-		Floodfill bool   `json:"floodfill"`
-		Transit   bool   `json:"transit"`
-		Family    string `json:"family"`
-		Version   string `json:"version"`
-	} `json:"router"`
-	Tunnel struct {
-		Enabled                   bool `json:"enabled"`
-		Hops                      int  `json:"hops"`
-		ExploratoryInboundTarget  int  `json:"exploratory_inbound_target"`
-		ExploratoryOutboundTarget int  `json:"exploratory_outbound_target"`
-		ExploratoryPoolCapacity   int  `json:"exploratory_pool_capacity"`
-		ClientInboundTarget       int  `json:"client_inbound_target"`
-		ClientOutboundTarget      int  `json:"client_outbound_target"`
-		ClientPoolCapacity        int  `json:"client_pool_capacity"`
-		BandwidthRateBPS          int  `json:"bandwidth_rate_bytes_per_second"`
-		BandwidthBurstBytes       int  `json:"bandwidth_burst_bytes"`
-	} `json:"tunnel"`
-	NTCP2  transportConfigView `json:"ntcp2"`
-	SSU2   transportConfigView `json:"ssu2"`
-	Reseed struct {
-		Enabled   bool     `json:"enabled"`
-		Required  bool     `json:"required"`
-		Endpoints []string `json:"endpoints"`
-	} `json:"reseed"`
-	AddressBook struct {
-		Enabled              bool     `json:"enabled"`
-		Subscriptions        []string `json:"subscriptions"`
-		RefreshIntervalHours int      `json:"refresh_interval_hours"`
-	} `json:"addressbook"`
-	Services struct {
-		HTTPProxyEnabled bool   `json:"http_proxy_enabled"`
-		HTTPProxyAddress string `json:"http_proxy_address"`
-		HTTPProxyPort    uint16 `json:"http_proxy_port"`
-		SOCKS5Enabled    bool   `json:"socks5_enabled"`
-		SOCKS5Address    string `json:"socks5_address"`
-		SOCKS5Port       uint16 `json:"socks5_port"`
-		SAMEnabled       bool   `json:"sam_enabled"`
-		SAMAddress       string `json:"sam_address"`
-		SAMPort          uint16 `json:"sam_port"`
-		MetricsEnabled   bool   `json:"metrics_enabled"`
-		MetricsAddress   string `json:"metrics_address"`
-		MetricsPort      uint16 `json:"metrics_port"`
-	} `json:"services"`
-	Log struct {
-		Level  string `json:"level"`
-		Format string `json:"format"`
-	} `json:"log"`
-	RestartRequired bool `json:"restart_required"`
+const (
+	configRemoteWriteReason   = "configuration writes are limited to loopback clients; start ivnpd with -webui-remote-write to allow remote changes"
+	configMemoryModeReason    = "configuration file is unavailable in memory mode"
+	configPathUnavailable     = "configuration path is unavailable"
+	configChangedOnDisk       = "configuration changed on disk"
+	configBackupMissing       = "no configuration backup"
+	configBackupSuffix        = ".bak"
+	configRequestBodyLimit    = 64 << 10
+	configStatusSaved         = "saved"
+	configStatusUnchanged     = "unchanged"
+	configUnknownKeyMessage   = "unknown or non-editable configuration key"
+	configInvalidPayloadError = "invalid configuration payload"
+)
+
+type configFieldView struct {
+	Key         string   `json:"key"`
+	Group       string   `json:"group"`
+	Label       string   `json:"label"`
+	Description string   `json:"description"`
+	Type        string   `json:"type"`
+	Value       any      `json:"value"`
+	Running     any      `json:"running"`
+	Min         any      `json:"min"`
+	Max         any      `json:"max"`
+	Options     []string `json:"options"`
+	Unit        string   `json:"unit"`
+	Apply       string   `json:"apply"`
+	Requires    []string `json:"requires"`
+	Pending     bool     `json:"pending"`
 }
 
-type transportConfigView struct {
-	Enabled           bool   `json:"enabled"`
-	BindAddress       string `json:"bind_address"`
-	AdvertisedAddress string `json:"advertised_address"`
-	MaxSessions       int    `json:"max_sessions"`
+type configView struct {
+	Revision           string            `json:"revision"`
+	Writable           bool              `json:"writable"`
+	WriteBlockedReason string            `json:"write_blocked_reason"`
+	RestartRequired    bool              `json:"restart_required"`
+	BackupAvailable    bool              `json:"backup_available"`
+	FileError          string            `json:"file_error"`
+	Fields             []configFieldView `json:"fields"`
 }
 
-type webUIConfigUpdate struct {
-	Router struct {
-		Floodfill bool   `json:"floodfill"`
-		Transit   bool   `json:"transit"`
-		Family    string `json:"family"`
-	} `json:"router"`
-	Tunnel struct {
-		Enabled                   bool `json:"enabled"`
-		Hops                      int  `json:"hops"`
-		ExploratoryInboundTarget  int  `json:"exploratory_inbound_target"`
-		ExploratoryOutboundTarget int  `json:"exploratory_outbound_target"`
-		ExploratoryPoolCapacity   int  `json:"exploratory_pool_capacity"`
-		ClientInboundTarget       int  `json:"client_inbound_target"`
-		ClientOutboundTarget      int  `json:"client_outbound_target"`
-		ClientPoolCapacity        int  `json:"client_pool_capacity"`
-		BandwidthRateBPS          int  `json:"bandwidth_rate_bytes_per_second"`
-		BandwidthBurstBytes       int  `json:"bandwidth_burst_bytes"`
-	} `json:"tunnel"`
-	NTCP2 struct {
-		Enabled     bool `json:"enabled"`
-		MaxSessions int  `json:"max_sessions"`
-	} `json:"ntcp2"`
-	SSU2 struct {
-		Enabled     bool `json:"enabled"`
-		MaxSessions int  `json:"max_sessions"`
-	} `json:"ssu2"`
-	Reseed struct {
-		Enabled   bool     `json:"enabled"`
-		Required  bool     `json:"required"`
-		Endpoints []string `json:"endpoints"`
-	} `json:"reseed"`
-	AddressBook struct {
-		Enabled              bool     `json:"enabled"`
-		Subscriptions        []string `json:"subscriptions"`
-		RefreshIntervalHours int      `json:"refresh_interval_hours"`
-	} `json:"addressbook"`
-	Services struct {
-		HTTPProxyEnabled bool   `json:"http_proxy_enabled"`
-		HTTPProxyPort    uint16 `json:"http_proxy_port"`
-		SOCKS5Enabled    bool   `json:"socks5_enabled"`
-		SOCKS5Port       uint16 `json:"socks5_port"`
-		SAMEnabled       bool   `json:"sam_enabled"`
-		SAMPort          uint16 `json:"sam_port"`
-		MetricsEnabled   bool   `json:"metrics_enabled"`
-		MetricsPort      uint16 `json:"metrics_port"`
-	} `json:"services"`
-	Log struct {
-		Level string `json:"level"`
-	} `json:"log"`
+type configPatchRequest struct {
+	Revision string                     `json:"revision"`
+	Changes  map[string]json.RawMessage `json:"changes"`
+}
+
+type configRollbackRequest struct {
+	Revision string `json:"revision"`
 }
 
 type configUpdateResult struct {
 	Status          string   `json:"status"`
+	Revision        string   `json:"revision"`
 	Applied         []string `json:"applied"`
 	RestartRequired []string `json:"restart_required"`
+}
+
+type configErrorResponse struct {
+	Error string `json:"error"`
+	Key   string `json:"key"`
+}
+
+type configConflictResponse struct {
+	Error    string `json:"error"`
+	Revision string `json:"revision"`
 }
 
 type iniUpdate struct {
@@ -150,145 +95,384 @@ type iniUpdate struct {
 func (s *WebUIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.configMu.RLock()
-		config := cloneConfig(s.persistedConfig)
-		s.configMu.RUnlock()
-		writeJSONResponse(w, http.StatusOK, newWebUIConfigView(config, s.node.Config()))
-	case http.MethodPost:
-		s.updateConfig(w, r)
+		s.getConfig(w, r)
+	case http.MethodPatch:
+		s.withNode(s.patchConfig)(w, r)
 	default:
-		methodNotAllowed(w, "GET, POST")
+		methodNotAllowed(w, "GET, PATCH")
 	}
 }
 
-func (s *WebUIServer) updateConfig(w http.ResponseWriter, r *http.Request) {
+// remoteWriteAllowed applies the write policy: loopback clients may always
+// write; other clients require -webui-remote-write.
+func (s *WebUIServer) remoteWriteAllowed(r *http.Request) bool {
+	return s.config.AllowRemoteWrite || remoteIsLoopback(r.RemoteAddr)
+}
+
+// configWriteBlockedReason explains why the requesting client cannot write
+// the configuration, or returns an empty string when it can.
+func (s *WebUIServer) configWriteBlockedReason(r *http.Request) string {
 	if s.config.ConfigPath == "" {
-		writeAPIError(w, http.StatusConflict, "configuration path is unavailable")
-		return
+		return configMemoryModeReason
 	}
+	if !s.remoteWriteAllowed(r) {
+		return configRemoteWriteReason
+	}
+	return ""
+}
+
+func configRevision(content []byte) string {
+	digest := sha256.Sum256(content)
+	return hex.EncodeToString(digest[:])
+}
+
+func (s *WebUIServer) configBackupPath() string {
+	return s.config.ConfigPath + configBackupSuffix
+}
+
+func (s *WebUIServer) effectiveConfig(config state.ConfigurationOperating) state.ConfigurationOperating {
+	if s.config.ConfigOverrides != nil {
+		s.config.ConfigOverrides(&config)
+	}
+	return config
+}
+
+func (s *WebUIServer) getConfig(w http.ResponseWriter, r *http.Request) {
+	view := configView{Fields: []configFieldView{}}
+	view.WriteBlockedReason = s.configWriteBlockedReason(r)
+	view.Writable = view.WriteBlockedReason == ""
+
+	var fileConfig *state.ConfigurationOperating
+	if s.config.ConfigPath != "" {
+		s.configMu.Lock()
+		content, readErr := os.ReadFile(s.config.ConfigPath)
+		_, backupErr := os.Stat(s.configBackupPath())
+		s.configMu.Unlock()
+		view.BackupAvailable = backupErr == nil
+		if readErr != nil {
+			view.FileError = "cannot read configuration file: " + readErr.Error()
+		} else {
+			view.Revision = configRevision(content)
+			parsed, parseErr := state.ConfigurationParseOperating(string(content), s.config.ConfigPath)
+			if parseErr != nil {
+				view.FileError = parseErr.Error()
+			} else {
+				fileConfig = &parsed
+			}
+		}
+	}
+	var running *state.ConfigurationOperating
+	if current := s.currentNode(); current != nil {
+		config := current.Config()
+		running = &config
+	}
+	var effective *state.ConfigurationOperating
+	if fileConfig != nil {
+		config := s.effectiveConfig(*fileConfig)
+		effective = &config
+	}
+	view.Fields = configFieldViews(fileConfig, running, effective)
+	for _, field := range view.Fields {
+		view.RestartRequired = view.RestartRequired || field.Pending
+	}
+	writeJSONResponse(w, http.StatusOK, view)
+}
+
+// configFieldViews renders the schema. value comes from fileConfig, falling
+// back to running when the file is unavailable; pending compares the file
+// configuration with command-line overrides applied against running.
+func configFieldViews(fileConfig, running, effective *state.ConfigurationOperating) []configFieldView {
+	views := make([]configFieldView, 0, len(configFields))
+	for _, field := range configFields {
+		minimum, maximum, options := field.bounds()
+		view := configFieldView{
+			Key: field.key, Group: field.group, Label: field.label, Description: field.description,
+			Type: field.kind, Min: minimum, Max: maximum, Options: options, Unit: field.unit,
+			Apply: field.apply(), Requires: append([]string{}, field.requires...),
+		}
+		if running != nil {
+			view.Running = field.get(*running)
+		}
+		switch {
+		case fileConfig != nil:
+			view.Value = field.get(*fileConfig)
+		case running != nil:
+			view.Value = view.Running
+		}
+		if !field.live && effective != nil && running != nil {
+			view.Pending = !configValuesEqual(field.get(*effective), view.Running)
+		}
+		views = append(views, view)
+	}
+	return views
+}
+
+// decodeConfigRequest reads one JSON object with no unknown fields.
+func decodeConfigRequest(w http.ResponseWriter, r *http.Request, target any) bool {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		writeAPIError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
-		return
+		return false
 	}
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, configRequestBodyLimit))
 	decoder.DisallowUnknownFields()
-	var request webUIConfigUpdate
-	if err = decoder.Decode(&request); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid configuration payload: "+err.Error())
-		return
+	if err = decoder.Decode(target); err != nil {
+		writeJSONResponse(w, http.StatusBadRequest, configErrorResponse{Error: configInvalidPayloadError + ": " + err.Error()})
+		return false
 	}
 	if err = decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-		writeAPIError(w, http.StatusBadRequest, "configuration payload must contain one JSON value")
-		return
+		writeJSONResponse(w, http.StatusBadRequest, configErrorResponse{Error: "configuration payload must contain one JSON value"})
+		return false
 	}
+	return true
+}
 
-	s.configMu.RLock()
-	previous := cloneConfig(s.persistedConfig)
-	s.configMu.RUnlock()
-	updates := configINIUpdates(request, previous)
-	current, err := os.ReadFile(s.config.ConfigPath)
+// authorizeConfigWrite applies the write policy and memory-mode rule shared by
+// PATCH and rollback.
+func (s *WebUIServer) authorizeConfigWrite(w http.ResponseWriter, r *http.Request) bool {
+	if !s.remoteWriteAllowed(r) {
+		writeAPIError(w, http.StatusForbidden, configRemoteWriteReason)
+		return false
+	}
+	if s.config.ConfigPath == "" {
+		writeAPIError(w, http.StatusConflict, configPathUnavailable)
+		return false
+	}
+	return true
+}
+
+// readConfigForWrite reads the configuration file and verifies the client
+// revision. The caller must hold configMu.
+func (s *WebUIServer) readConfigForWrite(w http.ResponseWriter, revision string) ([]byte, bool) {
+	content, err := os.ReadFile(s.config.ConfigPath)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "cannot read configuration")
+		return nil, false
+	}
+	if current := configRevision(content); current != revision {
+		writeJSONResponse(w, http.StatusConflict, configConflictResponse{Error: configChangedOnDisk, Revision: current})
+		return nil, false
+	}
+	return content, true
+}
+
+func (s *WebUIServer) patchConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeConfigWrite(w, r) {
 		return
 	}
-	nextText := updateINI(string(current), updates)
-	nextConfig, err := state.ConfigurationParseOperating(nextText, s.config.ConfigPath)
-	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, err.Error())
+	var request configPatchRequest
+	if !decodeConfigRequest(w, r, &request) {
 		return
+	}
+	for key := range request.Changes {
+		if _, ok := lookupConfigField(key); !ok {
+			writeJSONResponse(w, http.StatusBadRequest, configErrorResponse{Error: configUnknownKeyMessage, Key: key})
+			return
+		}
 	}
 
-	applied, restartRequired := changedConfigKeys(previous, nextConfig)
-	if len(applied) == 0 && len(restartRequired) == 0 {
-		writeJSONResponse(w, http.StatusOK, configUpdateResult{Status: "unchanged", Applied: []string{}, RestartRequired: []string{}})
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	current, ok := s.readConfigForWrite(w, request.Revision)
+	if !ok {
 		return
 	}
-	if err = writePrivateFileAtomic(s.config.ConfigPath, []byte(nextText)); err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "cannot save configuration")
+	previous, previousErr := state.ConfigurationParseOperating(string(current), s.config.ConfigPath)
+	updates := make([]iniUpdate, 0, len(request.Changes)+1)
+	for _, field := range configFields {
+		raw, requested := request.Changes[field.key]
+		if !requested {
+			continue
+		}
+		value, remove, err := field.encode(raw)
+		if err != nil {
+			writeJSONResponse(w, http.StatusBadRequest, configErrorResponse{Error: err.Error(), Key: field.key})
+			return
+		}
+		updates = append(updates, iniUpdate{section: field.section(), key: field.name(), value: value, remove: remove})
+		// listen_port is valid only beside listen_host; pin the host already in effect.
+		if field.name() == "listen_port" && !iniHasKey(string(current), field.section(), "listen_host") {
+			base := previous
+			if previousErr != nil {
+				base = state.ConfigurationDefaultOperating()
+			}
+			updates = append(updates, iniUpdate{section: field.section(), key: "listen_host", value: listenHost(base, field.section())})
+		}
+	}
+	nextText := updateINI(string(current), updates)
+	next, err := state.ConfigurationParseOperating(nextText, s.config.ConfigPath)
+	if err != nil {
+		s.recordAction(actionConfig, err, "")
+		writeJSONResponse(w, http.StatusBadRequest, configErrorResponse{Error: err.Error(), Key: configValidationKey(err)})
+		return
+	}
+	var previousConfig *state.ConfigurationOperating
+	if previousErr == nil {
+		previousConfig = &previous
+	}
+	applied, restartRequired := changedConfigKeys(previousConfig, next, request.Changes)
+	s.commitConfig(w, r, actionConfig, current, []byte(nextText), next, applied, restartRequired)
+}
+
+func (s *WebUIServer) handleConfigRollback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if !s.authorizeConfigWrite(w, r) {
+		return
+	}
+	var request configRollbackRequest
+	if !decodeConfigRequest(w, r, &request) {
 		return
 	}
 
 	s.configMu.Lock()
-	s.persistedConfig = cloneConfig(nextConfig)
-	s.configMu.Unlock()
+	defer s.configMu.Unlock()
+	current, ok := s.readConfigForWrite(w, request.Revision)
+	if !ok {
+		return
+	}
+	backup, err := os.ReadFile(s.configBackupPath())
+	if errors.Is(err, os.ErrNotExist) {
+		writeAPIError(w, http.StatusNotFound, configBackupMissing)
+		return
+	}
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "cannot read configuration backup")
+		return
+	}
+	restored, err := state.ConfigurationParseOperating(string(backup), s.config.ConfigPath)
+	if err != nil {
+		s.recordAction(actionRollback, err, "")
+		writeJSONResponse(w, http.StatusBadRequest, configErrorResponse{Error: "configuration backup is invalid: " + err.Error(), Key: configValidationKey(err)})
+		return
+	}
+	var previousConfig *state.ConfigurationOperating
+	if previous, previousErr := state.ConfigurationParseOperating(string(current), s.config.ConfigPath); previousErr == nil {
+		previousConfig = &previous
+	}
+	applied, restartRequired := changedConfigKeys(previousConfig, restored, nil)
+	s.commitConfig(w, r, actionRollback, current, backup, restored, applied, restartRequired)
+}
+
+// commitConfig writes the replaced bytes to the backup file, installs next,
+// applies live settings, and writes the PATCH-shaped response. The caller
+// must hold configMu.
+func (s *WebUIServer) commitConfig(w http.ResponseWriter, r *http.Request, action string, current, next []byte, nextConfig state.ConfigurationOperating, applied, restartRequired []string) {
+	if bytes.Equal(current, next) || len(applied)+len(restartRequired) == 0 {
+		writeJSONResponse(w, http.StatusOK, configUpdateResult{
+			Status: configStatusUnchanged, Revision: configRevision(current), Applied: []string{}, RestartRequired: []string{},
+		})
+		return
+	}
+	if err := writePrivateFileAtomic(s.configBackupPath(), current); err != nil {
+		s.recordAction(action, err, "")
+		writeAPIError(w, http.StatusInternalServerError, "cannot write configuration backup")
+		return
+	}
+	if err := writePrivateFileAtomic(s.config.ConfigPath, next); err != nil {
+		s.recordAction(action, err, "")
+		writeAPIError(w, http.StatusInternalServerError, "cannot save configuration")
+		return
+	}
 	if contains(applied, "log.level") && s.logLevel != nil {
-		setSlogLevel(s.logLevel, nextConfig.Log.Level)
+		setSlogLevel(s.logLevel, s.effectiveConfig(nextConfig).Log.Level)
 	}
-	writeJSONResponse(w, http.StatusOK, configUpdateResult{Status: "saved", Applied: applied, RestartRequired: restartRequired})
+	keys := append(append([]string{}, applied...), restartRequired...)
+	message := "webui configuration saved"
+	if action == actionRollback {
+		message = "webui configuration rolled back"
+	}
+	s.logger.Info(message, "remote", r.RemoteAddr, "keys", keys)
+	s.recordAction(action, nil, fmt.Sprintf("%s: %s", strings.TrimPrefix(message, "webui configuration "), strings.Join(keys, ", ")))
+	writeJSONResponse(w, http.StatusOK, configUpdateResult{
+		Status: configStatusSaved, Revision: configRevision(next), Applied: applied, RestartRequired: restartRequired,
+	})
 }
 
-func newWebUIConfigView(config, runtime state.ConfigurationOperating) webUIConfigView {
-	view := webUIConfigView{}
-	view.Network.ID, view.Network.IPv4, view.Network.IPv6 = config.Network.ID, config.Network.IPv4, config.Network.IPv6
-	view.Router.Floodfill, view.Router.Transit, view.Router.Family, view.Router.Version = config.Router.Floodfill, config.Router.Transit, config.Router.Family, config.Router.Version
-	view.Tunnel.Enabled = config.Tunnel.Enabled
-	view.Tunnel.Hops = config.Tunnel.Hops
-	view.Tunnel.ExploratoryInboundTarget = config.Tunnel.ExploratoryInboundTarget
-	view.Tunnel.ExploratoryOutboundTarget = config.Tunnel.ExploratoryOutboundTarget
-	view.Tunnel.ExploratoryPoolCapacity = config.Tunnel.ExploratoryPoolCapacity
-	view.Tunnel.ClientInboundTarget = config.Tunnel.ClientInboundTarget
-	view.Tunnel.ClientOutboundTarget = config.Tunnel.ClientOutboundTarget
-	view.Tunnel.ClientPoolCapacity = config.Tunnel.ClientPoolCapacity
-	view.Tunnel.BandwidthRateBPS = config.Tunnel.BandwidthRateBytesPerSecond
-	view.Tunnel.BandwidthBurstBytes = config.Tunnel.BandwidthBurstBytes
-	view.NTCP2 = transportConfigView{Enabled: config.NTCP2.Enabled, BindAddress: endpointString(config.NTCP2.Bind), AdvertisedAddress: endpointString(config.NTCP2.Advertised), MaxSessions: config.NTCP2.MaxSessions}
-	view.SSU2 = transportConfigView{Enabled: config.SSU2.Enabled, BindAddress: endpointString(config.SSU2.Bind), AdvertisedAddress: endpointString(config.SSU2.Advertised), MaxSessions: config.SSU2.MaxSessions}
-	view.Reseed.Enabled, view.Reseed.Required = config.Reseed.Enabled, config.Reseed.Required
-	view.Reseed.Endpoints = append([]string{}, config.Reseed.Endpoints...)
-	view.AddressBook.Enabled = config.AddressBook.Enabled
-	view.AddressBook.Subscriptions = append([]string{}, config.AddressBook.Subscriptions...)
-	view.AddressBook.RefreshIntervalHours = int(config.AddressBook.RefreshInterval / time.Hour)
-	view.Services.HTTPProxyEnabled, view.Services.HTTPProxyAddress, view.Services.HTTPProxyPort = config.HTTPProxy.Enabled, config.HTTPProxy.Address.Host, config.HTTPProxy.Address.Port
-	view.Services.SOCKS5Enabled, view.Services.SOCKS5Address, view.Services.SOCKS5Port = config.SOCKS5.Enabled, config.SOCKS5.Address.Host, config.SOCKS5.Address.Port
-	view.Services.SAMEnabled, view.Services.SAMAddress, view.Services.SAMPort = config.SAM.Enabled, config.SAM.Address.Host, config.SAM.Address.Port
-	view.Services.MetricsEnabled, view.Services.MetricsAddress, view.Services.MetricsPort = config.Metrics.Enabled, config.Metrics.Address.Host, config.Metrics.Address.Port
-	view.Log.Level, view.Log.Format = config.Log.Level, config.Log.Format
-	view.RestartRequired = configRequiresRestart(config, runtime)
-	return view
+// changedConfigKeys lists schema keys whose value differs between previous
+// and next, split by apply mode in schema order. When requested is non-nil
+// only those keys are considered. An unparseable previous file treats every
+// considered key as changed.
+func changedConfigKeys(previous *state.ConfigurationOperating, next state.ConfigurationOperating, requested map[string]json.RawMessage) (applied, restartRequired []string) {
+	applied, restartRequired = []string{}, []string{}
+	for _, field := range configFields {
+		if requested != nil {
+			if _, ok := requested[field.key]; !ok {
+				continue
+			}
+		}
+		if previous != nil && configValuesEqual(field.get(*previous), field.get(next)) {
+			continue
+		}
+		if field.live {
+			applied = append(applied, field.key)
+		} else {
+			restartRequired = append(restartRequired, field.key)
+		}
+	}
+	return applied, restartRequired
 }
 
-func configINIUpdates(request webUIConfigUpdate, current state.ConfigurationOperating) []iniUpdate {
-	boolean := strconv.FormatBool
-	integer := strconv.Itoa
-	return []iniUpdate{
-		{section: "router", key: "floodfill", value: boolean(request.Router.Floodfill)},
-		{section: "router", key: "transit", value: boolean(request.Router.Transit)},
-		{section: "router", key: "family", value: strings.TrimSpace(request.Router.Family), remove: strings.TrimSpace(request.Router.Family) == ""},
-		{section: "tunnel", key: "enabled", value: boolean(request.Tunnel.Enabled)},
-		{section: "tunnel", key: "hops", value: integer(request.Tunnel.Hops)},
-		{section: "tunnel", key: "exploratory_inbound_target", value: integer(request.Tunnel.ExploratoryInboundTarget)},
-		{section: "tunnel", key: "exploratory_outbound_target", value: integer(request.Tunnel.ExploratoryOutboundTarget)},
-		{section: "tunnel", key: "exploratory_pool_capacity", value: integer(request.Tunnel.ExploratoryPoolCapacity)},
-		{section: "tunnel", key: "client_inbound_target", value: integer(request.Tunnel.ClientInboundTarget)},
-		{section: "tunnel", key: "client_outbound_target", value: integer(request.Tunnel.ClientOutboundTarget)},
-		{section: "tunnel", key: "client_pool_capacity", value: integer(request.Tunnel.ClientPoolCapacity)},
-		{section: "tunnel", key: "bandwidth_rate_bytes_per_second", value: integer(request.Tunnel.BandwidthRateBPS)},
-		{section: "tunnel", key: "bandwidth_burst_bytes", value: integer(request.Tunnel.BandwidthBurstBytes)},
-		{section: "ntcp2", key: "enabled", value: boolean(request.NTCP2.Enabled)},
-		{section: "ntcp2", key: "max_sessions", value: integer(request.NTCP2.MaxSessions)},
-		{section: "ssu2", key: "enabled", value: boolean(request.SSU2.Enabled)},
-		{section: "ssu2", key: "max_sessions", value: integer(request.SSU2.MaxSessions)},
-		{section: "reseed", key: "enabled", value: boolean(request.Reseed.Enabled)},
-		{section: "reseed", key: "required", value: boolean(request.Reseed.Required)},
-		{section: "reseed", key: "endpoints", value: strings.Join(request.Reseed.Endpoints, ",")},
-		{section: "addressbook", key: "enabled", value: boolean(request.AddressBook.Enabled)},
-		{section: "addressbook", key: "subscriptions", value: strings.Join(request.AddressBook.Subscriptions, ",")},
-		{section: "addressbook", key: "refresh_interval", value: fmt.Sprintf("%dh", request.AddressBook.RefreshIntervalHours)},
-		{section: "http_proxy", key: "enabled", value: boolean(request.Services.HTTPProxyEnabled)},
-		{section: "http_proxy", key: "listen_host", value: current.HTTPProxy.Address.Host},
-		{section: "http_proxy", key: "listen_port", value: integer(int(request.Services.HTTPProxyPort))},
-		{section: "socks5", key: "enabled", value: boolean(request.Services.SOCKS5Enabled)},
-		{section: "socks5", key: "listen_host", value: current.SOCKS5.Address.Host},
-		{section: "socks5", key: "listen_port", value: integer(int(request.Services.SOCKS5Port))},
-		{section: "sam", key: "enabled", value: boolean(request.Services.SAMEnabled)},
-		{section: "sam", key: "listen_host", value: current.SAM.Address.Host},
-		{section: "sam", key: "listen_port", value: integer(int(request.Services.SAMPort))},
-		{section: "metrics", key: "enabled", value: boolean(request.Services.MetricsEnabled)},
-		{section: "metrics", key: "listen_host", value: current.Metrics.Address.Host},
-		{section: "metrics", key: "listen_port", value: integer(int(request.Services.MetricsPort))},
-		{section: "log", key: "level", value: strings.ToLower(request.Log.Level)},
+// configValidationKey maps a configuration validation error to the schema key
+// it names, or returns an empty string when no editable key matches.
+func configValidationKey(err error) string {
+	if !errors.Is(err, state.ConfigurationErrInvalidOperating) {
+		return ""
 	}
+	detail := strings.TrimPrefix(err.Error(), state.ConfigurationErrInvalidOperating.Error()+": ")
+	if _, ok := lookupConfigField(detail); ok {
+		return detail
+	}
+	section, name, _ := strings.Cut(detail, ".")
+	candidates := map[string]string{
+		"listen_endpoint": section + ".listen_port",
+		"listen":          section + ".listen_port",
+		"listen_host":     section + ".listen_port",
+		"bearer_token":    section + ".enabled",
+	}
+	if candidate, ok := candidates[name]; ok {
+		if _, known := lookupConfigField(candidate); known {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func listenHost(config state.ConfigurationOperating, section string) string {
+	switch section {
+	case "http_proxy":
+		return config.HTTPProxy.Address.Host
+	case "socks5":
+		return config.SOCKS5.Address.Host
+	case "sam":
+		return config.SAM.Address.Host
+	case "control":
+		return config.Control.Address.Host
+	case "metrics":
+		return config.Metrics.Address.Host
+	}
+	return ""
+}
+
+// iniHasKey reports whether text assigns key inside section.
+func iniHasKey(text, section, key string) bool {
+	currentSection := ""
+	for line := range strings.SplitSeq(text, "\n") {
+		if name, ok := iniSection(line); ok {
+			currentSection = name
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if currentSection != section || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";") {
+			continue
+		}
+		if name, _, assignment := strings.Cut(trimmed, "="); assignment && strings.TrimSpace(name) == key {
+			return true
+		}
+	}
+	return false
 }
 
 func updateINI(text string, updates []iniUpdate) string {
@@ -376,79 +560,6 @@ func applyINIUpdate(line, section string, updates []iniUpdate, seenKeys map[stri
 		return update.key + " = " + update.value, true
 	}
 	return "", false
-}
-
-func changedConfigKeys(previous, next state.ConfigurationOperating) (applied, restartRequired []string) {
-	applied = []string{}
-	restartRequired = []string{}
-	if previous.Log.Level != next.Log.Level {
-		applied = append(applied, "log.level")
-	}
-	previous.Log.Level = next.Log.Level
-	if reflect.DeepEqual(previous, next) {
-		return applied, restartRequired
-	}
-	before, after := configComparableValues(previous), configComparableValues(next)
-	for key, nextValue := range after {
-		if before[key] != nextValue {
-			restartRequired = append(restartRequired, key)
-		}
-	}
-	sort.Strings(restartRequired)
-	return applied, restartRequired
-}
-
-func configComparableValues(config state.ConfigurationOperating) map[string]string {
-	view := newWebUIConfigView(config, config)
-	updates := configINIUpdates(webUIConfigUpdateFromView(view), config)
-	values := make(map[string]string, len(updates))
-	for _, update := range updates {
-		if update.section == "log" && update.key == "level" {
-			continue
-		}
-		values[update.section+"."+update.key] = update.value
-	}
-	return values
-}
-
-func webUIConfigUpdateFromView(view webUIConfigView) webUIConfigUpdate {
-	var update webUIConfigUpdate
-	update.Router.Floodfill, update.Router.Transit, update.Router.Family = view.Router.Floodfill, view.Router.Transit, view.Router.Family
-	update.Tunnel.Enabled = view.Tunnel.Enabled
-	update.Tunnel.Hops = view.Tunnel.Hops
-	update.Tunnel.ExploratoryInboundTarget = view.Tunnel.ExploratoryInboundTarget
-	update.Tunnel.ExploratoryOutboundTarget = view.Tunnel.ExploratoryOutboundTarget
-	update.Tunnel.ExploratoryPoolCapacity = view.Tunnel.ExploratoryPoolCapacity
-	update.Tunnel.ClientInboundTarget = view.Tunnel.ClientInboundTarget
-	update.Tunnel.ClientOutboundTarget = view.Tunnel.ClientOutboundTarget
-	update.Tunnel.ClientPoolCapacity = view.Tunnel.ClientPoolCapacity
-	update.Tunnel.BandwidthRateBPS = view.Tunnel.BandwidthRateBPS
-	update.Tunnel.BandwidthBurstBytes = view.Tunnel.BandwidthBurstBytes
-	update.NTCP2.Enabled, update.NTCP2.MaxSessions = view.NTCP2.Enabled, view.NTCP2.MaxSessions
-	update.SSU2.Enabled, update.SSU2.MaxSessions = view.SSU2.Enabled, view.SSU2.MaxSessions
-	update.Reseed.Enabled, update.Reseed.Required = view.Reseed.Enabled, view.Reseed.Required
-	update.Reseed.Endpoints = append([]string(nil), view.Reseed.Endpoints...)
-	update.AddressBook.Enabled = view.AddressBook.Enabled
-	update.AddressBook.Subscriptions = append([]string(nil), view.AddressBook.Subscriptions...)
-	update.AddressBook.RefreshIntervalHours = view.AddressBook.RefreshIntervalHours
-	update.Services.HTTPProxyEnabled, update.Services.HTTPProxyPort = view.Services.HTTPProxyEnabled, view.Services.HTTPProxyPort
-	update.Services.SOCKS5Enabled, update.Services.SOCKS5Port = view.Services.SOCKS5Enabled, view.Services.SOCKS5Port
-	update.Services.SAMEnabled, update.Services.SAMPort = view.Services.SAMEnabled, view.Services.SAMPort
-	update.Services.MetricsEnabled, update.Services.MetricsPort = view.Services.MetricsEnabled, view.Services.MetricsPort
-	update.Log.Level = view.Log.Level
-	return update
-}
-
-func configRequiresRestart(config, runtime state.ConfigurationOperating) bool {
-	config.Log.Level = runtime.Log.Level
-	return !reflect.DeepEqual(config, runtime)
-}
-
-func cloneConfig(config state.ConfigurationOperating) state.ConfigurationOperating {
-	config.NetDB.BootstrapRouterInfoPaths = append([]string(nil), config.NetDB.BootstrapRouterInfoPaths...)
-	config.Reseed.Endpoints = append([]string(nil), config.Reseed.Endpoints...)
-	config.AddressBook.Subscriptions = append([]string(nil), config.AddressBook.Subscriptions...)
-	return config
 }
 
 func writePrivateFileAtomic(path string, content []byte) (result error) {

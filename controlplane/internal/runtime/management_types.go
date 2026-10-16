@@ -27,6 +27,64 @@ type ReadinessDetails struct {
 	ProcessHeapObjects         uint64 `json:"process_heap_objects"`
 }
 
+// Readiness requirement keys reported by UnmetReadinessConditions, in
+// evaluation order.
+const (
+	ReadinessNetDBRouters           = "netdb_routers"
+	ReadinessRouterInfoPublication  = "router_info_publication"
+	ReadinessLeaseSet2Publication   = "lease_set2_publication"
+	ReadinessExploratoryInbound     = "exploratory_inbound"
+	ReadinessExploratoryOutbound    = "exploratory_outbound"
+	ReadinessClientInbound          = "client_inbound"
+	ReadinessClientOutbound         = "client_outbound"
+	ReadinessFloodfillAdvertisement = "floodfill_advertisement"
+)
+
+// readinessMinimumNetDBRouters is the RouterInfo count the data plane needs
+// before peer selection is considered representative.
+const readinessMinimumNetDBRouters = 50
+
+// ReadinessCondition is one unmet data-plane readiness requirement. Current
+// and Required are meaningful only when Numeric is true.
+type ReadinessCondition struct {
+	Key      string
+	Numeric  bool
+	Current  uint64
+	Required uint64
+}
+
+// UnmetReadinessConditions returns the requirements that keep the data plane
+// from reporting ready, in a fixed order. It returns nil when every
+// requirement is met; dataPlaneReady uses it as its single source of truth.
+func UnmetReadinessConditions(readiness ReadinessDetails) []ReadinessCondition {
+	var unmet []ReadinessCondition
+	minimum := func(key string, current, required uint64) {
+		if current < required {
+			unmet = append(unmet, ReadinessCondition{Key: key, Numeric: true, Current: current, Required: required})
+		}
+	}
+	minimum(ReadinessNetDBRouters, readiness.NetDBRouters, readinessMinimumNetDBRouters)
+	minimum(ReadinessRouterInfoPublication, readiness.RouterInfoPublications, 1)
+	minimum(ReadinessLeaseSet2Publication, readiness.LeaseSet2Publications, 1)
+	minimum(ReadinessExploratoryInbound, readiness.ExploratoryInboundTunnels, 1)
+	minimum(ReadinessExploratoryOutbound, readiness.ExploratoryOutboundTunnels, 1)
+	minimum(ReadinessClientInbound, readiness.ClientInboundTunnels, 1)
+	minimum(ReadinessClientOutbound, readiness.ClientOutboundTunnels, 1)
+	if readiness.FloodfillConfigured && !readiness.FloodfillAdvertised {
+		unmet = append(unmet, ReadinessCondition{Key: ReadinessFloodfillAdvertisement})
+	}
+	return unmet
+}
+
+// PeerProfileSnapshot summarizes the recent tunnel outcomes recorded for one
+// peer.
+type PeerProfileSnapshot struct {
+	Successes         int
+	Failures          int
+	MeanLatencyMillis uint64
+	Samples           int
+}
+
 type DestinationSummary struct {
 	Name    string `json:"name"`
 	Address string `json:"address"`

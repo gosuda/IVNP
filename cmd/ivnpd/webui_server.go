@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gosuda.org/ivnp/node"
@@ -46,6 +47,15 @@ type WebUIConfig struct {
 	BearerToken   string
 	ConfigPath    string
 	DisableAuth   bool
+	// AllowRemoteWrite permits configuration writes and restarts from
+	// non-loopback clients.
+	AllowRemoteWrite bool
+	// ShowPeers exposes peer router identities when the listener is not
+	// loopback-bound.
+	ShowPeers bool
+	// ConfigOverrides applies the command-line overrides that main applies to
+	// the file configuration, so pending changes compare effective values.
+	ConfigOverrides func(*state.ConfigurationOperating)
 }
 
 type webUIAccessPolicy struct {
@@ -68,11 +78,17 @@ type trafficSample struct {
 type WebUIServer struct {
 	config        WebUIConfig
 	policy        webUIAccessPolicy
-	node          *node.Subsystem
 	logger        *slog.Logger
 	logLevel      *slog.LevelVar
 	started       time.Time
 	triggerReseed func(context.Context) (<-chan struct{}, error)
+	restartHook   func() error
+
+	// nodeMu guards node. API handlers hold the read lock for their whole
+	// duration, so detachNode returns only after in-flight node calls finish.
+	nodeMu     sync.RWMutex
+	node       *node.Subsystem
+	restarting atomic.Bool
 
 	server   *http.Server
 	listener net.Listener
@@ -80,11 +96,13 @@ type WebUIServer struct {
 	tokenHash     [32]byte
 	scriptSources string
 
-	configMu        sync.RWMutex
-	persistedConfig state.ConfigurationOperating
+	configMu sync.Mutex
 
 	trafficMu sync.RWMutex
 	traffic   trafficSample
+
+	history historyRing
+	actions actionLog
 
 	subscribersMu sync.Mutex
 	subscribers   map[chan []byte]struct{}
@@ -93,6 +111,8 @@ type WebUIServer struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
+
+type webUINodeContextKey struct{}
 
 // NewWebUIServer validates the listener policy before any socket is opened.
 func NewWebUIServer(cfg WebUIConfig, node *node.Subsystem, logger *slog.Logger, level *slog.LevelVar) (*WebUIServer, error) {
@@ -118,17 +138,84 @@ func NewWebUIServer(cfg WebUIConfig, node *node.Subsystem, logger *slog.Logger, 
 		return nil, err
 	}
 	return &WebUIServer{
-		config:          cfg,
-		policy:          policy,
-		node:            node,
-		logger:          logger,
-		logLevel:        level,
-		started:         time.Now(),
-		tokenHash:       sha256.Sum256([]byte(cfg.BearerToken)),
-		persistedConfig: node.Config(),
-		subscribers:     make(map[chan []byte]struct{}),
-		triggerReseed:   node.TriggerReseed,
+		config:      cfg,
+		policy:      policy,
+		node:        node,
+		logger:      logger,
+		logLevel:    level,
+		started:     time.Now(),
+		tokenHash:   sha256.Sum256([]byte(cfg.BearerToken)),
+		subscribers: make(map[chan []byte]struct{}),
 	}, nil
+}
+
+// SetRestartHook installs the function that asks main to restart the node.
+// It must be called before Start; a nil hook disables the restart action.
+func (s *WebUIServer) SetRestartHook(hook func() error) {
+	s.restartHook = hook
+}
+
+func (s *WebUIServer) currentNode() *node.Subsystem {
+	s.nodeMu.RLock()
+	defer s.nodeMu.RUnlock()
+	return s.node
+}
+
+// detachNode stops API access to the current node and waits for in-flight
+// node calls to finish. The caller owns closing the detached node.
+func (s *WebUIServer) detachNode() {
+	s.restarting.Store(true)
+	s.nodeMu.Lock()
+	s.node = nil
+	s.nodeMu.Unlock()
+}
+
+// attachNode serves a started node and ends the restarting state.
+func (s *WebUIServer) attachNode(next *node.Subsystem) {
+	s.nodeMu.Lock()
+	s.node = next
+	s.nodeMu.Unlock()
+	s.restarting.Store(false)
+}
+
+// withNode rejects requests while the node is detached and otherwise runs
+// next with the node pinned in the request context.
+func (s *WebUIServer) withNode(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.nodeMu.RLock()
+		defer s.nodeMu.RUnlock()
+		if s.node == nil {
+			writeRestarting(w)
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), webUINodeContextKey{}, s.node)))
+	}
+}
+
+// requestNode returns the node pinned by withNode. Handlers invoked without
+// withNode fall back to the current node.
+func (s *WebUIServer) requestNode(r *http.Request) *node.Subsystem {
+	if pinned, ok := r.Context().Value(webUINodeContextKey{}).(*node.Subsystem); ok {
+		return pinned
+	}
+	return s.currentNode()
+}
+
+// sampleNode runs sample with the current node held, skipping it while the
+// node is detached.
+func (s *WebUIServer) sampleNode(sample func(*node.Subsystem)) {
+	s.nodeMu.RLock()
+	defer s.nodeMu.RUnlock()
+	if s.node != nil {
+		sample(s.node)
+	}
+}
+
+func writeRestarting(w http.ResponseWriter) {
+	writeJSONResponse(w, http.StatusServiceUnavailable, struct {
+		Error      string `json:"error"`
+		Restarting bool   `json:"restarting"`
+	}{Error: "router restarting", Restarting: true})
 }
 
 func parseWebUIAccessPolicy(listenAddress, bearerToken string, disableAuth ...bool) (webUIAccessPolicy, error) {
@@ -205,14 +292,19 @@ func (s *WebUIServer) Start(parent context.Context) error {
 	mux.HandleFunc("/livez", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
 	mux.HandleFunc("/varz", s.handleVarz)
-	mux.HandleFunc("/api/status", s.handleStatus)
-	mux.HandleFunc("/api/metrics", s.handleMetrics)
-	mux.HandleFunc("/api/tunnels", s.handleTunnels)
-	mux.HandleFunc("/api/netdb", s.handleNetDB)
-	mux.HandleFunc("/api/destinations", s.handleDestinations)
+	mux.HandleFunc("/api/status", s.withNode(s.handleStatus))
+	mux.HandleFunc("/api/metrics", s.withNode(s.handleMetrics))
+	mux.HandleFunc("/api/tunnels", s.withNode(s.handleTunnels))
+	mux.HandleFunc("/api/netdb", s.withNode(s.handleNetDB))
+	mux.HandleFunc("/api/peers", s.withNode(s.handlePeers))
+	mux.HandleFunc("/api/destinations", s.withNode(s.handleDestinations))
 	mux.HandleFunc("/api/config", s.handleConfig)
-	mux.HandleFunc("/api/actions/reseed", s.handleActionReseed)
-	mux.HandleFunc("/api/actions/tunnel-probe", s.handleActionTunnelProbe)
+	mux.HandleFunc("/api/config/rollback", s.withNode(s.handleConfigRollback))
+	mux.HandleFunc("/api/history", s.handleHistory)
+	mux.HandleFunc("/api/actions/log", s.handleActionsLog)
+	mux.HandleFunc("/api/actions/reseed", s.withNode(s.handleActionReseed))
+	mux.HandleFunc("/api/actions/tunnel-probe", s.withNode(s.handleActionTunnelProbe))
+	mux.HandleFunc("/api/actions/restart", s.handleActionRestart)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.Handle("/", s.staticHandler(staticFS))
 
@@ -225,7 +317,12 @@ func (s *WebUIServer) Start(parent context.Context) error {
 		MaxHeaderBytes:    64 << 10,
 	}
 
-	s.sampleTraffic(time.Now(), s.node.RegistrySnapshot())
+	s.sampleNode(func(current *node.Subsystem) {
+		now := time.Now()
+		snapshot := current.RegistrySnapshot()
+		s.sampleTraffic(now, snapshot)
+		s.recordHistory(now, snapshot)
+	})
 	s.wg.Add(2)
 	go func() {
 		defer s.wg.Done()
@@ -255,17 +352,21 @@ func (s *WebUIServer) staticHandler(staticFS fs.FS) http.Handler {
 		fileServer.ServeHTTP(w, r)
 	})
 }
-func (s *WebUIServer) startReseedAction() error {
+func (s *WebUIServer) startReseedAction(current *node.Subsystem) error {
 	parent := s.ctx
 	if parent == nil {
 		parent = context.Background()
 	}
-	timeout := s.node.Config().Reseed.Timeout
+	timeout := current.Config().Reseed.Timeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	trigger := s.triggerReseed
+	if trigger == nil {
+		trigger = current.TriggerReseed
+	}
 	actionContext, cancel := context.WithTimeout(parent, timeout)
-	done, err := s.triggerReseed(actionContext)
+	done, err := trigger(actionContext)
 	if err != nil {
 		cancel()
 		return err
@@ -328,7 +429,7 @@ func (s *WebUIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	if s.node != nil && s.node.Status().Running {
+	if current := s.currentNode(); current != nil && current.Status().Running {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("{\"status\":\"ok\"}\n"))
@@ -344,8 +445,8 @@ func (s *WebUIServer) handleReady(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	if s.node != nil {
-		clientStatus, _ := s.node.ClientStatus(r.Context())
+	if current := s.currentNode(); current != nil {
+		clientStatus, _ := current.ClientStatus(r.Context())
 		if clientStatus.Ready {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
@@ -363,7 +464,9 @@ func (s *WebUIServer) handleVarz(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	writeJSONResponse(w, http.StatusOK, s.currentMetricsResponse())
+	s.withNode(func(w http.ResponseWriter, r *http.Request) {
+		writeJSONResponse(w, http.StatusOK, s.metricsResponse(s.requestNode(r)))
+	})(w, r)
 }
 
 func (s *WebUIServer) wrapMiddleware(next http.Handler) http.Handler {
@@ -503,6 +606,15 @@ func (s *WebUIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unavailable", http.StatusInternalServerError)
 		return
 	}
+	var initialMetrics metricsResponse
+	attached := false
+	s.sampleNode(func(current *node.Subsystem) {
+		initialMetrics, attached = s.metricsResponse(current), true
+	})
+	if !attached {
+		writeRestarting(w)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("Connection", "keep-alive")
@@ -520,7 +632,7 @@ func (s *WebUIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	initial, err := json.Marshal(struct {
 		Type    string          `json:"type"`
 		Metrics metricsResponse `json:"metrics"`
-	}{Type: "metrics", Metrics: s.currentMetricsResponse()})
+	}{Type: "metrics", Metrics: initialMetrics})
 	if err != nil {
 		http.Error(w, "telemetry unavailable", http.StatusInternalServerError)
 		return
@@ -556,20 +668,29 @@ func (s *WebUIServer) broadcastLoop() {
 	defer s.wg.Done()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	historyTicker := time.NewTicker(historyInterval)
+	defer historyTicker.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case now := <-ticker.C:
-			snapshot := s.node.RegistrySnapshot()
-			s.sampleTraffic(now, snapshot)
-			payload, err := json.Marshal(struct {
-				Type    string          `json:"type"`
-				Metrics metricsResponse `json:"metrics"`
-			}{Type: "metrics", Metrics: s.metricsResponse(snapshot)})
-			if err == nil {
+			var payload []byte
+			s.sampleNode(func(current *node.Subsystem) {
+				snapshot := current.RegistrySnapshot()
+				s.sampleTraffic(now, snapshot)
+				payload, _ = json.Marshal(struct {
+					Type    string          `json:"type"`
+					Metrics metricsResponse `json:"metrics"`
+				}{Type: "metrics", Metrics: s.metricsFromSnapshot(current.Config(), snapshot)})
+			})
+			if payload != nil {
 				s.broadcast(payload)
 			}
+		case now := <-historyTicker.C:
+			s.sampleNode(func(current *node.Subsystem) {
+				s.recordHistory(now, current.RegistrySnapshot())
+			})
 		}
 	}
 }

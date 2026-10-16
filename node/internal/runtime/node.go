@@ -389,6 +389,42 @@ func (d *Daemon) ClientStatus(ctx context.Context) (controlplane.ManagementStatu
 	return status, errors.Join(err, nodeStatus.Error)
 }
 
+// ServiceListeners reports which client services hold a bound listener.
+// A service that is disabled, not yet started, or closed reports false.
+type ServiceListeners struct {
+	HTTPProxy bool
+	SOCKS5    bool
+	SAM       bool
+	Control   bool
+	Metrics   bool
+}
+
+// ServiceListeners returns the listener state of node-owned client services.
+func (d *Daemon) ServiceListeners() ServiceListeners {
+	if d == nil {
+		return ServiceListeners{}
+	}
+	d.mu.Lock()
+	active := d.started && !d.closed
+	d.mu.Unlock()
+	if !active {
+		return ServiceListeners{}
+	}
+	// Start publishes service fields before closing startReady.
+	select {
+	case <-d.startReady:
+	default:
+		return ServiceListeners{}
+	}
+	return ServiceListeners{
+		HTTPProxy: d.httpProxy != nil && d.httpProxy.Addr() != nil,
+		SOCKS5:    d.socks5 != nil && d.socks5.Addr() != nil,
+		SAM:       d.samServer != nil && d.samServer.Addr() != nil,
+		Control:   d.control != nil && d.control.Addr() != nil,
+		Metrics:   d.metricsListener != nil,
+	}
+}
+
 // Listener provides stream and packet listening interfaces for node services.
 type Listener interface {
 	Listen(context.Context, string, string) (net.Listener, error)

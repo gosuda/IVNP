@@ -263,11 +263,12 @@ func TestUpdateINIPreservesCommentsAndAddsKeys(t *testing.T) {
 
 func TestWebUIConfigViewMarshalsEmptyLists(t *testing.T) {
 	t.Parallel()
-	payload, err := json.Marshal(newWebUIConfigView(state.ConfigurationOperating{}, state.ConfigurationOperating{}))
+	empty := state.ConfigurationOperating{}
+	payload, err := json.Marshal(configFieldViews(&empty, &empty, &empty))
 	if err != nil {
 		t.Fatalf("marshal empty config view: %v", err)
 	}
-	for _, field := range []string{`"endpoints":[]`, `"subscriptions":[]`} {
+	for _, field := range []string{`"key":"reseed.endpoints"`, `"key":"addressbook.subscriptions"`, `"value":[]`, `"running":[]`} {
 		if !bytes.Contains(payload, []byte(field)) {
 			t.Fatalf("empty config JSON missing %s: %s", field, payload)
 		}
@@ -390,7 +391,7 @@ func TestWebUIConfigUpdatePersistsAndReportsApplyMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET config: %v", err)
 	}
-	var view webUIConfigView
+	var view configView
 	if err = json.NewDecoder(response.Body).Decode(&view); err != nil {
 		t.Fatalf("decode config: %v", err)
 	}
@@ -400,16 +401,24 @@ func TestWebUIConfigUpdatePersistsAndReportsApplyMode(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("GET config status = %d, want %d", response.StatusCode, http.StatusOK)
 	}
-	update := webUIConfigUpdateFromView(view)
-	update.Log.Level = "debug"
-	update.Tunnel.Hops = 4
-	payload, err := json.Marshal(update)
+	payload, err := json.Marshal(map[string]any{
+		"revision": view.Revision,
+		"changes": map[string]any{
+			"log.level":   "debug",
+			"tunnel.hops": 4,
+		},
+	})
 	if err != nil {
 		t.Fatalf("marshal config update: %v", err)
 	}
-	response, err = client.Post(baseURL+"/api/config", "application/json", bytes.NewReader(payload))
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPatch, baseURL+"/api/config", bytes.NewReader(payload))
 	if err != nil {
-		t.Fatalf("POST config: %v", err)
+		t.Fatalf("build PATCH config: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatalf("PATCH config: %v", err)
 	}
 	updateBody, err := io.ReadAll(response.Body)
 	if err != nil {
@@ -419,7 +428,7 @@ func TestWebUIConfigUpdatePersistsAndReportsApplyMode(t *testing.T) {
 		t.Fatalf("close update response: %v", err)
 	}
 	if response.StatusCode != http.StatusOK {
-		t.Fatalf("POST config status = %d, body %s, update %+v", response.StatusCode, updateBody, update)
+		t.Fatalf("PATCH config status = %d, body %s", response.StatusCode, updateBody)
 	}
 	var result configUpdateResult
 	if err = json.Unmarshal(updateBody, &result); err != nil {
@@ -441,8 +450,8 @@ func TestWebUIConfigUpdatePersistsAndReportsApplyMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load persisted config: %v", err)
 	}
-	if persisted.Log.Level != "debug" || persisted.Tunnel.Hops != 4 {
-		t.Fatalf("persisted config = log %q, hops %d", persisted.Log.Level, persisted.Tunnel.Hops)
+	if persisted.Log.Level != "debug" || persisted.Tunnel.Hops != 4 || !persisted.Router.Transit {
+		t.Fatalf("persisted config = log %q, hops %d, transit %v", persisted.Log.Level, persisted.Tunnel.Hops, persisted.Router.Transit)
 	}
 }
 
@@ -505,14 +514,19 @@ func TestWebUIConfigInMemoryConflict(t *testing.T) {
 		t.Fatalf("GET /api/config status = %d, want 200", response.StatusCode)
 	}
 
-	payload := `{"log":{"level":"debug"}}`
-	response, err = http.Post(baseURL+"/api/config", "application/json", strings.NewReader(payload))
+	payload := `{"revision":"","changes":{"log.level":"debug"}}`
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPatch, baseURL+"/api/config", strings.NewReader(payload))
 	if err != nil {
-		t.Fatalf("POST /api/config: %v", err)
+		t.Fatalf("build PATCH /api/config: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("PATCH /api/config: %v", err)
 	}
 	body, _ := io.ReadAll(response.Body)
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusConflict {
-		t.Fatalf("POST /api/config status = %d, want 409, body: %s", response.StatusCode, body)
+		t.Fatalf("PATCH /api/config status = %d, want 409, body: %s", response.StatusCode, body)
 	}
 }

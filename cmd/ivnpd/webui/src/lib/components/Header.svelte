@@ -1,179 +1,242 @@
 <script lang="ts">
-	import {
-		collectionState,
-		isConfigModalOpen,
-		metricsStreamState,
-		lastUpdated,
-		refreshDashboard,
-		resourceLabels
-	} from '../api';
+	import { onMount } from 'svelte';
+	import { page } from '$app/state';
+	import { collection, refreshAll, restarting, routerStatus, streamState } from '$lib/api';
+	import { formatAgoSeconds } from '$lib/format';
+	import { paletteOpen } from '$lib/ui';
+	import type { Tone } from '$lib/types';
 
-	let refreshing = false;
-	$: failedResources = Object.entries($collectionState).filter(([, state]) => state.error !== null);
-	$: failureText = failedResources.length === 5 ? 'Data collection failed' : 'Some data could not be refreshed';
+	const links = [
+		{ href: '/', label: 'Overview' },
+		{ href: '/tunnels/', label: 'Tunnels' },
+		{ href: '/network/', label: 'Network' },
+		{ href: '/destinations/', label: 'Destinations' },
+		{ href: '/settings/', label: 'Settings' }
+	];
+
+	let now = $state(Date.now());
+	let refreshing = $state(false);
+	const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+
+	onMount(() => {
+		const timer = window.setInterval(() => (now = Date.now()), 1000);
+		return () => window.clearInterval(timer);
+	});
+
+	const freshness = $derived.by((): { tone: Tone; text: string; detail: string } => {
+		if ($restarting) return { tone: 'info', text: 'Restarting', detail: 'The router is restarting' };
+		const last = $collection.status.lastSuccess;
+		if (last === null) return $collection.status.error ? { tone: 'crit', text: 'Offline', detail: $collection.status.error } : { tone: 'neutral', text: 'Connecting', detail: '' };
+		const age = (now - last) / 1000;
+		if (age < 12 && $streamState === 'live') return { tone: 'ok', text: 'Live', detail: `Updated ${formatAgoSeconds(age)}` };
+		if (age < 30) return { tone: 'warn', text: 'Delayed', detail: `Updated ${formatAgoSeconds(age)}` };
+		return { tone: 'crit', text: 'Stale', detail: `Updated ${formatAgoSeconds(age)}` };
+	});
+
+	function active(href: string): boolean {
+		return href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href);
+	}
 
 	async function refresh(): Promise<void> {
 		if (refreshing) return;
 		refreshing = true;
-		await refreshDashboard();
+		await refreshAll();
 		refreshing = false;
 	}
 </script>
 
 <header class="header">
-	<div class="identity">
-		<span class="period" aria-hidden="true"></span>
-		<div>
-			<a class="wordmark" href="#top" aria-label="IVNP router dashboard">ivnp router</a>
-			<p>embedded i2p runtime</p>
-		</div>
-	</div>
+	<a class="wordmark" href="/" aria-label="IVNP router console, overview">
+		<span class="mark" aria-hidden="true"></span>
+		<span>IVNP</span>
+		{#if $routerStatus?.version}<span class="version">{$routerStatus.version}</span>{/if}
+	</a>
 
-	<div class="readout" aria-live="polite">
-		<span class:online={$metricsStreamState === 'open'} class="connection-mark" aria-hidden="true"></span>
-		<span>Metrics stream: {$metricsStreamState}</span>
-		{#if $lastUpdated}
-			<span class="separator">/</span>
-			<span>Full refresh <time datetime={$lastUpdated.toISOString()}>{$lastUpdated.toLocaleTimeString()}</time></span>
-		{/if}
-	</div>
+	<nav aria-label="Console sections">
+		{#each links as link (link.href)}
+			<a href={link.href} aria-current={active(link.href) ? 'page' : undefined}>{link.label}</a>
+		{/each}
+	</nav>
 
-	<div class="actions">
-		<button class="button" type="button" on:click={refresh} aria-busy={refreshing} disabled={refreshing}>
-			{refreshing ? 'Refreshing' : 'Refresh'}
+	<div class="tools">
+		<button class="search" type="button" onclick={() => paletteOpen.set(true)} aria-keyshortcuts={isMac ? 'Meta+K' : 'Control+K'}>
+			<span>Search</span><kbd>{isMac ? '⌘K' : 'Ctrl K'}</kbd>
 		</button>
-		<button class="button button--primary" type="button" on:click={(event) => { event.currentTarget.focus(); isConfigModalOpen.set(true); }}>
-			Settings
+		<span class="freshness" data-tone={freshness.tone} title={freshness.detail}>
+			<span class="dot" aria-hidden="true"></span>
+			<span>{freshness.text}</span>
+			{#if freshness.detail && freshness.tone !== 'ok'}<span class="detail">{freshness.detail}</span>{/if}
+		</span>
+		<button class="button button--quiet" type="button" onclick={refresh} disabled={refreshing} aria-busy={refreshing}>
+			{refreshing ? 'Refreshing' : 'Refresh'}
 		</button>
 	</div>
 </header>
 
-{#if failedResources.length > 0}
-	<div class="collection-alert" role="status">
-		<div><strong>{failureText}</strong><span>{failedResources.map(([resource]) => resourceLabels[resource as keyof typeof resourceLabels]).join(', ')} · Retry here or in the affected section.</span></div>
-		<button class="button" type="button" on:click={refresh} disabled={refreshing} aria-busy={refreshing}>{refreshing ? 'Retrying' : 'Retry all'}</button>
-	</div>
-{/if}
-
 <style>
-	.collection-alert { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin: var(--space-3); padding: var(--space-4); border-left: var(--rule-heavy) solid var(--color-ink); background: var(--color-paper-2); font-size: var(--text-sm); }
-	.collection-alert span { display: block; color: var(--color-muted); }
-	@media (max-width: 520px) { .collection-alert { align-items: flex-start; flex-direction: column; } }
 	.header {
+		position: sticky;
+		top: 0;
+		z-index: 10;
 		display: grid;
-		grid-template-columns: minmax(12rem, 1fr) auto auto;
+		grid-template-columns: auto minmax(0, 1fr) auto;
 		align-items: center;
-		gap: var(--space-6);
-		min-height: 5.25rem;
-		padding: var(--space-4) clamp(var(--space-4), 3vw, var(--space-8));
+		gap: var(--space-3) var(--space-6);
+		padding: var(--space-3) clamp(var(--space-3), 2.4vw, var(--space-8));
 		border-bottom: var(--rule-heavy) solid var(--color-ink);
 		background: var(--color-paper);
 	}
 
-	.identity {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-		min-width: 0;
+	.wordmark {
+		display: inline-flex;
+		align-items: baseline;
+		gap: var(--space-2);
+		font-family: var(--font-display);
+		font-size: 1.15rem;
+		font-weight: 800;
+		letter-spacing: -0.03em;
+		text-decoration: none;
 	}
 
-	.period {
-		width: 1.25rem;
-		height: 1.25rem;
-		flex: 0 0 auto;
+	.mark {
+		align-self: center;
+		width: 1rem;
+		height: 1rem;
 		background: var(--color-accent);
 	}
 
-	.wordmark {
-		display: block;
-		width: fit-content;
-		font-family: var(--font-display);
-		font-size: 1.18rem;
-		font-weight: 800;
-		letter-spacing: -0.035em;
-		line-height: 1;
+	.version {
+		color: var(--color-muted);
+		font-family: var(--font-mono);
+		font-size: var(--text-xs);
+		font-weight: 500;
+		letter-spacing: 0;
+	}
+
+	nav {
+		display: flex;
+		gap: var(--space-1);
+		min-width: 0;
+		overflow-x: auto;
+		scrollbar-width: none;
+	}
+
+	nav a {
+		padding: var(--space-2) var(--space-3);
+		border-bottom: 3px solid transparent;
+		color: var(--color-ink-2);
+		font-size: var(--text-sm);
+		font-weight: 650;
 		text-decoration: none;
 		white-space: nowrap;
 	}
 
-	.wordmark:hover {
-		text-decoration: underline;
-		text-decoration-color: var(--color-accent);
-		text-underline-offset: 0.2em;
+	nav a:hover {
+		color: var(--color-accent);
 	}
 
-	.identity p {
-		margin: var(--space-1) 0 0;
-		color: var(--color-muted);
-		font-size: var(--text-xs);
-		letter-spacing: 0.055em;
-		text-transform: uppercase;
+	nav a[aria-current='page'] {
+		border-bottom-color: var(--color-accent);
+		color: var(--color-ink);
 	}
 
-	.readout {
+	.tools {
 		display: flex;
 		align-items: center;
-		flex-wrap: wrap;
+		gap: var(--space-3);
+	}
+
+	.search {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-3);
+		min-height: 2rem;
+		padding: 0.3rem 0.4rem 0.3rem 0.7rem;
+		border: var(--rule-thin) solid var(--color-rule-strong);
+		border-radius: var(--radius-control);
+		background: var(--color-paper-2);
+		color: var(--color-muted);
+		font-size: var(--text-sm);
+		cursor: pointer;
+	}
+
+	.search:hover {
+		border-color: var(--color-accent);
+		color: var(--color-ink);
+	}
+
+	kbd {
+		padding: 0.05rem 0.35rem;
+		border: var(--rule-thin) solid var(--color-rule);
+		background: var(--color-paper);
+		font-family: var(--font-mono);
+		font-size: var(--text-xs);
+	}
+
+	.freshness {
+		display: inline-flex;
+		align-items: center;
 		gap: var(--space-2);
 		color: var(--color-ink-2);
-		font-family: var(--font-label);
 		font-size: var(--text-xs);
-		font-weight: 600;
-		letter-spacing: 0.07em;
-		text-transform: uppercase;
+		font-weight: 650;
+		white-space: nowrap;
 	}
 
-	.connection-mark {
+	.freshness .dot {
 		width: 0.55rem;
 		height: 0.55rem;
-		border: var(--rule-thin) solid var(--color-ink);
-		background: transparent;
+		border-radius: 50%;
+		background: var(--color-rule-strong);
 	}
 
-	.connection-mark.online {
-		border-color: var(--color-accent);
+	.freshness[data-tone='ok'] .dot {
+		background: var(--color-ok);
+	}
+
+	.freshness[data-tone='warn'] .dot {
+		background: var(--color-warn-mark);
+	}
+
+	.freshness[data-tone='crit'] {
+		color: var(--color-crit);
+	}
+
+	.freshness[data-tone='crit'] .dot {
+		background: var(--color-crit);
+	}
+
+	.freshness[data-tone='info'] .dot {
 		background: var(--color-accent);
 	}
 
-	.separator {
-		color: var(--color-rule-strong);
+	.detail {
+		color: var(--color-muted);
+		font-weight: 500;
 	}
 
-	.actions {
-		display: flex;
-		gap: var(--space-2);
-	}
-
-	@media (max-width: 860px) {
+	@media (max-width: 960px) {
 		.header {
-			grid-template-columns: 1fr auto;
+			grid-template-columns: auto auto;
 		}
 
-		.readout {
+		nav {
 			grid-column: 1 / -1;
 			grid-row: 2;
-			justify-content: flex-start;
-			overflow-x: auto;
-			padding-bottom: var(--space-1);
+		}
+
+		.tools {
+			justify-content: end;
+		}
+
+		.detail {
+			display: none;
 		}
 	}
 
-	@media (max-width: 520px) {
-		.header {
-			grid-template-columns: 1fr;
-			gap: var(--space-3);
-		}
-
-		.actions {
-			grid-row: 2;
-		}
-
-		.readout {
-			grid-row: 3;
-		}
-
-		.actions .button {
-			flex: 1;
+	@media (max-width: 560px) {
+		.search span {
+			display: none;
 		}
 	}
 </style>

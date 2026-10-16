@@ -1,3 +1,5 @@
+// Wire types for the ivnpd WebUI API (contract v2). Keys mirror the Go JSON tags.
+
 export interface ReadinessDetails {
 	bootstrap_stage: number;
 	netdb_routers: number;
@@ -17,6 +19,22 @@ export interface ReadinessDetails {
 	process_heap_objects: number;
 }
 
+export type UnmetConditionKey =
+	| 'netdb_routers'
+	| 'router_info_publication'
+	| 'lease_set2_publication'
+	| 'exploratory_inbound'
+	| 'exploratory_outbound'
+	| 'client_inbound'
+	| 'client_outbound'
+	| 'floodfill_advertisement';
+
+export interface UnmetCondition {
+	key: UnmetConditionKey;
+	current: number | null;
+	required: number | null;
+}
+
 export interface TransportStatus {
 	enabled: boolean;
 	bind_address: string;
@@ -28,6 +46,14 @@ export interface TransportStatus {
 export interface ServiceStatus {
 	enabled: boolean;
 	address: string;
+	listening: boolean | null;
+}
+
+export interface Capabilities {
+	config_writable: boolean;
+	config_write_reason: string;
+	restart: boolean;
+	peer_identities: boolean;
 }
 
 export interface RouterStatusResponse {
@@ -42,7 +68,10 @@ export interface RouterStatusResponse {
 	reachability: 'reachable' | 'testing' | 'firewalled' | 'disabled';
 	floodfill_configured: boolean;
 	floodfill_advertised: boolean;
+	transit_configured: boolean;
 	readiness: ReadinessDetails;
+	unmet_conditions: UnmetCondition[];
+	capabilities: Capabilities;
 	transports: { ntcp2: TransportStatus; ssu2: TransportStatus };
 	reseed: {
 		enabled: boolean;
@@ -57,6 +86,7 @@ export interface RouterStatusResponse {
 		socks5: ServiceStatus;
 		sam: ServiceStatus;
 		metrics: ServiceStatus;
+		control: ServiceStatus;
 		addressbook: { enabled: boolean; subscriptions: number };
 	};
 }
@@ -107,16 +137,22 @@ export interface ObservabilityMetricsResponse {
 	};
 }
 
-export interface TelemetryPoint {
-	timestamp: number;
-	inRate: number;
-	outRate: number;
-	activeTunnels: number;
-	buildSuccessRate: number | null;
-	routers: number;
+export interface HistorySample {
+	t: number;
+	in_rate_bps: number;
+	out_rate_bps: number;
+	active_tunnels: number;
+	build_successes: number;
+	build_failures: number;
+	netdb_routers: number;
 	floodfills: number;
 	goroutines: number;
-	heapBytes: number;
+	heap_inuse_bytes: number;
+}
+
+export interface HistoryResponse {
+	interval_seconds: number;
+	samples: HistorySample[];
 }
 
 export interface RouterTunnelItem {
@@ -149,6 +185,10 @@ export interface RouterTunnelsResponse {
 	build_successes: number;
 	build_failures: number;
 	forwarded_messages: number;
+	peer_identities: boolean;
+	recent_window_seconds: number;
+	recent_build_successes: number;
+	recent_build_failures: number;
 	tunnels: RouterTunnelItem[];
 }
 
@@ -169,7 +209,24 @@ export interface NetDBResponse {
 	floodfill_routers: number;
 	lookups_total: number;
 	lookups_failed: number;
+	matched: number;
 	routers: NetDBRouterItem[];
+}
+
+export interface PeerProfile {
+	successes: number;
+	failures: number;
+	mean_latency_ms: number;
+	samples: number;
+}
+
+export interface PeerItem extends NetDBRouterItem {
+	profile: PeerProfile | null;
+}
+
+export interface PeersResponse {
+	peers: PeerItem[];
+	missing: string[];
 }
 
 export interface LocalDestinationItem {
@@ -190,69 +247,58 @@ export interface DestinationsResponse {
 	destinations: LocalDestinationItem[];
 }
 
-export interface RouterConfigData {
-	network: { id: number; ipv4: boolean; ipv6: boolean };
-	router: { floodfill: boolean; family: string; version: string };
-	tunnel: {
-		enabled: boolean;
-		hops: number;
-		exploratory_inbound_target: number;
-		exploratory_outbound_target: number;
-		exploratory_pool_capacity: number;
-		client_inbound_target: number;
-		client_outbound_target: number;
-		client_pool_capacity: number;
-		bandwidth_rate_bytes_per_second: number;
-		bandwidth_burst_bytes: number;
-	};
-	ntcp2: { enabled: boolean; bind_address: string; advertised_address: string; max_sessions: number };
-	ssu2: { enabled: boolean; bind_address: string; advertised_address: string; max_sessions: number };
-	reseed: { enabled: boolean; required: boolean; endpoints: string[] };
-	addressbook: { enabled: boolean; subscriptions: string[]; refresh_interval_hours: number };
-	services: {
-		http_proxy_enabled: boolean;
-		http_proxy_address: string;
-		http_proxy_port: number;
-		socks5_enabled: boolean;
-		socks5_address: string;
-		socks5_port: number;
-		sam_enabled: boolean;
-		sam_address: string;
-		sam_port: number;
-		metrics_enabled: boolean;
-		metrics_address: string;
-		metrics_port: number;
-	};
-	log: { level: 'debug' | 'info' | 'warn' | 'error'; format: 'text' | 'json' };
-	restart_required: boolean;
+export type ConfigFieldType = 'bool' | 'int' | 'string' | 'enum' | 'list' | 'duration';
+export type ConfigGroup = 'features' | 'router' | 'tunnels' | 'transports' | 'services' | 'sources' | 'logging';
+export type ConfigValue = boolean | number | string | string[];
+
+export interface ConfigField {
+	key: string;
+	group: ConfigGroup;
+	label: string;
+	description: string;
+	type: ConfigFieldType;
+	value: ConfigValue;
+	running: ConfigValue | null;
+	min: number | null;
+	max: number | null;
+	options: string[] | null;
+	unit: string;
+	apply: 'live' | 'restart';
+	requires: string[];
+	pending: boolean;
 }
 
-export interface RouterConfigUpdate {
-	router: Pick<RouterConfigData['router'], 'floodfill' | 'family'>;
-	tunnel: RouterConfigData['tunnel'];
-	ntcp2: Pick<RouterConfigData['ntcp2'], 'enabled' | 'max_sessions'>;
-	ssu2: Pick<RouterConfigData['ssu2'], 'enabled' | 'max_sessions'>;
-	reseed: RouterConfigData['reseed'];
-	addressbook: RouterConfigData['addressbook'];
-	services: Pick<
-		RouterConfigData['services'],
-		| 'http_proxy_enabled'
-		| 'http_proxy_port'
-		| 'socks5_enabled'
-		| 'socks5_port'
-		| 'sam_enabled'
-		| 'sam_port'
-		| 'metrics_enabled'
-		| 'metrics_port'
-	>;
-	log: Pick<RouterConfigData['log'], 'level'>;
+export interface ConfigResponse {
+	revision: string;
+	writable: boolean;
+	write_blocked_reason: string;
+	restart_required: boolean;
+	backup_available: boolean;
+	file_error: string;
+	fields: ConfigField[];
 }
 
 export interface ConfigUpdateResult {
 	status: 'saved' | 'unchanged';
+	revision: string;
 	applied: string[];
 	restart_required: string[];
 }
+
+export type ActionName = 'reseed' | 'probe' | 'restart' | 'config' | 'rollback';
+
+export interface ActionLogEntry {
+	at: number;
+	action: ActionName;
+	outcome: 'ok' | 'error';
+	detail: string;
+}
+
+export interface ActionLogResponse {
+	entries: ActionLogEntry[];
+}
+
+export type Tone = 'ok' | 'warn' | 'crit' | 'info' | 'neutral';
 
 export interface ToastMessage {
 	id: number;

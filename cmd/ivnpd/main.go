@@ -33,6 +33,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	webUIListen := flags.String("webui-listen", defaultWebUIListenAddress, "WebUI listen address")
 	webUIAuth := flags.Bool("webui-auth", true, "require authentication for non-loopback WebUI access")
 	webUIToken := flags.String("webui-token", "", "WebUI bearer token (overrides IVNPD_WEBUI_TOKEN)")
+	webUIRemoteWrite := flags.Bool("webui-remote-write", false, "allow WebUI configuration writes and restarts from non-loopback clients")
+	webUIShowPeers := flags.Bool("webui-show-peers", false, "expose peer router identities when WebUI is not loopback-bound")
 	httpProxyEnabled := flags.Bool("http-proxy", true, "enable local HTTP outproxy (default :4444)")
 	socks5Enabled := flags.Bool("socks5", false, "enable local SOCKS5 proxy (default :4447)")
 	dataDir := flags.String("data-dir", "", "override data directory")
@@ -52,6 +54,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *showVersion {
 		fmt.Fprintln(stdout, version)
 		return 0
+	}
+	overrideConfig := func(target *state.ConfigurationOperating) {
+		applyConfigOverrides(target, *dataDir, *logLevel, *logFormat, *httpProxyEnabled, *socks5Enabled)
+		if *memoryMode {
+			clearStoragePaths(target)
+		}
 	}
 	var cfg state.ConfigurationOperating
 	var err error
@@ -84,10 +92,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
-	applyConfigOverrides(&cfg, *dataDir, *logLevel, *logFormat, *httpProxyEnabled, *socks5Enabled)
-	if *memoryMode {
-		clearStoragePaths(&cfg)
-	}
+	overrideConfig(&cfg)
 	if *testConfig {
 		fmt.Fprintln(stdout, "ivnpd: configuration is valid")
 		return 0
@@ -112,8 +117,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer func() {
-		if closeErr := d.Close(); closeErr != nil {
-			logger.Error("daemon cleanup failed", "error", closeErr)
+		if d != nil {
+			if closeErr := d.Close(); closeErr != nil {
+				logger.Error("daemon cleanup failed", "error", closeErr)
+			}
 		}
 	}()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -122,6 +129,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		logger.Error("daemon startup failed", "error", err)
 		return 1
 	}
+	var (
+		webUI           *WebUIServer
+		restartRequests chan struct{}
+	)
 	if *webUIEnabled {
 		webUIHost, _, _ := net.SplitHostPort(*webUIListen)
 		token := *webUIToken
@@ -132,15 +143,30 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if *memoryMode {
 			webUIConfigPath = ""
 		}
-		webUI, webErr := NewWebUIServer(WebUIConfig{
-			ListenAddress: *webUIListen,
-			BearerToken:   token,
-			DisableAuth:   !*webUIAuth,
-			ConfigPath:    webUIConfigPath,
+		var webErr error
+		webUI, webErr = NewWebUIServer(WebUIConfig{
+			ListenAddress:    *webUIListen,
+			BearerToken:      token,
+			DisableAuth:      !*webUIAuth,
+			ConfigPath:       webUIConfigPath,
+			AllowRemoteWrite: *webUIRemoteWrite,
+			ShowPeers:        *webUIShowPeers,
+			ConfigOverrides:  overrideConfig,
 		}, d, logger, level)
 		if webErr != nil {
 			logger.Error("WebUI configuration failed", "error", webErr)
 			return 1
+		}
+		if !*memoryMode {
+			restartRequests = make(chan struct{}, 1)
+			webUI.SetRestartHook(func() error {
+				select {
+				case restartRequests <- struct{}{}:
+					return nil
+				default:
+					return errRestartInProgress
+				}
+			})
 		}
 		if webErr = webUI.Start(ctx); webErr != nil {
 			logger.Error("WebUI startup failed", "error", webErr)
@@ -152,11 +178,55 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 		}()
 	}
-	if err := d.Wait(); err != nil {
-		logger.Error("daemon stopped with error", "error", err)
-		return 1
+	waitCurrent := func(current *node.Subsystem) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			done <- current.Wait()
+		}()
+		return done
 	}
-	return 0
+	waitDone := waitCurrent(d)
+	for {
+		select {
+		case err := <-waitDone:
+			if err != nil {
+				logger.Error("daemon stopped with error", "error", err)
+				return 1
+			}
+			return 0
+		case <-restartRequests:
+			webUI.detachNode()
+			if closeErr := d.Close(); closeErr != nil {
+				logger.Error("daemon close during restart failed", "error", closeErr)
+			}
+			<-waitDone
+			d = nil
+			if ctx.Err() != nil {
+				return 0
+			}
+			nextCfg, loadErr := state.ConfigurationLoadOperating(*configPath)
+			if loadErr != nil {
+				logger.Error("daemon restart configuration error", "error", loadErr)
+				return 1
+			}
+			overrideConfig(&nextCfg)
+			setLoggerLevel(level, nextCfg.Log.Level)
+			nextNode, initErr := node.NewSubsystem(nextCfg, node.Options{Logger: logger, Embedded: *memoryMode})
+			if initErr != nil {
+				logger.Error("daemon restart initialization failed", "error", initErr)
+				return 1
+			}
+			if startErr := nextNode.Start(ctx); startErr != nil {
+				_ = nextNode.Close()
+				logger.Error("daemon restart startup failed", "error", startErr)
+				return 1
+			}
+			d = nextNode
+			waitDone = waitCurrent(d)
+			webUI.attachNode(d)
+			logger.Info("daemon restarted")
+		}
+	}
 }
 
 func applyConfigOverrides(cfg *state.ConfigurationOperating, dataDir, logLevel, logFormat string, httpProxy, socks5 bool) {

@@ -75,6 +75,8 @@ type (
 	NetworkDatabaseStoreFlooder              = netdb.StoreFlooder
 	NetworkDatabaseStoreFlooderConfig        = netdb.StoreFlooderConfig
 	NetworkDatabaseTable                     = netdb.Table
+	PeerProfileSnapshot                      = noderuntime.PeerProfileSnapshot
+	ReadinessCondition                       = noderuntime.ReadinessCondition
 	ReadinessDetails                         = noderuntime.ReadinessDetails
 	ReseedClient                             = reseed.Client
 	ReseedSU3Signer                          = reseed.SU3Signer
@@ -245,6 +247,7 @@ var (
 	ErrStateConflict                                         = noderuntime.ErrStateConflict
 	ErrTooManyDestinations                                   = noderuntime.ErrTooManyDestinations
 	ErrTunnelProbeUnavailable                                = noderuntime.ErrTunnelProbeUnavailable
+	UnmetReadinessConditions                                 = noderuntime.UnmetReadinessConditions
 	ErrExplorationUnavailable                                = noderuntime.ErrExplorationUnavailable
 	NetworkAddressTranslationPortMappingErrGatewayRequired   = natpmp.ErrGatewayRequired
 	NetworkAddressTranslationPortMappingErrInvalidRequest    = natpmp.ErrInvalidRequest

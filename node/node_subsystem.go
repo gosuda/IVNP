@@ -16,6 +16,7 @@ type (
 	TunnelRuntimeSnapshot = controlplane.TunnelRuntimeSnapshot
 	DestinationPolicy     = controlplane.DestinationPolicy
 	DestinationPolicyKind = controlplane.DestinationPolicyKind
+	ServiceListeners      = noderuntime.ServiceListeners
 )
 
 const (

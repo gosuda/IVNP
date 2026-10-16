@@ -1,264 +1,165 @@
 <script lang="ts">
 	import '@fontsource-variable/archivo';
 	import '../../tokens.css';
-	import ToastContainer from '$lib/components/ToastContainer.svelte';
-	import ConfigEditorModal from '$lib/components/ConfigEditorModal.svelte';
-	import { isConfigModalOpen } from '$lib/api';
+	import '$lib/styles/global.css';
+	import { onMount, type Snippet } from 'svelte';
+	import { page } from '$app/state';
+	import { authRequired, configData, fetchStatus, refreshAll, restarting, routerStatus, setAccessToken } from '$lib/api';
+	import { startLiveUpdates } from '$lib/live';
+	import { paletteOpen } from '$lib/ui';
+	import Header from '$lib/components/Header.svelte';
+	import Toasts from '$lib/components/Toasts.svelte';
+	import CommandPalette from '$lib/components/CommandPalette.svelte';
+
+	let { children }: { children: Snippet } = $props();
+
+	let token = $state('');
+	let authenticating = $state(false);
+	let authError = $state('');
+
+	onMount(() => startLiveUpdates());
+
+	function onKeydown(event: KeyboardEvent): void {
+		const target = event.target as HTMLElement | null;
+		const typing = target?.closest('input, textarea, select, [contenteditable="true"]');
+		if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+			event.preventDefault();
+			paletteOpen.set(true);
+		} else if (event.key === '/' && !typing) {
+			event.preventDefault();
+			paletteOpen.set(true);
+		}
+	}
+
+	async function authenticate(event: SubmitEvent): Promise<void> {
+		event.preventDefault();
+		if (token.trim().length < 16 || authenticating) return;
+		authenticating = true;
+		authError = '';
+		setAccessToken(token);
+		const status = await fetchStatus();
+		if (!status) {
+			authError = $authRequired ? 'The token was rejected.' : 'ivnpd did not answer. Check that the router is running and retry.';
+		} else {
+			token = '';
+			await refreshAll();
+		}
+		authenticating = false;
+	}
 </script>
 
-<div class="app-shell">
-	<slot />
-	<ToastContainer />
-	{#if $isConfigModalOpen}
-		<ConfigEditorModal />
+<svelte:window onkeydown={onKeydown} />
+<svelte:head>
+	<title>{page.url.pathname === '/' ? 'IVNP router console' : `${page.url.pathname.split('/')[1]} · IVNP`}</title>
+	<meta name="description" content="Local operations console for the IVNP I2P router" />
+</svelte:head>
+
+<a class="skip" href="#main">Skip to content</a>
+<Header />
+
+{#if $authRequired}
+	<main id="main" class="access">
+		<section class="access-panel" aria-labelledby="access-title">
+			<h1 id="access-title">Access token required</h1>
+			<p>This console listens on a non-loopback address. Enter the token from <code class="mono">IVNPD_WEBUI_TOKEN</code> or the ivnpd startup log. It stays in this browser tab only.</p>
+			<form onsubmit={authenticate}>
+				<label for="access-token">Access token</label>
+				<input class="input" id="access-token" type="password" bind:value={token} autocomplete="current-password" required minlength="16" />
+				{#if authError}<p class="notice" data-tone="crit" role="alert">{authError}</p>{/if}
+				<button class="button button--primary" type="submit" disabled={authenticating || token.trim().length < 16} aria-busy={authenticating}>
+					{authenticating ? 'Checking token' : 'Open console'}
+				</button>
+			</form>
+		</section>
+	</main>
+{:else}
+	{#if $restarting}
+		<div class="banner notice" data-tone="info" role="status">Router restarting. Tunnels and sessions rebuild; this page reconnects automatically.</div>
+	{:else if $configData?.restart_required && !page.url.pathname.startsWith('/settings')}
+		<div class="banner notice" data-tone="info" role="status">
+			<span>Saved settings differ from the running router and apply after a restart.</span>
+			<a class="button button--quiet" href="/settings/">Review changes</a>
+		</div>
 	{/if}
-</div>
+	<main id="main">
+		{@render children()}
+	</main>
+{/if}
+
+<footer class="footer">
+	<span>IVNP {$routerStatus?.version ?? ''}</span>
+	<span>Network {$routerStatus?.network_id ?? '—'}</span>
+</footer>
+
+<Toasts />
+<CommandPalette />
 
 <style>
-	:global(*) {
-		box-sizing: border-box;
-	}
-
-	:global(html),
-	:global(body) {
-		margin: 0;
-		min-width: 320px;
-		min-height: 100%;
-		overflow-x: clip;
-		background: var(--color-paper);
-		color: var(--color-ink);
-		font-family: var(--font-body);
-		font-size: 16px;
-		font-variant-numeric: tabular-nums;
-		line-height: 1.45;
-		-webkit-font-smoothing: antialiased;
-	}
-
-	:global(body) {
-		min-height: 100vh;
-	}
-
-	:global(button),
-	:global(input),
-	:global(select),
-	:global(textarea) {
-		font: inherit;
-	}
-
-	:global(button),
-	:global(a),
-	:global(select),
-	:global(input[type='checkbox']) {
-		touch-action: manipulation;
-	}
-
-	:global(a) {
-		color: inherit;
-	}
-
-	:global(summary) {
-		cursor: pointer;
-		font-weight: 650;
-		overflow-wrap: anywhere;
-	}
-
-	:global(summary:focus-visible),
-	:global(a:focus-visible) {
-		outline: 3px solid var(--color-focus);
-		outline-offset: 3px;
-	}
-
-	:global(summary:hover) { color: var(--color-accent); }
-	:global(summary:active) { color: var(--color-ink); }
-	:global(details[open] > summary) { margin-bottom: var(--space-4); }
-
-	:global(::selection) {
-		background: var(--color-accent);
-		color: var(--color-accent-ink);
-	}
-
-	:global(.cell) {
-		min-width: 0;
-		background: color-mix(in oklab, var(--color-paper) 94%, transparent);
-		border: var(--rule-thin) solid var(--color-rule);
-		padding: var(--space-5);
-	}
-
-	:global(.cell-head) {
-		display: flex;
-		align-items: start;
-		justify-content: space-between;
-		gap: var(--space-4);
-		margin-bottom: var(--space-5);
-	}
-
-	:global(.cell-title) {
-		margin: 0;
-		font-family: var(--font-display);
-		font-size: var(--text-lg);
-		font-weight: 700;
-		letter-spacing: -0.02em;
-		line-height: 1.1;
-		min-width: 0;
-		overflow-wrap: anywhere;
-	}
-
-	:global(.cell-note),
-	:global(.label) {
-		font-family: var(--font-label);
-		font-size: var(--text-xs);
-		font-weight: 600;
-		letter-spacing: 0.085em;
-		line-height: 1.25;
-		text-transform: uppercase;
-	}
-
-	:global(.cell-note) {
-		color: var(--color-muted);
-	}
-
-	:global(.button) {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		gap: var(--space-2);
-		min-height: 2.5rem;
-		padding: 0.62rem 0.9rem;
-		border: var(--rule-thin) solid var(--color-ink);
-		border-radius: var(--radius-control);
-		background: var(--color-paper);
-		color: var(--color-ink);
-		font-weight: 650;
-		line-height: 1;
-		white-space: nowrap;
-		cursor: pointer;
-		transition:
-			background-color var(--dur-base) var(--ease-out),
-			border-color var(--dur-base) var(--ease-out),
-			color var(--dur-base) var(--ease-out),
-			transform var(--dur-fast) var(--ease-out);
-	}
-
-	:global(.button:hover),
-	:global(.button.is-hover) {
-		border-color: var(--color-accent);
-		background: var(--color-accent-soft);
-	}
-
-	:global(.button:focus-visible),
-	:global(.button.is-focus) {
-		outline: 3px solid var(--color-focus);
-		outline-offset: 2px;
-	}
-
-	:global(.button:active),
-	:global(.button.is-active) {
-		transform: translateY(1px);
-	}
-
-	:global(.button:disabled),
-	:global(.button[aria-busy='true']) {
-		cursor: not-allowed;
-		opacity: 0.48;
-		transform: none;
-	}
-
-	:global(.button[data-state='error']) {
-		border-style: double;
-	}
-
-	:global(.button[data-state='success']) {
-		background: var(--color-accent);
-		color: var(--color-accent-ink);
-	}
-
-	:global(.button--primary) {
-		border-color: var(--color-accent);
-		background: var(--color-accent);
-		color: var(--color-accent-ink);
-	}
-
-	:global(.button--primary:hover) {
-		border-color: var(--color-ink);
+	.skip {
+		position: absolute;
+		left: var(--space-3);
+		top: -3rem;
+		z-index: 50;
+		padding: var(--space-2) var(--space-3);
 		background: var(--color-ink);
+		color: var(--color-paper);
 	}
 
-	:global(.field) {
-		display: grid;
-		gap: var(--space-2);
-		min-width: 0;
+	.skip:focus {
+		top: var(--space-3);
 	}
 
-	:global(.field label) {
-		font-size: var(--text-sm);
-		font-weight: 650;
+	main {
+		min-height: calc(100vh - 9rem);
 	}
 
-	:global(.input),
-	:global(.select),
-	:global(.textarea) {
-		width: 100%;
-		min-height: 2.65rem;
-		border: var(--rule-thin) solid var(--color-rule-strong);
-		border-radius: var(--radius-control);
-		background: var(--color-paper);
-		color: var(--color-ink);
-		padding: 0.62rem 0.72rem;
-		transition:
-			border-color var(--dur-base) var(--ease-out),
-			background-color var(--dur-base) var(--ease-out);
+	.banner {
+		max-width: var(--page-max);
+		margin: var(--space-3) auto 0;
+		width: calc(100% - 2 * clamp(var(--space-3), 2.4vw, var(--space-8)));
 	}
 
-	:global(.textarea) {
-		min-height: 6.5rem;
-		resize: vertical;
-	}
-
-	:global(.input:hover),
-	:global(.select:hover),
-	:global(.textarea:hover) {
-		border-color: var(--color-ink);
-	}
-
-	:global(.input:focus-visible),
-	:global(.select:focus-visible),
-	:global(.textarea:focus-visible) {
-		border-color: var(--color-accent);
-		outline: 3px solid var(--color-focus);
-		outline-offset: 1px;
-	}
-
-	:global(.input:disabled),
-	:global(.select:disabled),
-	:global(.textarea:disabled) {
-		background: var(--color-paper-2);
-		color: var(--color-muted);
-		cursor: not-allowed;
-	}
-
-	:global(.empty) {
+	.access {
 		display: grid;
 		place-items: center;
-		min-height: 8rem;
-		border: var(--rule-thin) dashed var(--color-rule-strong);
-		color: var(--color-muted);
+		padding: var(--space-8) var(--space-4);
+	}
+
+	.access-panel {
+		display: grid;
+		gap: var(--space-4);
+		width: min(34rem, 100%);
+		padding: clamp(var(--space-5), 5vw, var(--space-8));
+		border: var(--rule-heavy) solid var(--color-ink);
+		box-shadow: 10px 10px 0 var(--color-shadow);
+	}
+
+	.access-panel h1 {
+		font-size: clamp(1.8rem, 6vw, 2.6rem);
+		letter-spacing: -0.04em;
+	}
+
+	.access-panel p {
+		color: var(--color-ink-2);
+	}
+
+	.access-panel form {
+		display: grid;
+		gap: var(--space-3);
+	}
+
+	.access-panel label {
 		font-size: var(--text-sm);
-		text-align: center;
+		font-weight: 700;
 	}
 
-	.app-shell {
-		min-height: 100vh;
-	}
-
-	@media (max-width: 520px) {
-		:global(.cell-head) { flex-direction: column; }
-		:global(.cell) { padding: var(--space-4); }
-	}
-	@media (prefers-reduced-motion: reduce) {
-		:global(*) {
-			scroll-behavior: auto !important;
-			animation: none !important;
-			transition-duration: 0.01ms !important;
-		}
+	.footer {
+		display: flex;
+		justify-content: space-between;
+		gap: var(--space-4);
+		padding: var(--space-4) clamp(var(--space-3), 2.4vw, var(--space-8));
+		border-top: var(--rule-thin) solid var(--color-rule);
+		color: var(--color-muted);
+		font-size: var(--text-xs);
 	}
 </style>

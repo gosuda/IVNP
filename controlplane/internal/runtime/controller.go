@@ -1780,14 +1780,7 @@ func (d *Controller) refreshObservability() {
 }
 
 func dataPlaneReady(readiness ReadinessDetails) bool {
-	return readiness.NetDBRouters >= 50 &&
-		readiness.RouterInfoPublications != 0 &&
-		readiness.LeaseSet2Publications != 0 &&
-		readiness.ExploratoryInboundTunnels != 0 &&
-		readiness.ExploratoryOutboundTunnels != 0 &&
-		readiness.ClientInboundTunnels != 0 &&
-		readiness.ClientOutboundTunnels != 0 &&
-		(!readiness.FloodfillConfigured || readiness.FloodfillAdvertised)
+	return len(UnmetReadinessConditions(readiness)) == 0
 }
 
 func outproxyWarmupReady(readiness ReadinessDetails, inboundTarget, outboundTarget uint64) bool {
@@ -2105,6 +2098,26 @@ func (d *Controller) NetDBRoutersSnapshot() []netdb.RouterRef {
 	}
 	_, routers := d.database.Routers().Snapshot()
 	return routers
+}
+
+// PeerProfileSnapshots returns the recorded tunnel outcome profile for each
+// requested peer. Peers without a recorded profile are absent from the result.
+func (d *Controller) PeerProfileSnapshots(peers []foundation.Hash) map[foundation.Hash]PeerProfileSnapshot {
+	profiles := make(map[foundation.Hash]PeerProfileSnapshot, len(peers))
+	if d == nil || d.profiles == nil {
+		return profiles
+	}
+	for _, peer := range peers {
+		profile, ok := d.profiles.Snapshot(peer)
+		if !ok {
+			continue
+		}
+		profiles[peer] = PeerProfileSnapshot{
+			Successes: profile.Successes, Failures: profile.Failures,
+			MeanLatencyMillis: profile.MeanLatency, Samples: profile.Samples,
+		}
+	}
+	return profiles
 }
 
 // ExportLocalRouterInfo returns an independent snapshot copy of this context's
