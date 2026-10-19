@@ -61,7 +61,7 @@ A subtle vulnerability in naive ECIES implementations occurs if an unauthenticat
 - **Bounded Circular Receive Window (`receiveTags`)**: Pre-derives tags into a fixed-capacity ring (`DefaultTagLookahead = 512`, `capacity = 2*lookahead + 1 = 1025`) bounded by `defaultMaxTags = 8192` per manager.
 - **Single-Use Tag Consumption**: When an `ExistingSession` packet matches an 8-byte tag in `Open`, the tag is **removed from the lookup index before AEAD tag verification runs**. If the ciphertext is corrupted or tampered with, the packet fails immediately and can never be replayed or fall through to Elligator2 `NewSession` trial decryption.
 - **Automatic DH Ratchet (`NextKey` block `0x07`)**: Initiated automatically after `automaticDHRatchetMessages = 4096` messages (or on explicit `RequestDH`), exchanging fresh X25519 keys (`XDHRatchetTagSet`) and keeping the replaced inbound tagset alive for `previousSetLife = 3m` to absorb reordered packets.
-- **Sharded `RatchetManager` (`garlic/ratchet.go`)**: Partitions peer sessions across `parallelism.Workers(maxSessions)` shards while maintaining a top-level `tagRoutes` index via `TagObserver` callbacks so inbound 8-byte tag lookups route directly to the owning shard.
+- **Sharded `RatchetManager` (`garlic/ratchet.go`)**: Partitions peer sessions across `parallelism.Workers(maxSessions)` shards while maintaining a 64-way sharded tag index (`tagShards [64]ratchetTagShard`) via `TagObserver` callbacks so inbound 8-byte tag lookups route directly to the owning shard.
 
 ### 1.5 One-Time Reply Tags, Router Garlic & I2CP Gzip Framing
 

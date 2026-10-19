@@ -321,8 +321,10 @@ func TestRequestManagerDispatchesKnownParentBeforeBlockingUnknownReferralRefresh
 	manager.mu.Lock()
 	request := manager.pending[requestKey{key: key}]
 	var initial foundation.Hash
-	for peer := range request.sent {
-		initial = peer
+	for _, candidate := range request.candidates {
+		if candidate.sent {
+			initial = candidate.hash
+		}
 	}
 	manager.mu.Unlock()
 	if initial == (foundation.Hash{}) {
@@ -478,8 +480,10 @@ func TestRequestManagerReservesCandidateCapacityForSearchReplyReferrals(t *testi
 		t.Fatalf("initial candidates = %d, fallbacks = %d", len(req.candidates), len(req.fallbacks))
 	}
 	var responder foundation.Hash
-	for peer := range req.sent {
-		responder = peer
+	for _, candidate := range req.candidates {
+		if candidate.sent {
+			responder = candidate.hash
+		}
 	}
 	manager.mu.Unlock()
 

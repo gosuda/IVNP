@@ -157,7 +157,7 @@ A single 1024-byte tunnel frame holds at most `maxBlockBytes = 1003` bytes of de
 - **Initial Fragment (`FirstFragment`)**: `flag[1]` (`(deliveryType << 5) | 0x08` if fragmented) `|| [toHash[32]] || [tunnelID[4]] || messageID[4, BE] || size[2, BE] || fragment0`.
 - **Follow-On Fragment (`FollowOnFragment`)**: `flag[1]` (`0x80 | (fragmentNum[1..63] << 1) | isLastBit`) `|| messageID[4, BE] || size[2, BE] || fragmentN`.
 
-At the tunnel endpoint (`Endpoint.Parse`), unfragmented blocks are emitted zero-copy directly from the 1024-byte buffer. Fragmented blocks enter `Reassembler` (`dataplane/internal/tunnel/reassembly.go`), which tracks up to `128` concurrent message IDs (`fragmentReassemblyLifetime = 45s`) using a 64-bit received bitmask, stores fragments in `pool.Lease` slabs, supports out-of-order arrival (follow-on fragments arriving before fragment 0), and rejects conflicting duplicate fragments (`ErrFragmentConflict`).
+At the tunnel endpoint (`Endpoint.Parse`), unfragmented blocks are emitted zero-copy directly from the 1024-byte buffer without acquiring `Endpoint.mu`. When a fragmented block arrives, `Endpoint.Parse` acquires `Endpoint.mu` and passes the fragment to `Reassembler` (`dataplane/internal/tunnel/reassembly.go`), which tracks up to `128` concurrent message IDs (`fragmentReassemblyLifetime = 45s`) using 64-bit `seen` and `terminal` bitmasks over fixed `[64]` fragment arrays, stores fragments in `pool.Lease` slabs, supports out-of-order arrival (follow-on fragments arriving before fragment 0), and rejects conflicting duplicate fragments (`ErrFragment`).
 
 ---
 

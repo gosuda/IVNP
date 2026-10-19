@@ -98,6 +98,13 @@ type requestKey struct {
 	key foundation.Hash
 }
 
+type lookupCandidate struct {
+	hash       foundation.Hash
+	attempted  bool
+	sent       bool
+	refreshing bool
+}
+
 type pendingRequest struct {
 	ctx              context.Context
 	cancel           context.CancelFunc
@@ -108,12 +115,9 @@ type pendingRequest struct {
 	routingKey       foundation.Hash
 	seed             foundation.Hash
 	waiters          []chan LookupResult
-	candidates       []foundation.Hash
-	candidate        map[foundation.Hash]struct{}
-	attempted        map[foundation.Hash]struct{}
-	sent             map[foundation.Hash]struct{}
+	candidates       []lookupCandidate
+	sentCount        int
 	fallbacks        []foundation.Hash
-	refreshing       map[foundation.Hash]struct{}
 	inFlight         bool
 	wakeups          int
 	wakeupDeadline   time.Time
@@ -305,11 +309,7 @@ func (m *RequestManager) lookup(ctx context.Context, typeID LookupType, key foun
 		routingKey: RoutingKey(key, now),
 		deadline:   deadline,
 		waiters:    []chan LookupResult{result},
-		candidates: make([]foundation.Hash, 0, m.maxCandidates),
-		candidate:  make(map[foundation.Hash]struct{}, m.maxCandidates),
-		attempted:  make(map[foundation.Hash]struct{}, m.maxCandidates),
-		sent:       make(map[foundation.Hash]struct{}, javaIterativeSearchLimit),
-		refreshing: make(map[foundation.Hash]struct{}, m.maxCandidates),
+		candidates: make([]lookupCandidate, 0, m.maxCandidates),
 		fallbacks:  make([]foundation.Hash, 0, len(allTargets)),
 	}
 	if m.responders != nil {
@@ -321,7 +321,7 @@ func (m *RequestManager) lookup(ctx context.Context, typeID LookupType, key foun
 		}
 	}
 	for _, target := range allTargets {
-		if _, exists := req.candidate[target.Hash]; exists {
+		if req.candidateIndex(target.Hash) >= 0 {
 			continue
 		}
 		if len(req.candidates) < javaIterativeSearchInitialPeers {
@@ -414,7 +414,7 @@ func (m *RequestManager) HandleDatabaseSearchReply(ctx context.Context, reply fo
 		m.mu.Unlock()
 		return
 	}
-	if _, queried := req.sent[reply.From]; !queried {
+	if !req.wasSent(reply.From) {
 		m.mu.Unlock()
 		if m.logger != nil {
 			m.logger.Debug("netdb search reply ignored", "reason", "unexpected_sender", "key", foundation.EncodeI2PBase64(reply.Key[:]), "from", foundation.EncodeI2PBase64(reply.From[:]))
@@ -432,7 +432,7 @@ func (m *RequestManager) HandleDatabaseSearchReply(ctx context.Context, reply fo
 			continue
 		}
 		if current, known := m.database.Routers().Get(peer); !known || !targetEligible(m.sender, current) {
-			req.refreshing[peer] = struct{}{}
+			req.setRefreshing(peer, true)
 			refresh = append(refresh, peer)
 		}
 	}
@@ -467,7 +467,7 @@ func (m *RequestManager) HandleDatabaseSearchReply(ctx context.Context, reply fo
 		req = m.pending[lookupKey]
 		if req != nil {
 			for _, peer := range refreshFailed {
-				delete(req.refreshing, peer)
+				req.setRefreshing(peer, false)
 			}
 			if !req.inFlight {
 				var terminal error
@@ -513,10 +513,9 @@ func (m *RequestManager) HandleDatabaseStore(ctx context.Context, store foundati
 	}
 	if store.Type == foundation.I2NPStoreRouterInfo {
 		for key, req := range m.pending {
-			if _, wanted := req.candidate[store.Key]; !wanted {
+			if !req.setRefreshing(store.Key, false) {
 				continue
 			}
-			delete(req.refreshing, store.Key)
 			if req.inFlight {
 				m.addWakeupLocked(ctx, req)
 				continue
@@ -634,15 +633,54 @@ func (m *RequestManager) lookupPresent(typeID LookupType, key foundation.Hash) b
 	}
 }
 
+func (r *pendingRequest) candidateIndex(peer foundation.Hash) int {
+	for i := range r.candidates {
+		if r.candidates[i].hash == peer {
+			return i
+		}
+	}
+	return -1
+}
+
+func (r *pendingRequest) wasSent(peer foundation.Hash) bool {
+	idx := r.candidateIndex(peer)
+	return idx >= 0 && r.candidates[idx].sent
+}
+
+func (r *pendingRequest) setRefreshing(peer foundation.Hash, refreshing bool) bool {
+	idx := r.candidateIndex(peer)
+	if idx < 0 {
+		return false
+	}
+	r.candidates[idx].refreshing = refreshing
+	return true
+}
+
+func (r *pendingRequest) unmarkSent(peer foundation.Hash) {
+	idx := r.candidateIndex(peer)
+	if idx >= 0 && r.candidates[idx].sent {
+		r.candidates[idx].sent = false
+		r.sentCount--
+	}
+}
+
+func (r *pendingRequest) anyAttempted() bool {
+	for i := range r.candidates {
+		if r.candidates[i].attempted {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *RequestManager) addCandidateLocked(req *pendingRequest, peer foundation.Hash) bool {
 	if len(req.candidates) == m.maxCandidates {
 		return false
 	}
-	if _, exists := req.candidate[peer]; exists {
+	if req.candidateIndex(peer) >= 0 {
 		return false
 	}
-	req.candidate[peer] = struct{}{}
-	req.candidates = append(req.candidates, peer)
+	req.candidates = append(req.candidates, lookupCandidate{hash: peer})
 	return true
 }
 func (m *RequestManager) promoteFallbackLocked(req *pendingRequest) {
@@ -671,50 +709,52 @@ func (m *RequestManager) prepareSendLocked(key requestKey, req *pendingRequest) 
 	if req.deadline <= m.now() {
 		return nil, ErrRequestExpired
 	}
-	if len(req.sent) >= min(m.maxCandidates, javaIterativeSearchLimit) {
+	if req.sentCount >= min(m.maxCandidates, javaIterativeSearchLimit) {
 		return nil, ErrRequestExpired
 	}
-	var selected foundation.Hash
+	selectedIndex := -1
 	var peer RouterRef
-	found := false
-	if req.seed != (foundation.Hash{}) && len(req.attempted) == 0 {
-		if current, known := m.database.Routers().Get(req.seed); known && responderRefEligible(current, m.now()) && targetEligible(m.sender, current) {
-			selected, peer, found = req.seed, current, true
+	if req.seed != (foundation.Hash{}) && !req.anyAttempted() {
+		if idx := req.candidateIndex(req.seed); idx >= 0 {
+			if current, known := m.database.Routers().Get(req.seed); known && responderRefEligible(current, m.now()) && targetEligible(m.sender, current) {
+				selectedIndex, peer = idx, current
+			}
 		}
 	}
-	if !found {
-		for _, candidate := range req.candidates {
-			if _, attempted := req.attempted[candidate]; attempted {
+	if selectedIndex < 0 {
+		for i := range req.candidates {
+			candidate := &req.candidates[i]
+			if candidate.attempted || candidate.refreshing {
 				continue
 			}
-			if _, refreshing := req.refreshing[candidate]; refreshing {
-				continue
-			}
-			current, known := m.database.Routers().Get(candidate)
+			current, known := m.database.Routers().Get(candidate.hash)
 			if !known || !targetEligible(m.sender, current) {
 				continue
 			}
-			if candidate == req.seed && !responderRefEligible(current, m.now()) {
+			if candidate.hash == req.seed && !responderRefEligible(current, m.now()) {
 				continue
 			}
-			if !found || distanceLess(req.routingKey, candidate, selected) {
-				selected, peer, found = candidate, current, true
+			if selectedIndex < 0 || distanceLess(req.routingKey, candidate.hash, req.candidates[selectedIndex].hash) {
+				selectedIndex, peer = i, current
 			}
 		}
 	}
-	if found {
-		req.attempted[selected] = struct{}{}
-		req.sent[selected] = struct{}{}
+	if selectedIndex >= 0 {
+		req.candidates[selectedIndex].attempted = true
+		if !req.candidates[selectedIndex].sent {
+			req.candidates[selectedIndex].sent = true
+			req.sentCount++
+		}
 		req.inFlight = true
-		exclusions := make([]foundation.Hash, 0, len(req.sent))
-		for _, exclusion := range req.candidates {
-			if _, sent := req.sent[exclusion]; sent {
-				exclusions = append(exclusions, exclusion)
+		exclusions := make([]foundation.Hash, 0, req.sentCount)
+		for i := range req.candidates {
+			if req.candidates[i].sent {
+				exclusions = append(exclusions, req.candidates[i].hash)
 			}
 		}
 		return &sendWork{request: req, key: key, typeID: req.typeID, peer: peer, exclusions: exclusions, deadline: req.wakeupDeadline}, nil
 	}
-	if len(req.sent) == 0 {
+	if req.sentCount == 0 {
 		return nil, ErrNoFloodfill
 	}
 	return nil, nil
@@ -837,7 +877,7 @@ func (m *RequestManager) send(work sendWork) {
 		m.mu.Unlock()
 		return
 	}
-	delete(req.sent, work.peer.Hash)
+	req.unmarkSent(work.peer.Hash)
 	m.promoteFallbackLocked(req)
 	req.inFlight = false
 	next, terminal := m.prepareSendLocked(work.key, req)
@@ -855,8 +895,8 @@ func (m *RequestManager) send(work sendWork) {
 }
 
 func allCandidatesSent(req *pendingRequest) bool {
-	for _, candidate := range req.candidates {
-		if _, attempted := req.attempted[candidate]; !attempted {
+	for i := range req.candidates {
+		if !req.candidates[i].attempted {
 			return false
 		}
 	}

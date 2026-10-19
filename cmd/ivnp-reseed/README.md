@@ -19,7 +19,7 @@ Autonomous I2P network indexer and SU3 reseed server (`gosuda.org/ivnp/cmd/ivnp-
                                 │
                                 ▼
 ┌───────────────────────────────────────────────────────────────────┐
-│ Bounded PeerStore (Cap: 5,000 routers, atomic peers.gob snapshot) │
+│ Bounded PeerStore (Cap: 2,500 routers, atomic peers.gob snapshot) │
 │ - Subnet (/16 IPv4, /48 IPv6) and router family contention bounds │
 │ - EWMA RTT, rolling 3h probe window, and composite quality score  │
 └───────────────────────────────┬───────────────────────────────────┘
@@ -44,7 +44,7 @@ Autonomous I2P network indexer and SU3 reseed server (`gosuda.org/ivnp/cmd/ivnp-
 
 ### Core Mechanisms
 
-1. **Embedded Floodfill Crawler (`crawler.go`)**: Runs an embedded `node.Subsystem` in floodfill and tainted-copy mode with transit participation and client destinations disabled (`Router.Transit = false`, `DisableClientDestinations: true`, `RouterLimit = 5000`). In addition to active iterative lookups, it passively receives unsolicited `DatabaseStore` publications from the network and rewards peers that accept exploratory tunnel hops (`RecordTunnelUsed`).
+1. **Embedded Floodfill Crawler (`crawler.go`)**: Runs an embedded `node.Subsystem` in floodfill and tainted-copy mode with transit participation and client destinations disabled (`Router.Transit = false`, `DisableClientDestinations: true`, `RouterLimit = 2000`). In addition to active iterative lookups, it passively receives unsolicited `DatabaseStore` publications from the network and rewards peers that accept exploratory tunnel hops (`RecordTunnelUsed`).
 2. **Deficit-Weighted Prefix Exploration (`TreeExplore`)**: On every pass, the crawler inspects peer counts across all 256 `Hash[0]` K-buckets:
    - Empty buckets (`0` peers) receive 4-way quadrant subdivision queries (`[0x00, 0x40, 0x80, 0xC0]`).
    - Severely sparse buckets (`< 4` peers) receive 2-way subdivision queries.
@@ -54,7 +54,7 @@ Autonomous I2P network indexer and SU3 reseed server (`gosuda.org/ivnp/cmd/ivnp-
    - **Maintenance Mode** (`Reachable >= 1024`): Launches `8` repair queries per pass and applies exponential probe backoff (`5m * 2^(fails-1)`, capped at `2h`) to unresponsive peers.
 4. **Max-Min XOR Farthest-Point Sampling (`selector.go`)**: Rather than drawing fixed counts per prefix, `farthestPointSample` runs greedy farthest-point sampling across the full 256-bit XOR keyspace ($O(K \cdot N)$). Each pick maximizes the minimum XOR distance to all already-selected peers, filling the 50% floodfill quota first and then drawing from the full qualified pool to produce a 75-peer bundle (`bundleSize = 75`).
 5. **Hard Qualification Gate & Relaxation Ladder**: Candidates must advertise a dialable NTCP2 or SSU2 address, publish a `RouterInfo` within the client's 24-hour reseed window (`±2m` clock skew), and pass the qualification ladder (`gateStrict`: $\ge 85\%$ probe success and $\ge 1\text{h}$ uptime -> `gateNoUptime` -> `gateCumulativeRate` -> `gateReachable`). If fewer than `-min-bundle-peers` qualify, the server retains the previous epoch's bundle pool.
-6. **Sybil & Eclipse Contention Bounds (`store.go`)**: Both `PeerStore` admission and bundle selection enforce at most one router per IPv4 `/16` subnet, IPv6 `/48` prefix, and declared router `family`. A newly admitted peer that outranks an existing group member evicts the dominated entry (`PruneRedundant`).
+6. **Sybil & Eclipse Contention Bounds (`store.go`)**: `PeerStore` maintains incremental `bySubnet16` (`/16` IPv4, `/48` IPv6) and `byFamily` contention group indices (`MaxPeersPerIPv4_16 = 3`, `MaxPeersPerFamily = 15`), while bundle selection enforces at most one router per `/16` IPv4 subnet, `/48` IPv6 prefix, and declared router `family`. A newly admitted peer that outranks the weakest member in its contention group evicts the dominated entry (`evictDominatedLocked`, `PruneRedundant`).
 7. **16-Bundle Epoch Pool (`packager.go`, `server.go`)**: Every refresh interval (`10m` default), `ivnp-reseed` builds a pool of `16` distinct 75-peer SU3 archives (`bundlePoolSize = 16`) and rotates across them on incoming download requests so concurrent bootstrap clients do not hammer identical peer subsets.
 
 ---
@@ -90,7 +90,7 @@ $$\text{Score} = S_{\text{probe}} + S_{\text{latency}} + S_{\text{floodfill}} + 
 
 ```go
 // 1. Bayesian / Laplace-Smoothed Probe Reliability (0 to 40 pts)
-smoothedRatio := float64(SuccessProbes+1) / float64(TotalProbes+3)
+smoothedRatio := float64(SuccessProbes+1) / float64(TotalProbes+2)
 score += smoothedRatio * 40.0
 
 // 2. Hyperbolic EWMA RTT Score (0 to 25 pts)

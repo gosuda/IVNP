@@ -122,7 +122,7 @@ CircuitToken { id: uint32, generation: *circuitLifetime (refs = 1) }
 
 - **64-Way Sharded Circuit Table**: `tunnel.Runtime` partitions circuits across 64 `circuitShard` instances (`tunnelID & 63`). Workers hold `shard.mu.RLock()` only long enough to look up the circuit and increment `circuitLifetime.refs`. All AES-256-CBC layer encryption and network I/O run outside the shard lock.
 - **Generation Matching**: `RemoveCircuitToken(token)` removes a table entry only if its internal `circuitLifetime` pointer matches `token.generation`. Stale teardown requests from a previous rotation cannot evict a newly installed circuit that happens to share the same numeric tunnel ID.
-- **Destination Route Draining (`PreparedRouteSet`)**: In `dataplane/internal/router/prepared_routes.go`, outbound destination routes (`PreparedRoute`) are similarly reference-counted. When the control plane refreshes a destination's route snapshot (`InstallRoute`), in-flight sends complete on the old snapshot before its reference count drops to zero.
+- **Destination Route Draining (`PreparedRouteSender`)**: In `dataplane/internal/router/prepared_routes.go`, outbound destination routes (`PreparedRoute`) are similarly reference-counted. When the control plane refreshes a destination's route snapshot (`InstallRoute`), in-flight sends complete on the old snapshot before its reference count drops to zero.
 
 ---
 

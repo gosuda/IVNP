@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -699,7 +700,8 @@ func (m *NTCP2Manager) establishedConn(conn net.Conn) net.Conn {
 	if m.idleTimeout == 0 {
 		return conn
 	}
-	idle := &ntcp2IdleConn{Conn: conn, timeout: m.idleTimeout, lastActivity: time.Now()}
+	idle := &ntcp2IdleConn{Conn: conn, timeout: m.idleTimeout}
+	idle.recordActivity()
 	idle.mu.Lock()
 	idle.timer = time.AfterFunc(idle.timeout, idle.expire)
 	idle.mu.Unlock()
@@ -708,11 +710,11 @@ func (m *NTCP2Manager) establishedConn(conn net.Conn) net.Conn {
 
 type ntcp2IdleConn struct {
 	net.Conn
-	mu           sync.Mutex
-	timeout      time.Duration
-	lastActivity time.Time
-	timer        *time.Timer
-	closed       bool
+	mu               sync.Mutex
+	timeout          time.Duration
+	lastActivityNano atomic.Int64
+	timer            *time.Timer
+	closed           bool
 }
 
 func (c *ntcp2IdleConn) Read(p []byte) (int, error) {
@@ -732,9 +734,7 @@ func (c *ntcp2IdleConn) Write(p []byte) (int, error) {
 }
 
 func (c *ntcp2IdleConn) recordActivity() {
-	c.mu.Lock()
-	c.lastActivity = time.Now()
-	c.mu.Unlock()
+	c.lastActivityNano.Store(time.Now().UnixNano())
 }
 
 func (c *ntcp2IdleConn) expire() {
@@ -743,7 +743,8 @@ func (c *ntcp2IdleConn) expire() {
 		c.mu.Unlock()
 		return
 	}
-	if remaining := c.timeout - time.Since(c.lastActivity); remaining > 0 {
+	lastActivity := time.Unix(0, c.lastActivityNano.Load())
+	if remaining := c.timeout - time.Since(lastActivity); remaining > 0 {
 		c.timer.Reset(remaining)
 		c.mu.Unlock()
 		return

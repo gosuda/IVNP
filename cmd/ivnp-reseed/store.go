@@ -326,53 +326,22 @@ func (s *PeerStore) PruneRedundant() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	subnets := make(map[[2]byte][]foundation.Hash)
-	families := make(map[string][]foundation.Hash)
+	if len(s.bySubnet16) == 0 && len(s.byFamily) == 0 {
+		for _, rec := range s.peers {
+			s.indexPeerLocked(rec)
+		}
+	}
+
+	var evict []foundation.Hash
 	for h, rec := range s.peers {
-		for _, ip := range rec.IPv4 {
-			if ip.Is4() {
-				subnet := IPv4Subnet16(ip)
-				subnets[subnet] = append(subnets[subnet], h)
-			}
-		}
-		if rec.Family != "" {
-			families[rec.Family] = append(families[rec.Family], h)
+		if hasGroup, tops := s.topsAnyContentionLocked(rec); hasGroup && !tops {
+			evict = append(evict, h)
 		}
 	}
-
-	keep := make(map[foundation.Hash]struct{}, len(subnets)+len(families))
-	contested := make(map[foundation.Hash]struct{})
-	markTop := func(members []foundation.Hash) {
-		var top *PeerRecord
-		for _, h := range members {
-			contested[h] = struct{}{}
-			rec := s.peers[h]
-			if rec == nil {
-				continue
-			}
-			if top == nil || compareRetention(rec, top) < 0 {
-				top = rec
-			}
-		}
-		if top != nil {
-			keep[top.Hash] = struct{}{}
-		}
+	for _, h := range evict {
+		s.deletePeerLocked(h)
 	}
-	for _, members := range subnets {
-		markTop(members)
-	}
-	for _, members := range families {
-		markTop(members)
-	}
-
-	evicted := 0
-	for h := range contested {
-		if _, ok := keep[h]; !ok {
-			s.deletePeerLocked(h)
-			evicted++
-		}
-	}
-	return evicted
+	return len(evict)
 }
 
 func (s *PeerStore) indexPeerLocked(rec *PeerRecord) {

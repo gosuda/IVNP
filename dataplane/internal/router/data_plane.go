@@ -438,7 +438,8 @@ func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState
 	if len(result.Payload) == 0 && len(result.Reply) == 0 && !result.ReplyRequested {
 		return nil
 	}
-	cloves, err := parseRatchetGarlicCloves(result.Payload)
+	var cloveStorage [4]dataplanegarlic.Clove
+	cloves, err := parseRatchetGarlicClovesTo(cloveStorage[:0], result.Payload)
 	if err != nil {
 		return err
 	}
@@ -530,7 +531,11 @@ func sendRatchetResponse(destination *garlicDestinationState, result dataplanega
 }
 
 func parseRatchetGarlicCloves(payload []byte) ([]dataplanegarlic.Clove, error) {
-	var cloves []dataplanegarlic.Clove
+	return parseRatchetGarlicClovesTo(nil, payload)
+}
+
+func parseRatchetGarlicClovesTo(dst []dataplanegarlic.Clove, payload []byte) ([]dataplanegarlic.Clove, error) {
+	cloves := dst[:0]
 	for len(payload) != 0 {
 		if len(payload) < 3 {
 			return nil, ErrGarlicPacket
@@ -545,12 +550,12 @@ func parseRatchetGarlicCloves(payload []byte) ([]dataplanegarlic.Clove, error) {
 			if err != nil {
 				return nil, err
 			}
-			if cloves == nil {
-				cloves = make([]dataplanegarlic.Clove, 0, 4)
-			}
 			cloves = append(cloves, clove)
 		}
 		payload = payload[size:]
+	}
+	if len(cloves) == 0 {
+		return nil, nil
 	}
 	return cloves, nil
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	dataplanedatagram "gosuda.org/ivnp/dataplane/internal/datagram"
 	dataplanegarlic "gosuda.org/ivnp/dataplane/internal/garlic"
@@ -51,12 +52,12 @@ type PreparedRouteSender struct {
 	scratchSlots  int
 	metrics       *observability.Registry
 	logger        *slog.Logger
-	routesMu      sync.Mutex
+	routesMu      sync.RWMutex
 	routes        map[foundation.Hash]*preparedRouteEntry
 	retiring      map[*preparedRouteEntry]struct{}
 	generation    uint64
 	routeCapacity int
-	routeClock    uint64
+	routeClock    atomic.Uint64
 }
 
 func NewPreparedRouteSender(config PreparedRouteSenderConfig) (*PreparedRouteSender, error) {

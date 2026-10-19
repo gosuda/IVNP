@@ -322,8 +322,12 @@ func (e *Endpoint) Parse(payload []byte, out []Block, nowMillis uint64) (int, er
 	if subtle.ConstantTimeCompare(checksum, expected[:tunnelChecksumLen]) != 1 {
 		return 0, ErrGatewayPayload
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	locked := false
+	defer func() {
+		if locked {
+			e.mu.Unlock()
+		}
+	}()
 	it := NewBlockIterator(data[start+1:])
 	n := 0
 	for {
@@ -333,6 +337,18 @@ func (e *Endpoint) Parse(payload []byte, out []Block, nowMillis uint64) (int, er
 		}
 		if !ok {
 			return n, nil
+		}
+		if !block.FollowOn && block.Last {
+			if n == len(out) {
+				return n, ErrGatewayOutput
+			}
+			out[n] = block
+			n++
+			continue
+		}
+		if !locked {
+			e.mu.Lock()
+			locked = true
 		}
 		if block.FollowOn {
 			if block.Fragment == 0 {
@@ -355,14 +371,6 @@ func (e *Endpoint) Parse(payload []byte, out []Block, nowMillis uint64) (int, er
 				n++
 				delete(e.meta, block.MessageID)
 			}
-			continue
-		}
-		if block.Last {
-			if n == len(out) {
-				return n, ErrGatewayOutput
-			}
-			out[n] = block
-			n++
 			continue
 		}
 

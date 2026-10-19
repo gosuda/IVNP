@@ -56,7 +56,7 @@ func (r PreparedRouteReceipt) Confirmed() bool {
 type preparedRouteEntry struct {
 	route           PreparedRoute
 	active          sync.WaitGroup
-	used            uint64
+	used            atomic.Uint64
 	wiping          atomic.Bool
 	drained         chan struct{}
 	installation    uint64
@@ -107,9 +107,12 @@ func (s *PreparedRouteSender) InstallRoute(route PreparedRoute) error {
 	}
 	previous := s.routes[route.Remote]
 	if previous == nil && len(s.routes) >= s.routeCapacity {
+		var oldestUsed uint64
 		for _, candidate := range s.routes {
-			if previous == nil || candidate.used < previous.used {
+			candidateUsed := candidate.used.Load()
+			if previous == nil || candidateUsed < oldestUsed {
 				previous = candidate
+				oldestUsed = candidateUsed
 			}
 		}
 		delete(s.routes, previous.route.Remote)
@@ -119,8 +122,10 @@ func (s *PreparedRouteSender) InstallRoute(route PreparedRoute) error {
 	}
 	route.KeyData = append([]byte(nil), route.KeyData...)
 	route.LocalLeaseSet = append([]byte(nil), route.LocalLeaseSet...)
-	s.routeClock++
-	s.routes[route.Remote] = &preparedRouteEntry{route: route, used: s.routeClock, installation: s.routeClock, drained: make(chan struct{})}
+	clock := s.routeClock.Add(1)
+	entry := &preparedRouteEntry{route: route, installation: clock, drained: make(chan struct{})}
+	entry.used.Store(clock)
+	s.routes[route.Remote] = entry
 	s.routesMu.Unlock()
 	if previous != nil {
 		s.retireRouteEntry(previous)
@@ -157,14 +162,13 @@ func (s *PreparedRouteSender) InvalidateRoutes(generation uint64) {
 }
 
 func (s *PreparedRouteSender) acquireRoute(remote foundation.Hash) (*preparedRouteEntry, error) {
-	s.routesMu.Lock()
-	defer s.routesMu.Unlock()
+	s.routesMu.RLock()
+	defer s.routesMu.RUnlock()
 	route := s.routes[remote]
 	if route == nil || route.route.Expires <= s.now() {
 		return nil, ErrPreparedRouteMissing
 	}
-	s.routeClock++
-	route.used = s.routeClock
+	route.used.Store(s.routeClock.Add(1))
 	route.active.Add(1)
 	return route, nil
 }
@@ -199,8 +203,8 @@ func (s *PreparedRouteSender) HasRoute(remote foundation.Hash, generation uint64
 	if s.released {
 		return false
 	}
-	s.routesMu.Lock()
-	defer s.routesMu.Unlock()
+	s.routesMu.RLock()
+	defer s.routesMu.RUnlock()
 	route := s.routes[remote]
 	return route != nil && route.route.Generation == generation && route.route.Expires > s.now()
 }
@@ -208,8 +212,8 @@ func (s *PreparedRouteSender) HasRoute(remote foundation.Hash, generation uint64
 func (s *PreparedRouteSender) RouteReceipt(remote foundation.Hash) (PreparedRouteReceipt, bool) {
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
-	s.routesMu.Lock()
-	defer s.routesMu.Unlock()
+	s.routesMu.RLock()
+	defer s.routesMu.RUnlock()
 	entry := s.routes[remote]
 	if s.released || entry == nil || entry.route.Expires <= s.now() {
 		return PreparedRouteReceipt{}, false

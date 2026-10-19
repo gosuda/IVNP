@@ -22,10 +22,10 @@ type Fragment struct {
 }
 
 type partial struct {
-	parts    [128][]byte
-	leases   [128]*pool.Lease
-	seen     [128]bool
-	terminal [128]bool
+	parts    [64][]byte
+	leases   [64]*pool.Lease
+	seen     uint64
+	terminal uint64
 	last     uint8
 	hasLast  bool
 	size     int
@@ -56,7 +56,7 @@ func NewReassembler(maxEntries, maxMessage int) *Reassembler {
 // Add copies one fragment and returns a complete caller-owned message only
 // after every fragment from zero through the final number is present.
 func (r *Reassembler) Add(fragment Fragment, nowMillis uint64) ([]byte, bool, error) {
-	if len(fragment.Data) == 0 || fragment.Number > 127 {
+	if len(fragment.Data) == 0 || fragment.Number > 63 {
 		return nil, false, ErrFragment
 	}
 	r.mu.Lock()
@@ -74,8 +74,9 @@ func (r *Reassembler) Add(fragment Fragment, nowMillis uint64) ([]byte, bool, er
 		r.remove(fragment.MessageID)
 		return nil, false, ErrFragment
 	}
-	if entry.seen[fragment.Number] {
-		if entry.terminal[fragment.Number] != fragment.Last || !bytes.Equal(entry.parts[fragment.Number], fragment.Data) {
+	bit := uint64(1) << fragment.Number
+	if entry.seen&bit != 0 {
+		if (entry.terminal&bit != 0) != fragment.Last || !bytes.Equal(entry.parts[fragment.Number], fragment.Data) {
 			r.remove(fragment.MessageID)
 			return nil, false, ErrFragment
 		}
@@ -89,27 +90,28 @@ func (r *Reassembler) Add(fragment Fragment, nowMillis uint64) ([]byte, bool, er
 	part, _ := lease.Bytes(len(fragment.Data))
 	copy(part, fragment.Data)
 	entry.parts[fragment.Number], entry.leases[fragment.Number] = part, lease
-	entry.seen[fragment.Number], entry.terminal[fragment.Number], entry.size = true, fragment.Last, entry.size+len(fragment.Data)
+	entry.seen |= bit
+	if fragment.Last {
+		entry.terminal |= bit
+	}
+	entry.size += len(fragment.Data)
 	if fragment.Last {
 		if entry.hasLast && entry.last != fragment.Number {
 			r.remove(fragment.MessageID)
 			return nil, false, ErrFragment
 		}
-		for i := int(fragment.Number) + 1; i < len(entry.seen); i++ {
-			if entry.seen[i] {
-				r.remove(fragment.MessageID)
-				return nil, false, ErrFragment
-			}
+		if entry.seen>>(fragment.Number+1) != 0 {
+			r.remove(fragment.MessageID)
+			return nil, false, ErrFragment
 		}
 		entry.last, entry.hasLast = fragment.Number, true
 	}
 	if !entry.hasLast {
 		return nil, false, nil
 	}
-	for i := uint8(0); i <= entry.last; i++ {
-		if !entry.seen[i] {
-			return nil, false, nil
-		}
+	requiredMask := (^uint64(0)) >> (63 - entry.last)
+	if entry.seen&requiredMask != requiredMask {
+		return nil, false, nil
 	}
 	message := make([]byte, 0, entry.size)
 	for i := uint8(0); i <= entry.last; i++ {
@@ -150,10 +152,10 @@ func (r *Reassembler) remove(messageID uint32) {
 		return
 	}
 	delete(r.entries, messageID)
-	for index, lease := range entry.leases {
-		lease.Release()
-		entry.leases[index] = nil
-		entry.parts[index] = nil
+	for _, lease := range entry.leases {
+		if lease != nil {
+			lease.Release()
+		}
 	}
 	*entry = partial{}
 	r.partialPool.Put(entry)

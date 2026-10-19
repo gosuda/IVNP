@@ -116,7 +116,7 @@ All L1 files reside directly in `/Users/user/work/work3/IVNP/cryptography`:
 `observability.Registry` (`registry.go`) stores all telemetry counters and gauges as lock-free `atomic.Uint64` fields organized into 13 domain structs (`Lifecycle`, `Reseed`, `Transport`, `NetDB`, `Tunnel`, `Admission`, `Proxy`, `Control`, `Bootstrap`, `Publication`, `SAM`, `Garlic`, `SSU2`).
 
 - **Nil-Receiver Safety**: Every metric accessor on `*Registry` checks `if r == nil` and falls back to a package-private `zeroRegistryState`, allowing subsystems in unit tests to record metrics with a `nil` registry without branching or panicking.
-- **Zero-Reflection Exposition (`http.go`)**: `NewMetricsHandler` writes Prometheus text format `0.0.4` into a pre-sized 32 KiB buffer using `strconv.AppendUint` and `strconv.AppendFloat`.
+- **Zero-Reflection Exposition (`http.go`)**: `NewMetricsHandler` writes Prometheus text format `0.0.4` into a pooled `*bytes.Buffer` (`metricsBufferPool`, 8 KiB initial capacity, 64 KiB pooling cap) using `strconv.AppendUint` and `strconv.AppendFloat`.
 
 ---
 

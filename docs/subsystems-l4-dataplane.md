@@ -59,29 +59,33 @@ Inbound I2NPGarlic Payload
 
 ## 2. Destination Sessions & Prepared Route Execution (`dataplane/internal/router`)
 
-### 2.1 `DestinationSession` & `PreparedRouteSet` (`destination.go`, `prepared_routes.go`, `prepared_sender.go`)
+### 2.1 `DestinationSession` & `PreparedRouteSender` (`destination.go`, `prepared_routes.go`, `prepared_sender.go`)
 
 Each active local destination in L4 is represented by a `DestinationSession`:
 
 - **Cryptographic State**: Holds the destination's `foundation.LocalDestination`, its sharded `*garlic.RatchetManager` (configured with ML-KEM-768 and ML-KEM-1024 private keys when post-quantum hybrid capabilities are enabled), and legacy ElGamal `SessionManager`/`TagStore`.
 - **Installed Circuits**: Tracks the set of owned inbound and outbound `tunnel.CircuitToken` installations.
-- **`PreparedRouteSet`**: Stores reference-counted `PreparedRoute` snapshots installed by L5 (`InstallRoute`):
+- **`PreparedRouteSender`**: Stores reference-counted `PreparedRoute` snapshots (`preparedRouteEntry`) installed by L5 (`InstallRoute`):
 
 ```go
 type PreparedRoute struct {
-	Outbound         tunnel.CircuitToken
-	Gateway          foundation.Hash
-	TunnelID         uint32
-	TargetStatic     [32]byte
-	TargetCryptoType uint16
-	TargetPQPublic   []byte
-	LocalLeaseSet    []byte
-	LeaseExpires     uint64
-	RouteExpires     uint64
+	Owner          foundation.Hash
+	Remote         foundation.Hash
+	Generation     uint64
+	KeyType        foundation.CryptoKeyType
+	KeyData        []byte
+	LegacyKey      cryptography.ElGamalPublicKey
+	Legacy         bool
+	Gateway        foundation.Hash
+	TunnelID       uint32
+	Circuit        dataplanetunnel.CircuitToken
+	Expires        uint64
+	LocalLeaseSet  []byte
+	LocalLeaseSet2 bool
 }
 ```
 
-When an application sends a streaming packet or datagram to a remote destination hash, `PreparedRouteSender.Send` acquires a reference on the current `PreparedRoute`, encrypts the I2CP-gzipped `I2NPData` message (bundling `LocalLeaseSet` as a second garlic clove when initiating a `NewSession` or before session confirmation), and injects the resulting `I2NPGarlic` message directly into `tunnel.Runtime.SendTunnelToken(route.Outbound, route.Gateway, route.TunnelID, msg)`.
+When an application sends a streaming packet or datagram to a remote destination hash, `PreparedRouteSender` (`SendTunnel` / `SendRatchetReply`) acquires `routesMu.RLock()` via `acquireRoute`, updates `route.used.Store(s.routeClock.Add(1))`, increments `route.active.Add(1)`, releases `routesMu.RUnlock()`, encrypts the I2CP-gzipped `I2NPData` message (bundling `LocalLeaseSet` as a second garlic clove when initiating a `NewSession` or before session confirmation), and injects the resulting `I2NPGarlic` block directly into `tunnels.SendBlockPrepared(ctx, route.Circuit, block)`.
 
 ### 2.2 Bounded Subscriptions & Bandwidth Limiting (`destination.go`, `destination_bandwidth.go`)
 
@@ -143,7 +147,7 @@ type circuitShard struct {
 To prevent lock contention when a destination communicates with many concurrent peers, `garlic.RatchetManager` partitions `garlicecies.RatchetManager` instances across `parallelism.Workers(maxSessions)` shards:
 
 - Outbound encryption (`Seal`, `HasSession`, `NeedsBundledLeaseSet`) hashes the target peer's first byte (`peer[0] % len(shards)`) and locks only that shard.
-- Inbound `ExistingSession` decryption (`Open`) must look up the 8-byte session tag before the sender's identity is known. Each shard notifies the parent `garlic.RatchetManager` of newly derived and retired tags through the `garlicecies.TagObserver` interface (`TagAdded`, `TagRemoved`), maintaining a compact top-level `tagRoutes map[[8]byte]int` index that routes 8-byte tags directly to their owning shard.
+- Inbound `ExistingSession` decryption (`Open`) must look up the 8-byte session tag before the sender's identity is known. Each shard notifies the parent `garlic.RatchetManager` of newly derived and retired tags through the `garlicecies.TagObserver` interface (`TagAdded`, `TagRemoved`), maintaining a 64-way sharded `tagShards [64]ratchetTagShard` (`map[[8]byte]uint16`, indexed by `tag[0] & 63`) that routes 8-byte tags directly to their owning shard.
 
 ### 5.2 Tunnel-Backed Streaming Engine (`dataplane/internal/streaming/tunnel/tunnel.go`)
 

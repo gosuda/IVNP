@@ -1323,9 +1323,10 @@ func TestSSU2EstablishReleasesEvictedIdleSession(t *testing.T) {
 	peer := foundation.Hash{3}
 	stale := &ssu2TransportSession{
 		peer: peer, sendID: 1, receiveID: 2, send: send, receive: receive,
-		lastActivity: time.Now().Add(-time.Hour), sent: make(map[uint32]*ssu2SentPacket),
+		sent:      make(map[uint32]*ssu2SentPacket),
 		fragments: make(map[uint32]*ssu2FragmentAssembly),
 	}
+	stale.touch(time.Now().Add(-time.Hour))
 	manager, _ := newSSU2ConfiguredManager(t, nil)
 	manager.started = true
 	manager.ctx = context.Background()
@@ -1428,10 +1429,11 @@ func TestSSU2SessionRequestSupersedesStaleSessionOnNewSourceID(t *testing.T) {
 		// drains; a cached NewToken lets a new initiator reuse that destination.
 		stale := &ssu2TransportSession{
 			peer: alice.Hash(), sendID: 200, receiveID: 100,
-			remote:       aliceConn.LocalAddr(),
-			lastActivity: time.Now(),
-			sent:         make(map[uint32]*ssu2SentPacket), fragments: make(map[uint32]*ssu2FragmentAssembly),
+			remote:    aliceConn.LocalAddr(),
+			sent:      make(map[uint32]*ssu2SentPacket),
+			fragments: make(map[uint32]*ssu2FragmentAssembly),
 		}
+		stale.touch(time.Now())
 		bobManager.mu.Lock()
 		bobManager.sessionsByID[stale.receiveID] = stale
 		bobManager.sessionsByPeer[alice.Hash()] = stale
@@ -1798,14 +1800,14 @@ func TestSSU2CanceledEgressConsumesSealedPacketNumber(t *testing.T) {
 		}
 		peer := foundation.Hash{1}
 		session := &ssu2TransportSession{
-			peer:         peer,
-			sendID:       9,
-			receiveID:    10,
-			remote:       net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:1234")),
-			send:         send,
-			nextPacket:   1,
-			lastActivity: time.Now(),
+			peer:       peer,
+			sendID:     9,
+			receiveID:  10,
+			remote:     net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:1234")),
+			send:       send,
+			nextPacket: 1,
 		}
+		session.touch(time.Now())
 		session.initReliability(ssu2MaximumNetworkMTU)
 		managerCtx, stopManager := context.WithCancel(t.Context())
 		defer stopManager()
@@ -2211,14 +2213,14 @@ func newSSU2SendTestHarness(t *testing.T) (*SSU2Manager, *ssu2TransportSession) 
 	}
 	peer := foundation.Hash{1}
 	session := &ssu2TransportSession{
-		peer:         peer,
-		sendID:       9,
-		receiveID:    10,
-		remote:       net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:1234")),
-		send:         send,
-		nextPacket:   1,
-		lastActivity: time.Now(),
+		peer:       peer,
+		sendID:     9,
+		receiveID:  10,
+		remote:     net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:1234")),
+		send:       send,
+		nextPacket: 1,
 	}
+	session.touch(time.Now())
 	session.initReliability(ssu2MaximumNetworkMTU)
 	managerCtx, cancel := context.WithCancel(t.Context())
 	free := make(chan *ssu2EgressSlot, 1)

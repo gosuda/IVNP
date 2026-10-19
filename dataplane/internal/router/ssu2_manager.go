@@ -440,11 +440,10 @@ type ssu2TransportSession struct {
 	ackPayload            [3 + 5 + 2*dataplanessu2.MaxACKRanges]byte
 	fragments             map[uint32]*ssu2FragmentAssembly
 
-	activityMu   sync.Mutex
-	lastActivity time.Time
-	pathMu       sync.Mutex
-	candidate    *ssu2PathCandidate
-	releaseOnce  sync.Once
+	lastActivityNano atomic.Int64
+	pathMu           sync.Mutex
+	candidate        *ssu2PathCandidate
+	releaseOnce      sync.Once
 }
 
 type ssu2PathCandidate struct {
@@ -463,10 +462,7 @@ func (s *ssu2TransportSession) ReleaseSensitive() {
 		// lock while reliable control sends may wait for retained slots.
 		s.sendMu.Lock()
 		s.closing = true
-		if s.sendCapacityAvailable != nil {
-			close(s.sendCapacityAvailable)
-			s.sendCapacityAvailable = nil
-		}
+		s.signalSendCapacityLocked()
 		s.sendMu.Unlock()
 		// The lifetime barrier prevents authenticated receive processing from
 		// repopulating fragments/path state after terminal cleanup. Cipher
@@ -575,7 +571,6 @@ func (s *ssu2TransportSession) initReliability(largeMTU int) {
 	s.sendWindowRemaining = s.sendWindowBytes
 	s.slowStartThreshold = ssu2InitialSlowStart
 	s.rto = ssu2RetransmitInterval
-	s.sendCapacityAvailable = make(chan struct{})
 	s.sent = make(map[uint32]*ssu2SentPacket, ssu2InitialTrackedPackets)
 	// Retransmission tracking starts small (the initial congestion window is
 	// a handful of packets) and grows on demand in retainPayload, up to the
@@ -2357,10 +2352,15 @@ func (m *SSU2Manager) handlePacket(packet []byte, remote netip.AddrPort) {
 	}
 	if destinationID, err := dataplanessu2.PeekDestinationID(packet, m.introKey); err == nil {
 		m.mu.RLock()
-		known := m.inbound[destinationID] != nil || m.sessionsByID[destinationID] != nil
+		pending := m.inbound[destinationID]
+		session := m.sessionsByID[destinationID]
 		m.mu.RUnlock()
-		if known {
-			m.handleSessionPacket(packet, remote)
+		if pending != nil {
+			m.handleInboundPacket(packet, pending, destinationID, remote)
+			return
+		}
+		if session != nil {
+			m.handleDataFrom(session, packet, remote)
 			return
 		}
 		if m.logger != nil {
@@ -3015,7 +3015,8 @@ func (m *SSU2Manager) sendSessionConfirmed(pending *ssu2OutboundPending) {
 		m.markOutboundFailed(pending, err)
 		return
 	}
-	session := &ssu2TransportSession{peer: pending.peer, sendID: pending.destinationID, receiveID: pending.sourceID, remote: pending.remote, send: send, receive: receive, nextPacket: 1, fragments: make(map[uint32]*ssu2FragmentAssembly), lastActivity: m.now()}
+	session := &ssu2TransportSession{peer: pending.peer, sendID: pending.destinationID, receiveID: pending.sourceID, remote: pending.remote, send: send, receive: receive, nextPacket: 1, fragments: make(map[uint32]*ssu2FragmentAssembly)}
+	session.touch(m.now())
 	session.initReliability(m.ssu2LargeMTU(pending.remote, pending.address.mtu))
 	installed := false
 	defer func() {
@@ -3194,24 +3195,6 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 	}
 }
 
-func (m *SSU2Manager) handleSessionPacket(packet []byte, remote netip.AddrPort) {
-	destinationID, err := dataplanessu2.PeekDestinationID(packet, m.introKey)
-	if err != nil {
-		return
-	}
-	m.mu.RLock()
-	pending := m.inbound[destinationID]
-	session := m.sessionsByID[destinationID]
-	m.mu.RUnlock()
-	if pending != nil {
-		m.handleInboundPacket(packet, pending, destinationID, remote)
-		return
-	}
-	if session != nil {
-		m.handleDataFrom(session, packet, remote)
-	}
-}
-
 func (m *SSU2Manager) handleInboundPacket(packet []byte, pending *ssu2InboundPending, destinationID uint64, remote netip.AddrPort) {
 	pending.reassemblyMu.Lock()
 	defer pending.reassemblyMu.Unlock()
@@ -3258,17 +3241,17 @@ func (m *SSU2Manager) processSessionConfirmedLocked(packet []byte, pending *ssu2
 		return
 	}
 	session := &ssu2TransportSession{
-		peer:         peer.Hash(),
-		sendID:       pending.sendID,
-		receiveID:    destinationID,
-		inbound:      true,
-		remote:       cloneUDPAddress(remoteAddr),
-		send:         send,
-		receive:      receive,
-		nextPacket:   1,
-		fragments:    make(map[uint32]*ssu2FragmentAssembly),
-		lastActivity: m.now(),
+		peer:       peer.Hash(),
+		sendID:     pending.sendID,
+		receiveID:  destinationID,
+		inbound:    true,
+		remote:     cloneUDPAddress(remoteAddr),
+		send:       send,
+		receive:    receive,
+		nextPacket: 1,
+		fragments:  make(map[uint32]*ssu2FragmentAssembly),
 	}
+	session.touch(m.now())
 	session.initReliability(m.ssu2LargeMTU(remoteAddr, ssu2AdvertisedMTU(peer, remoteAddr)))
 	m.mu.Lock()
 	var displaced *ssu2TransportSession
@@ -3775,6 +3758,10 @@ func (m *SSU2Manager) sendSessionDataContext(ctx context.Context, session *ssu2T
 			break
 		}
 		available := session.sendCapacityAvailable
+		if available == nil {
+			available = make(chan struct{})
+			session.sendCapacityAvailable = available
+		}
 		remaining, tracked, window := session.sendWindowRemaining, len(session.sent), session.sendWindowBytes
 		sessionRTO := session.rto
 		session.sendMu.Unlock()
@@ -3886,16 +3873,16 @@ func ssu2DataHeader(destinationID uint64, packetNumber uint32, requestImmediateA
 }
 
 func (s *ssu2TransportSession) touch(now time.Time) {
-	s.activityMu.Lock()
-	s.lastActivity = now
-	s.activityMu.Unlock()
+	if now.IsZero() {
+		s.lastActivityNano.Store(0)
+		return
+	}
+	s.lastActivityNano.Store(now.UnixNano())
 }
 
 func (s *ssu2TransportSession) idle(now time.Time, timeout time.Duration) bool {
-	s.activityMu.Lock()
-	last := s.lastActivity
-	s.activityMu.Unlock()
-	return last.IsZero() || now.Sub(last) >= timeout
+	last := s.lastActivityNano.Load()
+	return last == 0 || now.Sub(time.Unix(0, last)) >= timeout
 }
 
 func (s *ssu2TransportSession) expirePath(now time.Time) {
@@ -3983,7 +3970,7 @@ func (s *ssu2TransportSession) signalSendCapacityLocked() {
 		return
 	}
 	close(s.sendCapacityAvailable)
-	s.sendCapacityAvailable = make(chan struct{})
+	s.sendCapacityAvailable = nil
 }
 
 func (s *ssu2TransportSession) removeSentAliasesLocked(sent *ssu2SentPacket) {

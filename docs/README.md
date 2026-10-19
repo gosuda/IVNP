@@ -47,7 +47,7 @@ This directory contains the architectural specifications, subsystem maps, and wi
 - **[Subsystem Code Reference: Layers L0 to L3](subsystems-l0-l3-foundation-and-state.md)**
   Struct layouts, method contracts, slab class tables, nil-safe observability counters, and the AES-256-GCM `router.state` binary bundle specification across `internal/*`, `cryptography`, `foundation`, `observability`, `interfaces/*`, and `state`.
 - **[Subsystem Code Reference: Layer L4 (`dataplane`)](subsystems-l4-dataplane.md)**
-  Internal call graphs, 64-shard Bloom replay filter, `GarlicReceiver` dispatch priority, `PreparedRouteSet` execution, `NTCP2Manager`, `SSU2Manager` 7-loop worker pipeline, 64-shard `tunnel.Runtime`, and sharded `garlic.RatchetManager`.
+  Internal call graphs, 64-shard Bloom replay filter, `GarlicReceiver` dispatch priority, `PreparedRouteSender` execution, `NTCP2Manager`, `SSU2Manager` 7-loop worker pipeline, 64-shard `tunnel.Runtime`, and sharded `garlic.RatchetManager`.
 - **[Subsystem Code Reference: Layer L5 (`controlplane`)](subsystems-l5-controlplane.md)**
   `runtime.Controller` object graph, per-destination `destinationRuntime` isolation, `StreamingTunnelSender` coalesced route preparation, silent-handshake lease exclusion, session-scoped `replyRouterInfoSeeds`, NetDB internals, and STBM/VTBM tunnel builders.
 - **[Subsystem Code Reference: Layers L6 to L9](subsystems-l6-l9-services-node-and-cli.md)**
