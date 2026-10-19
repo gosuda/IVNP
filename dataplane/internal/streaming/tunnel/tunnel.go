@@ -2016,7 +2016,7 @@ func (c *tunnelConn) Write(src []byte) (int, error) {
 			// The send failed before the packet reached the wire, but its
 			// sequence is consumed: dropping the pending entry would leave a
 			// permanent hole the receiver parks every later packet on. Keep
-			// it queued — the retry machinery owns delivery — and report the
+			// it queued (the retry machinery owns delivery) and report the
 			// bytes as accepted, matching the write-deadline branch.
 			c.network.scheduleRetry(c)
 			return written + chunkLen, nil
@@ -2076,7 +2076,7 @@ func (c *tunnelConn) Close() error {
 	if err := c.initiateClose(); err != nil {
 		c.abort(false)
 		// initiateClose only surfaces a send error when the connection was
-		// already torn down — there is nothing left to close.
+		// already torn down, when there is nothing left to close.
 		if errors.Is(err, net.ErrClosed) || c.isDone() {
 			return nil
 		}

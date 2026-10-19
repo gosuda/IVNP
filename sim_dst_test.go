@@ -22,7 +22,7 @@ import (
 )
 
 // TestSimRouterBoot smoke-tests the harness: routers start on virtual sockets,
-// exchange RouterInfos, and build exploratory tunnels — all on fake time.
+// exchange RouterInfos, and build exploratory tunnels on fake time.
 func TestSimRouterBoot(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sim := newSimNet(t, 7)
@@ -38,9 +38,9 @@ func TestSimRouterBoot(t *testing.T) {
 }
 
 // TestDeterministicRouterMesh is the primary deterministic-simulation test.
-// Four embedded routers — two floodfill contributors and two warm clients —
-// run real NTCP2 and SSU2 transports over a virtual mesh. The test covers the
-// full user-facing path inside a synctest bubble:
+// Nine embedded routers (two floodfill contributors, five transit relays, and
+// two warm clients) run real NTCP2 and SSU2 transports over a virtual mesh.
+// The test covers the full user-facing path inside a synctest bubble:
 //
 //   - RouterInfo exchange and exploratory tunnel construction (router routing).
 //   - LeaseSet2 publication through tunnels to the floodfill NetDB.
@@ -77,8 +77,8 @@ func TestDeterministicRouterMesh(t *testing.T) {
 			RenewBefore: 10 * time.Second,
 		}
 
-		// The destination create blocks until tunnels form and the LeaseSet is
-		// confirmed stored on the floodfill — a real NetDB publication.
+		// Destination creation blocks until tunnels form and the LeaseSet is
+		// confirmed stored on the floodfill.
 		target, err := bob.router.NewDestination(ctx, destCfg)
 		if err != nil {
 			t.Fatalf("bob destination: %v", err)
@@ -119,8 +119,8 @@ func TestDeterministicRouterMesh(t *testing.T) {
 			}
 		}()
 
-		// Bob's address was never imported into alice's NetDB — resolving it
-		// exercises a real destination LeaseSet lookup over tunnels.
+		// Bob's address was never imported into alice's NetDB; resolving it
+		// exercises a destination LeaseSet lookup over tunnels.
 		start := time.Now()
 		var outbound net.Conn
 		initialDialCtx, initialDialCancel := context.WithTimeout(ctx, 180*time.Second)
@@ -558,7 +558,7 @@ func TestSimChaosFailureModels(t *testing.T) {
 		// SSU2-only nodes force the streams onto UDP so the duplication and
 		// burst-loss models below provably apply to the tested traffic.
 		// Two tunnels per direction keep route resolution able to steer around
-		// a single failure-marked path — with one, one silent handshake can
+		// a single failure-marked path; with one, a single silent handshake can
 		// blackhole the only (circuit, lease) pair until the mark expires.
 		sim.AddRouter(t, simNodeConfig{Name: "flood", Participation: ParticipationContributor, TunnelCount: 2, DisableNTCP2: true})
 		alice := sim.AddRouter(t, simNodeConfig{Name: "alice", TunnelCount: 2, DisableNTCP2: true})
@@ -693,7 +693,7 @@ func TestSimChaosFailureModels(t *testing.T) {
 			// replace the pair so the blackhole read cannot observe stale data.
 			_ = outbound.Close()
 			_ = inbound.Close()
-			// The stall starves tunnel health probes too — wait for both
+			// The stall starves tunnel health probes too; wait for both
 			// pools to rebuild and republish before dialing. Recovery is
 			// bounded by the post-stall envelope, not a fixed 300s guess:
 			// transport cooldowns (up to 300s) and build quarantine (120s)
@@ -705,7 +705,7 @@ func TestSimChaosFailureModels(t *testing.T) {
 				recoveryWatch{"source", source, alice.router},
 				recoveryWatch{"target", target, bob.router})
 			// A ready pool can still lose the selected tunnel between the
-			// pool count and circuit install — retry within a bounded budget.
+			// pool count and circuit install; retry within a bounded budget.
 			dialCtx, dialCancel := context.WithTimeout(ctx, 120*time.Second)
 			for {
 				attemptCtx, attemptCancel := context.WithTimeout(dialCtx, 30*time.Second)
@@ -796,7 +796,7 @@ func (w recoveryWatch) signal(ctx context.Context) string {
 }
 
 // waitDestinationsReady waits for every watched destination to report
-// ready — inbound and outbound tunnels plus a confirmed LeaseSet — while
+// ready (inbound and outbound tunnels plus a confirmed LeaseSet) while
 // logging each router's observable tunnel signals. Readiness is polled in
 // slices so the wait can outlive the post-stall recovery envelope
 // (transport cooldowns up to 300s plus build quarantine and republish

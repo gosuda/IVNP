@@ -25,8 +25,8 @@ import (
 )
 
 // Deterministic router-mesh harness. Every router binds simnet sockets instead
-// of kernel UDP/TCP, so the whole fleet — NTCP2 streams, SSU2 datagrams, tunnel
-// builds, NetDB traffic — runs on the ambient clock. Inside a testing/synctest
+// of kernel UDP/TCP, so the whole fleet (NTCP2 streams, SSU2 datagrams, tunnel
+// builds, and NetDB traffic) runs on the ambient clock. Inside a testing/synctest
 // bubble that clock is virtual: tests advance through latency, jitter, and
 // maintenance timers without wall-clock sleeps.
 //
@@ -216,7 +216,7 @@ func (s *simNet) AddRouter(tb testing.TB, cfg simNodeConfig) *simNode {
 }
 
 // ExchangeRouterInfos installs every node's signed RouterInfo into every other
-// node's NetDB — the static-membership bootstrap of a dedicated network.
+// node's NetDB, modeling static-membership bootstrap of a dedicated network.
 func (s *simNet) ExchangeRouterInfos(tb testing.TB) {
 	tb.Helper()
 	ctx := tb.Context()
@@ -254,7 +254,7 @@ func (s *simNet) Mesh(cfg simnet.LinkConfig) {
 }
 
 // WaitReady blocks until every node reports ready or the timeout elapses on
-// the ambient clock — inside a bubble the wait advances fake time.
+// the ambient clock; inside a bubble the wait advances fake time.
 func (s *simNet) WaitReady(tb testing.TB, timeout time.Duration) {
 	tb.Helper()
 	ctx, cancel := context.WithTimeout(tb.Context(), timeout)

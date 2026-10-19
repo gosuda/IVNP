@@ -70,7 +70,7 @@ const (
 	ssu2DispatchStall = 4 * time.Second
 	// ssu2SendStall bounds one wait for congestion capacity. The wait holds the
 	// session's send serialization, so an unresponsive peer must fail the send
-	// — not every other sender queued behind it — once no capacity signal
+	// (not every other sender queued behind it) once no capacity signal
 	// arrives within a retransmit interval.
 	ssu2SendStall = ssu2RetransmitInterval
 	// ssu2SessionDegradedCooldown is how long a send-capacity stall marks the
@@ -666,7 +666,7 @@ func (s *ssu2TransportSession) maintainSentCapacity() {
 // ssu2SentSlotIdleShrinkTicks consecutive ticks, mirroring growSentSlotsLocked's
 // doubling by undoing exactly one doubling step at a time. It never shrinks
 // below ssu2InitialTrackedPackets, and only removes a chunk once every slot
-// in it is free — a still-tracked packet in that chunk defers the shrink to
+// in it is free; a still-tracked packet in that chunk defers the shrink to
 // a later tick rather than blocking or relocating it. Callers hold sendMu.
 func (s *ssu2TransportSession) shrinkSentSlotsLocked() {
 	if len(s.sentSlots) <= ssu2InitialTrackedPackets || len(s.sentChunks) == 0 {
@@ -4616,8 +4616,8 @@ func (m *SSU2Manager) releaseDispatchBatch(batch *ssu2DispatchBatch) {
 	}
 	// A full free channel means the batch budget already covers every live
 	// borrow; only a double-release can reach this state, so the batch must be
-	// spilled rather than parked — parking an authLoop worker would starve the
-	// receive path of ACKs.
+	// spilled rather than parked, because parking an authLoop worker would
+	// starve the receive path of ACKs.
 	select {
 	case free <- batch:
 	default:
@@ -4659,8 +4659,8 @@ func (m *SSU2Manager) appendDispatchI2NP(batch *ssu2DispatchBatch, peer foundati
 // dispatchI2NPBatch hands a complete set of self-owned message views to the
 // bounded dispatch stage. The receive worker must not wait on delivery:
 // parking here blocks inbound ACK processing behind downstream congestion and
-// wedges the peer's send window. A saturated queue drops the batch — datagram
-// admission remains lossy — rather than reviving that convoy.
+// wedges the peer's send window. A saturated queue drops the batch (datagram
+// admission remains lossy) rather than reviving that convoy.
 func (m *SSU2Manager) dispatchI2NPBatch(batch *ssu2DispatchBatch) error {
 	if batch == nil || batch.count == 0 {
 		m.releaseDispatchBatch(batch)

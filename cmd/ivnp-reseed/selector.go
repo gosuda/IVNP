@@ -378,7 +378,7 @@ func farthestPointSample(pool []PeerRecord, cfg SelectorConfig, now time.Time) [
 		floodfills = 1
 	}
 
-	// Phase 1: floodfill quota.
+	// Fill the floodfill quota first.
 	ffTarget := int(math.Round(float64(k) * cfg.PreferFloodfillRatio))
 	for floodfills < ffTarget && len(selected) < k {
 		i := pick(isFloodfill)
@@ -390,8 +390,8 @@ func farthestPointSample(pool []PeerRecord, cfg SelectorConfig, now time.Time) [
 			floodfills++
 		}
 	}
-	// Phase 2: remaining slots from the whole pool (floodfills may exceed
-	// their quota here when the rest of the pool is exhausted).
+	// Fill remaining slots from the full pool (floodfills may exceed their
+	// quota when non-floodfills are exhausted).
 	for len(selected) < k {
 		i := pick(anyPeer)
 		if i < 0 {

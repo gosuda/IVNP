@@ -19,7 +19,7 @@ var _ = sync.DurableMutexOverlay
 // TestMain serializes goroutine scheduling for deterministic simulation: one
 // P runs runnable goroutines in runqueue order rather than racing them across
 // threads, and crypto packages honor a pinned crypto/rand.Reader. Both
-// GODEBUG settings can only be applied at process start — run dst tests as:
+// GODEBUG settings can only be applied at process start; run dst tests as:
 //
 //	GODEBUG=asyncpreemptoff=1,cryptocustomrand=1 GOGC=off go test -tags dst -overlay=...
 //

@@ -65,7 +65,7 @@ type EventKind uint8
 
 const (
 	// EventSent is recorded when a datagram or stream segment is accepted for
-	// delivery — before drop sampling.
+	// delivery, before drop sampling.
 	EventSent EventKind = iota + 1
 	// EventDeliver records one delivery into a receive queue or stream buffer.
 	EventDeliver
@@ -82,7 +82,7 @@ const (
 )
 
 // Event describes one simulated network occurrence. At carries the network's
-// clock value — fake time inside a synctest bubble, wall time outside.
+// clock value (fake time inside a synctest bubble, wall time outside).
 type Event struct {
 	At       time.Time
 	Kind     EventKind
@@ -135,7 +135,7 @@ type LinkConfig struct {
 	// DropRate is the independent loss probability per packet in [0,1].
 	DropRate float64
 	// DropEvery drops every Nth proto-matching packet, counted on the link
-	// with no RNG — engagement is guaranteed regardless of scheduling order.
+	// with no RNG so engagement is guaranteed regardless of scheduling order.
 	// Zero disables.
 	DropEvery uint64
 	// DropProto scopes DropRate, DropEvery, and BurstLoss to one protocol;
@@ -176,13 +176,13 @@ type Config struct {
 	Prefix netip.Prefix
 	// DefaultLink applies to directed pairs with no SetLink entry.
 	DefaultLink LinkConfig
-	// Now supplies the clock. Nil selects time.Now — which is the fake bubble
+	// Now supplies the clock. Nil selects time.Now, which is the fake bubble
 	// clock inside testing/synctest and the wall clock outside.
 	Now func() time.Time
 	// Hook observes every Event when non-nil. It runs on the scheduler or
 	// sender goroutine while the network mutex is held, so it must be fast,
-	// non-blocking, and must not call any Network method — a reentrant send
-	// panics and any other call deadlocks.
+	// non-blocking, and must not call any Network method (a reentrant send
+	// panics and any other call deadlocks).
 	Hook func(Event)
 	// UDPQueueLimit bounds each UDP socket's inbound queue in packets;
 	// overflow is dropped and counted. Zero selects 256.
@@ -646,7 +646,7 @@ func (n *Network) scheduleLocked(due time.Time, run func()) {
 }
 
 // run is the event scheduler. It sleeps until the next event's due time on
-// the caller clock — inside a synctest bubble that sleep is a fake timer, so
+// the caller clock; inside a synctest bubble that sleep is a fake timer, so
 // virtual time advances exactly to each delivery.
 func (n *Network) run() {
 	defer close(n.schedDone)
@@ -723,7 +723,7 @@ func (n *Network) waitDelay(delay time.Duration) bool {
 }
 
 // sendDatagram implements UDP send: sample loss/duplication on the directed
-// link, then schedule delivery. A send always reports success — like real
+// link, then schedule delivery. A send always reports success; like real
 // UDP, failures are invisible to the sender.
 func (n *Network) sendDatagram(from, to netip.AddrPort, payload []byte) {
 	n.mu.Lock()
@@ -792,7 +792,7 @@ func (n *Network) deliverDatagram(from, to netip.AddrPort, data []byte, duplicat
 	sock.deliver(from, data, duplicate)
 }
 
-// record emits one Event with its own lock acquisition — for code paths that
+// record emits one Event with its own lock acquisition for code paths that
 // do not already hold n.mu.
 func (n *Network) record(kind EventKind, proto Proto, from, to netip.AddrPort, bytes int) {
 	n.mu.Lock()

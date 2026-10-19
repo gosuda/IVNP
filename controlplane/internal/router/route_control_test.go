@@ -770,7 +770,7 @@ func TestSilentLeaseStaysExcludedAcrossCircuitReplacement(t *testing.T) {
 	retry.NoResponse()
 	// Both distinct circuits absorbed a silent handshake on the same lease:
 	// the remote path is dead, not either local circuit. Replacing every
-	// outbound installation — renewal or health-driven churn — must not
+	// outbound installation (renewal or health-driven churn) must not
 	// unmark it, otherwise the dead lease is repicked forever.
 	third, err := sender.tunnels.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 21, Owner: sender.owner, FirstHop: foundation.Hash{9}, NextTunnelID: 22, ExpiresAt: 99000})
 	if err != nil {
@@ -825,7 +825,7 @@ func TestExhaustedRemoteLeaseRefreshClearsSilenceMarks(t *testing.T) {
 	second.NoResponse()
 	// Every (circuit, lease) pair now carries a silence mark. A completed
 	// refresh returning the identical LeaseSet is proof the marks measured
-	// transient loss, not a stale cache — the leases must be retried.
+	// transient loss, not a stale cache, so the leases must be retried.
 	if err := sender.database.AdmitRouterInfo(dataPlaneFloodfill(t), true, 1000); err != nil {
 		t.Fatal(err)
 	}

@@ -6,8 +6,8 @@ import (
 	"syscall"
 )
 
-// Portable builds have no kernel vector path: every socket — native or
-// simulated — uses the shared per-datagram implementation.
+// Portable builds have no kernel vector path: every socket (native or
+// simulated) uses the shared per-datagram implementation.
 
 func newBatchState(count int) any { return newBatchStatePortable(count) }
 

@@ -16,8 +16,8 @@ import (
 
 type RouterConfig struct {
 	Persistence *PersistenceConfig
-	// NetworkID through Exploratory configure a single I2P context — the
-	// official network when NetworkID is 2. When Networks is non-empty they
+	// NetworkID through Exploratory configure a single I2P context (the
+	// official network when NetworkID is 2). When Networks is non-empty they
 	// must all be zero; each entry carries them instead.
 	NetworkID   uint32
 	NTCP2       TransportConfig
@@ -31,7 +31,7 @@ type RouterConfig struct {
 	// operations. Empty selects the netId=2 entry, or the first entry when no
 	// public context is configured.
 	DefaultNetwork string
-	// Networks lists the I2P protocol contexts this router serves — one
+	// Networks lists the I2P protocol contexts this router serves: one
 	// independent network (own transports, own NetDB) per entry, each scoped
 	// to its netId.
 	Networks []NetworkConfig

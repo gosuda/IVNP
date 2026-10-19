@@ -29,7 +29,7 @@ const networkNativeName = "i2p"
 // PeerAdmission presents one authenticated transport peer for approval by a
 // network's admission callback. RouterInfo is the signature-verified,
 // netId-matched peer record; it is a view and must not be retained after the
-// callback returns — copy fields (or Hash) needed later.
+// callback returns. Copy any fields (or Hash) needed later.
 type (
 	PeerAdmission     = dataplane.RouterPeerAdmission
 	PeerAdmissionFunc = dataplane.RouterPeerAdmissionFunc
@@ -42,12 +42,12 @@ const (
 )
 
 // ErrPeerDenied is the sentinel marking admission denials: every transport
-// denial — callback error or contained panic — satisfies
+// denial (callback error or contained panic) satisfies
 // errors.Is(err, ErrPeerDenied), and helpers wrap it so denials compose.
 var ErrPeerDenied = dataplane.RouterErrPeerDenied
 
 // AdmitPeers returns a PeerAdmissionFunc allowing only the listed router
-// hashes — the static allowlist form of an enterprise membership policy.
+// hashes, forming a static allowlist for a closed network membership policy.
 func AdmitPeers(allow ...Hash) PeerAdmissionFunc {
 	allowed := make(map[Hash]struct{}, len(allow))
 	for _, hash := range allow {
@@ -61,8 +61,8 @@ func AdmitPeers(allow ...Hash) PeerAdmissionFunc {
 	}
 }
 
-// RejectPeers returns a PeerAdmissionFunc denying the listed router hashes —
-// an egress or ingress denylist over otherwise admitted peers.
+// RejectPeers returns a PeerAdmissionFunc denying the listed router hashes,
+// acting as an egress or ingress denylist over otherwise admitted peers.
 func RejectPeers(deny ...Hash) PeerAdmissionFunc {
 	denied := make(map[Hash]struct{}, len(deny))
 	for _, hash := range deny {
@@ -153,10 +153,10 @@ func ConnectionNetwork(conn net.Conn) string {
 }
 
 // NetworkConfig describes one I2P protocol context: the transports, bootstrap,
-// and tunnel policy serving one netId. Every entry has the same shape — the
+// and tunnel policy serving one netId. Every entry has the same shape: the
 // official I2P network is simply the netId=2 configuration produced by
-// DefaultI2PNetwork, and a dedicated network differs only in field values:
-// its own netId, its own listeners, and its own seed set, which yields an
+// DefaultI2PNetwork, and a dedicated network differs only in field values
+// (its own netId, its own listeners, and its own seed set), which yields an
 // isolated NetDB rather than a different protocol.
 type NetworkConfig struct {
 	// Name is the local handle used in Dial/Listen network strings and
@@ -166,7 +166,7 @@ type NetworkConfig struct {
 	NetworkID uint32
 	NTCP2     TransportConfig
 	SSU2      TransportConfig
-	// Bootstrap seeds this context's NetDB — reseed URLs or literal
+	// Bootstrap seeds this context's NetDB via reseed URLs or literal
 	// RouterInfos for the dedicated network.
 	Bootstrap   BootstrapConfig
 	Exploratory TunnelPoolConfig
@@ -175,8 +175,8 @@ type NetworkConfig struct {
 	Participation PublicParticipation
 	// AdmitPeer gates transport sessions for this context. When non-nil it
 	// runs after the peer RouterInfo is cryptographically verified and
-	// netId-matched, before the session is installed — inbound denial closes
-	// the connection, outbound denial skips the dial. The callback runs
+	// netId-matched, before the session is installed: inbound denial closes
+	// the connection, and outbound denial skips the dial. The callback runs
 	// synchronously on transport setup paths and must be fast and bounded;
 	// a panic is contained and treated as denial. Nil admits every
 	// authenticated peer. For closed networks pair this with
@@ -208,7 +208,7 @@ func WithBootstrap(b BootstrapConfig) NetworkOption {
 }
 
 // WithBootstrapRouterInfos seeds the context's NetDB with literal signed
-// RouterInfos — the static membership of a dedicated network.
+// RouterInfos representing the static membership of a dedicated network.
 func WithBootstrapRouterInfos(infos ...[]byte) NetworkOption {
 	return func(c *NetworkConfig) {
 		c.Bootstrap.RouterInfos = append(c.Bootstrap.RouterInfos, infos...)
@@ -428,8 +428,8 @@ func validateReseedURLs(field string, urls []string, requiredQuery string) error
 }
 
 // networkSpecs lowers the validated network entries to per-context specs. Each
-// context gets its own operating configuration — including an isolated state
-// directory under the persistence root named after the network — and its own
+// context gets its own operating configuration (including an isolated state
+// directory under the persistence root named after the network) and its own
 // controller options so tests can inject transports per context.
 func networkSpecs(cfg RouterConfig) ([]node.NetworkSpec, string, error) {
 	networks, def, err := networkPlan(cfg)

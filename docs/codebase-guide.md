@@ -171,7 +171,7 @@ L0 packages have zero internal dependencies and rely only on the Go standard lib
 
 - **`controlplane_subsystem.go`**: Sole public gateway for L5.
 - **`controlplane/internal/netdb/`**:
-  - `dht.go` & `kbucket.go`: Split `Table` (`routers` map + Kademlia $b=4$ `kBucketSet` over 2048 ranges with Java `RejectTrimmer` flood resistance and per-bucket `/16` IPv4 and `/48` IPv6 subnet diversity quotas), `RoutingKey` (`SHA256(key || YYYYMMDD)`), and pooled zero-allocation XOR selection buffers.
+  - `dht.go` & `kbucket.go`: Split `Table` (`routers` map, incremental `floodfills` index, and Kademlia $b=4$ `kBucketSet` over 2048 ranges with Java `RejectTrimmer` flood resistance and per-bucket `/16` IPv4 and `/48` IPv6 subnet diversity quotas), `RoutingKey` (`SHA256(key || YYYYMMDD)`), and pooled zero-allocation XOR selection buffers.
   - `database.go` & `store.go`: `Database` store admission, gzip bomb protection (`<= 4096 B`), version monotonicity, and `published` vs. private lookup-derived LeaseSet separation.
   - `local_router.go`, `local.go`, `local_ls2.go`, `local_encrypted_ls2.go`, `encrypted_resolution.go`: Local `RouterInfo`, `LeaseSet`, `LeaseSet2`, and two-layer ChaCha20 + HKDF `EncryptedLeaseSet` construction and decryption (`ELS2_L1K`, `ELS2_L2K`, `ELS2_XCA` DH auth, `ELS2PSKA` PSK auth).
   - `requests.go`, `explorer.go`, `lookup_responder.go`, `store_flooder.go`, `confirmation.go`, `publication.go`, `router_publication.go`, `responder_profiles.go`, `persistence.go`, `responder_persistence.go`: Iterative DHT lookups, K-bucket exploration, floodfill responder/flooder (with UTC midnight rollover), `DeliveryStatus`-confirmed publication, and atomic `netdb.routers` / `netdb.responders` persistence.

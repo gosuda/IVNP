@@ -764,8 +764,8 @@ func isPriorityReseedEndpoint(endpoint string) bool {
 // unique candidates are collected or sufficient independent sources succeed,
 // then runs one deduplicated, quota-gated admission pass. Prioritized
 // endpoints (such as hotseed.gosuda.org) are all queried in parallel and
-// their archives are merged — ingestion waits for every priority response so
-// a slow source still contributes coverage, bounded by Client.MergeWait —
+// their archives are merged (ingestion waits for every priority response so
+// a slow source still contributes coverage, bounded by Client.MergeWait)
 // before hedging against the remaining random endpoints. When MergeWait is
 // negative, the first successful priority response finishes the fetch.
 func (c Client) FetchAny(ctx context.Context, endpoints []string, database *controlplanenetdb.Database, seenAt uint64) (ReseedResult, error) {

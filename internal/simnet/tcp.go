@@ -92,8 +92,8 @@ func (l *TCPListener) Close() error {
 // delivery events on the peer link; reads drain the receive buffer. Flow
 // control bounds in-flight plus buffered bytes; writers block at the bound.
 //
-// DropRate loss on a stream link discards data permanently — the sim has no
-// retransmission — so stream tests should prefer Partition/ResetLink over
+// DropRate loss on a stream link discards data permanently because the sim has
+// no retransmission, so stream tests should prefer Partition/ResetLink over
 // DropRate for fault injection.
 type TCPConn struct {
 	net    *Network
@@ -162,8 +162,8 @@ func (h *Host) DialTCP(ctx context.Context, remote netip.AddrPort) (net.Conn, er
 		res.canceled.Store(true)
 		// The dial may have completed in the same instant the context
 		// fired: completeSYN registers res.conn under n.mu, so claiming
-		// it under the same mutex settles ownership either way — a
-		// conn present here is ours to tear down, a nil means the
+		// it under the same mutex settles ownership either way; a
+		// conn present here is ours to tear down, and a nil means the
 		// canceled-dial checks already stopped or will stop the retry.
 		n.mu.Lock()
 		conn := res.conn
@@ -448,7 +448,7 @@ func (c *TCPConn) isClosed() bool {
 
 // sendSegment schedules one chunk's delivery on the c→peer link. Chunks carry
 // a per-direction sequence number so jittered deliveries reassemble in wire
-// order — a stream must never reorder bytes. A dropped chunk leaves a
+// order (a stream must never reorder bytes). A dropped chunk leaves a
 // permanent hole (the sim has no retransmission): later arrivals wait in the
 // reorder buffer and the reader stalls, matching documented stream loss.
 func (n *Network) sendSegment(c, peer *TCPConn, chunk []byte) {
@@ -630,7 +630,7 @@ func (c *TCPConn) SetWriteDeadline(t time.Time) error {
 }
 
 // ResetLink aborts every connection on the a↔b pair and drops the link both
-// ways — a hard cut, as opposed to Partition's stall on new deliveries.
+// ways (a hard cut, as opposed to Partition's stall on new deliveries).
 func (n *Network) ResetLink(a, b netip.Addr) {
 	n.Partition(a, b)
 	n.mu.Lock()

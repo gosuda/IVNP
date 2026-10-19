@@ -47,7 +47,7 @@ func newSSU2SimConn(t *testing.T, net_ *simnet.Network, name string) *simnet.UDP
 
 // TestSSU2SimnetSessionExchange runs the same reliable-delivery workload as
 // TestSSU2DeliversExpectedMessagesIntact over simnet virtual UDP sockets
-// inside a synctest bubble — isolating SSU2 session data and ACK flow from
+// inside a synctest bubble, isolating SSU2 session data and ACK flow from
 // kernel networking.
 func TestSSU2SimnetSessionExchange(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

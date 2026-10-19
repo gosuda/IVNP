@@ -325,7 +325,7 @@ func ensureTransportSession(ctx context.Context, manager dataplane.RouterTranspo
 }
 
 // sessionDegraded reports whether the manager holds a session for peer that
-// exists but cannot currently send — sessionManager skips it, yet dialing the
+// exists but cannot currently send; sessionManager skips it, yet dialing the
 // same transport again would only return the degraded session.
 func (m *TransportMux) sessionDegraded(manager dataplane.RouterTransportManager, peer foundation.Hash) bool {
 	sessions, ok := manager.(preferredSessionManager)

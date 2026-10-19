@@ -119,8 +119,8 @@ type failedRoutePath struct {
 	tunnelID uint32
 }
 
-// failedLeasePath identifies only the remote side of a route — the lease a
-// remote LeaseSet advertises. Silence observed under a single local circuit
+// failedLeasePath identifies only the remote side of a route (the lease a
+// remote LeaseSet advertises). Silence observed under a single local circuit
 // is ambiguous (the circuit may be dead), so the lease is excluded only
 // after distinct circuits each produced a silent handshake: no single dead
 // local circuit can explain that. Accumulating evidence by remote path

@@ -15,9 +15,9 @@ var deterministicExplorerSeedPtr atomic.Pointer[foundation.Hash]
 
 func deterministicExplorerSeed() *foundation.Hash { return deterministicExplorerSeedPtr.Load() }
 
-// chainedReader yields sha256(seed‖local‖counter) blocks — a deterministic
-// byte stream per (seed, local) pair so one router's explorer replays an
-// identical exploration sequence under a fixed simulation seed.
+// chainedReader yields sha256(seed‖local‖counter) blocks, producing a
+// deterministic byte stream per (seed, local) pair so one router's explorer
+// replays an identical exploration sequence under a fixed simulation seed.
 type chainedReader struct {
 	block   [sha256.Size]byte
 	seed    foundation.Hash

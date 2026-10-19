@@ -379,7 +379,7 @@ func TestUntrustedSU3SignerRejectedOnAnyHost(t *testing.T) {
 	}
 
 	// Archives signed by non-embedded signers are rejected everywhere, including
-	// on the prioritized hotseed host — TLS channel trust never substitutes for
+	// on the prioritized hotseed host; TLS channel trust never substitutes for
 	// SU3 signature verification.
 	for _, host := range []string{"hotseed.gosuda.org", "untrusted.example.org"} {
 		database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)

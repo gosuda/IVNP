@@ -10,12 +10,12 @@ Layer L5 (`controlplane`) owns network discovery, Kademlia XOR routing, floodfil
 
 `netdb.Table` separates full `RouterInfo` storage from Kademlia routing buckets, matching Java I2P's split `DataStore` + `KBucketSet` design:
 
-- **Full `RouterInfo` Store (`routers map[foundation.Hash]routerEntry`)**: Holds all verified `RouterInfo` records (`MaxRouterInfoBytes = 4096`). In embedded mode, `routerLimit` bounds total stored routers (`256 * BucketCapacity`), evicting the oldest `lastSeen` entry with deterministic XOR tie-breaking.
+- **Full `RouterInfo` Store (`routers map[foundation.Hash]routerEntry`, `floodfills map[foundation.Hash]struct{}`)**: Holds all verified `RouterInfo` records (`MaxRouterInfoBytes = 4096`) and maintains an incremental `floodfills` index across admissions, updates, expirations, and evictions so `Counts() (routers, floodfills int)` and floodfill queries avoid scanning the entire `routers` map. In embedded mode, `routerLimit` bounds total stored routers (`256 * BucketCapacity`), evicting the oldest `lastSeen` entry with deterministic XOR tie-breaking.
 - **Kademlia $b=4$ `kBucketSet` (`kbucket.go`)**:
   - Uses `BucketCount = 256`, `KademliaB = 4`, `kademliaBFactor = 8` ($2^{b-1}$), and `kademliaRangeCount = 2048` ($256 \times 8$), with `DefaultBucketCapacity = 24` ($K = 24$).
   - `kademliaRange(local, peer)` computes the leading zero bits of `local ^ peer`, sets `highBit = 255 - leading`, shifts `rangeNumber = highBit << 3`, and ORs in the next 3 bits below `highBit` to map every peer into `[0, 2047]`.
   - **Flood Resistance (`RejectTrimmer`) & Subnet Diversity (`DefaultBucketSubnetQuota = 2`)**: When a leaf bucket (`bucket.begin == bucket.end`) is full (`len(members) >= 24`), `add()` rejects newly arriving peers rather than evicting verified routing entries. Before admitting or updating a peer in `kBucketSet`, `routingAllowsSubnetsLocked` enforces at most `DefaultBucketSubnetQuota = 2` peers (configurable via `SetBucketSubnetQuota`) per IPv4 `/16` or IPv6 `/48` subnet within the same `distanceBucket(local, hash)` band. Rejected peers remain available in the `t.routers` data store.
-- **Zero-Allocation XOR Selection (`selectionPool`)**: Closest-peer queries (`ClosestInto`, `ClosestFloodfillsInto`, `ClosestFloodfillsExcludingInto`) borrow pre-allocated `routerSelectionBuffer` structs from a CPU-sized channel pool to run partial selection sorts by XOR distance without heap allocations.
+- **Zero-Allocation XOR Selection (`selectionPool`, `borrowSelectionFloodfills`)**: Closest-peer queries (`ClosestInto`, `ClosestFloodfillsInto`, `ClosestFloodfillsExcludingInto`) borrow pre-allocated `routerSelectionBuffer` structs from a CPU-sized channel pool to run partial selection sorts by XOR distance without heap allocations, with floodfill queries iterating only the indexed `floodfills` set via `borrowSelectionFloodfills()`.
 
 ### 1.2 Daily UTC Routing Key (`RoutingKey`)
 

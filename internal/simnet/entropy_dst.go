@@ -14,8 +14,8 @@ import (
 // PinSessionEntropy points the crypto/rand global reader at a seeded ChaCha8
 // stream, so transport handshake key generation (X25519 ephemerals, tokens,
 // padding) replays identically per seed. Those draws otherwise read the OS
-// entropy source — a real syscall inside the bubble whose completion timing
-// decides same-instant wakeup order, which no simulation seed can pin. The
+// entropy source (a real syscall inside the bubble whose completion timing
+// decides same-instant wakeup order, which no simulation seed can pin). The
 // returned function restores the previous reader.
 //
 // This mutates process-global state; call it from the test entry point (or a

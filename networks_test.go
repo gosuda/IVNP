@@ -99,7 +99,7 @@ func TestNetworkPlanEntryRules(t *testing.T) {
 		t.Fatal("entry with an invalid participation was accepted")
 	}
 
-	// A dedicated network without the public context is valid — netId 2 is a
+	// A dedicated network without the public context is valid: netId 2 is a
 	// field value, not a requirement.
 	dedicated := NewNetwork("corp", 77)
 	networks, def, err = networkPlan(RouterConfig{Networks: []NetworkConfig{dedicated}})

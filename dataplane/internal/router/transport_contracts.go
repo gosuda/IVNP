@@ -35,7 +35,7 @@ func (t PeerTransport) String() string {
 }
 
 // PeerAdmission presents one authenticated transport peer for policy approval.
-// RouterInfo is the signature-verified, netId-matched peer record — for
+// RouterInfo is the signature-verified, netId-matched peer record: for
 // inbound peers it was received in the handshake and bound to the session
 // static key; for outbound peers it is the record being dialed. RouterInfo is
 // a view over transport-owned bytes and must not be retained after the
@@ -55,8 +55,8 @@ type PeerAdmission struct {
 type PeerAdmissionFunc func(context.Context, PeerAdmission) error
 
 // runPeerAdmission invokes fn with panic containment: a panicking callback is
-// reported through reporter and treated as denial. Every denial — callback
-// error or panic — carries ErrPeerDenied so classification and callers can
+// reported through reporter and treated as denial. Every denial (callback
+// error or panic) carries ErrPeerDenied so classification and callers can
 // recognize policy rejections uniformly.
 func runPeerAdmission(ctx context.Context, fn PeerAdmissionFunc, reporter ingress.Reporter, boundary ingress.Boundary, request PeerAdmission) (err error) {
 	if fn == nil {

@@ -623,7 +623,7 @@ func (r *Router) startReseed(ctx context.Context) <-chan struct{} {
 
 // verifyReseedAnchors asynchronously probes reseed anchors selected closest to
 // the local hash. Sessions are established with bounded concurrency and a
-// per-anchor timeout; failures are not punished — the verified transport and
+// per-anchor timeout; failures are not punished because the verified transport and
 // session state decide future routing quality on their own.
 func (r *Router) verifyReseedAnchors(ctx context.Context, anchors []foundation.Hash) {
 	if len(anchors) == 0 {

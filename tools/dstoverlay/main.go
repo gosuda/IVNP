@@ -13,8 +13,8 @@
 // process-independent), and runtime/proc.go stops sysmon from retaking a P
 // mid-syscall (a retake requeues the returning goroutine onto the global run
 // queue, reordering it relative to the local queue). Matched runs also need
-// GODEBUG=cryptocustomrand=1 — without it Go 1.27's crypto packages bypass a
-// swapped crypto/rand.Reader for the internal DRBG — and GOGC=off to keep GC
+// GODEBUG=cryptocustomrand=1 (without it Go 1.27's crypto packages bypass a
+// swapped crypto/rand.Reader for the internal DRBG) and GOGC=off to keep GC
 // marker goroutines out of the single P's run queue. Finally,
 // crypto/internal/randutil.MaybeReadByte is neutralized: it steals a byte
 // from custom readers with 50% probability under cryptocustomrand=1, while

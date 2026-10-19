@@ -20,7 +20,7 @@ var (
 
 // NetworkSpec describes one I2P protocol context the router runs: an operating
 // configuration scoped to a netId plus that context's controller options. Every
-// context is an independent I2P network — public or dedicated — with its own
+// context is an independent I2P network (public or dedicated) with its own
 // transports, NetDB, and tunnel pools.
 type NetworkSpec struct {
 	Name      string
@@ -107,8 +107,8 @@ func (r *EmbeddedRouter) Context(name string) *controlplane.Controller {
 	return r.contexts[name]
 }
 
-// Default returns the control-plane controller for the first configured
-// network — the unqualified-dial target.
+// Default returns the control-plane controller for the default network
+// (the unqualified-dial target).
 func (r *EmbeddedRouter) Default() *controlplane.Controller {
 	if r == nil {
 		return nil
@@ -194,7 +194,7 @@ func (r *EmbeddedRouter) NewDestination(ctx context.Context, spec destination.De
 	return r.NewDestinationOn(ctx, "", spec)
 }
 
-// NewDestinationOn creates a destination on the named network — an empty name
+// NewDestinationOn creates a destination on the named network; an empty name
 // selects the default. It returns only after the destination's tunnels and
 // confirmed publication are ready on that network. Cancellation closes the
 // partial destination before returning.

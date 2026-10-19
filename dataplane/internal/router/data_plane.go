@@ -254,7 +254,7 @@ func (r *GarlicReceiver) ReleaseSensitive() {
 	// Every acquire path below clears its reply buffer before returning it to
 	// the pool, even on error, so dropping the pool here is safe; handlers
 	// capture the pool pointer under the read lock, so replacing the field
-	// cannot race their Put — the GC reclaims the retired pool.
+	// cannot race their Put, and the GC reclaims the retired pool.
 	r.replyScratch = nil
 	r.hasStatic = false
 	r.lifecycleMu.Unlock()

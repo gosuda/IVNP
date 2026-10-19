@@ -1,7 +1,7 @@
 // Package ivnp embeds an in-memory-by-default I2P router and destination-owned
 // stream and datagram sockets. Router construction never creates a service
 // identity. RouterConfig.Networks runs one independent I2P protocol context
-// per entry — the official netId=2 network and any dedicated networks — and a
+// per entry (the official netId=2 network and any dedicated networks), and a
 // Destination bound to several networks is reachable under one address on all
 // of them.
 package ivnp
@@ -99,7 +99,7 @@ func contextNames(specs []node.NetworkSpec) map[string]struct{} {
 
 func (r *Router) Hash() Hash { return r.core.Hash() }
 
-// DefaultNetwork returns the network name serving unqualified operations —
+// DefaultNetwork returns the network name serving unqualified operations:
 // the configured DefaultNetwork, the netId=2 entry, or the first entry.
 func (r *Router) DefaultNetwork() string {
 	if r == nil {
@@ -174,7 +174,7 @@ func (r *Router) NewDestination(ctx context.Context, cfg DestinationConfig) (*De
 	}
 	defer wipeDestinationSpec(&spec)
 	if spec.Local == nil {
-		// One identity must be shared by every bound network — letting each
+		// One identity must be shared by every bound network; letting each
 		// context generate its own would give the destination a different
 		// address per network.
 		var generated *foundation.LocalDestination
@@ -290,8 +290,8 @@ func (d *Destination) B32() string { return d.b32 }
 // Destination returns an independent copy of the I2P-base64 public identity.
 func (d *Destination) Destination() []byte { return append([]byte(nil), d.public...) }
 
-// Networks returns the destination's bound network names in preference order —
-// the order unqualified dials race them in.
+// Networks returns the destination's bound network names in preference order
+// (the order in which unqualified dials race them).
 func (d *Destination) Networks() []string {
 	if d == nil {
 		return nil

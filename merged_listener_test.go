@@ -88,7 +88,6 @@ func TestMergedListenerSurvivesSubListenerFailure(t *testing.T) {
 			if r.err == nil {
 				continue
 			}
-			// Terminal error surfaced — the fix is complete.
 			return
 		case <-deadline:
 			t.Fatal("terminal error never surfaced after all subs retired")

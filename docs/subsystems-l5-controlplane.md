@@ -97,7 +97,7 @@ When a local outbound tunnel endpoint (OBEP) is asked to forward a message to a 
 | File | Primary Types | Responsibility |
 | :--- | :--- | :--- |
 | `kbucket.go` | `kBucketSet`, `kBucket` | Kademlia $b=4$ routing tree over ranges `[0, 2047]`; splits through bucket 0 and rejects overflow via Java `RejectTrimmer` semantics |
-| `dht.go` | `Table`, `RoutingKey`, `routerSelectionBuffer` | Split `routers` map + `kBucketSet`; per-bucket `/16` IPv4 and `/48` IPv6 routing subnet quota (`DefaultBucketSubnetQuota = 2`); UTC daily routing key (`SHA256(key \|\| YYYYMMDD)`); CPU-pooled zero-allocation XOR partial sort |
+| `dht.go` | `Table`, `RoutingKey`, `routerSelectionBuffer` | Split `routers` map, incremental `floodfills` index (`Counts`), and `kBucketSet`; per-bucket `/16` IPv4 and `/48` IPv6 routing subnet quota (`DefaultBucketSubnetQuota = 2`); UTC daily routing key (`SHA256(key \|\| YYYYMMDD)`); CPU-pooled zero-allocation XOR partial sort |
 | `database.go`, `store.go` | `Database`, `leaseEntry` | Pooled gzip inflation (`<= 4096 B`), version monotonicity, min-heap `leaseExpiries` eviction (`maxLeases = 4096`), and `published` flag isolation |
 | `local_router.go`, `local_ls2.go` | `LocalRouterInfo`, `LocalLeaseSet2` | Signs and caches local `RouterInfo` and multi-key `LeaseSet2` (capping lease `EndDate` at `Offline.Expires` when offline-signed) |
 | `local_encrypted_ls2.go`, `encrypted_resolution.go` | `LocalEncryptedLeaseSet`, `DecryptEncryptedLeaseSet` | Daily `Red25519` key blinding, two-layer ChaCha20 encryption (`ELS2_L1K`, `ELS2_L2K`), and per-client DH (`ELS2_XCA`) / PSK (`ELS2PSKA`) authorization |

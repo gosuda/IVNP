@@ -14,8 +14,8 @@ import (
 
 // multiNetTestConfig builds a two-context router configuration: the "i2p"
 // public context on netId 2 and a dedicated "corp" context on netId 77. The
-// contexts share nothing — each has its own transports, NetDB, and state
-// directory — so a dedicated network is literally a second I2P instance.
+// contexts share nothing (each has its own transports, NetDB, and state
+// directory), so a dedicated network operates as a second I2P instance.
 func multiNetTestConfig(t *testing.T) RouterConfig {
 	t.Helper()
 	base := t.TempDir()
@@ -61,7 +61,7 @@ func TestEmbeddedMultiNetworkDestination(t *testing.T) {
 	}
 
 	// Boot once per router to publish each context's RouterInfo, then seed the
-	// peer RIs into the matching context's bootstrap set — a net-77 context
+	// peer RIs into the matching context's bootstrap set; a net-77 context
 	// rejects netId-2 records, so the two meshes stay isolated.
 	configs := []RouterConfig{multiNetTestConfig(t), multiNetTestConfig(t), multiNetTestConfig(t)}
 	infos2 := make([][]byte, len(configs))
