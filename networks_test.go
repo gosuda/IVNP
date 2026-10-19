@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -484,5 +485,62 @@ func TestStreamEndpointsFiltering(t *testing.T) {
 	_, err = dest.streamEndpoints("tcp", DialPolicy{Networks: []string{"unknown"}})
 	if !errors.Is(err, ErrUnsupportedNetwork) {
 		t.Fatalf("expected ErrUnsupportedNetwork, got %v", err)
+	}
+}
+
+func TestNetworkPresetsAndOptions(t *testing.T) {
+	bind := netip.MustParseAddrPort("127.0.0.1:19100")
+	adv := netip.MustParseAddrPort("192.0.2.50:19100")
+	small := NewSmallPrivateNetwork(
+		"small",
+		42,
+		WithListenAddress(bind, bind),
+		WithAdvertisedAddress(adv, adv),
+		WithPeerSeeds([]byte{1, 2, 3}),
+		WithNetDBConfig(NetDBConfig{MinRouters: 3}),
+		WithTunnelTiming(3*time.Second, 2*time.Second, 3),
+		WithIPRestriction(1),
+	)
+	office := NewOfficeLANNetwork("office", 88)
+
+	cfg := DefaultRouterConfig()
+	cfg.SetNetworks(small, office)
+	specs, def, err := networkSpecs(cfg)
+	if err != nil {
+		t.Fatalf("networkSpecs failed: %v", err)
+	}
+	if def != "small" || len(specs) != 2 {
+		t.Fatalf("def=%q len=%d", def, len(specs))
+	}
+
+	smallOp := specs[0].Operating
+	if smallOp.Network.Profile != NetworkProfileSmallPrivate || smallOp.NetDB.MinRouters != 3 || smallOp.NetDB.BucketSubnetQuota != 16 {
+		t.Fatalf("unexpected small operating NetDB: %+v", smallOp.NetDB)
+	}
+	if smallOp.Tunnel.IPRestriction != 1 || smallOp.Tunnel.DisableIPRestriction || smallOp.Tunnel.MaintenanceInterval != 3*time.Second || smallOp.Tunnel.ProbeTimeout != 2*time.Second || smallOp.Tunnel.ProbeFailureThreshold != 3 {
+		t.Fatalf("unexpected small operating Tunnel: %+v", smallOp.Tunnel)
+	}
+	if !smallOp.Router.Floodfill || !smallOp.Router.Transit {
+		t.Fatalf("expected contributor participation on small network: %+v", smallOp.Router)
+	}
+
+	officeOp := specs[1].Operating
+	if officeOp.Network.Profile != NetworkProfileOfficeLAN {
+		t.Fatalf("unexpected office profile: %q", officeOp.Network.Profile)
+	}
+	if !officeOp.NetDB.DisableBucketSubnetQuota || officeOp.NetDB.BucketSubnetQuota != 0 || !officeOp.Reseed.DisableBucketSubnetQuota {
+		t.Fatalf("expected office LAN subnet quota disabled: netdb=%+v reseed=%+v", officeOp.NetDB, officeOp.Reseed)
+	}
+	if !officeOp.Tunnel.DisableIPRestriction || officeOp.Tunnel.IPRestriction != 0 || officeOp.Tunnel.MaintenanceInterval != 3*time.Second || officeOp.Tunnel.ProbeTimeout != 5*time.Second || officeOp.Tunnel.ProbeFailureThreshold != 2 {
+		t.Fatalf("unexpected office operating Tunnel: %+v", officeOp.Tunnel)
+	}
+
+	smallDest := SmallPrivateDestinationConfig()
+	if smallDest.Tunnels.Inbound.Hops != 1 || smallDest.Tunnels.Inbound.Count != 2 {
+		t.Fatalf("unexpected SmallPrivateDestinationConfig: %+v", smallDest.Tunnels)
+	}
+	officeDest := OfficeLANDestinationConfig()
+	if officeDest.Tunnels.Inbound.Hops != 1 || officeDest.Tunnels.Inbound.Count != 1 || officeDest.Tunnels.Inbound.Backup != 1 {
+		t.Fatalf("unexpected OfficeLANDestinationConfig: %+v", officeDest.Tunnels)
 	}
 }

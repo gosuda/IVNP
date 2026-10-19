@@ -600,3 +600,64 @@ func TestNetDBBuildSourcesUseFullProfilePopulation(t *testing.T) {
 		t.Fatalf("inbound did not select high-profile peer from full population: %#v", inboundBuild.Hops)
 	}
 }
+
+func TestSmallNetworkHopSelectionFallbacks(t *testing.T) {
+	t.Run("two-node outbound allows coalesced reply gateway when no other peer exists", func(t *testing.T) {
+		onlyPeer := verifiedX25519RouterTransport(t, 1, "NTCP2", "192.0.2.1", "", "OfR")
+		table := controlplanenetdb.NewTable(foundation.Hash{9}, 8)
+		table.StoreVerified(onlyPeer, false, 1)
+		nextTunnel := uint32(100)
+		source, err := NewNetDBOutboundBuildSource(NetDBOutboundBuildSourceConfig{
+			Table: table, Profiles: NewPeerProfiles(PeerProfilesConfig{}), LocalRouter: foundation.Hash{9},
+			Hops: 1, Lifetime: 100, Exploratory: true,
+			CircuitID: func() uint32 { return 70 },
+			TunnelID:  func() uint32 { nextTunnel++; return nextTunnel },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		build, err := source.NextOutboundForReply(context.Background(), 50, ReplyRoute{Gateway: onlyPeer.Hash(), TunnelID: 10})
+		if err != nil {
+			t.Fatalf("NextOutboundForReply() error = %v", err)
+		}
+		if len(build.Hops) != 1 || build.Hops[0].Router != onlyPeer.Hash() || !build.AllowCoalescedReply {
+			t.Fatalf("coalesced 2-node outbound build = %#v", build)
+		}
+	})
+
+	t.Run("client multi-hop relaxes subTier when all peers hash to same subTier", func(t *testing.T) {
+		left := verifiedX25519Router(t, 1)
+		right := verifiedX25519Router(t, 2)
+		table := controlplanenetdb.NewTable(foundation.Hash{9}, 8)
+		table.StoreVerified(left, false, 1)
+		table.StoreVerified(right, false, 1)
+
+		var collidedKey foundation.Hash
+		for marker := 1; marker < 1<<16; marker++ {
+			binary.BigEndian.PutUint16(collidedKey[14:16], uint16(marker))
+			keys := newJavaPeerSelectionKeys(collidedKey)
+			if keys.subTier(left.Hash()) < 2 && keys.subTier(right.Hash()) < 2 {
+				break
+			}
+		}
+
+		nextTunnel := uint32(100)
+		source, err := NewNetDBOutboundBuildSource(NetDBOutboundBuildSourceConfig{
+			Table: table, Profiles: NewPeerProfiles(PeerProfilesConfig{}), LocalRouter: foundation.Hash{9},
+			ReplyRouter: foundation.Hash{8}, ReplyTunnelID: 10,
+			Hops: 2, Lifetime: 100, SelectionKey: collidedKey,
+			CircuitID: func() uint32 { return 70 },
+			TunnelID:  func() uint32 { nextTunnel++; return nextTunnel },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		build, err := source.NextOutbound(context.Background(), 50)
+		if err != nil {
+			t.Fatalf("NextOutbound() with collided subTiers error = %v", err)
+		}
+		if len(build.Hops) != 2 || build.Hops[0].Router == build.Hops[1].Router {
+			t.Fatalf("relaxed client 2-hop build = %#v", build.Hops)
+		}
+	})
+}

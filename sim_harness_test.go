@@ -96,11 +96,15 @@ func (n *simNode) Addr() netip.Addr { return n.host.Addr() }
 // simNodeConfig selects a node's role in the simulated network.
 type simNodeConfig struct {
 	Name string
+	// Profile selects a network topology preset (empty uses public defaults).
+	Profile NetworkProfile
+	// NetworkID overrides the simulated network ID (zero selects NetworkIDPublicI2P).
+	NetworkID uint32
 	// Participation defaults to ParticipationWarm (transit, no floodfill).
 	Participation PublicParticipation
-	// Hops sets exploratory tunnel length; zero selects 1.
+	// Hops sets exploratory tunnel length; zero selects 1 (or the profile default).
 	Hops int
-	// TunnelCount sets exploratory tunnels per direction; zero selects 1.
+	// TunnelCount sets exploratory tunnels per direction; zero selects 1 (or the profile default).
 	TunnelCount int
 	// DisableNTCP2 forces all sessions onto SSU2/UDP so UDP-scoped fault
 	// models provably engage instead of passing over TCP.
@@ -186,15 +190,27 @@ func (s *simNet) AddRouter(tb testing.TB, cfg simNodeConfig) *simNode {
 	if s.log != nil {
 		routerCfg.Logger = slog.New(slog.NewTextHandler(s.log, &slog.HandlerOptions{Level: slog.LevelDebug})).With("node", cfg.Name)
 	}
-	opts := []NetworkOption{
-		WithPublicParticipation(cfg.Participation),
-		WithTransportSSU2(transport(ssu2)),
-		WithExploratoryPool(pool),
+	var opts []NetworkOption
+	if cfg.Profile != "" {
+		opts = append(opts, WithNetworkProfile(cfg.Profile))
+		if cfg.Participation != 0 {
+			opts = append(opts, WithPublicParticipation(cfg.Participation))
+		}
+		if cfg.Hops != 0 || cfg.TunnelCount != 0 {
+			opts = append(opts, WithExploratoryPool(pool))
+		}
+	} else {
+		opts = append(opts,
+			WithPublicParticipation(cfg.Participation),
+			WithExploratoryPool(pool),
+		)
 	}
+	opts = append(opts, WithTransportSSU2(transport(ssu2)))
 	if !cfg.DisableNTCP2 {
 		opts = append(opts, WithTransportNTCP2(transport(ntcp2)))
 	}
-	routerCfg.SetNetworks(NewNetwork(networkNativeName, NetworkIDPublicI2P, opts...))
+	netID := cmp.Or(cfg.NetworkID, NetworkIDPublicI2P)
+	routerCfg.SetNetworks(NewNetwork(networkNativeName, netID, opts...))
 	specs, def, err := networkSpecs(routerCfg)
 	if err != nil {
 		tb.Fatal(err)

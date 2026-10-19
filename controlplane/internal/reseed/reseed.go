@@ -64,9 +64,10 @@ type Client struct {
 	// (IPv4 /16 or IPv6 /48). BucketAdmitLimit caps admissions per bucket.
 	// VerifyAnchorCount bounds the floodfill anchors returned for post-reseed
 	// connectivity checks.
-	BucketSubnetQuota int
-	BucketAdmitLimit  int
-	VerifyAnchorCount int
+	BucketSubnetQuota        int
+	DisableBucketSubnetQuota bool
+	BucketAdmitLimit         int
+	VerifyAnchorCount        int
 	// MergeWait bounds how long FetchAny waits for outstanding priority-source
 	// responses before ingesting the merged candidate set. Zero selects
 	// DefaultMergeWait; a negative value disables merging and finishes on the
@@ -107,6 +108,9 @@ func (c Client) targetRouterInfos() int {
 }
 
 func (c Client) bucketSubnetQuota() int {
+	if c.DisableBucketSubnetQuota || c.BucketSubnetQuota < 0 {
+		return 0
+	}
 	if c.BucketSubnetQuota > 0 {
 		return c.BucketSubnetQuota
 	}
@@ -403,13 +407,15 @@ func (g *ingressGuard) claim(bucket int, subnets []ingressSubnet) bool {
 	if bucket < 0 || bucket >= len(g.bucketUse) || g.bucketUse[bucket] >= g.bucketLimit {
 		return false
 	}
-	for _, subnet := range subnets {
-		if g.subnetUse[ingressKey{bucket: uint16(bucket), subnet: subnet}] >= g.subnetQuota {
-			return false
+	if g.subnetQuota > 0 {
+		for _, subnet := range subnets {
+			if g.subnetUse[ingressKey{bucket: uint16(bucket), subnet: subnet}] >= g.subnetQuota {
+				return false
+			}
 		}
-	}
-	for _, subnet := range subnets {
-		g.subnetUse[ingressKey{bucket: uint16(bucket), subnet: subnet}]++
+		for _, subnet := range subnets {
+			g.subnetUse[ingressKey{bucket: uint16(bucket), subnet: subnet}]++
+		}
 	}
 	g.bucketUse[bucket]++
 	return true

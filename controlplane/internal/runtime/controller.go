@@ -71,6 +71,38 @@ func healthProbeFailureThreshold(cfg state.ConfigurationOperating) uint8 {
 	return uint8(threshold)
 }
 
+func tunnelIPRestriction(cfg state.ConfigurationOperating) *uint8 {
+	if cfg.Tunnel.DisableIPRestriction {
+		zero := uint8(0)
+		return &zero
+	}
+	if cfg.Tunnel.IPRestriction > 0 {
+		restriction := uint8(min(cfg.Tunnel.IPRestriction, 4))
+		return &restriction
+	}
+	return nil
+}
+
+func loadTrustedCertFiles(paths []string) ([][]byte, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	certs := make([][]byte, 0, len(paths))
+	for _, path := range paths {
+		file, _, err := state.FilesystemStoreOpenRegular(path)
+		if err != nil {
+			return nil, fmt.Errorf("open %q: %w", path, err)
+		}
+		contents, readErr := state.FilesystemStoreReadBoundedFile(file, 64<<10)
+		_ = file.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read %q: %w", path, readErr)
+		}
+		certs = append(certs, contents)
+	}
+	return certs, nil
+}
+
 func daemonReplyKeyCapacity(buildPending, maxDestinations int) int {
 	maxInt := int(^uint(0) >> 1)
 	if maxDestinations >= maxInt {
@@ -116,6 +148,7 @@ type ControllerOptions struct {
 	PromoteToMaster           *bool
 	LockRetryInterval         time.Duration
 	BootstrapRouterInfos      [][]byte
+	ReseedTrustedCerts        [][]byte
 	Exploratory               *destination.TunnelPoolConfig
 	// SocketRuntime provides low-level network socket creation.
 	SocketRuntime dataplane.RouterSocketRuntime
@@ -698,6 +731,11 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 	}
 	database := netdb.NewDatabaseForNetwork(bundle.Router.Hash, cfg.NetDB.BucketCapacity, cfg.Network.ID)
+	if cfg.NetDB.DisableBucketSubnetQuota {
+		database.Routers().SetBucketSubnetQuota(0)
+	} else if cfg.NetDB.BucketSubnetQuota > 0 {
+		database.Routers().SetBucketSubnetQuota(cfg.NetDB.BucketSubnetQuota)
+	}
 	if options.RouterLimit > 0 {
 		database.Routers().SetRouterLimit(options.RouterLimit)
 	} else if options.Embedded {
@@ -859,10 +897,11 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	publicationTokens := netdb.NewPublicationTokenRegistry(now, randomNonZeroID)
 	var lookupResponder *netdb.LookupResponder
 	var storeFlooder *netdb.StoreFlooder
+	routerInfoFloodfillK := cmp.Or(cfg.NetDB.RouterInfoFloodfillK, netdb.RouterInfoPublicationFloodfillK)
 	routerPublisher, err := netdb.NewRouterInfoPublisher(netdb.RouterInfoPublisherConfig{
 		Local: localInfo, Database: database, Sender: muxLeaseSetSender{sender: mux},
 		ReplyPath: daemonReplyRoute{local: bundle.Router.Hash, now: now}, Registry: publicationTokens, Now: now, Random: randomNonZeroID, PreferredTargets: bootstrapPeers,
-		FloodfillLimit: netdb.RouterInfoPublicationFloodfillK, Logger: logger,
+		FloodfillLimit: routerInfoFloodfillK, Logger: logger,
 	})
 	if err != nil {
 		return nil, err
@@ -877,16 +916,32 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			copyClient.Timeout = cfg.Reseed.Timeout
 			httpClient = &copyClient
 		}
+		fileCerts, certErr := loadTrustedCertFiles(cfg.Reseed.TrustedCertPaths)
+		if certErr != nil {
+			return nil, fmt.Errorf("daemon: load trusted reseed certificate files: %w", certErr)
+		}
+		customCerts := append(fileCerts, options.ReseedTrustedCerts...)
 		signers, signerErr := reseed.DefaultSU3SignersAt(clock.Now())
-		if signerErr != nil {
+		if signerErr != nil && len(customCerts) == 0 {
 			return nil, fmt.Errorf("daemon: load pinned reseed signers: %w", signerErr)
+		}
+		if len(customCerts) > 0 {
+			signers, signerErr = reseed.MergeSU3Signers(signers, customCerts, clock.Now())
+			if signerErr != nil {
+				return nil, fmt.Errorf("daemon: load trusted reseed certificates: %w", signerErr)
+			}
 		}
 		client := &reseed.Client{
 			HTTPClient: httpClient, SU3Signers: signers,
-			NetworkID:       uint8(cfg.Network.ID),
-			MaxArchiveBytes: cfg.Reseed.MaxArchiveBytes, MaxRouterInfos: cfg.Reseed.MaxRouterInfos, MaxTotalRouterBytes: cfg.Reseed.MaxTotalBytes,
-			BucketSubnetQuota: cfg.Reseed.BucketSubnetQuota, BucketAdmitLimit: cfg.Reseed.BucketAdmitLimit,
-			VerifyAnchorCount: cfg.Reseed.VerifyAnchorCount, MergeWait: cfg.Reseed.MergeWait,
+			NetworkID:                uint8(cfg.Network.ID),
+			MaxArchiveBytes:          cfg.Reseed.MaxArchiveBytes,
+			MaxRouterInfos:           cfg.Reseed.MaxRouterInfos,
+			MaxTotalRouterBytes:      cfg.Reseed.MaxTotalBytes,
+			BucketSubnetQuota:        cfg.Reseed.BucketSubnetQuota,
+			DisableBucketSubnetQuota: cfg.Reseed.DisableBucketSubnetQuota,
+			BucketAdmitLimit:         cfg.Reseed.BucketAdmitLimit,
+			VerifyAnchorCount:        cfg.Reseed.VerifyAnchorCount,
+			MergeWait:                cfg.Reseed.MergeWait,
 		}
 		reseedRunner = client
 	}
@@ -1016,12 +1071,13 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		if err != nil {
 			return nil, err
 		}
+		ipRestriction := tunnelIPRestriction(cfg)
 		inboundSource, sourceErr := tunnel.NewNetDBInboundBuildSource(tunnel.NetDBInboundBuildSourceConfig{
 			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: exploratory.Inbound.Hops,
 			Lifetime:       uint64(cfg.Tunnel.Lifetime / time.Millisecond),
 			CandidateLimit: daemonTunnelBuildCandidates,
 			CircuitID:      randomNonZeroID, TunnelID: randomNonZeroID,
-			Eligible: eligible, Connected: connected, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
+			Eligible: eligible, Connected: connected, IPRestriction: ipRestriction, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
 		})
 		if sourceErr != nil {
 			return nil, fmt.Errorf("create exploratory inbound build source: %w", sourceErr)
@@ -1031,7 +1087,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			Lifetime:       uint64(cfg.Tunnel.Lifetime / time.Millisecond),
 			CandidateLimit: daemonTunnelBuildCandidates,
 			CircuitID:      randomNonZeroID, TunnelID: randomNonZeroID,
-			Eligible: eligible, Connected: connected, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
+			Eligible: eligible, Connected: connected, IPRestriction: ipRestriction, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
 		})
 		if sourceErr != nil {
 			return nil, fmt.Errorf("create exploratory outbound build source: %w", sourceErr)
@@ -1494,15 +1550,17 @@ func (d *Controller) maintainDestinationTunnels(runtime *destinationRuntime) {
 
 func (d *Controller) explorationLoop() {
 	defer close(d.explorationDone)
+	steadyDelay := cmp.Or(d.config.NetDB.ExplorationSteadyDelay, daemonNetDBExplorationSteadyDelay)
+	bootstrapDelay := cmp.Or(d.config.NetDB.ExplorationBootstrapDelay, daemonNetDBExplorationBootstrapDelay)
 	for {
 		now := uint64(d.clock.Now().UnixMilli())
 		if d.requests != nil {
 			d.requests.Expire(now)
 		}
 		d.recordMaintenanceError(d.explorer.Maintain(d.ctx))
-		delay := daemonNetDBExplorationSteadyDelay
+		delay := steadyDelay
 		if d.registry.BootstrapStage() < 3 {
-			delay = daemonNetDBExplorationBootstrapDelay
+			delay = bootstrapDelay
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -1735,6 +1793,13 @@ func (d *Controller) requestDestinationMaintenance(runtime *destinationRuntime) 
 	}
 }
 
+func (d *Controller) minNetDBRouters() uint64 {
+	if d == nil || d.config.NetDB.MinRouters <= 0 {
+		return 50
+	}
+	return uint64(d.config.NetDB.MinRouters)
+}
+
 func (d *Controller) refreshObservability() {
 	if d == nil || d.registry == nil {
 		return
@@ -1742,9 +1807,10 @@ func (d *Controller) refreshObservability() {
 	routersCount, floodfillsCount := d.database.Routers().Counts()
 	routers := uint64(routersCount)
 	floodfills := uint64(floodfillsCount)
+	minRouters := d.minNetDBRouters()
 	d.registry.SetNetDBRouters(routers)
 	d.registry.SetNetDBFloodfills(floodfills)
-	if d.registry.BootstrapStage() < 3 && routers >= 50 && d.bootstrapPoolsStarted.CompareAndSwap(bootstrapPoolsIdle, bootstrapPoolsStarted) {
+	if d.registry.BootstrapStage() < 3 && routers >= minRouters && d.bootstrapPoolsStarted.CompareAndSwap(bootstrapPoolsIdle, bootstrapPoolsStarted) {
 		d.requestAllTunnelMaintenance()
 	}
 	var routerReachable uint64
@@ -1783,6 +1849,7 @@ func (d *Controller) refreshObservability() {
 	}
 	operational := dataPlaneReady(ReadinessDetails{
 		NetDBRouters:               routers,
+		MinNetDBRouters:            minRouters,
 		RouterInfoPublications:     routerInfoPublications,
 		LeaseSet2Publications:      leaseSet2Publications,
 		ExploratoryInboundTunnels:  exploratoryInbound,
@@ -1807,7 +1874,8 @@ func dataPlaneReady(readiness ReadinessDetails) bool {
 }
 
 func outproxyWarmupReady(readiness ReadinessDetails, inboundTarget, outboundTarget uint64) bool {
-	return readiness.NetDBRouters >= 50 &&
+	minRouters := cmp.Or(readiness.MinNetDBRouters, 50)
+	return readiness.NetDBRouters >= minRouters &&
 		readiness.RouterInfoPublications != 0 &&
 		readiness.ExploratoryInboundTunnels >= inboundTarget &&
 		readiness.ExploratoryOutboundTunnels >= outboundTarget
@@ -2041,6 +2109,7 @@ func (d *Controller) ClientStatus(context.Context) (ManagementStatus, error) {
 	readiness := ReadinessDetails{
 		BootstrapStage:             snapshot.Bootstrap.Stage,
 		NetDBRouters:               snapshot.NetDB.Routers,
+		MinNetDBRouters:            d.minNetDBRouters(),
 		RouterInfoPublications:     snapshot.Publication.RouterInfoSuccesses,
 		LeaseSet2Publications:      snapshot.Publication.LeaseSet2Successes,
 		ExploratoryInboundTunnels:  snapshot.Tunnel.ExploratoryInboundActive,
@@ -2075,6 +2144,7 @@ func (d *Controller) Config() state.ConfigurationOperating {
 	d.mu.Unlock()
 	config.NetDB.BootstrapRouterInfoPaths = slices.Clone(config.NetDB.BootstrapRouterInfoPaths)
 	config.Reseed.Endpoints = slices.Clone(config.Reseed.Endpoints)
+	config.Reseed.TrustedCertPaths = slices.Clone(config.Reseed.TrustedCertPaths)
 	config.AddressBook.Subscriptions = slices.Clone(config.AddressBook.Subscriptions)
 	return config
 }

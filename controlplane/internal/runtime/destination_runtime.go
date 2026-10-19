@@ -482,11 +482,12 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 			build.ReleaseSensitive()
 		}
 	}()
+	ipRestriction := tunnelIPRestriction(f.cfg)
 	inboundSource, err := tunnel.NewNetDBInboundBuildSource(tunnel.NetDBInboundBuildSourceConfig{
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: tunnelPolicy.Inbound.Hops,
 		Lifetime: uint64(lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
 		Eligible: f.eligible, Connected: f.connected, CandidateLimit: daemonTunnelBuildCandidates,
-		AllowUnknownTransports: f.allowUnknownTransports,
+		IPRestriction: ipRestriction, AllowUnknownTransports: f.allowUnknownTransports,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create destination inbound build source: %w", err)
@@ -495,7 +496,7 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: tunnelPolicy.Outbound.Hops,
 		Lifetime: uint64(lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
 		Eligible: f.eligible, Connected: f.connected, CandidateLimit: daemonTunnelBuildCandidates,
-		AllowUnknownTransports: f.allowUnknownTransports,
+		IPRestriction: ipRestriction, AllowUnknownTransports: f.allowUnknownTransports,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create destination outbound build source: %w", err)
@@ -596,7 +597,8 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 			staticKeyLookup:     tunnel.NewNetDBBuildStaticKeyLookup(f.database.Routers()),
 			seedReplyRouterInfo: f.seedRouterInfo,
 		},
-		Discovery: requests, Sign: local.Sign, Now: f.now, Random: randomNonZeroID, FloodfillLimit: netdb.LeaseSetPublicationFloodfillK,
+		Discovery: requests, Sign: local.Sign, Now: f.now, Random: randomNonZeroID,
+		FloodfillLimit:  cmp.Or(f.cfg.NetDB.LeaseSetFloodfillK, netdb.LeaseSetPublicationFloodfillK),
 		RepublishBefore: uint64(tunnelPolicy.RenewBefore.Milliseconds()), Registry: f.publicationTokens,
 		ReplyPath: daemonReplyRoute{local: f.localRouter, maintainer: maintainer, now: f.now}, PreferredTargets: preferredPeers, Logger: f.logger,
 	}

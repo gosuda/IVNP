@@ -119,25 +119,26 @@ type publicationAttempt struct {
 }
 
 type confirmedPublication struct {
-	database   *Database
-	sender     LeaseSetPublishSender
-	route      ReplyPathSource
-	registry   *PublicationTokenRegistry
-	now        func() uint64
-	random     func() uint32
-	key        foundation.Hash
-	typeID     foundation.I2NPStoreType
-	preferred  []foundation.Hash
-	targetK    int
-	data       []byte
-	generation uint64
-	targets    []RouterRef
-	nextTarget int
-	attempts   map[uint32]publicationAttempt
-	confirmed  int
-	nextRetry  uint64
-	logger     *slog.Logger
-	mu         sync.Mutex
+	database         *Database
+	sender           LeaseSetPublishSender
+	route            ReplyPathSource
+	registry         *PublicationTokenRegistry
+	now              func() uint64
+	random           func() uint32
+	key              foundation.Hash
+	typeID           foundation.I2NPStoreType
+	preferred        []foundation.Hash
+	targetK          int
+	data             []byte
+	generation       uint64
+	targets          []RouterRef
+	nextTarget       int
+	attempts         map[uint32]publicationAttempt
+	confirmedTargets map[foundation.Hash]struct{}
+	confirmed        int
+	nextRetry        uint64
+	logger           *slog.Logger
+	mu               sync.Mutex
 }
 
 func newConfirmedPublication(database *Database, sender LeaseSetPublishSender, route ReplyPathSource, registry *PublicationTokenRegistry, now func() uint64, random func() uint32, key foundation.Hash, typeID foundation.I2NPStoreType, preferred []foundation.Hash, targetK int, logger *slog.Logger) *confirmedPublication {
@@ -152,7 +153,7 @@ func newConfirmedPublication(database *Database, sender LeaseSetPublishSender, r
 			targetK = LeaseSetPublicationFloodfillK
 		}
 	}
-	return &confirmedPublication{database: database, sender: sender, route: route, registry: registry, now: now, random: random, key: key, typeID: typeID, preferred: append([]foundation.Hash(nil), preferred...), targetK: targetK, attempts: make(map[uint32]publicationAttempt), logger: logger}
+	return &confirmedPublication{database: database, sender: sender, route: route, registry: registry, now: now, random: random, key: key, typeID: typeID, preferred: append([]foundation.Hash(nil), preferred...), targetK: targetK, attempts: make(map[uint32]publicationAttempt), confirmedTargets: make(map[foundation.Hash]struct{}), logger: logger}
 }
 
 func (p *confirmedPublication) replace(data []byte) {
@@ -162,6 +163,7 @@ func (p *confirmedPublication) replace(data []byte) {
 		p.registry.retire(token)
 	}
 	clear(p.attempts)
+	clear(p.confirmedTargets)
 	p.data = bytesClone(data)
 	p.generation++
 	p.targets = nil
@@ -183,6 +185,7 @@ func (p *confirmedPublication) close() {
 		p.registry.retire(token)
 	}
 	clear(p.attempts)
+	clear(p.confirmedTargets)
 	clear(p.data)
 	p.targets = nil
 	p.mu.Unlock()
@@ -347,6 +350,9 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 func (p *confirmedPublication) snapshotTargets() []RouterRef {
 	targets := make([]RouterRef, 0, publicationTargetSnapshot+len(p.preferred))
 	for _, hash := range p.preferred {
+		if _, confirmed := p.confirmedTargets[hash]; confirmed {
+			continue
+		}
 		ref, ok := p.database.Routers().Get(hash)
 		if !ok || !ref.Floodfill || !targetEligible(p.sender, ref) {
 			continue
@@ -354,6 +360,9 @@ func (p *confirmedPublication) snapshotTargets() []RouterRef {
 		targets = append(targets, ref)
 	}
 	for _, candidate := range p.database.eligibleFloodTargets(make([]RouterRef, publicationTargetSnapshot), p.key, p.now(), p.sender) {
+		if _, confirmed := p.confirmedTargets[candidate.Hash]; confirmed {
+			continue
+		}
 		duplicate := false
 		for _, existing := range targets {
 			if existing.Hash == candidate.Hash {
@@ -384,7 +393,10 @@ func (p *confirmedPublication) confirm(token uint32, generation uint64) bool {
 		return false
 	}
 	delete(p.attempts, uint32(token))
-	p.confirmed++
+	if _, alreadyConfirmed := p.confirmedTargets[attempt.target.Hash]; !alreadyConfirmed {
+		p.confirmedTargets[attempt.target.Hash] = struct{}{}
+		p.confirmed++
+	}
 	if metrics := p.database.Metrics(); metrics != nil {
 		switch p.typeID {
 		case foundation.I2NPStoreRouterInfo:

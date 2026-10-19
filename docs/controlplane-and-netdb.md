@@ -54,7 +54,7 @@ Every stored `leaseEntry` carries a `published bool` flag:
   - **UTC Midnight Rollover**: Within `45m` of UTC midnight for `RouterInfo` (or `10m` for `LeaseSet`), `StoreFlooder` also floods to the `2` closest floodfills under *tomorrow's* `RoutingKey` so lookups remain continuous across midnight.
 - **Confirmed Publication (`confirmation.go`, `publication.go`, `router_publication.go`)**:
   - `PublicationTokenRegistry` allocates 31-bit non-zero tokens (`(rand | 1) & 0x7fffffff`, keeping bit 31 clear for tunnel health probes).
-  - `LeaseSetPublisher` and `RouterInfoPublisher` send `DatabaseStore` waves (`30s` wave timeout) across the 12 closest floodfills until `K = 4` (LeaseSet) or `K = 5` (RouterInfo) floodfills return matching `DeliveryStatus` confirmations.
+  - `LeaseSetPublisher` and `RouterInfoPublisher` send `DatabaseStore` waves (`30s` wave timeout) across the 12 closest floodfills until `K = 4` (LeaseSet, configurable via `LeaseSetFloodfillK`) or `K = 5` (RouterInfo, configurable via `RouterInfoFloodfillK`) distinct floodfills return matching `DeliveryStatus` confirmations. Each generation tracks `confirmedTargets` so floodfills that have already confirmed the generation are excluded from subsequent retry waves.
 
 ---
 
@@ -111,7 +111,7 @@ Building tunnels in I2P has a circular dependency: an outbound tunnel build requ
   - For 2-hop client tunnels, hop 0 is drawn from `subTier 2..3` and hop 1 from `subTier 0..1`.
   - For 3-hop client tunnels, hop 0 is drawn from `subTier 1`, the endpoint from `subTier 0`, and middle hops from `subTier 2..3`.
   - This deterministic partitioning prevents predecessor/successor correlation attacks across tunnel rotations.
-- **3-Pass Subnet & Family Diversity**: Pass 0 enforces unique IPv4 `/16` prefixes, unique IPv6 `/32` prefixes, unique ports, and unique `family` declarations across all hops in a tunnel; Pass 1 relaxes IP prefix uniqueness under scarcity; Pass 2 relaxes family uniqueness.
+- **3-Pass Subnet & Family Diversity & Small-Mesh Fallbacks**: Pass 0 enforces the configured IP prefix restriction (`IPRestriction = 0..4`, default `2` for `/16` IPv4 and `/32` IPv6 prefixes), unique ports, and unique `family` declarations across all hops in a tunnel; Pass 1 relaxes IP prefix uniqueness under scarcity; Pass 2 relaxes family uniqueness and deterministic `subTier` partitioning. When a small private or LAN mesh has only one peer (`2` nodes total), `NextOutboundForReply` falls back to allowing `OBEP == ReplyRouter` (`AllowCoalescedReply = true`), and `BuildManager.inboundLocalDelivery` dispatches the local `OutboundTunnelBuildReply` directly to `HandleReply`.
 
 ### 3.3 60-Second Build Grace Window & Bit-31 Health Probing (`build_manager.go`, `health.go`)
 
@@ -124,10 +124,10 @@ Building tunnels in I2P has a circular dependency: an outbound tunnel build requ
 
 ### 4.1 Two-Phase SU3 Reseed Ingestion (`controlplane/internal/reseed`)
 
-- **Raw PKCS#1 v1.5 RSA-4096 Verification (`su3.go`, `certificates.go`)**: Parses the `I2Psu3\x00` header (`SigningRSASHA512_4096 = 6`), locates the signer's X.509 certificate among the 18 embedded `.crt` files in `controlplane/internal/reseed/certs/`, computes `SHA-512` over the header and ZIP payload, and calls `rsa.VerifyPKCS1v15(pub, crypto.Hash(0), digest[:], sig)` (verifying raw block-type-1 padding without an ASN.1 `DigestInfo` prefix, per the I2P SU3 specification).
+- **Raw PKCS#1 v1.5 RSA-4096 Verification (`su3.go`, `certificates.go`)**: Parses the `I2Psu3\x00` header (`SigningRSASHA512_4096 = 6`), locates the signer's X.509 certificate among the 18 embedded `.crt` files in `controlplane/internal/reseed/certs/` (plus any custom PEM/DER certificates merged via `MergeSU3Signers`), computes `SHA-512` over the header and ZIP payload, and calls `rsa.VerifyPKCS1v15(pub, crypto.Hash(0), digest[:], sig)` (verifying raw block-type-1 padding without an ASN.1 `DigestInfo` prefix, per the I2P SU3 specification).
 - **Two-Phase Admission (`reseed.go`)**:
   1. `fetchCandidates` queries up to 3 reseed servers in parallel (prioritizing `*.hotseed.gosuda.org` within a 5s merge window), validates `netId` and 24-hour freshness before signature verification, and retains both the newest (`best`) and second-newest (`fallback`) `RouterInfo` per router hash (`dedupSlot`) so a corrupt or forged newer record from one server cannot shadow a valid record from another.
-  2. `ingestCandidates` groups candidates by local K-bucket, orders each bucket via Max-Min XOR farthest-point sampling (`fpsOrderBucket`), lazily verifies signatures (falling back to `slot.fallback` on failure), enforces per-bucket subnet quotas (`<= 2` routers per IPv4 `/16` or IPv6 `/48`, `<= 20` total per bucket), and returns up to `16` floodfill anchors for active live transport probing (`probeReseedAnchors`).
+  2. `ingestCandidates` groups candidates by local K-bucket, orders each bucket via Max-Min XOR farthest-point sampling (`fpsOrderBucket`), lazily verifies signatures (falling back to `slot.fallback` on failure), enforces per-bucket subnet quotas (`<= 2` routers per IPv4 `/16` or IPv6 `/48` unless `DisableBucketSubnetQuota` is set, `<= 20` total per bucket), and returns up to `16` floodfill anchors for active live transport probing (`probeReseedAnchors`).
 
 ### 4.2 NAT-PMP & UPnP IGD Port Mapping (`controlplane/internal/nat`, `runtime/nat_mapping.go`)
 

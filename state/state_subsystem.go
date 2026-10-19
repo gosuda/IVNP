@@ -15,6 +15,7 @@ type (
 	ConfigurationLog                      = configuration.Log
 	ConfigurationNetDB                    = configuration.NetDB
 	ConfigurationNetwork                  = configuration.Network
+	ConfigurationNetworkProfile           = configuration.NetworkProfile
 	ConfigurationOperating                = configuration.Operating
 	ConfigurationReseed                   = configuration.Reseed
 	ConfigurationRouter                   = configuration.Router
@@ -30,21 +31,25 @@ type (
 )
 
 const (
-	SecureStateRemoteELSAuthorizationDH   = securestore.RemoteELSAuthorizationDH
-	SecureStateRemoteELSAuthorizationNone = securestore.RemoteELSAuthorizationNone
-	SecureStateRemoteELSAuthorizationPSK  = securestore.RemoteELSAuthorizationPSK
+	ConfigurationNetworkProfilePublic       = configuration.NetworkProfilePublic
+	ConfigurationNetworkProfileSmallPrivate = configuration.NetworkProfileSmallPrivate
+	ConfigurationNetworkProfileOfficeLAN    = configuration.NetworkProfileOfficeLAN
+	SecureStateRemoteELSAuthorizationDH     = securestore.RemoteELSAuthorizationDH
+	SecureStateRemoteELSAuthorizationNone   = securestore.RemoteELSAuthorizationNone
+	SecureStateRemoteELSAuthorizationPSK    = securestore.RemoteELSAuthorizationPSK
 )
 
 var (
-	ConfigurationErrInvalidOperating   = configuration.ErrInvalidOperating
-	ConfigurationDefaultOperating      = configuration.DefaultOperating
-	ConfigurationLoadOperating         = configuration.LoadOperating
-	ConfigurationLoadOrCreateOperating = configuration.LoadOrCreateOperating
-	ConfigurationParseOperating        = configuration.ParseOperating
-	FilesystemStoreOpenRegular         = filesystemstore.OpenRegular
-	FilesystemStoreReadBoundedFile     = filesystemstore.ReadBoundedFile
-	FilesystemStoreWriteAtomic         = filesystemstore.WriteAtomic
-	SecureStateErrStateLocked          = securestore.ErrStateLocked
-	SecureStateNewStore                = securestore.NewStore
-	SecureStateNewMemoryStore          = securestore.NewMemoryStore
+	ConfigurationErrInvalidOperating        = configuration.ErrInvalidOperating
+	ConfigurationDefaultOperating           = configuration.DefaultOperating
+	ConfigurationDefaultOperatingForProfile = configuration.DefaultOperatingForProfile
+	ConfigurationLoadOperating              = configuration.LoadOperating
+	ConfigurationLoadOrCreateOperating      = configuration.LoadOrCreateOperating
+	ConfigurationParseOperating             = configuration.ParseOperating
+	FilesystemStoreOpenRegular              = filesystemstore.OpenRegular
+	FilesystemStoreReadBoundedFile          = filesystemstore.ReadBoundedFile
+	FilesystemStoreWriteAtomic              = filesystemstore.WriteAtomic
+	SecureStateErrStateLocked               = securestore.ErrStateLocked
+	SecureStateNewStore                     = securestore.NewStore
+	SecureStateNewMemoryStore               = securestore.NewMemoryStore
 )

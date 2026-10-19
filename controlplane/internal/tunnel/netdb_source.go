@@ -167,6 +167,7 @@ func (s *NetDBOutboundBuildSource) NextOutboundForReply(ctx context.Context, now
 	build := OutboundBuild{
 		CircuitID: circuitID, Hops: hops, ReplyRouter: route.Gateway,
 		ReplyTunnelID: route.TunnelID, ExpiresAt: expiresAt,
+		AllowCoalescedReply: hops[len(hops)-1].Router == route.Gateway,
 	}
 	return build, nil
 }
@@ -539,6 +540,7 @@ type peerSelectionPolicy struct {
 	exploratory            bool
 	directFirst            bool
 	allowUnknownTransports bool
+	relaxSubTier           bool
 	eligible               func(foundation.Hash) bool
 	connected              func(foundation.Hash) bool
 	endpointMask           tunnelTransportMask
@@ -550,18 +552,31 @@ type peerSelectionPolicy struct {
 
 // selectDiverseHops applies Java's keyed subtiers and ordering while keeping
 // strict correlation avoidance. It relaxes address-prefix conflicts first,
-// then signed router-family conflicts when the candidate set cannot fill the
+// then signed router-family conflicts, then client subtier partitioning and
+// outbound reply-gateway exclusion when a small mesh cannot otherwise fill the
 // requested path.
 func selectDiverseHops(refs []controlplanenetdb.RouterRef, profiles *PeerProfiles, local, excluded foundation.Hash, wanted int, nowMillis uint64, policy peerSelectionPolicy) []ShortBuildHop {
+	if hops := selectDiverseHopsWithExcluded(refs, profiles, local, excluded, wanted, nowMillis, policy); len(hops) == wanted || excluded == (foundation.Hash{}) {
+		return hops
+	}
+	return selectDiverseHopsWithExcluded(refs, profiles, local, foundation.Hash{}, wanted, nowMillis, policy)
+}
+
+func selectDiverseHopsWithExcluded(refs []controlplanenetdb.RouterRef, profiles *PeerProfiles, local, excluded foundation.Hash, wanted int, nowMillis uint64, policy peerSelectionPolicy) []ShortBuildHop {
 	selectionKeys := newJavaPeerSelectionKeys(policy.selectionKey)
-	collectCandidates := func(allowReseedFresh bool) []hopCandidate {
+	type candidateCollectionSpec struct {
+		allowFloodfill   bool
+		allowReseedFresh bool
+		ignoreCooldown   bool
+	}
+	collectCandidates := func(spec candidateCollectionSpec) []hopCandidate {
 		candidates := make([]hopCandidate, 0, len(refs))
 		for _, ref := range refs {
 			caps, allowed := tunnelPeerCapabilitiesAllowedWithDecisions(
 				ref.Info,
 				policy.exploratory,
 				policy.random.oneIn(4),
-				policy.random.oneIn(4),
+				spec.allowFloodfill || policy.random.oneIn(4),
 				policy.random.oneIn(4),
 			)
 			if ref.Hash == local || ref.Hash == excluded || !allowed {
@@ -571,11 +586,11 @@ func selectDiverseHops(refs []controlplanenetdb.RouterRef, profiles *PeerProfile
 			// recorded failure history; connected peers remain selectable so a
 			// mesh can re-converge the moment any transport session re-forms.
 			connected := policy.connected != nil && policy.connected(ref.Hash)
-			if !connected && !profiles.EligibleAt(ref.Hash, nowMillis) {
+			if !connected && !spec.ignoreCooldown && !profiles.EligibleAt(ref.Hash, nowMillis) {
 				continue
 			}
 			if err := controlplanenetdb.RouterInfoFresh(ref.Info, nowMillis); err != nil {
-				if !allowReseedFresh || controlplanenetdb.ReseedRouterInfoFresh(ref.Info, nowMillis) != nil {
+				if !spec.allowReseedFresh || controlplanenetdb.ReseedRouterInfoFresh(ref.Info, nowMillis) != nil {
 					continue
 				}
 			}
@@ -599,9 +614,19 @@ func selectDiverseHops(refs []controlplanenetdb.RouterRef, profiles *PeerProfile
 		}
 		return candidates
 	}
-	candidates := collectCandidates(false)
+	candidates := collectCandidates(candidateCollectionSpec{})
 	if len(candidates) < wanted && policy.exploratory {
-		candidates = collectCandidates(true)
+		candidates = collectCandidates(candidateCollectionSpec{allowFloodfill: true})
+		if len(candidates) < wanted {
+			candidates = collectCandidates(candidateCollectionSpec{allowFloodfill: true, allowReseedFresh: true})
+		}
+	}
+	if len(candidates) < wanted && len(refs) <= 8 {
+		candidates = collectCandidates(candidateCollectionSpec{
+			allowFloodfill:   true,
+			allowReseedFresh: policy.exploratory,
+			ignoreCooldown:   true,
+		})
 	}
 	sortMembershipCandidates(candidates)
 	if policy.candidateLimit != 0 && len(candidates) > policy.candidateLimit {
@@ -617,24 +642,33 @@ func selectDiverseHops(refs []controlplanenetdb.RouterRef, profiles *PeerProfile
 		candidate.flagsCached = true
 		candidate.info = foundation.NetworkDatabaseRouterInfo{}
 	}
-	selected := make([]hopCandidate, 0, wanted)
-	for relaxation := range 3 {
-		for len(selected) < wanted {
-			choice := selectDiverseHop(candidates, selected, wanted, relaxation, policy)
-			if choice == -1 {
+	runSelection := func(activePolicy peerSelectionPolicy) []hopCandidate {
+		selected := make([]hopCandidate, 0, wanted)
+		for relaxation := range 3 {
+			for len(selected) < wanted {
+				choice := selectDiverseHop(candidates, selected, wanted, relaxation, activePolicy)
+				if choice == -1 {
+					break
+				}
+				selected = append(selected, candidates[choice])
+			}
+			if len(selected) == wanted {
 				break
 			}
-			selected = append(selected, candidates[choice])
 		}
-		if len(selected) == wanted {
-			break
-		}
+		return selected
+	}
+	activePolicy := policy
+	selected := runSelection(activePolicy)
+	if len(selected) < wanted && !policy.exploratory && wanted > 1 {
+		activePolicy.relaxSubTier = true
+		selected = runSelection(activePolicy)
 	}
 	if policy.exploratory {
 		sortHopCandidates(selected)
 		slices.Reverse(selected)
 		for index, candidate := range selected {
-			if !peerAllowedAtPosition(candidate, index, wanted, policy) || index != 0 && !tunnelPathCompatible(selected[:index], candidate) {
+			if !peerAllowedAtPosition(candidate, index, wanted, activePolicy) || index != 0 && !tunnelPathCompatible(selected[:index], candidate) {
 				return nil
 			}
 		}
@@ -752,7 +786,7 @@ func hopCandidateAllowed(candidate hopCandidate, selected []hopCandidate, wanted
 }
 
 func peerAllowedAtPosition(candidate hopCandidate, selected, wanted int, policy peerSelectionPolicy) bool {
-	if !policy.exploratory && !clientSubTierAllowed(candidate.subTier, selected, wanted) {
+	if !policy.exploratory && !policy.relaxSubTier && !clientSubTierAllowed(candidate.subTier, selected, wanted) {
 		return false
 	}
 	connected := candidate.connected

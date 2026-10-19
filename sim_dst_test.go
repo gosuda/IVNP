@@ -950,3 +950,205 @@ func TestDeterministicFleetIdentities(t *testing.T) {
 		t.Fatalf("different seeds produced identical router identity %x", a3[:4])
 	}
 }
+
+// TestSimOfficeLANTwoNodeMesh verifies that two routers configured with
+// NetworkProfileOfficeLAN on a private network ID converge over virtual
+// NTCP2/SSU2 links without a third-party floodfill, build 1-hop exploratory
+// and client tunnels (exercising OBEP == IBGW reply routing), confirm
+// LeaseSet2 publication (K = 1), and exchange bidirectional stream and
+// Datagram2 traffic inside a synctest bubble.
+func TestSimOfficeLANTwoNodeMesh(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sim := newSimNet(t, 2088)
+		alice := sim.AddRouter(t, simNodeConfig{
+			Name:      "alice",
+			Profile:   NetworkProfileOfficeLAN,
+			NetworkID: 88,
+		})
+		bob := sim.AddRouter(t, simNodeConfig{
+			Name:      "bob",
+			Profile:   NetworkProfileOfficeLAN,
+			NetworkID: 88,
+		})
+		sim.Mesh(simnet.LinkConfig{Latency: time.Millisecond, Jitter: 250 * time.Microsecond})
+
+		sim.ExchangeRouterInfos(t)
+		sim.WaitReady(t, 60*time.Second)
+
+		ctx := t.Context()
+		destCfg := OfficeLANDestinationConfig()
+		target, err := bob.router.NewDestination(ctx, destCfg)
+		if err != nil {
+			t.Fatalf("bob office destination: %v", err)
+		}
+		defer target.Close()
+		source, err := alice.router.NewDestination(ctx, destCfg)
+		if err != nil {
+			t.Fatalf("alice office destination: %v", err)
+		}
+		defer source.Close()
+
+		assertSimStreamAndDatagramRoundTrip(t, sim, source, target, "office-lan-2node")
+	})
+}
+
+// TestSimSmallPrivateMesh verifies that a 4-node small private mesh on a
+// shared /16 subnet (NetworkProfileSmallPrivate, netId = 42) builds 1-hop
+// exploratory and 2-hop client tunnels, satisfies K = 2 floodfill publication
+// confirmations, and routes bidirectional stream and Datagram2 traffic.
+func TestSimSmallPrivateMesh(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sim := newSimNet(t, 2042)
+		nodes := make([]*simNode, 4)
+		for i := range nodes {
+			nodes[i] = sim.AddRouter(t, simNodeConfig{
+				Name:      fmt.Sprintf("priv%d", i+1),
+				Profile:   NetworkProfileSmallPrivate,
+				NetworkID: 42,
+			})
+		}
+		sim.Mesh(simnet.LinkConfig{Latency: 2 * time.Millisecond, Jitter: 500 * time.Microsecond})
+
+		sim.ExchangeRouterInfos(t)
+		sim.WaitReady(t, 90*time.Second)
+
+		ctx := t.Context()
+		destCfg := SmallPrivateDestinationConfig()
+		target, err := nodes[3].router.NewDestination(ctx, destCfg)
+		if err != nil {
+			t.Fatalf("target small-private destination: %v", err)
+		}
+		defer target.Close()
+		source, err := nodes[0].router.NewDestination(ctx, destCfg)
+		if err != nil {
+			t.Fatalf("source small-private destination: %v", err)
+		}
+		defer source.Close()
+
+		assertSimStreamAndDatagramRoundTrip(t, sim, source, target, "small-private-4node")
+	})
+}
+
+func assertSimStreamAndDatagramRoundTrip(t *testing.T, sim *simNet, source, target *Destination, tag string) {
+	t.Helper()
+	ctx := t.Context()
+	listener, err := target.Listen("i2p", ":8080")
+	if err != nil {
+		t.Fatalf("%s listen: %v", tag, err)
+	}
+	defer listener.Close()
+
+	accepted := make(chan net.Conn, 8)
+	stopAccept := make(chan struct{})
+	defer close(stopAccept)
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			select {
+			case accepted <- conn:
+			case <-stopAccept:
+				_ = conn.Close()
+				return
+			}
+		}
+	}()
+
+	var outbound net.Conn
+	dialBudgetCtx, dialBudgetCancel := context.WithTimeout(ctx, 120*time.Second)
+	defer dialBudgetCancel()
+	dialPort := uint16(52000)
+	for {
+		for len(accepted) > 0 {
+			stale := <-accepted
+			_ = stale.Close()
+		}
+		dialPort++
+		dialer := Dialer{Destination: source, LocalPort: dialPort}
+		attemptCtx, attemptCancel := context.WithTimeout(dialBudgetCtx, 45*time.Second)
+		outbound, err = dialer.DialContext(attemptCtx, "i2p", net.JoinHostPort(target.B32(), "8080"))
+		attemptCancel()
+		if err == nil {
+			break
+		}
+		if dialBudgetCtx.Err() != nil {
+			t.Fatalf("%s dial failed: %v", tag, err)
+		}
+		sim.net.Advance(2 * time.Second)
+	}
+	defer outbound.Close()
+
+	var inbound net.Conn
+	for inbound == nil {
+		select {
+		case conn := <-accepted:
+			if conn.RemoteAddr().String() == outbound.LocalAddr().String() {
+				inbound = conn
+			} else {
+				_ = conn.Close()
+			}
+		case <-time.After(60 * time.Second):
+			t.Fatalf("%s accept timed out", tag)
+		}
+	}
+	defer inbound.Close()
+
+	req := []byte(tag + "-stream-request")
+	_ = outbound.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	if _, err := outbound.Write(req); err != nil {
+		t.Fatalf("%s write request: %v", tag, err)
+	}
+	gotReq := make([]byte, len(req))
+	_ = inbound.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if _, err := io.ReadFull(inbound, gotReq); err != nil {
+		t.Fatalf("%s read request: %v", tag, err)
+	}
+	if !bytes.Equal(gotReq, req) {
+		t.Fatalf("%s request = %q, want %q", tag, gotReq, req)
+	}
+
+	resp := []byte(tag + "-stream-response")
+	_ = inbound.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	if _, err := inbound.Write(resp); err != nil {
+		t.Fatalf("%s write response: %v", tag, err)
+	}
+	gotResp := make([]byte, len(resp))
+	_ = outbound.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if _, err := io.ReadFull(outbound, gotResp); err != nil {
+		t.Fatalf("%s read response: %v", tag, err)
+	}
+	if !bytes.Equal(gotResp, resp) {
+		t.Fatalf("%s response = %q, want %q", tag, gotResp, resp)
+	}
+
+	sender, err := source.ListenPacket("i2p-datagram2", ":0")
+	if err != nil {
+		t.Fatalf("%s sender packet conn: %v", tag, err)
+	}
+	defer sender.Close()
+	receiver, err := target.ListenPacket("i2p-datagram2", ":9091")
+	if err != nil {
+		t.Fatalf("%s receiver packet conn: %v", tag, err)
+	}
+	defer receiver.Close()
+
+	dgramPayload := []byte(tag + "-datagram2")
+	_ = sender.SetWriteDeadline(time.Now().Add(15 * time.Second))
+	if _, err := sender.WriteTo(dgramPayload, receiver.LocalAddr()); err != nil {
+		t.Fatalf("%s datagram write: %v", tag, err)
+	}
+	dgramBuf := make([]byte, 128)
+	_ = receiver.SetReadDeadline(time.Now().Add(30 * time.Second))
+	n, from, err := receiver.ReadFrom(dgramBuf)
+	if err != nil {
+		t.Fatalf("%s datagram read: %v", tag, err)
+	}
+	if !bytes.Equal(dgramBuf[:n], dgramPayload) {
+		t.Fatalf("%s datagram = %q, want %q", tag, dgramBuf[:n], dgramPayload)
+	}
+	if addr, ok := from.(Addr); !ok || addr.Hash != source.Hash() {
+		t.Fatalf("%s datagram sender = %v, want %v", tag, from, source.Hash())
+	}
+}

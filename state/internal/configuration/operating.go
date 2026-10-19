@@ -1,6 +1,7 @@
 package configuration
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"net"
@@ -65,11 +66,21 @@ type Operating struct {
 	Log         Log
 }
 
-// Network specifies network ID and enabled IP protocol families.
+// NetworkProfile selects the baseline parameter preset for an IVNP network.
+type NetworkProfile string
+
+const (
+	NetworkProfilePublic       NetworkProfile = "public"
+	NetworkProfileSmallPrivate NetworkProfile = "small_private"
+	NetworkProfileOfficeLAN    NetworkProfile = "office_lan"
+)
+
+// Network specifies network ID, preset profile, and enabled IP protocol families.
 type Network struct {
-	ID   uint32
-	IPv4 bool
-	IPv6 bool
+	ID      uint32
+	Profile NetworkProfile
+	IPv4    bool
+	IPv6    bool
 }
 
 // Router holds identity and capability settings advertised in RouterInfo.
@@ -81,17 +92,26 @@ type Router struct {
 	Version      string
 }
 
-// NetDB configures Kademlia bucket limits and optional bootstrap RouterInfo files.
+// NetDB configures Kademlia bucket limits, publication replication targets, and bootstrap RouterInfo files.
 type NetDB struct {
-	BucketCapacity           int
-	BootstrapRouterInfoPaths []string
-	LookupCapacity           int
+	BucketCapacity            int
+	BucketSubnetQuota         int
+	DisableBucketSubnetQuota  bool
+	BootstrapRouterInfoPaths  []string
+	LookupCapacity            int
+	MinRouters                int
+	RouterInfoFloodfillK      int
+	LeaseSetFloodfillK        int
+	ExplorationBootstrapDelay time.Duration
+	ExplorationSteadyDelay    time.Duration
 }
 
 // Tunnel configures tunnel pool targets, capacities, and build parameters.
 type Tunnel struct {
 	Enabled                     bool
 	Hops                        int
+	IPRestriction               int
+	DisableIPRestriction        bool
 	ExploratoryInboundTarget    int
 	ExploratoryOutboundTarget   int
 	ExploratoryPoolCapacity     int
@@ -141,7 +161,7 @@ type NAT struct {
 	UPnPEndpoint   string
 }
 
-// Reseed configures SU3 reseed server URLs and limits.
+// Reseed configures SU3 reseed server URLs, limits, and trusted signer certificates.
 type Reseed struct {
 	Enabled           bool
 	Required          bool
@@ -155,14 +175,16 @@ type Reseed struct {
 	// BucketSubnetQuota caps admitted RouterInfos per local K-bucket per
 	// subnet (IPv4 /16 or IPv6 /48). BucketAdmitLimit caps admissions per
 	// local K-bucket. VerifyAnchorCount bounds post-reseed floodfill anchors.
-	BucketSubnetQuota int
-	BucketAdmitLimit  int
-	VerifyAnchorCount int
+	BucketSubnetQuota        int
+	DisableBucketSubnetQuota bool
+	BucketAdmitLimit         int
+	VerifyAnchorCount        int
 	// MergeWait bounds how long reseed waits for all priority endpoints to
 	// respond before ingesting their merged candidates. Zero selects the
 	// client default; a negative value finishes on the first priority
 	// response instead of merging.
-	MergeWait time.Duration
+	MergeWait        time.Duration
+	TrustedCertPaths []string
 }
 
 // Listener configures a local RPC, proxy, or SAM listener.
@@ -341,7 +363,7 @@ func ParseOperating(text, path string) (Operating, error) {
 	if !operating.NTCP2.Enabled && !operating.SSU2.Enabled {
 		return Operating{}, invalid("transport", "enabled")
 	}
-	if err := applyReseed(&operating, values); err != nil {
+	if err := applyReseed(&operating, values, filepath.Dir(absolute)); err != nil {
 		return Operating{}, err
 	}
 	if err := applyListener(&operating.SAM, "sam", values); err != nil {
@@ -408,6 +430,15 @@ func DefaultOperating() Operating {
 	return defaultOperating("")
 }
 
+// DefaultOperatingForProfile returns independent defaults for the specified network profile.
+func DefaultOperatingForProfile(profile NetworkProfile) Operating {
+	operating := defaultOperating("")
+	if profile != "" && profile != NetworkProfilePublic {
+		_ = applyNetworkProfile(&operating, profile)
+	}
+	return operating
+}
+
 func defaultOperating(base string) Operating {
 	dataDir := "./data"
 	stateDir := filepath.Join(dataDir, "state")
@@ -417,12 +448,16 @@ func defaultOperating(base string) Operating {
 		StatePath: filepath.Join(stateDir, "router.state"),
 		KeyPath:   filepath.Join(stateDir, "router.keys"),
 		TempDir:   os.TempDir(),
-		Network:   Network{ID: 2, IPv4: true},
+		Network:   Network{ID: 2, Profile: NetworkProfilePublic, IPv4: true},
 		Router:    Router{IdentityType: "ed25519", Transit: true, Version: "0.9.70"},
 		State:     State{MaxBytes: 16 << 20, MaxDestinations: 64, MaxNameBytes: 255, PromoteToMaster: true, LockRetryInterval: 15 * time.Second},
-		NetDB:     NetDB{BucketCapacity: 24, LookupCapacity: 32},
+		NetDB: NetDB{
+			BucketCapacity: 24, BucketSubnetQuota: 2, LookupCapacity: 32,
+			MinRouters: 50, RouterInfoFloodfillK: 5, LeaseSetFloodfillK: 4,
+			ExplorationBootstrapDelay: time.Second, ExplorationSteadyDelay: 5 * time.Second,
+		},
 		Tunnel: Tunnel{
-			Enabled: true, Hops: 3,
+			Enabled: true, Hops: 3, IPRestriction: 2,
 			ExploratoryInboundTarget: 4, ExploratoryOutboundTarget: 4, ExploratoryPoolCapacity: 8,
 			ClientInboundTarget: 2, ClientOutboundTarget: 2, ClientPoolCapacity: 4,
 			BuildPendingCapacity: 32, Lifetime: 10 * time.Minute,
@@ -448,6 +483,80 @@ func defaultOperating(base string) Operating {
 		SOCKS5:    defaultListener(4447),
 		Metrics:   defaultListener(9090),
 		Log:       Log{Level: "info", Format: "text"},
+	}
+}
+
+func applyNetworkProfile(operating *Operating, profile NetworkProfile) error {
+	switch profile {
+	case NetworkProfilePublic:
+		operating.Network.Profile = NetworkProfilePublic
+		return nil
+	case NetworkProfileSmallPrivate:
+		operating.Network.Profile = NetworkProfileSmallPrivate
+		operating.Router.Floodfill = true
+		operating.Router.Transit = true
+		operating.NetDB.BucketSubnetQuota = 16
+		operating.NetDB.DisableBucketSubnetQuota = false
+		operating.NetDB.MinRouters = 2
+		operating.NetDB.RouterInfoFloodfillK = 2
+		operating.NetDB.LeaseSetFloodfillK = 2
+		operating.NetDB.ExplorationBootstrapDelay = 500 * time.Millisecond
+		operating.NetDB.ExplorationSteadyDelay = 5 * time.Second
+		operating.Tunnel.Hops = 1
+		operating.Tunnel.IPRestriction = 2
+		operating.Tunnel.DisableIPRestriction = false
+		operating.Tunnel.ExploratoryInboundTarget = 2
+		operating.Tunnel.ExploratoryOutboundTarget = 2
+		operating.Tunnel.ExploratoryPoolCapacity = 6
+		operating.Tunnel.ClientInboundTarget = 2
+		operating.Tunnel.ClientOutboundTarget = 2
+		operating.Tunnel.ClientPoolCapacity = 6
+		operating.Tunnel.MaintenanceInterval = 5 * time.Second
+		operating.Tunnel.ProbeTimeout = 10 * time.Second
+		operating.Tunnel.ProbeFailureThreshold = 2
+		operating.Reseed.Enabled = false
+		operating.Reseed.PriorityEndpoints = nil
+		operating.Reseed.Endpoints = nil
+		operating.Reseed.BucketSubnetQuota = 16
+		operating.Reseed.DisableBucketSubnetQuota = false
+		operating.Reseed.VerifyAnchorCount = 2
+		operating.HTTPProxy.Outproxies = []string{}
+		operating.AddressBook.Subscriptions = nil
+		return nil
+	case NetworkProfileOfficeLAN:
+		operating.Network.Profile = NetworkProfileOfficeLAN
+		operating.Router.Floodfill = true
+		operating.Router.Transit = true
+		operating.NetDB.BucketSubnetQuota = 0
+		operating.NetDB.DisableBucketSubnetQuota = true
+		operating.NetDB.MinRouters = 1
+		operating.NetDB.RouterInfoFloodfillK = 1
+		operating.NetDB.LeaseSetFloodfillK = 1
+		operating.NetDB.ExplorationBootstrapDelay = 500 * time.Millisecond
+		operating.NetDB.ExplorationSteadyDelay = 3 * time.Second
+		operating.Tunnel.Hops = 1
+		operating.Tunnel.IPRestriction = 0
+		operating.Tunnel.DisableIPRestriction = true
+		operating.Tunnel.ExploratoryInboundTarget = 2
+		operating.Tunnel.ExploratoryOutboundTarget = 2
+		operating.Tunnel.ExploratoryPoolCapacity = 4
+		operating.Tunnel.ClientInboundTarget = 2
+		operating.Tunnel.ClientOutboundTarget = 2
+		operating.Tunnel.ClientPoolCapacity = 4
+		operating.Tunnel.MaintenanceInterval = 3 * time.Second
+		operating.Tunnel.ProbeTimeout = 5 * time.Second
+		operating.Tunnel.ProbeFailureThreshold = 2
+		operating.Reseed.Enabled = false
+		operating.Reseed.PriorityEndpoints = nil
+		operating.Reseed.Endpoints = nil
+		operating.Reseed.BucketSubnetQuota = 0
+		operating.Reseed.DisableBucketSubnetQuota = true
+		operating.Reseed.VerifyAnchorCount = 1
+		operating.HTTPProxy.Outproxies = []string{}
+		operating.AddressBook.Subscriptions = nil
+		return nil
+	default:
+		return invalid("network", "profile")
 	}
 }
 
@@ -506,6 +615,11 @@ func applyPaths(operating *Operating, values map[entryKey]string, base string) e
 }
 
 func applyNetwork(operating *Operating, values map[entryKey]string) error {
+	if value, ok := valueOf(values, "network", "profile"); ok {
+		if err := applyNetworkProfile(operating, NetworkProfile(value)); err != nil {
+			return err
+		}
+	}
 	if value, ok := valueOf(values, "network", "id"); ok {
 		parsed, err := parseUint(value, 1, int64(^uint32(0)))
 		if err != nil {
@@ -622,6 +736,14 @@ func applyNetDB(operating *Operating, values map[entryKey]string, base string) e
 		}
 		operating.NetDB.BucketCapacity = int(parsed)
 	}
+	if value, ok := valueOf(values, "netdb", "bucket_subnet_quota"); ok {
+		parsed, err := parseUint(value, 0, 1_024)
+		if err != nil {
+			return invalid("netdb", "bucket_subnet_quota")
+		}
+		operating.NetDB.BucketSubnetQuota = int(parsed)
+		operating.NetDB.DisableBucketSubnetQuota = parsed == 0
+	}
 	if value, ok := valueOf(values, "netdb", "lookup_capacity"); ok {
 		parsed, err := parseUint(value, 1, 256)
 		if err != nil {
@@ -629,27 +751,73 @@ func applyNetDB(operating *Operating, values map[entryKey]string, base string) e
 		}
 		operating.NetDB.LookupCapacity = int(parsed)
 	}
-	if value, ok := valueOf(values, "netdb", "bootstrap_router_info_files"); ok {
-		raw := strings.Split(value, ",")
-		if len(raw) == 0 || len(raw) > maxBootstrapRouterInfoFiles {
-			return invalid("netdb", "bootstrap_router_info_files")
-		}
-		paths := make([]string, 0, len(raw))
-		seen := make(map[string]struct{}, len(raw))
-		for _, item := range raw {
-			resolved, err := resolvePath(strings.TrimSpace(item), base)
+	for _, setting := range []struct {
+		key string
+		dst *int
+		min int64
+		max int64
+	}{
+		{"min_routers", &operating.NetDB.MinRouters, 1, 10_000},
+		{"router_info_floodfill_k", &operating.NetDB.RouterInfoFloodfillK, 1, 16},
+		{"lease_set_floodfill_k", &operating.NetDB.LeaseSetFloodfillK, 1, 16},
+	} {
+		if value, ok := valueOf(values, "netdb", setting.key); ok {
+			parsed, err := parseUint(value, setting.min, setting.max)
 			if err != nil {
-				return invalid("netdb", "bootstrap_router_info_files")
+				return invalid("netdb", setting.key)
 			}
-			if _, duplicate := seen[resolved]; duplicate {
-				return invalid("netdb", "bootstrap_router_info_files")
+			*setting.dst = int(parsed)
+		}
+	}
+	for _, setting := range []struct {
+		key string
+		dst *time.Duration
+		min time.Duration
+		max time.Duration
+	}{
+		{"exploration_bootstrap_delay", &operating.NetDB.ExplorationBootstrapDelay, 100 * time.Millisecond, 10 * time.Minute},
+		{"exploration_steady_delay", &operating.NetDB.ExplorationSteadyDelay, 100 * time.Millisecond, 10 * time.Minute},
+	} {
+		if value, ok := valueOf(values, "netdb", setting.key); ok {
+			parsed, err := parseDuration(value, setting.min, setting.max)
+			if err != nil {
+				return invalid("netdb", setting.key)
 			}
-			seen[resolved] = struct{}{}
-			paths = append(paths, resolved)
+			*setting.dst = parsed
+		}
+	}
+	if value, ok := valueOf(values, "netdb", "bootstrap_router_info_files"); ok {
+		paths, err := parsePathList(value, base, maxBootstrapRouterInfoFiles, false)
+		if err != nil {
+			return invalid("netdb", "bootstrap_router_info_files")
 		}
 		operating.NetDB.BootstrapRouterInfoPaths = paths
 	}
 	return nil
+}
+
+func parsePathList(value, base string, maxFiles int, allowEmpty bool) ([]string, error) {
+	if allowEmpty && strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	raw := strings.Split(value, ",")
+	if len(raw) == 0 || len(raw) > maxFiles {
+		return nil, errInvalidPath
+	}
+	paths := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, item := range raw {
+		resolved, err := resolvePath(strings.TrimSpace(item), base)
+		if err != nil {
+			return nil, errInvalidPath
+		}
+		if _, duplicate := seen[resolved]; duplicate {
+			return nil, errInvalidPath
+		}
+		seen[resolved] = struct{}{}
+		paths = append(paths, resolved)
+	}
+	return paths, nil
 }
 
 func applyTunnel(operating *Operating, values map[entryKey]string) error {
@@ -660,6 +828,14 @@ func applyTunnel(operating *Operating, values map[entryKey]string) error {
 			return invalid("tunnel", "enabled")
 		}
 		tunnel.Enabled = parsed
+	}
+	if value, ok := valueOf(values, "tunnel", "ip_restriction"); ok {
+		parsed, err := parseUint(value, 0, 4)
+		if err != nil {
+			return invalid("tunnel", "ip_restriction")
+		}
+		tunnel.IPRestriction = int(parsed)
+		tunnel.DisableIPRestriction = parsed == 0
 	}
 	for _, setting := range []struct {
 		key string
@@ -777,7 +953,7 @@ func applyNAT(nat *NAT, values map[entryKey]string) error {
 	return nil
 }
 
-func applyReseed(operating *Operating, values map[entryKey]string) error {
+func applyReseed(operating *Operating, values map[entryKey]string, base string) error {
 	reseed := &operating.Reseed
 	if value, ok := valueOf(values, "reseed", "enabled"); ok {
 		parsed, err := parseBool(value)
@@ -796,11 +972,13 @@ func applyReseed(operating *Operating, values map[entryKey]string) error {
 	priorityEndpointsSpecified := false
 	if value, ok := valueOf(values, "reseed", "priority_endpoints"); ok {
 		priorityEndpointsSpecified = true
-		endpoints, err := parseReseedEndpoints(value)
+		endpoints, err := parseReseedEndpoints(value, operating.Network.ID)
 		if err != nil {
 			return invalid("reseed", "priority_endpoints")
 		}
 		reseed.PriorityEndpoints = endpoints
+	} else if operating.Network.ID != 2 {
+		reseed.PriorityEndpoints = nil
 	}
 	if value, ok := valueOf(values, "reseed", "priority_timeout"); ok {
 		parsed, err := parseDuration(value, 100*time.Millisecond, 10*time.Minute)
@@ -810,11 +988,13 @@ func applyReseed(operating *Operating, values map[entryKey]string) error {
 		reseed.PriorityTimeout = parsed
 	}
 	if value, ok := valueOf(values, "reseed", "endpoints"); ok {
-		endpoints, err := parseReseedEndpoints(value)
+		endpoints, err := parseReseedEndpoints(value, operating.Network.ID)
 		if err != nil {
 			return invalid("reseed", "endpoints")
 		}
 		reseed.Endpoints = endpoints
+	} else if operating.Network.ID != 2 {
+		reseed.Endpoints = nil
 	}
 	if value, ok := valueOf(values, "reseed", "timeout"); ok {
 		parsed, err := parseDuration(value, time.Second, 10*time.Minute)
@@ -845,11 +1025,12 @@ func applyReseed(operating *Operating, values map[entryKey]string) error {
 		reseed.MaxTotalBytes = parsed
 	}
 	if value, ok := valueOf(values, "reseed", "bucket_subnet_quota"); ok {
-		parsed, err := parseUint(value, 1, 64)
+		parsed, err := parseUint(value, 0, 64)
 		if err != nil {
 			return invalid("reseed", "bucket_subnet_quota")
 		}
 		reseed.BucketSubnetQuota = int(parsed)
+		reseed.DisableBucketSubnetQuota = parsed == 0
 	}
 	if value, ok := valueOf(values, "reseed", "bucket_admit_limit"); ok {
 		parsed, err := parseUint(value, 1, 256)
@@ -871,6 +1052,13 @@ func applyReseed(operating *Operating, values map[entryKey]string) error {
 			return invalid("reseed", "merge_wait")
 		}
 		reseed.MergeWait = parsed
+	}
+	if value, ok := valueOf(values, "reseed", "trusted_cert_files"); ok {
+		paths, err := parsePathList(value, base, maxReseedTrustedCertFiles, true)
+		if err != nil {
+			return invalid("reseed", "trusted_cert_files")
+		}
+		reseed.TrustedCertPaths = paths
 	}
 	if reseed.MaxTotalBytes < reseed.MaxArchiveBytes {
 		return invalid("reseed", "max_total_bytes")
@@ -1217,10 +1405,12 @@ func parseEndpoint(host, port string, allowUnspecified, allowZeroPort bool) (End
 	return Endpoint{Host: address.String(), Port: uint16(parsedPort)}, nil
 }
 
-func parseReseedEndpoints(value string) ([]string, error) {
+func parseReseedEndpoints(value string, networkID uint32) ([]string, error) {
 	if strings.TrimSpace(value) == "" {
 		return nil, nil
 	}
+	networkID = cmp.Or(networkID, 2)
+	expectedQuery := "netid=" + strconv.FormatUint(uint64(networkID), 10)
 	parts := strings.Split(value, ",")
 	if len(parts) == 0 || len(parts) > maxReseedEndpoints {
 		return nil, errInvalidReseedEndpointCount
@@ -1231,7 +1421,7 @@ func parseReseedEndpoints(value string) ([]string, error) {
 		parsed, err := url.Parse(endpoint)
 		parseReseedEndpointsRejected := len(endpoint) == 0 || len(endpoint) > maxReseedEndpointBytes || err != nil ||
 			parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil ||
-			parsed.RawQuery != "netid=2" || parsed.ForceQuery
+			parsed.RawQuery != expectedQuery || parsed.ForceQuery
 		if !parseReseedEndpointsRejected {
 			parseReseedEndpointsRejected = parsed.Fragment != ""
 		}
@@ -1332,15 +1522,15 @@ func knownOperatingKey(section, key string) bool {
 
 var operatingKeys = map[string]map[string]bool{
 	"paths":       {"data_dir": true, "state_dir": true, "state_path": true, "key_path": true, "temp_dir": true},
-	"network":     {"id": true, "ipv4": true, "ipv6": true},
+	"network":     {"id": true, "profile": true, "ipv4": true, "ipv6": true},
 	"router":      {"identity_type": true, "floodfill": true, "transit": true, "family": true, "version": true},
 	"state":       {"max_bytes": true, "max_destinations": true, "max_name_bytes": true, "tainted_copy": true, "promote_to_master": true, "lock_retry_interval": true},
-	"netdb":       {"bucket_capacity": true, "lookup_capacity": true, "bootstrap_router_info_files": true},
-	"tunnel":      {"enabled": true, "hops": true, "exploratory_inbound_target": true, "exploratory_outbound_target": true, "exploratory_pool_capacity": true, "client_inbound_target": true, "client_outbound_target": true, "client_pool_capacity": true, "build_pending_capacity": true, "lifetime": true, "renew_before": true, "maintenance_interval": true, "bandwidth_rate_bytes_per_second": true, "bandwidth_burst_bytes": true},
+	"netdb":       {"bucket_capacity": true, "bucket_subnet_quota": true, "lookup_capacity": true, "bootstrap_router_info_files": true, "min_routers": true, "router_info_floodfill_k": true, "lease_set_floodfill_k": true, "exploration_bootstrap_delay": true, "exploration_steady_delay": true},
+	"tunnel":      {"enabled": true, "hops": true, "ip_restriction": true, "exploratory_inbound_target": true, "exploratory_outbound_target": true, "exploratory_pool_capacity": true, "client_inbound_target": true, "client_outbound_target": true, "client_pool_capacity": true, "build_pending_capacity": true, "lifetime": true, "renew_before": true, "maintenance_interval": true, "probe_timeout": true, "probe_failure_threshold": true, "bandwidth_rate_bytes_per_second": true, "bandwidth_burst_bytes": true},
 	"ntcp2":       {"enabled": true, "bind_host": true, "bind_port": true, "advertise_host": true, "advertise_port": true, "max_sessions": true, "idle_timeout": true},
 	"ssu2":        {"enabled": true, "bind_host": true, "bind_port": true, "advertise_host": true, "advertise_port": true, "max_sessions": true, "idle_timeout": true},
 	"nat":         {"natpmp_endpoint": true, "upnp_endpoint": true},
-	"reseed":      {"enabled": true, "required": true, "priority_endpoints": true, "priority_timeout": true, "endpoints": true, "timeout": true, "max_archive_bytes": true, "max_router_infos": true, "max_total_bytes": true},
+	"reseed":      {"enabled": true, "required": true, "priority_endpoints": true, "priority_timeout": true, "endpoints": true, "timeout": true, "max_archive_bytes": true, "max_router_infos": true, "max_total_bytes": true, "bucket_subnet_quota": true, "bucket_admit_limit": true, "verify_anchor_count": true, "merge_wait": true, "trusted_cert_files": true},
 	"control":     {"enabled": true, "listen_host": true, "listen_port": true, "bearer_token": true, "max_connections": true},
 	"http_proxy":  {"enabled": true, "listen_host": true, "listen_port": true, "bearer_token": true, "max_connections": true, "outproxies": true},
 	"socks5":      {"enabled": true, "listen_host": true, "listen_port": true, "bearer_token": true, "max_connections": true},

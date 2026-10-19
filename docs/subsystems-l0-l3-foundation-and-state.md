@@ -139,6 +139,7 @@ All L1 files reside directly in `/Users/user/work/work3/IVNP/cryptography`:
 
 #### INI Configuration Parser (`state/internal/configuration/config.go`, `operating.go`)
 - `Parse(text)` enforces `maxConfigBytes = 1 MiB` and `maxConfigEntries = 4096`, strips `#` and `;` comments outside double-quoted strings, and rejects duplicate `(section, key)` pairs.
+- `DefaultOperatingForProfile(profile)` and `[network] profile` (`public`, `small_private`, `office_lan`) initialize baseline topology defaults before applying explicit INI key overrides across `[netdb]` (`bucket_subnet_quota`, `min_routers`, `router_info_floodfill_k`, `lease_set_floodfill_k`, `exploration_bootstrap_delay`, `exploration_steady_delay`), `[tunnels]` (`ip_restriction`), `[reseed]` (`trusted_cert_files`, `disable_subnet_quota`, `router_info_files` up to `64` files, and `netid=<network.id>` URL query validation), and `[destinations]` (`<name>.ip_restriction`).
 - `ParseOperating` and `LoadOperating` enforce loopback-only binding on `http_proxy`, `socks5`, and `sam` UDP (`udp_host`), require a `16..4096` byte `bearer_token` on `control` and any non-loopback `sam` or `metrics` listener, and require `0600` file permissions whenever any `bearer_token` is present in `ivnp.conf`.
 
 #### Encrypted State Bundle Wire Format (`state/internal/secure_store/state.go`)

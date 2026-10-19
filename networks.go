@@ -152,6 +152,43 @@ func ConnectionNetwork(conn net.Conn) string {
 	return ""
 }
 
+// NetworkProfile selects the baseline operating preset for a network context.
+type NetworkProfile = state.ConfigurationNetworkProfile
+
+const (
+	// NetworkProfilePublic selects the official I2P public network defaults.
+	NetworkProfilePublic NetworkProfile = state.ConfigurationNetworkProfilePublic
+	// NetworkProfileSmallPrivate tunes NetDB, tunnel hop diversity, and probe
+	// intervals for small private meshes (2 to 20 nodes).
+	NetworkProfileSmallPrivate NetworkProfile = state.ConfigurationNetworkProfileSmallPrivate
+	// NetworkProfileOfficeLAN tunes NetDB, subnet admission, tunnel hop
+	// diversity, and fast probe intervals for office and LAN deployments.
+	NetworkProfileOfficeLAN NetworkProfile = state.ConfigurationNetworkProfileOfficeLAN
+)
+
+// NetDBConfig overrides NetDB routing and admission parameters for a network
+// context. Zero values preserve the defaults selected by NetworkConfig.Profile.
+type NetDBConfig struct {
+	BucketSubnetQuota         int
+	DisableBucketSubnetQuota  bool
+	MinRouters                int
+	RouterInfoFloodfillK      int
+	LeaseSetFloodfillK        int
+	ExplorationBootstrapDelay time.Duration
+	ExplorationSteadyDelay    time.Duration
+}
+
+// TunnelPolicyConfig overrides tunnel hop diversity and health probe timing
+// for a network context. Zero values preserve the defaults selected by
+// NetworkConfig.Profile.
+type TunnelPolicyConfig struct {
+	IPRestriction         int
+	DisableIPRestriction  bool
+	MaintenanceInterval   time.Duration
+	ProbeTimeout          time.Duration
+	ProbeFailureThreshold int
+}
+
 // NetworkConfig describes one I2P protocol context: the transports, bootstrap,
 // and tunnel policy serving one netId. Every entry has the same shape: the
 // official I2P network is simply the netId=2 configuration produced by
@@ -164,12 +201,21 @@ type NetworkConfig struct {
 	// "-stream"/"-datagram2" suffix grammar stays unambiguous.
 	Name      string
 	NetworkID uint32
-	NTCP2     TransportConfig
-	SSU2      TransportConfig
+	// Profile selects the baseline operating preset ("public", "small_private",
+	// or "office_lan"). Empty defaults to NetworkProfilePublic.
+	Profile NetworkProfile
+	NTCP2   TransportConfig
+	SSU2    TransportConfig
 	// Bootstrap seeds this context's NetDB via reseed URLs or literal
 	// RouterInfos for the dedicated network.
 	Bootstrap   BootstrapConfig
 	Exploratory TunnelPoolConfig
+	// NetDB overrides NetDB admission, readiness, publication, and exploration
+	// parameters on top of Profile.
+	NetDB NetDBConfig
+	// TunnelPolicy overrides tunnel hop IP diversity and health probe timing
+	// on top of Profile.
+	TunnelPolicy TunnelPolicyConfig
 	// Participation selects this context's contribution; zero selects
 	// ParticipationWarm.
 	Participation PublicParticipation
@@ -187,9 +233,58 @@ type NetworkConfig struct {
 // NetworkOption configures a NetworkConfig component.
 type NetworkOption func(*NetworkConfig)
 
+// WithNetworkProfile sets the baseline network preset profile and applies its
+// default exploratory tunnel pool and participation mode.
+func WithNetworkProfile(profile NetworkProfile) NetworkOption {
+	return func(c *NetworkConfig) {
+		c.Profile = profile
+		switch profile {
+		case NetworkProfileSmallPrivate, NetworkProfileOfficeLAN:
+			direction := TunnelDirectionConfig{Hops: 1, Count: 2}
+			c.Exploratory = TunnelPoolConfig{Inbound: direction, Outbound: direction, RenewBefore: 180 * time.Second}
+			c.Participation = ParticipationContributor
+		}
+	}
+}
+
 // WithPublicParticipation sets the explicit participation level.
 func WithPublicParticipation(p PublicParticipation) NetworkOption {
 	return func(c *NetworkConfig) { c.Participation = p }
+}
+
+// WithPeerAdmission sets the transport peer admission policy callback.
+func WithPeerAdmission(fn PeerAdmissionFunc) NetworkOption {
+	return func(c *NetworkConfig) { c.AdmitPeer = fn }
+}
+
+// WithListenAddress sets the NTCP2 and SSU2 bind addresses for this network.
+func WithListenAddress(ntcp2Bind, ssu2Bind netip.AddrPort) NetworkOption {
+	return func(c *NetworkConfig) {
+		if ntcp2Bind.IsValid() {
+			c.NTCP2.Enabled = true
+			c.NTCP2.Bind = ntcp2Bind
+			c.NTCP2.MaxSessions = cmp.Or(c.NTCP2.MaxSessions, 256)
+			c.NTCP2.IdleTimeout = cmp.Or(c.NTCP2.IdleTimeout, 10*time.Minute)
+		}
+		if ssu2Bind.IsValid() {
+			c.SSU2.Enabled = true
+			c.SSU2.Bind = ssu2Bind
+			c.SSU2.MaxSessions = cmp.Or(c.SSU2.MaxSessions, 256)
+			c.SSU2.IdleTimeout = cmp.Or(c.SSU2.IdleTimeout, 10*time.Minute)
+		}
+	}
+}
+
+// WithAdvertisedAddress sets the NTCP2 and SSU2 advertised addresses for this network.
+func WithAdvertisedAddress(ntcp2Advertised, ssu2Advertised netip.AddrPort) NetworkOption {
+	return func(c *NetworkConfig) {
+		if ntcp2Advertised.IsValid() {
+			c.NTCP2.Advertised = ntcp2Advertised
+		}
+		if ssu2Advertised.IsValid() {
+			c.SSU2.Advertised = ssu2Advertised
+		}
+	}
 }
 
 // WithReseedURLs configures the standard reseed URLs.
@@ -202,6 +297,16 @@ func WithPriorityReseedURLs(urls []string) NetworkOption {
 	return func(c *NetworkConfig) { c.Bootstrap.PriorityReseedURLs = append([]string(nil), urls...) }
 }
 
+// WithTrustedReseedCerts appends PEM or DER X.509 certificates trusted for SU3
+// reseed verification in this network context.
+func WithTrustedReseedCerts(certs ...[]byte) NetworkOption {
+	return func(c *NetworkConfig) {
+		for _, cert := range certs {
+			c.Bootstrap.TrustedCerts = append(c.Bootstrap.TrustedCerts, append([]byte(nil), cert...))
+		}
+	}
+}
+
 // WithBootstrap sets the complete bootstrap configuration.
 func WithBootstrap(b BootstrapConfig) NetworkOption {
 	return func(c *NetworkConfig) { c.Bootstrap = b }
@@ -211,13 +316,48 @@ func WithBootstrap(b BootstrapConfig) NetworkOption {
 // RouterInfos representing the static membership of a dedicated network.
 func WithBootstrapRouterInfos(infos ...[]byte) NetworkOption {
 	return func(c *NetworkConfig) {
-		c.Bootstrap.RouterInfos = append(c.Bootstrap.RouterInfos, infos...)
+		for _, info := range infos {
+			c.Bootstrap.RouterInfos = append(c.Bootstrap.RouterInfos, append([]byte(nil), info...))
+		}
 	}
+}
+
+// WithPeerSeeds is a convenience alias for WithBootstrapRouterInfos.
+func WithPeerSeeds(infos ...[]byte) NetworkOption {
+	return WithBootstrapRouterInfos(infos...)
 }
 
 // WithExploratoryPool configures the exploratory tunnel pool for NetDB routing.
 func WithExploratoryPool(pool TunnelPoolConfig) NetworkOption {
 	return func(c *NetworkConfig) { c.Exploratory = pool }
+}
+
+// WithNetDBConfig overrides NetDB routing and admission parameters.
+func WithNetDBConfig(cfg NetDBConfig) NetworkOption {
+	return func(c *NetworkConfig) { c.NetDB = cfg }
+}
+
+// WithTunnelTiming overrides tunnel maintenance and health probe intervals.
+func WithTunnelTiming(maintenanceInterval, probeTimeout time.Duration, failureThreshold int) NetworkOption {
+	return func(c *NetworkConfig) {
+		c.TunnelPolicy.MaintenanceInterval = maintenanceInterval
+		c.TunnelPolicy.ProbeTimeout = probeTimeout
+		c.TunnelPolicy.ProbeFailureThreshold = failureThreshold
+	}
+}
+
+// WithIPRestriction configures tunnel hop IP diversity (0 disables restriction,
+// 1..4 enforces distinct IPv4 /8../32 and IPv6 /16../64 prefixes).
+func WithIPRestriction(mode int) NetworkOption {
+	return func(c *NetworkConfig) {
+		if mode == 0 {
+			c.TunnelPolicy.IPRestriction = 0
+			c.TunnelPolicy.DisableIPRestriction = true
+			return
+		}
+		c.TunnelPolicy.IPRestriction = mode
+		c.TunnelPolicy.DisableIPRestriction = false
+	}
 }
 
 // WithTransportNTCP2 configures the NTCP2 transport.
@@ -238,6 +378,7 @@ func DefaultI2PNetwork() NetworkConfig {
 	return NetworkConfig{
 		Name:          networkNativeName,
 		NetworkID:     NetworkIDPublicI2P,
+		Profile:       NetworkProfilePublic,
 		NTCP2:         defaults.NTCP2,
 		SSU2:          defaults.SSU2,
 		Bootstrap:     defaults.Bootstrap,
@@ -255,10 +396,59 @@ func NewNetwork(name string, netID uint32, opts ...NetworkOption) NetworkConfig 
 	cfg := NetworkConfig{
 		Name:          name,
 		NetworkID:     netID,
+		Profile:       NetworkProfilePublic,
 		NTCP2:         defaults.NTCP2,
 		SSU2:          defaults.SSU2,
 		Exploratory:   defaults.Exploratory,
 		Participation: ParticipationWarm,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg
+}
+
+// NewSmallPrivateNetwork builds a dedicated-network entry tuned for small
+// private meshes (2 to 20 nodes): 1-hop exploratory tunnels, floodfill and
+// transit participation enabled, relaxed NetDB readiness, and faster probe
+// recovery.
+func NewSmallPrivateNetwork(name string, netID uint32, opts ...NetworkOption) NetworkConfig {
+	defaults := DefaultRouterConfig()
+	direction := TunnelDirectionConfig{Hops: 1, Count: 2}
+	cfg := NetworkConfig{
+		Name:          name,
+		NetworkID:     netID,
+		Profile:       NetworkProfileSmallPrivate,
+		NTCP2:         defaults.NTCP2,
+		SSU2:          defaults.SSU2,
+		Exploratory:   TunnelPoolConfig{Inbound: direction, Outbound: direction, RenewBefore: 180 * time.Second},
+		Participation: ParticipationContributor,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg
+}
+
+// NewOfficeLANNetwork builds a dedicated-network entry tuned for office and
+// LAN meshes: subnet bucket quotas and hop IP restrictions disabled, 1-hop
+// exploratory tunnels, floodfill and transit participation enabled, and fast
+// LAN maintenance and health probes.
+func NewOfficeLANNetwork(name string, netID uint32, opts ...NetworkOption) NetworkConfig {
+	defaults := DefaultRouterConfig()
+	direction := TunnelDirectionConfig{Hops: 1, Count: 2}
+	cfg := NetworkConfig{
+		Name:          name,
+		NetworkID:     netID,
+		Profile:       NetworkProfileOfficeLAN,
+		NTCP2:         defaults.NTCP2,
+		SSU2:          defaults.SSU2,
+		Exploratory:   TunnelPoolConfig{Inbound: direction, Outbound: direction, RenewBefore: 180 * time.Second},
+		Participation: ParticipationContributor,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -287,7 +477,8 @@ func networkPlan(cfg RouterConfig) ([]NetworkConfig, string, error) {
 	if len(networks) == 0 {
 		networks = []NetworkConfig{{
 			Name: networkNativeName, NetworkID: cfg.NetworkID,
-			NTCP2: cfg.NTCP2, SSU2: cfg.SSU2, Bootstrap: cfg.Bootstrap,
+			Profile: NetworkProfilePublic,
+			NTCP2:   cfg.NTCP2, SSU2: cfg.SSU2, Bootstrap: cfg.Bootstrap,
 			Exploratory: cfg.Exploratory,
 		}}
 	} else if legacyNetworkSet(cfg) {
@@ -311,6 +502,11 @@ func networkPlan(cfg RouterConfig) ([]NetworkConfig, string, error) {
 			return nil, "", invalidConfig(field + ".NetworkID")
 		}
 		netIDs[networks[i].NetworkID] = struct{}{}
+		switch networks[i].Profile {
+		case "", NetworkProfilePublic, NetworkProfileSmallPrivate, NetworkProfileOfficeLAN:
+		default:
+			return nil, "", invalidConfig(field + ".Profile")
+		}
 		if !networks[i].NTCP2.Enabled && !networks[i].SSU2.Enabled {
 			return nil, "", invalidConfig(field + ".NTCP2.Enabled")
 		}
@@ -321,6 +517,12 @@ func networkPlan(cfg RouterConfig) ([]NetworkConfig, string, error) {
 			return nil, "", err
 		}
 		if err := validateTunnelPool(field+".Exploratory", networks[i].Exploratory); err != nil {
+			return nil, "", err
+		}
+		if err := validateNetDBConfig(field+".NetDB", networks[i].NetDB); err != nil {
+			return nil, "", err
+		}
+		if err := validateTunnelPolicyConfig(field+".TunnelPolicy", networks[i].TunnelPolicy); err != nil {
 			return nil, "", err
 		}
 		if networks[i].Participation > ParticipationContributor {
@@ -335,6 +537,57 @@ func networkPlan(cfg RouterConfig) ([]NetworkConfig, string, error) {
 		return nil, "", err
 	}
 	return networks, def, nil
+}
+
+func durationOutOfRange(value, minValue, maxValue time.Duration) bool {
+	if value == 0 {
+		return false
+	}
+	return value < minValue || value > maxValue
+}
+
+func validateNetDBConfig(field string, cfg NetDBConfig) error {
+	if cfg.BucketSubnetQuota < 0 || cfg.BucketSubnetQuota > 64 {
+		return invalidConfig(field + ".BucketSubnetQuota")
+	}
+	if cfg.DisableBucketSubnetQuota && cfg.BucketSubnetQuota != 0 {
+		return invalidConfig(field + ".BucketSubnetQuota")
+	}
+	if cfg.MinRouters < 0 || cfg.MinRouters > 1000 {
+		return invalidConfig(field + ".MinRouters")
+	}
+	if cfg.RouterInfoFloodfillK < 0 || cfg.RouterInfoFloodfillK > 16 {
+		return invalidConfig(field + ".RouterInfoFloodfillK")
+	}
+	if cfg.LeaseSetFloodfillK < 0 || cfg.LeaseSetFloodfillK > 16 {
+		return invalidConfig(field + ".LeaseSetFloodfillK")
+	}
+	if durationOutOfRange(cfg.ExplorationBootstrapDelay, 100*time.Millisecond, 10*time.Minute) {
+		return invalidConfig(field + ".ExplorationBootstrapDelay")
+	}
+	if durationOutOfRange(cfg.ExplorationSteadyDelay, time.Second, time.Hour) {
+		return invalidConfig(field + ".ExplorationSteadyDelay")
+	}
+	return nil
+}
+
+func validateTunnelPolicyConfig(field string, cfg TunnelPolicyConfig) error {
+	if cfg.IPRestriction < 0 || cfg.IPRestriction > 4 {
+		return invalidConfig(field + ".IPRestriction")
+	}
+	if cfg.DisableIPRestriction && cfg.IPRestriction != 0 {
+		return invalidConfig(field + ".IPRestriction")
+	}
+	if durationOutOfRange(cfg.MaintenanceInterval, 100*time.Millisecond, 10*time.Minute) {
+		return invalidConfig(field + ".MaintenanceInterval")
+	}
+	if durationOutOfRange(cfg.ProbeTimeout, 500*time.Millisecond, 2*time.Minute) {
+		return invalidConfig(field + ".ProbeTimeout")
+	}
+	if cfg.ProbeFailureThreshold < 0 || cfg.ProbeFailureThreshold > 16 {
+		return invalidConfig(field + ".ProbeFailureThreshold")
+	}
+	return nil
 }
 
 // validNetworkName accepts ASCII alphanumerics and underscore so a name never
@@ -364,7 +617,7 @@ func legacyNetworkSet(cfg RouterConfig) bool {
 // RouterInfos makes the struct incomparable so the check is explicit.
 func bootstrapEmpty(b BootstrapConfig) bool {
 	return len(b.ReseedURLs) == 0 && len(b.PriorityReseedURLs) == 0 && len(b.RouterInfos) == 0 &&
-		b.ReseedTimeout == 0 && b.PriorityReseedTimeout == 0
+		len(b.TrustedCerts) == 0 && b.ReseedTimeout == 0 && b.PriorityReseedTimeout == 0
 }
 
 // resolveDefaultNetwork determines which network handles generic "tcp", "udp",
@@ -402,6 +655,15 @@ func validateBootstrap(field string, b BootstrapConfig, netID uint32) error {
 	}
 	if len(b.PriorityReseedURLs) > 32 {
 		return invalidConfig(field + ".PriorityReseedURLs")
+	}
+	if len(b.TrustedCerts) > 16 {
+		return invalidConfig(field + ".TrustedCerts")
+	}
+	now := time.Now()
+	for i, cert := range b.TrustedCerts {
+		if _, _, err := controlplane.ReseedParseSU3SignerCertificate(cert, now); err != nil {
+			return invalidConfig(field + ".TrustedCerts[" + strconv.Itoa(i) + "]")
+		}
 	}
 	requiredQuery := "netid=" + strconv.FormatUint(uint64(netID), 10)
 	if err := validateReseedURLs(field+".ReseedURLs", b.ReseedURLs, requiredQuery); err != nil {
@@ -459,7 +721,8 @@ func networkSpecs(cfg RouterConfig) ([]node.NetworkSpec, string, error) {
 	specs := make([]node.NetworkSpec, 0, len(networks))
 	for i := range networks {
 		nc := networks[i]
-		operating := state.ConfigurationDefaultOperating()
+		profile := cmp.Or(nc.Profile, NetworkProfilePublic)
+		operating := state.ConfigurationDefaultOperatingForProfile(profile)
 		operating.DataDir, operating.StateDir, operating.StatePath, operating.KeyPath = "", "", "", ""
 		var options controlplane.ControllerOptions
 		if cfg.Persistence != nil {
@@ -495,7 +758,7 @@ func networkSpecs(cfg RouterConfig) ([]node.NetworkSpec, string, error) {
 			operating.State.LockRetryInterval = lockRetry
 			options.LockRetryInterval = lockRetry
 		}
-		operating.Network = state.ConfigurationNetwork{ID: nc.NetworkID}
+		operating.Network = state.ConfigurationNetwork{ID: nc.NetworkID, Profile: profile}
 		for _, transport := range []TransportConfig{nc.NTCP2, nc.SSU2} {
 			if transport.Enabled {
 				operating.Network.IPv4 = operating.Network.IPv4 || transport.Bind.Addr().Is4()
@@ -509,6 +772,7 @@ func networkSpecs(cfg RouterConfig) ([]node.NetworkSpec, string, error) {
 		operating.Reseed.Endpoints = append([]string(nil), nc.Bootstrap.ReseedURLs...)
 		operating.Reseed.Timeout = nc.Bootstrap.ReseedTimeout
 		operating.NetDB.BootstrapRouterInfoPaths = nil
+		applyNetworkConfigOverrides(&operating, nc)
 		operating.Control, operating.SOCKS5, operating.Metrics, operating.SAM = state.ConfigurationListener{}, state.ConfigurationListener{}, state.ConfigurationListener{}, state.ConfigurationListener{}
 		operating.HTTPProxy = state.ConfigurationHTTPProxy{}
 		operating.AddressBook = state.ConfigurationAddressBook{}
@@ -518,13 +782,66 @@ func networkSpecs(cfg RouterConfig) ([]node.NetworkSpec, string, error) {
 		operating.Router.Transit = participation >= ParticipationWarm
 		operating.Router.Floodfill = participation == ParticipationContributor
 		pool := nc.Exploratory
+		operating.Tunnel.Hops = pool.Inbound.Hops
+		operating.Tunnel.ExploratoryInboundTarget = pool.Inbound.Count
+		operating.Tunnel.ExploratoryOutboundTarget = pool.Outbound.Count
+		operating.Tunnel.RenewBefore = pool.RenewBefore
 		options.Embedded, options.Exploratory, options.Logger = true, &pool, cfg.Logger
 		options.PeerAdmission = nc.AdmitPeer
 		options.BootstrapRouterInfos = make([][]byte, len(nc.Bootstrap.RouterInfos))
 		for j, raw := range nc.Bootstrap.RouterInfos {
 			options.BootstrapRouterInfos[j] = append([]byte(nil), raw...)
 		}
+		if len(nc.Bootstrap.TrustedCerts) > 0 {
+			options.ReseedTrustedCerts = make([][]byte, len(nc.Bootstrap.TrustedCerts))
+			for j, raw := range nc.Bootstrap.TrustedCerts {
+				options.ReseedTrustedCerts[j] = append([]byte(nil), raw...)
+			}
+		}
 		specs = append(specs, node.NetworkSpec{Name: nc.Name, Operating: operating, Options: options})
 	}
 	return specs, def, nil
+}
+
+func applyNetworkConfigOverrides(operating *state.ConfigurationOperating, nc NetworkConfig) {
+	if nc.NetDB.DisableBucketSubnetQuota {
+		operating.NetDB.BucketSubnetQuota = 0
+		operating.NetDB.DisableBucketSubnetQuota = true
+		operating.Reseed.DisableBucketSubnetQuota = true
+	} else if nc.NetDB.BucketSubnetQuota > 0 {
+		operating.NetDB.BucketSubnetQuota = nc.NetDB.BucketSubnetQuota
+		operating.NetDB.DisableBucketSubnetQuota = false
+		operating.Reseed.DisableBucketSubnetQuota = false
+	}
+	if nc.NetDB.MinRouters > 0 {
+		operating.NetDB.MinRouters = nc.NetDB.MinRouters
+	}
+	if nc.NetDB.RouterInfoFloodfillK > 0 {
+		operating.NetDB.RouterInfoFloodfillK = nc.NetDB.RouterInfoFloodfillK
+	}
+	if nc.NetDB.LeaseSetFloodfillK > 0 {
+		operating.NetDB.LeaseSetFloodfillK = nc.NetDB.LeaseSetFloodfillK
+	}
+	if nc.NetDB.ExplorationBootstrapDelay > 0 {
+		operating.NetDB.ExplorationBootstrapDelay = nc.NetDB.ExplorationBootstrapDelay
+	}
+	if nc.NetDB.ExplorationSteadyDelay > 0 {
+		operating.NetDB.ExplorationSteadyDelay = nc.NetDB.ExplorationSteadyDelay
+	}
+	if nc.TunnelPolicy.DisableIPRestriction {
+		operating.Tunnel.IPRestriction = 0
+		operating.Tunnel.DisableIPRestriction = true
+	} else if nc.TunnelPolicy.IPRestriction > 0 {
+		operating.Tunnel.IPRestriction = nc.TunnelPolicy.IPRestriction
+		operating.Tunnel.DisableIPRestriction = false
+	}
+	if nc.TunnelPolicy.MaintenanceInterval > 0 {
+		operating.Tunnel.MaintenanceInterval = nc.TunnelPolicy.MaintenanceInterval
+	}
+	if nc.TunnelPolicy.ProbeTimeout > 0 {
+		operating.Tunnel.ProbeTimeout = nc.TunnelPolicy.ProbeTimeout
+	}
+	if nc.TunnelPolicy.ProbeFailureThreshold > 0 {
+		operating.Tunnel.ProbeFailureThreshold = nc.TunnelPolicy.ProbeFailureThreshold
+	}
 }

@@ -33,7 +33,7 @@ Controller
  └── destinations: map[string]*destinationRuntime (Isolated per-destination control/data runtimes)
 ```
 
-- **Readiness & Peer Telemetry (`management_types.go`, `controller.go`)**: `UnmetReadinessConditions(readiness ReadinessDetails)` evaluates the 8 ordered data-plane readiness requirements (`netdb_routers >= 50`, `router_info_publication`, `lease_set2_publication`, exploratory/client tunnel pools, and `floodfill_advertisement`) as the single source of truth shared by `dataPlaneReady` and the WebUI status API. `Controller.PeerProfileSnapshots(peers)` exports rolling tunnel build outcome and latency profiles per peer hash.
+- **Readiness & Peer Telemetry (`management_types.go`, `controller.go`)**: `UnmetReadinessConditions(readiness ReadinessDetails)` evaluates the 8 ordered data-plane readiness requirements (`netdb_routers >= MinNetDBRouters`, default `50` on public I2P and `1..2` on private/LAN profiles, `router_info_publication`, `lease_set2_publication`, exploratory/client tunnel pools, and `floodfill_advertisement`) as the single source of truth shared by `dataPlaneReady` and the WebUI status API. `Controller.PeerProfileSnapshots(peers)` exports rolling tunnel build outcome and latency profiles per peer hash.
 
 ### 1.2 Isolated Client Destination Runtime (`destination_runtime.go`, `client_destination.go`)
 
@@ -97,13 +97,13 @@ When a local outbound tunnel endpoint (OBEP) is asked to forward a message to a 
 | File | Primary Types | Responsibility |
 | :--- | :--- | :--- |
 | `kbucket.go` | `kBucketSet`, `kBucket` | Kademlia $b=4$ routing tree over ranges `[0, 2047]`; splits through bucket 0 and rejects overflow via Java `RejectTrimmer` semantics |
-| `dht.go` | `Table`, `RoutingKey`, `routerSelectionBuffer` | Split `routers` map, incremental `floodfills` index (`Counts`), and `kBucketSet`; per-bucket `/16` IPv4 and `/48` IPv6 routing subnet quota (`DefaultBucketSubnetQuota = 2`); UTC daily routing key (`SHA256(key \|\| YYYYMMDD)`); CPU-pooled zero-allocation XOR partial sort |
+| `dht.go` | `Table`, `RoutingKey`, `routerSelectionBuffer` | Split `routers` map, incremental `floodfills` index (`Counts`), and `kBucketSet`; per-bucket `/16` IPv4 and `/48` IPv6 routing subnet quota (`DefaultBucketSubnetQuota = 2`, configurable via `SetBucketSubnetQuota`); UTC daily routing key (`SHA256(key \|\| YYYYMMDD)`); CPU-pooled zero-allocation XOR partial sort |
 | `database.go`, `store.go` | `Database`, `leaseEntry` | Pooled gzip inflation (`<= 4096 B`), version monotonicity, min-heap `leaseExpiries` eviction (`maxLeases = 4096`), and `published` flag isolation |
 | `local_router.go`, `local_ls2.go` | `LocalRouterInfo`, `LocalLeaseSet2` | Signs and caches local `RouterInfo` and multi-key `LeaseSet2` (capping lease `EndDate` at `Offline.Expires` when offline-signed) |
 | `local_encrypted_ls2.go`, `encrypted_resolution.go` | `LocalEncryptedLeaseSet`, `DecryptEncryptedLeaseSet` | Daily `Red25519` key blinding, two-layer ChaCha20 encryption (`ELS2_L1K`, `ELS2_L2K`), and per-client DH (`ELS2_XCA`) / PSK (`ELS2PSKA`) authorization |
-| `requests.go`, `explorer.go` | `RequestManager`, `lookupCandidate`, `Explorer` | Coalesced iterative Kademlia lookups (`20s` budget, `3s` step) over contiguous `[]lookupCandidate` state and 256-bucket deficit exploration |
+| `requests.go`, `explorer.go` | `RequestManager`, `lookupCandidate`, `Explorer` | Coalesced iterative Kademlia lookups (`20s` budget, `3s` step) over contiguous `[]lookupCandidate` state and 256-bucket deficit exploration (`BootstrapDelay` and `SteadyDelay`) |
 | `lookup_responder.go`, `store_flooder.go` | `LookupResponder`, `StoreFlooder` | Bounded 64-slot floodfill query responder (with coalesced enqueue copies and pooled `searchReply` referral generation) and 3-target `DatabaseStore` flooder with UTC midnight rollover |
-| `confirmation.go`, `publication.go`, `router_publication.go` | `PublicationTokenRegistry`, `LeaseSetPublisher`, `RouterInfoPublisher` | 31-bit `DeliveryStatus` token correlation and multi-wave floodfill publication (`K=4` for LeaseSets, `K=5` for RouterInfo) |
+| `confirmation.go`, `publication.go`, `router_publication.go` | `PublicationTokenRegistry`, `LeaseSetPublisher`, `RouterInfoPublisher` | 31-bit `DeliveryStatus` token correlation, per-generation `confirmedTargets` retry deduplication, and multi-wave floodfill publication (default `K=4` for LeaseSets, `K=5` for RouterInfo) |
 | `persistence.go`, `responder_persistence.go` | `RouterInfoStore`, `ResponderProfileStore` | Atomic `0600` disk snapshots (`netdb.routers` magic `"IVNPNDB\x00"`, `netdb.responders` magic `"IVNPRSP\x00"`) with SHA-256 digests |
 
 ---
@@ -114,9 +114,9 @@ When a local outbound tunnel endpoint (OBEP) is asked to forward a message to a 
 | :--- | :--- | :--- |
 | `build_record.go` | `ShortBuildRequest`, `ShortBuildKeys`, `TransformShortBuildRecord` | 218-byte ECIES `ShortTunnelBuild` (`Noise_N_25519_ChaChaPoly_SHA256`) record sealing/opening and ChaCha20 slot layering |
 | `legacy_build.go`, `legacy_build_manager.go` | `VariableBuildRecord`, `LegacyBuildManager` | 528-byte `VariableTunnelBuild` supporting ElGamal-2048 and long ECIES-X25519 records with AES-256-CBC slot layering |
-| `build_manager.go` | `BuildManager`, `pendingBuild` | Manages outbound and inbound STBM flights, inbound fake-record SHA-256 tamper verification, `5s` request timeouts, and the `60s` `recent` grace window |
+| `build_manager.go` | `BuildManager`, `pendingBuild` | Manages outbound and inbound STBM flights, `AllowCoalescedReply` + `inboundLocalDelivery` for 2-node same-gateway replies, inbound fake-record SHA-256 tamper verification, `5s` request timeouts, and the `60s` `recent` grace window |
 | `creator_budget.go`, `creator_claim.go`, `stats.go` | `CreatorBudget`, `creatorClaim`, `BuildStatistics` | Bounds concurrent pending builds across pools and scales parallelism inversely with Bayesian build success rate (`3/10` prior, decay at `256` samples) |
-| `profile.go`, `netdb_source.go` | `PeerProfiles`, `NetDBHopSource` | Rolling 32-sample peer scoring, SipHash-2-4 sub-tier hop ordering, and 3-pass `/16` + `family` diversity selection |
+| `profile.go`, `netdb_source.go` | `PeerProfiles`, `NetDBHopSource` | Rolling 32-sample peer scoring, SipHash-2-4 sub-tier hop ordering, configurable `IPRestriction` (`0..4`), and 3-pass diversity selection with small-mesh fallbacks |
 | `pool.go`, `rotation.go`, `paired_maintenance.go`, `health.go` | `Pool`, `PairedPoolMaintainer`, `Health` | Sticky active outbound set, 4-phase bootstrap ordering (Bootstrap Inbound -> Outbound -> Paired Inbound -> Backups), and bit-31 `DeliveryStatus` liveness probing |
 
 ---
@@ -124,8 +124,8 @@ When a local outbound tunnel endpoint (OBEP) is asked to forward a message to a 
 ## 5. Reseed & NAT Discovery (`controlplane/internal/reseed`, `controlplane/internal/nat`)
 
 - **`controlplane/internal/reseed/`**:
-  - `su3.go` & `certificates.go`: Verifies 40-byte `I2Psu3\x00` headers and raw PKCS#1 v1.5 RSA-4096 SHA-512 signatures against 18 embedded X.509 certificates (`certs/*.crt`).
-  - `reseed.go`: Executes parallel fetches (prioritizing `*.hotseed.gosuda.org`), retains `best` and `fallback` candidates per hash in `dedupSlot`, orders each local K-bucket via Max-Min XOR farthest-point sampling (`fpsOrderBucket`), enforces `/16` and `/48` per-bucket subnet quotas, and returns 16 floodfill anchors for active transport probing.
+  - `su3.go` & `certificates.go`: Verifies 40-byte `I2Psu3\x00` headers and raw PKCS#1 v1.5 RSA-4096 SHA-512 signatures against 18 embedded X.509 certificates (`certs/*.crt`) and any custom PEM/DER certificates merged via `MergeSU3Signers`.
+  - `reseed.go`: Executes parallel fetches (prioritizing `*.hotseed.gosuda.org`), retains `best` and `fallback` candidates per hash in `dedupSlot`, orders each local K-bucket via Max-Min XOR farthest-point sampling (`fpsOrderBucket`), enforces `/16` and `/48` per-bucket subnet quotas (unless `DisableBucketSubnetQuota` is set), and returns 16 floodfill anchors for active transport probing.
 - **`controlplane/internal/nat/`**:
   - `natpmp/natpmp.go`: Mutex-serialized UDP client (`port 5351`) for public IP discovery and TCP/UDP port mapping with exponential retry (`250ms` to `64s`).
   - `upnp/ssdp.go`, `description.go`, `soap.go`: Strict SSDP `M-SEARCH` parser, XML `WANIPConnection`/`WANPPPConnection` service locator, and SOAP `AddPortMapping` / `DeletePortMapping` / `GetExternalIPAddress` client.
