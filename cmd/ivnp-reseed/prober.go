@@ -8,10 +8,17 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gosuda.org/ivnp/foundation"
 )
+
+const maxProbesPerPass = 256
+
+func isPassiveUDPOnly(rec PeerRecord) bool {
+	return len(rec.TCPPorts) == 0 && len(rec.UDPPorts) > 0
+}
 
 // DialFunc abstracts network reachability probes for testing.
 type DialFunc func(ctx context.Context, network, address string) (time.Duration, error)
@@ -98,8 +105,14 @@ func (p *Prober) SetDialer(d DialFunc) {
 	p.probeDialer = d
 }
 
-// ProbeAll runs a rate-limited probing pass against peers eligible for probing.
+// ProbeAll runs a rate-limited probing pass against all peers eligible for probing.
 func (p *Prober) ProbeAll(ctx context.Context) int {
+	return p.ProbeBatch(ctx, 0)
+}
+
+// ProbeBatch runs a rate-limited probing pass against up to limit eligible peers
+// (or all eligible peers when limit <= 0).
+func (p *Prober) ProbeBatch(ctx context.Context, limit int) int {
 	peers := p.store.Snapshot()
 	if len(peers) == 0 {
 		return 0
@@ -155,6 +168,9 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 		}
 		return a.Stats.LastProbed.Compare(b.Stats.LastProbed)
 	})
+	if limit > 0 && len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
 
 	jobs := make(chan PeerRecord, len(candidates))
 	for _, rec := range candidates {
@@ -164,7 +180,7 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 
 	var wg sync.WaitGroup
 	workers := min(p.workers, len(candidates))
-	var successCount sync.Map
+	var successCount atomic.Int64
 
 	for range workers {
 		wg.Add(1)
@@ -174,28 +190,27 @@ func (p *Prober) ProbeAll(ctx context.Context) int {
 				if ctx.Err() != nil {
 					return
 				}
-				// Rate limit: pause if token rate exceeded
-				if p.limiter != nil {
+				passiveUDP := isPassiveUDPOnly(rec)
+				if !passiveUDP && p.limiter != nil {
 					if err := p.limiter.Wait(ctx); err != nil {
 						return
 					}
 				}
 				success, rtt := p.probePeer(ctx, rec)
-				p.store.RecordProbeResult(rec.Hash, success, rtt)
+				if passiveUDP {
+					p.store.RecordPassiveProbeResult(rec.Hash, success, rtt)
+				} else {
+					p.store.RecordProbeResult(rec.Hash, success, rtt)
+				}
 				if success {
-					successCount.Store(rec.Hash, struct{}{})
+					successCount.Add(1)
 				}
 			}
 		}()
 	}
 
 	wg.Wait()
-	totalSuccess := 0
-	successCount.Range(func(_, _ any) bool {
-		totalSuccess++
-		return true
-	})
-	return totalSuccess
+	return int(successCount.Load())
 }
 
 func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Duration) {
@@ -257,7 +272,11 @@ func (p *Prober) ProbeSingle(ctx context.Context, hash foundation.Hash) (bool, t
 	for _, rec := range peers {
 		if rec.Hash == hash {
 			success, rtt := p.probePeer(ctx, rec)
-			p.store.RecordProbeResult(hash, success, rtt)
+			if isPassiveUDPOnly(rec) {
+				p.store.RecordPassiveProbeResult(hash, success, rtt)
+			} else {
+				p.store.RecordProbeResult(hash, success, rtt)
+			}
 			return success, rtt
 		}
 	}

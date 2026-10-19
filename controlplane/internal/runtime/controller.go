@@ -57,6 +57,7 @@ const (
 	daemonTunnelBuildCandidates               = 512
 	daemonNetDBExplorationBootstrapDelay      = time.Second
 	daemonNetDBExplorationSteadyDelay         = 5 * time.Second
+	daemonNetDBSaveIntervalMillis             = uint64((30 * time.Second) / time.Millisecond)
 	daemonMaxDestinations                     = 256
 )
 
@@ -108,12 +109,14 @@ type NATRuntime interface {
 
 // ControllerOptions supplies the core router's host-owned dependencies.
 type ControllerOptions struct {
-	Embedded             bool
-	TaintedCopy          bool
-	PromoteToMaster      *bool
-	LockRetryInterval    time.Duration
-	BootstrapRouterInfos [][]byte
-	Exploratory          *destination.TunnelPoolConfig
+	Embedded                  bool
+	DisableClientDestinations bool
+	RouterLimit               int
+	TaintedCopy               bool
+	PromoteToMaster           *bool
+	LockRetryInterval         time.Duration
+	BootstrapRouterInfos      [][]byte
+	Exploratory               *destination.TunnelPoolConfig
 	// SocketRuntime provides low-level network socket creation.
 	SocketRuntime dataplane.RouterSocketRuntime
 	// Transport overrides the default NTCP2/SSU2 transport manager.
@@ -352,41 +355,44 @@ type Controller struct {
 	clock             dataplane.RouterClock
 	admitPeer         dataplane.RouterPeerAdmissionFunc
 
-	service                *dataplane.RouterService
-	tunnels                *dataplane.TunnelRuntime
-	pool                   *tunnel.Pool
-	profiles               *tunnel.PeerProfiles
-	tunnelHealth           *tunnel.Health
-	replyKeys              *dataplane.GarlicReplyKeyRegistry
-	buildManager           *tunnel.BuildManager
-	maintainer             *tunnel.PairedPoolMaintainer
-	requests               *netdb.RequestManager
-	destinations           *dataplane.RouterDestinationManager
-	garlicSessions         []*dataplane.GarlicSessionManager
-	garlicReceiver         *dataplane.RouterGarlicReceiver
-	statusMux              *router.DeliveryStatusMux
-	publication            *router.PublicationMaintenance
-	destinationFactory     *destinationRuntimeFactory
-	releaseRouterInfoSeeds func()
-	closeNativeTransports  func() error
-	maintenanceWG          sync.WaitGroup
-	buildReplies           *destinationBuildReplyRegistry
-	requestHandlers        *destinationRequestRegistry
-	destinationPublishers  *destinationPublisherRegistry
-	clientRuntimes         []*destinationRuntime
-	clientRuntimesMu       sync.RWMutex
-	destinationMu          sync.Mutex
-	maintenanceDone        chan struct{}
-	explorationDone        chan struct{}
-	publicationWake        chan struct{}
-	destinationWake        chan *destinationRuntime
-	destinationTunnelWake  chan *destinationRuntime
-	destinationPublishWake chan *destinationRuntime
-	bootstrapPoolsStarted  atomic.Bool
-	publishDebounce        time.Duration
-	tunnelWake             chan struct{}
-	netdbSaveWake          chan struct{}
-	startReady             chan struct{}
+	service                   *dataplane.RouterService
+	tunnels                   *dataplane.TunnelRuntime
+	pool                      *tunnel.Pool
+	profiles                  *tunnel.PeerProfiles
+	tunnelHealth              *tunnel.Health
+	replyKeys                 *dataplane.GarlicReplyKeyRegistry
+	buildManager              *tunnel.BuildManager
+	maintainer                *tunnel.PairedPoolMaintainer
+	requests                  *netdb.RequestManager
+	destinations              *dataplane.RouterDestinationManager
+	garlicSessions            []*dataplane.GarlicSessionManager
+	garlicReceiver            *dataplane.RouterGarlicReceiver
+	statusMux                 *router.DeliveryStatusMux
+	publication               *router.PublicationMaintenance
+	destinationFactory        *destinationRuntimeFactory
+	releaseRouterInfoSeeds    func()
+	closeNativeTransports     func() error
+	maintenanceWG             sync.WaitGroup
+	buildReplies              *destinationBuildReplyRegistry
+	requestHandlers           *destinationRequestRegistry
+	destinationPublishers     *destinationPublisherRegistry
+	clientRuntimes            []*destinationRuntime
+	clientRuntimesMu          sync.RWMutex
+	destinationMu             sync.Mutex
+	maintenanceDone           chan struct{}
+	explorationDone           chan struct{}
+	publicationWake           chan struct{}
+	destinationWake           chan *destinationRuntime
+	destinationTunnelWake     chan *destinationRuntime
+	destinationPublishWake    chan *destinationRuntime
+	bootstrapPoolsStarted     atomic.Bool
+	publishDebounce           time.Duration
+	tunnelWake                chan struct{}
+	netdbSaveWake             chan struct{}
+	lastNetDBSaveMillis       atomic.Uint64
+	startReady                chan struct{}
+	embedded                  bool
+	disableClientDestinations bool
 
 	mu           sync.Mutex
 	started      bool
@@ -610,10 +616,10 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	if options.Embedded && (hasIdentities || hasPolicies) {
 		return nil, fmt.Errorf("%w: named application state requires the daemon", ErrStateConflict)
 	}
-	if cfg.Tunnel.Enabled && len(bundle.Destinations)+len(bundle.DestinationPrivate) > cfg.State.MaxDestinations {
+	if cfg.Tunnel.Enabled && !options.DisableClientDestinations && len(bundle.Destinations)+len(bundle.DestinationPrivate) > cfg.State.MaxDestinations {
 		return nil, ErrTooManyDestinations
 	}
-	if cfg.Tunnel.Enabled && !options.Embedded {
+	if cfg.Tunnel.Enabled && !options.Embedded && !options.DisableClientDestinations {
 		if bundle.DestinationPrivate == nil {
 			bundle.DestinationPrivate = make(map[string][]byte)
 		}
@@ -692,7 +698,9 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 	}
 	database := netdb.NewDatabaseForNetwork(bundle.Router.Hash, cfg.NetDB.BucketCapacity, cfg.Network.ID)
-	if options.Embedded {
+	if options.RouterLimit > 0 {
+		database.Routers().SetRouterLimit(options.RouterLimit)
+	} else if options.Embedded {
 		database.Routers().SetRouterLimit(netdb.BucketCount * cfg.NetDB.BucketCapacity)
 	}
 	database.SetMetrics(registry)
@@ -1010,8 +1018,9 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 		inboundSource, sourceErr := tunnel.NewNetDBInboundBuildSource(tunnel.NetDBInboundBuildSourceConfig{
 			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: exploratory.Inbound.Hops,
-			Lifetime:  uint64(cfg.Tunnel.Lifetime / time.Millisecond),
-			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
+			Lifetime:       uint64(cfg.Tunnel.Lifetime / time.Millisecond),
+			CandidateLimit: daemonTunnelBuildCandidates,
+			CircuitID:      randomNonZeroID, TunnelID: randomNonZeroID,
 			Eligible: eligible, Connected: connected, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
 		})
 		if sourceErr != nil {
@@ -1019,8 +1028,9 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 		outboundSource, sourceErr := tunnel.NewNetDBOutboundBuildSource(tunnel.NetDBOutboundBuildSourceConfig{
 			Table: database.Routers(), Profiles: profiles, LocalRouter: bundle.Router.Hash, Hops: exploratory.Outbound.Hops,
-			Lifetime:  uint64(cfg.Tunnel.Lifetime / time.Millisecond),
-			CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
+			Lifetime:       uint64(cfg.Tunnel.Lifetime / time.Millisecond),
+			CandidateLimit: daemonTunnelBuildCandidates,
+			CircuitID:      randomNonZeroID, TunnelID: randomNonZeroID,
 			Eligible: eligible, Connected: connected, Exploratory: true, AllowUnknownTransports: allowUnknownTransports,
 		})
 		if sourceErr != nil {
@@ -1056,7 +1066,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		}
 		explorer, err = netdb.NewExplorer(netdb.ExplorerConfig{
 			Table: database.Routers(), Requests: requests, Now: now,
-			Aggressive: func() bool { return registry.Snapshot().Bootstrap.Stage < 3 },
+			Aggressive: func() bool { return registry.BootstrapStage() < 3 },
 		})
 		if err != nil {
 			return nil, err
@@ -1096,20 +1106,22 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 				return d.router.WaitControl(ctx)
 			},
 		}
-		for name, encoded := range bundle.DestinationPrivate {
-			destination, importErr := foundation.ImportLocalDestination(encoded)
-			if importErr != nil {
-				return nil, importErr
+		if !options.DisableClientDestinations {
+			for name, encoded := range bundle.DestinationPrivate {
+				destination, importErr := foundation.ImportLocalDestination(encoded)
+				if importErr != nil {
+					return nil, importErr
+				}
+				var policy *state.SecureStateEncryptedLeaseSetPolicy
+				if encrypted, ok := bundle.EncryptedLeaseSetPolicies[name]; ok {
+					policy = &encrypted
+				}
+				clientRuntime, createErr := destinationFactory.create(name, destination, policy, bundle.DestinationAddressPolicies[name], nil, nil)
+				if createErr != nil {
+					return nil, createErr
+				}
+				clientRuntimes = append(clientRuntimes, clientRuntime)
 			}
-			var policy *state.SecureStateEncryptedLeaseSetPolicy
-			if encrypted, ok := bundle.EncryptedLeaseSetPolicies[name]; ok {
-				policy = &encrypted
-			}
-			clientRuntime, createErr := destinationFactory.create(name, destination, policy, bundle.DestinationAddressPolicies[name], nil, nil)
-			if createErr != nil {
-				return nil, createErr
-			}
-			clientRuntimes = append(clientRuntimes, clientRuntime)
 		}
 	}
 	if cfg.Router.Floodfill {
@@ -1177,13 +1189,15 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		return nil, err
 	}
 	d = &Controller{
-		taintedDir:        taintedDir,
-		masterStatePath:   masterStatePath,
-		masterKeyPath:     masterKeyPath,
-		masterNetdbDir:    masterNetdbDir,
-		promoteToMaster:   promoteToMaster,
-		lockRetryInterval: lockRetryInterval,
-		config:            cfg, store: store, stateLock: stateLock, bundle: bundle, database: database, netdbStore: netdbStore, explorer: explorer, localInfo: localInfo, router: runtime, registry: registry, logger: logger, clock: clock,
+		taintedDir:                taintedDir,
+		masterStatePath:           masterStatePath,
+		masterKeyPath:             masterKeyPath,
+		masterNetdbDir:            masterNetdbDir,
+		promoteToMaster:           promoteToMaster,
+		lockRetryInterval:         lockRetryInterval,
+		embedded:                  options.Embedded,
+		disableClientDestinations: options.DisableClientDestinations,
+		config:                    cfg, store: store, stateLock: stateLock, bundle: bundle, database: database, netdbStore: netdbStore, explorer: explorer, localInfo: localInfo, router: runtime, registry: registry, logger: logger, clock: clock,
 		service: service, tunnels: tunnels, pool: pool, profiles: profiles, tunnelHealth: health, replyKeys: replyKeys, buildManager: buildManager, maintainer: maintainer, requests: requests, destinations: destinations, garlicSessions: garlicSessions, garlicReceiver: garlicReceiver, statusMux: statusMux, publication: publication,
 		destinationFactory: destinationFactory, buildReplies: buildReplies, requestHandlers: requestHandlers, destinationPublishers: destinationPublishers, clientRuntimes: clientRuntimes,
 		responderStore:         responderStore,
@@ -1487,7 +1501,7 @@ func (d *Controller) explorationLoop() {
 		}
 		d.recordMaintenanceError(d.explorer.Maintain(d.ctx))
 		delay := daemonNetDBExplorationSteadyDelay
-		if d.registry.Snapshot().Bootstrap.Stage < 3 {
+		if d.registry.BootstrapStage() < 3 {
 			delay = daemonNetDBExplorationBootstrapDelay
 		}
 		timer := time.NewTimer(delay)
@@ -1580,9 +1594,14 @@ func (d *Controller) maintainOnce(now uint64) {
 	default:
 	}
 	if d.netdbStore != nil || d.responderStore != nil {
-		select {
-		case d.netdbSaveWake <- struct{}{}:
-		default:
+		lastSave := d.lastNetDBSaveMillis.Load()
+		if lastSave == 0 || now >= lastSave+daemonNetDBSaveIntervalMillis {
+			if d.lastNetDBSaveMillis.CompareAndSwap(lastSave, now) {
+				select {
+				case d.netdbSaveWake <- struct{}{}:
+				default:
+				}
+			}
 		}
 	}
 }
@@ -1720,30 +1739,26 @@ func (d *Controller) refreshObservability() {
 	if d == nil || d.registry == nil {
 		return
 	}
-	_, routerRefs := d.database.Routers().Snapshot()
-	routers := uint64(len(routerRefs))
-	floodfills := uint64(0)
-	for _, router := range routerRefs {
-		if router.Floodfill {
-			floodfills++
-		}
-	}
+	routersCount, floodfillsCount := d.database.Routers().Counts()
+	routers := uint64(routersCount)
+	floodfills := uint64(floodfillsCount)
 	d.registry.SetNetDBRouters(routers)
 	d.registry.SetNetDBFloodfills(floodfills)
-	if d.registry.Snapshot().Bootstrap.Stage < 3 && routers >= 50 && d.bootstrapPoolsStarted.CompareAndSwap(bootstrapPoolsIdle, bootstrapPoolsStarted) {
+	if d.registry.BootstrapStage() < 3 && routers >= 50 && d.bootstrapPoolsStarted.CompareAndSwap(bootstrapPoolsIdle, bootstrapPoolsStarted) {
 		d.requestAllTunnelMaintenance()
 	}
+	var routerReachable uint64
 	if d.localInfo.Reachability() == router.ReachabilityReachable {
-		d.registry.SetRouterReachable(1)
-	} else {
-		d.registry.SetRouterReachable(0)
+		routerReachable = 1
 	}
+	d.registry.SetRouterReachable(routerReachable)
+	var exploratoryInbound, exploratoryOutbound, clientInbound, clientOutbound uint64
+	clientRuntimes := d.clientRuntimeSnapshot()
 	if d.pool != nil {
 		now := uint64(d.clock.Now().UnixMilli())
-		exploratoryInbound := uint64(d.pool.Count(tunnel.Inbound, now))
-		exploratoryOutbound := uint64(d.pool.Count(tunnel.Outbound, now))
-		var clientInbound, clientOutbound uint64
-		for _, runtime := range d.clientRuntimeSnapshot() {
+		exploratoryInbound = uint64(d.pool.Count(tunnel.Inbound, now))
+		exploratoryOutbound = uint64(d.pool.Count(tunnel.Outbound, now))
+		for _, runtime := range clientRuntimes {
 			if runtime == nil || runtime.released.Load() || runtime.pool == nil {
 				continue
 			}
@@ -1756,16 +1771,24 @@ func (d *Controller) refreshObservability() {
 		d.registry.SetTunnelClientOutboundActive(clientOutbound)
 		d.registry.SetTunnelActive(exploratoryInbound + exploratoryOutbound + clientInbound + clientOutbound)
 	}
-	snapshot := d.registry.Snapshot()
-	stage := snapshot.Bootstrap.Stage
+	stage := d.registry.BootstrapStage()
+	routerInfoPublications := d.registry.PublicationRouterInfoSuccesses()
+	leaseSet2Publications := d.registry.PublicationLeaseSet2Successes()
+	readinessClientInbound := clientInbound
+	readinessClientOutbound := clientOutbound
+	if (d.embedded || d.disableClientDestinations) && len(clientRuntimes) == 0 {
+		leaseSet2Publications = max(1, leaseSet2Publications)
+		readinessClientInbound = max(1, readinessClientInbound)
+		readinessClientOutbound = max(1, readinessClientOutbound)
+	}
 	operational := dataPlaneReady(ReadinessDetails{
-		NetDBRouters:               snapshot.NetDB.Routers,
-		RouterInfoPublications:     snapshot.Publication.RouterInfoSuccesses,
-		LeaseSet2Publications:      snapshot.Publication.LeaseSet2Successes,
-		ExploratoryInboundTunnels:  snapshot.Tunnel.ExploratoryInboundActive,
-		ExploratoryOutboundTunnels: snapshot.Tunnel.ExploratoryOutboundActive,
-		ClientInboundTunnels:       snapshot.Tunnel.ClientInboundActive,
-		ClientOutboundTunnels:      snapshot.Tunnel.ClientOutboundActive,
+		NetDBRouters:               routers,
+		RouterInfoPublications:     routerInfoPublications,
+		LeaseSet2Publications:      leaseSet2Publications,
+		ExploratoryInboundTunnels:  exploratoryInbound,
+		ExploratoryOutboundTunnels: exploratoryOutbound,
+		ClientInboundTunnels:       readinessClientInbound,
+		ClientOutboundTunnels:      readinessClientOutbound,
 		FloodfillConfigured:        d.config.Router.Floodfill,
 		FloodfillAdvertised:        foundation.NetworkDatabaseIsFloodfill(d.localInfo.Snapshot()),
 		TransitConfigured:          d.config.Router.Transit,
@@ -1773,7 +1796,7 @@ func (d *Controller) refreshObservability() {
 	if stage < 3 && operational {
 		stage = 3
 	}
-	if stage == 3 && operational && snapshot.Bootstrap.RouterReachable != 0 {
+	if stage == 3 && operational && routerReachable != 0 {
 		stage = 4
 	}
 	d.registry.SetBootstrapStage(stage)
@@ -2098,6 +2121,23 @@ func (d *Controller) NetDBRoutersSnapshot() []netdb.RouterRef {
 	}
 	_, routers := d.database.Routers().Snapshot()
 	return routers
+}
+
+// NetDBGeneration returns the monotonic generation of the router table.
+func (d *Controller) NetDBGeneration() uint64 {
+	if d == nil || d.database == nil {
+		return 0
+	}
+	return d.database.Routers().Generation()
+}
+
+// NetDBVisitRouters calls fn for each RouterRef in the router table without
+// allocating a snapshot slice. Iteration stops early when fn returns false.
+func (d *Controller) NetDBVisitRouters(fn func(netdb.RouterRef) bool) {
+	if d == nil || d.database == nil || fn == nil {
+		return
+	}
+	d.database.Routers().Visit(fn)
 }
 
 // PeerProfileSnapshots returns the recorded tunnel outcome profile for each

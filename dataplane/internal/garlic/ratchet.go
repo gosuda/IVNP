@@ -2,6 +2,7 @@ package garlic
 
 import (
 	"encoding/binary"
+	"errors"
 	"sync"
 
 	dataplanegarlicecies "gosuda.org/ivnp/dataplane/internal/garlic/ecies"
@@ -144,20 +145,37 @@ func NewRatchetManager(local *foundation.LocalDestination, config RatchetConfig)
 	return manager, nil
 }
 
+func (m *RatchetManager) naturalShardIndex(peer foundation.Hash) int {
+	return int(binary.LittleEndian.Uint64(peer[:8]) % uint64(len(m.shards)))
+}
+
 func (m *RatchetManager) locatePeerLocked(peer foundation.Hash) (int, bool) {
+	primary := m.naturalShardIndex(peer)
+	if m.shards[primary].HasPeer(peer) {
+		return primary, true
+	}
 	for index, shard := range m.shards {
-		if shard.HasPeer(peer) {
+		if index != primary && shard.HasPeer(peer) {
 			return index, true
 		}
 	}
 	return 0, false
 }
 
+func (m *RatchetManager) locateOtherPeerLocked(peer foundation.Hash, skip int) (*dataplanegarlicecies.RatchetManager, bool) {
+	for index, shard := range m.shards {
+		if index != skip && shard.HasPeer(peer) {
+			return shard, true
+		}
+	}
+	return nil, false
+}
+
 func (m *RatchetManager) peerShardLocked(peer foundation.Hash) (int, *dataplanegarlicecies.RatchetManager) {
 	if index, ok := m.locatePeerLocked(peer); ok {
 		return index, m.shards[index]
 	}
-	index := int(binary.LittleEndian.Uint64(peer[:8]) % uint64(len(m.shards)))
+	index := m.naturalShardIndex(peer)
 	return index, m.shards[index]
 }
 
@@ -263,8 +281,15 @@ func (m *RatchetManager) EncryptExisting(dst []byte, peer foundation.Hash, paylo
 	}
 	m.routeMu.RLock()
 	defer m.routeMu.RUnlock()
-	_, shard := m.peerShardLocked(peer)
-	return shard.EncryptExisting(dst, peer, payload, options, now)
+	primary := m.naturalShardIndex(peer)
+	packet, err := m.shards[primary].EncryptExisting(dst, peer, payload, options, now)
+	if !errors.Is(err, ErrRatchetNoSession) {
+		return packet, err
+	}
+	if shard, ok := m.locateOtherPeerLocked(peer, primary); ok {
+		return shard.EncryptExisting(dst, peer, payload, options, now)
+	}
+	return nil, err
 }
 
 func (m *RatchetManager) EncryptExistingWithScratch(dst, plain []byte, peer foundation.Hash, payload []byte, options RatchetOptions, now uint64) ([]byte, error) {
@@ -273,8 +298,15 @@ func (m *RatchetManager) EncryptExistingWithScratch(dst, plain []byte, peer foun
 	}
 	m.routeMu.RLock()
 	defer m.routeMu.RUnlock()
-	_, shard := m.peerShardLocked(peer)
-	return shard.EncryptExistingWithScratch(dst, plain, peer, payload, options, now)
+	primary := m.naturalShardIndex(peer)
+	packet, err := m.shards[primary].EncryptExistingWithScratch(dst, plain, peer, payload, options, now)
+	if !errors.Is(err, ErrRatchetNoSession) {
+		return packet, err
+	}
+	if shard, ok := m.locateOtherPeerLocked(peer, primary); ok {
+		return shard.EncryptExistingWithScratch(dst, plain, peer, payload, options, now)
+	}
+	return nil, err
 }
 
 func (m *RatchetManager) Receive(dst, replyDst, packet []byte, now uint64) (RatchetResult, error) {

@@ -258,6 +258,8 @@ type RatchetManager struct {
 	newSessions       uint64
 	newSessionReplies uint64
 	existingSessions  uint64
+	nextExpiry        uint64
+	hasTerminated     bool
 }
 
 // NewRatchetManager creates destination-scoped ECIES state. The local private
@@ -321,8 +323,15 @@ func newRatchetManager(local *foundation.LocalDestination, config RatchetConfig,
 	}
 	cryptoCount := len(config.CryptoTypes)
 	config.CryptoTypes = nil
-	return &RatchetManager{owner: local.Hash(), private: private, cryptoTypes: cryptoTypes, cryptoCount: cryptoCount, config: config, metrics: config.Metrics, tagObserver: observer, sessions: make(map[foundation.Hash]*session), inbound: make(map[[ratchetTagLen]byte]tagEntry), pending: make(map[[ratchetTagLen]byte]pendingInitiator), replays: make(map[[32]byte]uint64), windowScratch: make([]tagEntry, config.TagLookahead), windowTags: make(map[[ratchetTagLen]byte]struct{}, config.TagLookahead)}, nil
+	return &RatchetManager{owner: local.Hash(), private: private, cryptoTypes: cryptoTypes, cryptoCount: cryptoCount, config: config, metrics: config.Metrics, tagObserver: observer, sessions: make(map[foundation.Hash]*session), inbound: make(map[[ratchetTagLen]byte]tagEntry), pending: make(map[[ratchetTagLen]byte]pendingInitiator), replays: make(map[[32]byte]uint64), windowScratch: make([]tagEntry, config.TagLookahead), windowTags: make(map[[ratchetTagLen]byte]struct{}, config.TagLookahead), nextExpiry: ^uint64(0)}, nil
 }
+
+func (m *RatchetManager) noteExpiryLocked(expires uint64) {
+	if expires < m.nextExpiry {
+		m.nextExpiry = expires
+	}
+}
+
 func (m *RatchetManager) addInboundTagLocked(entry tagEntry) {
 	m.inbound[entry.tag] = entry
 	entry.set.recordInbound(entry.tag, entry.n, m.config.TagLookahead)
@@ -347,6 +356,7 @@ func (m *RatchetManager) removeInboundTagLocked(tag [ratchetTagLen]byte) {
 
 func (m *RatchetManager) addPendingTagLocked(tag [ratchetTagLen]byte, pending pendingInitiator) {
 	m.pending[tag] = pending
+	m.noteExpiryLocked(pending.expires)
 	if m.tagObserver != nil {
 		m.tagObserver.TagAdded(SessionTag(tag))
 	}
@@ -650,6 +660,9 @@ func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, 
 	}
 	if options.RequestDH && !s.forwardDH.send {
 		if err := s.beginForwardDH(); err != nil {
+			if s.terminated {
+				m.hasTerminated = true
+			}
 			return nil, err
 		}
 	}
@@ -732,6 +745,7 @@ func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, 
 
 	if options.Terminate {
 		s.terminated = true
+		m.hasTerminated = true
 	}
 	s.outbound.expires = max(s.outbound.expires, now+m.config.SessionLifetime)
 	s.expires = max(s.expires, s.outbound.expires)
@@ -857,7 +871,9 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 		return RatchetResult{}, err
 	}
 	if !responder.bound {
-		m.replays[ephemeral] = now + m.config.ReplayLifetime
+		replayExpiry := now + m.config.ReplayLifetime
+		m.replays[ephemeral] = replayExpiry
+		m.noteExpiryLocked(replayExpiry)
 		return RatchetResult{Payload: application, NewSession: true}, nil
 	}
 	tag, err := responder.ReplyTag()
@@ -882,7 +898,9 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 	// Authentication and replay reservation complete together, while session
 	// and tag admission remain deferred until the authenticated Destination is
 	// known to the caller.
-	m.replays[ephemeral] = now + m.config.ReplayLifetime
+	replayExpiry := now + m.config.ReplayLifetime
+	m.replays[ephemeral] = replayExpiry
+	m.noteExpiryLocked(replayExpiry)
 	return RatchetResult{Payload: application, Reply: replyDst[:n], Peer: peer, Candidate: candidate, NewSession: true}, nil
 }
 
@@ -977,6 +995,7 @@ func (m *RatchetManager) parseExistingLocked(entry tagEntry, plain []byte, now u
 	if out.Terminated {
 		if s := sessionForSet(entry.set, m.sessions); s != nil {
 			s.terminated = true
+			m.hasTerminated = true
 		}
 	}
 	return out, nil
@@ -1065,6 +1084,7 @@ func (m *RatchetManager) receiveReverseKeyLocked(s *session, key nextKey, now ui
 	next, _, err := m.prepareRatchetDirectionLocked(s, true, shared[:], now)
 	if err != nil {
 		s.terminated = true
+		m.hasTerminated = true
 		return err
 	}
 	m.commitRatchetDirectionLocked(s, true, next, nil, now)
@@ -1115,6 +1135,7 @@ func (m *RatchetManager) receiveForwardKeyLocked(s *session, current *tagSet, ke
 	next, entries, err := m.prepareRatchetDirectionLocked(s, false, shared[:], now)
 	if err != nil {
 		s.terminated = true
+		m.hasTerminated = true
 		return err
 	}
 	m.commitRatchetDirectionLocked(s, false, next, entries, now)
@@ -1188,9 +1209,11 @@ func (m *RatchetManager) commitRatchetDirectionLocked(s *session, outbound bool,
 	}
 	if s.inbound != nil {
 		s.inbound.oldUntil = now + previousSetLife
+		m.noteExpiryLocked(s.inbound.oldUntil)
 	}
 	next.previous = s.inbound
 	s.inbound = next
+	m.noteExpiryLocked(next.expires)
 	for _, entry := range entries {
 		m.addInboundTagLocked(entry)
 	}
@@ -1281,6 +1304,8 @@ func (m *RatchetManager) installSessionLocked(s *session, now uint64) error {
 		m.discardSessionLocked(victim.peer, victim)
 	}
 	m.sessions[s.peer] = s
+	m.noteExpiryLocked(s.expires)
+	m.noteExpiryLocked(s.inbound.expires)
 	for _, entry := range entries {
 		m.addInboundTagLocked(entry)
 	}
@@ -1291,15 +1316,27 @@ func (m *RatchetManager) checkLocked(now uint64) error {
 	if m.closed {
 		return ErrRatchetClosed
 	}
+	if !m.hasTerminated && now <= m.nextExpiry {
+		return nil
+	}
+	nextExpiry := ^uint64(0)
 	for tag, pending := range m.pending {
 		if pending.expires < now {
 			pending.handshake.ReleaseSensitive()
 			m.removePendingTagLocked(tag)
+			continue
+		}
+		if pending.expires < nextExpiry {
+			nextExpiry = pending.expires
 		}
 	}
 	for eph, expiry := range m.replays {
 		if expiry < now {
 			delete(m.replays, eph)
+			continue
+		}
+		if expiry < nextExpiry {
+			nextExpiry = expiry
 		}
 	}
 	for peer, s := range m.sessions {
@@ -1307,21 +1344,37 @@ func (m *RatchetManager) checkLocked(now uint64) error {
 			m.discardSessionLocked(peer, s)
 			continue
 		}
-		m.expireOldTagsLocked(s, now)
+		if s.expires < nextExpiry {
+			nextExpiry = s.expires
+		}
+		if minTagExpiry := m.expireOldTagsLocked(s, now); minTagExpiry < nextExpiry {
+			nextExpiry = minTagExpiry
+		}
 	}
+	m.nextExpiry = nextExpiry
+	m.hasTerminated = false
 	return nil
 }
 
-func (m *RatchetManager) expireOldTagsLocked(s *session, now uint64) {
+func (m *RatchetManager) expireOldTagsLocked(s *session, now uint64) uint64 {
+	nextExpiry := ^uint64(0)
 	if s.inbound == nil {
-		return
+		return nextExpiry
 	}
 	if s.inbound.expires < now {
 		m.removeTagSetTagsLocked(s.inbound)
+	} else if len(s.inbound.receiveTags) != 0 && s.inbound.expires < nextExpiry {
+		nextExpiry = s.inbound.expires
 	}
 	previous := s.inbound
 	for set := previous.previous; set != nil; set = previous.previous {
 		if set.expires >= now && (set.oldUntil == 0 || set.oldUntil >= now) {
+			if set.expires < nextExpiry {
+				nextExpiry = set.expires
+			}
+			if set.oldUntil != 0 && set.oldUntil < nextExpiry {
+				nextExpiry = set.oldUntil
+			}
 			previous = set
 			continue
 		}
@@ -1329,6 +1382,7 @@ func (m *RatchetManager) expireOldTagsLocked(s *session, now uint64) {
 		m.removeTagSetTagsLocked(set)
 		releaseTagSet(set)
 	}
+	return nextExpiry
 }
 func (m *RatchetManager) removeSessionTagsLocked(s *session) {
 	if s == nil {

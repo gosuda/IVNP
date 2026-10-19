@@ -51,7 +51,7 @@ Build the Go runtime source overlay first with `tools/dstoverlay`, then run the 
 
 ```sh
 overlay=$(mktemp /tmp/ivnp-dst-overlay.XXXXXX.json)
-go run ./tools/dstoverlay -o "$overlay"
+go run ./tools/dstoverlay -write "$overlay"
 GODEBUG=asyncpreemptoff=1,cryptocustomrand=1 GOGC=off \
   go test -tags=dst -overlay="$overlay" -run '^TestSim|^TestDeterministic' .
 rm -f "$overlay"

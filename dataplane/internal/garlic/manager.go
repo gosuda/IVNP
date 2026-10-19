@@ -58,9 +58,10 @@ type SessionManager struct {
 }
 
 type sessionManagerShard struct {
-	mu       sync.Mutex
-	peers    map[foundation.Hash]*outboundPeer
-	maxPeers int
+	mu         sync.Mutex
+	peers      map[foundation.Hash]*outboundPeer
+	maxPeers   int
+	nextExpiry uint64
 }
 
 // NewSessionManager creates a SessionManager initialized with default pool sizes and tag lifetimes.
@@ -106,7 +107,7 @@ func NewSessionManager(config SessionManagerConfig) *SessionManager {
 		tagLifetime: config.TagLifetime, random: config.Random,
 	}
 	for index := range manager.shards {
-		manager.shards[index] = sessionManagerShard{peers: make(map[foundation.Hash]*outboundPeer), maxPeers: peersPerShard}
+		manager.shards[index] = sessionManagerShard{peers: make(map[foundation.Hash]*outboundPeer), maxPeers: peersPerShard, nextExpiry: ^uint64(0)}
 	}
 	return manager
 }
@@ -186,6 +187,9 @@ func (m *SessionManager) Encrypt(dst []byte, peer foundation.Hash, recipient cry
 				delete(state.confirmed, tag)
 			}
 			m.installPendingOutboundLocked(shard, peer, key, fresh, m.expiresAt(now))
+			if len(state.confirmed) == 0 && len(state.pending) == 0 {
+				delete(shard.peers, peer)
+			}
 		}
 		shard.mu.Unlock()
 		return packet, nil
@@ -353,6 +357,9 @@ func (m *SessionManager) releaseReserved(shard *sessionManagerShard, peer founda
 		if entry, ok := state.confirmed[tag]; ok {
 			entry.reserved = false
 			state.confirmed[tag] = entry
+			if entry.expires < shard.nextExpiry {
+				shard.nextExpiry = entry.expires
+			}
 		}
 	}
 }
@@ -406,12 +413,19 @@ func (m *SessionManager) installPendingOutboundLocked(shard *sessionManagerShard
 			}
 		}
 		state.pending[tag] = outboundTag{key: key, expires: expires}
+		if expires < shard.nextExpiry {
+			shard.nextExpiry = expires
+		}
 		tags = tags[32:]
 	}
 }
 
 func (m *SessionManager) expireOutboundShardLocked(shard *sessionManagerShard, now uint64) int {
+	if now <= shard.nextExpiry {
+		return 0
+	}
 	removed := 0
+	nextExpiry := ^uint64(0)
 	for peer, state := range shard.peers {
 		for tag, entry := range state.confirmed {
 			if entry.expires < now && !entry.reserved {
@@ -419,6 +433,10 @@ func (m *SessionManager) expireOutboundShardLocked(shard *sessionManagerShard, n
 				state.confirmed[tag] = entry
 				delete(state.confirmed, tag)
 				removed++
+				continue
+			}
+			if !entry.reserved && entry.expires < nextExpiry {
+				nextExpiry = entry.expires
 			}
 		}
 		for tag, entry := range state.pending {
@@ -427,12 +445,17 @@ func (m *SessionManager) expireOutboundShardLocked(shard *sessionManagerShard, n
 				state.pending[tag] = entry
 				delete(state.pending, tag)
 				removed++
+				continue
+			}
+			if entry.expires < nextExpiry {
+				nextExpiry = entry.expires
 			}
 		}
 		if len(state.confirmed) == 0 && len(state.pending) == 0 {
 			delete(shard.peers, peer)
 		}
 	}
+	shard.nextExpiry = nextExpiry
 	return removed
 }
 

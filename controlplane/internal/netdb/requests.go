@@ -489,13 +489,10 @@ func (m *RequestManager) HandleDatabaseSearchReply(ctx context.Context, reply fo
 // published-entry responses.
 func (m *RequestManager) ExpectsDatabaseStore(store foundation.I2NPDatabaseStoreMessage) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, req := range m.pending {
-		if req.key == store.Key && storeMatches(req.typeID, store.Type) {
-			return true
-		}
-	}
-	return false
+	req := m.pending[requestKey{key: store.Key}]
+	matched := req != nil && storeMatches(req.typeID, store.Type)
+	m.mu.Unlock()
+	return matched
 }
 
 // HandleDatabaseStore completes a matching request after the caller has
@@ -507,29 +504,28 @@ func (m *RequestManager) HandleDatabaseStore(ctx context.Context, store foundati
 	}
 	var work []sendWork
 	m.mu.Lock()
-	for key, req := range m.pending {
-		if req.key == store.Key && storeMatches(req.typeID, store.Type) {
-			m.completeLocked(key, req, nil)
-			if m.logger != nil {
-				m.logger.Debug("netdb lookup completed by store", "key", foundation.EncodeI2PBase64(store.Key[:]), "store_type", uint8(store.Type))
+	lookupKey := requestKey{key: store.Key}
+	if req := m.pending[lookupKey]; req != nil && storeMatches(req.typeID, store.Type) {
+		m.completeLocked(lookupKey, req, nil)
+		if m.logger != nil {
+			m.logger.Debug("netdb lookup completed by store", "key", foundation.EncodeI2PBase64(store.Key[:]), "store_type", uint8(store.Type))
+		}
+	}
+	if store.Type == foundation.I2NPStoreRouterInfo {
+		for key, req := range m.pending {
+			if _, wanted := req.candidate[store.Key]; !wanted {
+				continue
 			}
-			continue
-		}
-		if store.Type != foundation.I2NPStoreRouterInfo {
-			continue
-		}
-		if _, wanted := req.candidate[store.Key]; !wanted {
-			continue
-		}
-		delete(req.refreshing, store.Key)
-		if req.inFlight {
-			m.addWakeupLocked(ctx, req)
-			continue
-		}
-		if next, terminal := m.prepareSendLocked(key, req); terminal != nil {
-			m.completeLocked(key, req, terminal)
-		} else if next != nil {
-			work = append(work, *next)
+			delete(req.refreshing, store.Key)
+			if req.inFlight {
+				m.addWakeupLocked(ctx, req)
+				continue
+			}
+			if next, terminal := m.prepareSendLocked(key, req); terminal != nil {
+				m.completeLocked(key, req, terminal)
+			} else if next != nil {
+				work = append(work, *next)
+			}
 		}
 	}
 	m.mu.Unlock()

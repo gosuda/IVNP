@@ -44,7 +44,7 @@ Autonomous I2P network indexer and SU3 reseed server (`gosuda.org/ivnp/cmd/ivnp-
 
 ### Core Mechanisms
 
-1. **Embedded Floodfill Crawler (`crawler.go`)**: Runs an embedded `node.Subsystem` in floodfill and tainted-copy mode. In addition to active iterative lookups, it passively receives unsolicited `DatabaseStore` publications from the network and rewards peers that accept exploratory or transit tunnel hops (`RecordTunnelUsed`).
+1. **Embedded Floodfill Crawler (`crawler.go`)**: Runs an embedded `node.Subsystem` in floodfill and tainted-copy mode with transit participation and client destinations disabled (`Router.Transit = false`, `DisableClientDestinations: true`, `RouterLimit = 5000`). In addition to active iterative lookups, it passively receives unsolicited `DatabaseStore` publications from the network and rewards peers that accept exploratory tunnel hops (`RecordTunnelUsed`).
 2. **Deficit-Weighted Prefix Exploration (`TreeExplore`)**: On every pass, the crawler inspects peer counts across all 256 `Hash[0]` K-buckets:
    - Empty buckets (`0` peers) receive 4-way quadrant subdivision queries (`[0x00, 0x40, 0x80, 0xC0]`).
    - Severely sparse buckets (`< 4` peers) receive 2-way subdivision queries.

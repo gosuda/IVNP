@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 )
 
 // ssu2SendMutex keeps bulk locking allocation-free. Only a control sender
@@ -10,12 +11,21 @@ import (
 type ssu2SendMutex struct {
 	mu       sync.Mutex
 	waitMu   sync.Mutex
+	waiters  atomic.Int32
 	released chan struct{}
 }
 
 func (m *ssu2SendMutex) Lock() { m.mu.Lock() }
 
 func (m *ssu2SendMutex) LockContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if m.mu.TryLock() {
+		return nil
+	}
+	m.waiters.Add(1)
+	defer m.waiters.Add(-1)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -40,6 +50,9 @@ func (m *ssu2SendMutex) LockContext(ctx context.Context) error {
 
 func (m *ssu2SendMutex) Unlock() {
 	m.mu.Unlock()
+	if m.waiters.Load() == 0 {
+		return
+	}
 	m.waitMu.Lock()
 	if m.released != nil {
 		close(m.released)

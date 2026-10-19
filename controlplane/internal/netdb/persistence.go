@@ -164,6 +164,9 @@ func (s *RouterInfoStore) loadLocked(data []byte, nowMillis uint64) (RouterInfoL
 func (s *RouterInfoStore) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.database.Routers().Generation() == s.savedGeneration {
+		return nil
+	}
 	generation, peers := s.database.Routers().Snapshot()
 	if generation == s.savedGeneration {
 		return nil
@@ -208,7 +211,7 @@ func (s *RouterInfoStore) encode(peers []RouterRef) ([]byte, error) {
 		binary.BigEndian.PutUint64(data[cursor:cursor+8], peer.LastSeen)
 		binary.BigEndian.PutUint16(data[cursor+8:cursor+10], uint16(len(wire)))
 		copy(data[cursor+10:cursor+10+len(wire)], wire)
-		digest := snapshotRecordDigest(peer.LastSeen, wire)
+		digest := sha256.Sum256(data[cursor : cursor+10+len(wire)])
 		copy(data[cursor+10+len(wire):cursor+10+len(wire)+routerSnapshotDigest], digest[:])
 		cursor += 10 + len(wire) + routerSnapshotDigest
 	}
@@ -223,7 +226,7 @@ func snapshotRecordDigest(seenAt uint64, wire []byte) [sha256.Size]byte {
 	_, _ = hash.Write(header[:])
 	_, _ = hash.Write(wire)
 	var digest [sha256.Size]byte
-	copy(digest[:], hash.Sum(nil))
+	hash.Sum(digest[:0])
 	return digest
 }
 

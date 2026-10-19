@@ -24,6 +24,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -203,7 +205,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		routerCfg := configureActiveClientRouter(*dataDir, *tempDir, uint8(*netID), *routerPort, advertisedHost, advertisedPort)
-		subsystem, routerErr := node.NewSubsystem(routerCfg, node.Options{Logger: logger, TaintedCopy: true})
+		subsystem, routerErr := node.NewSubsystem(routerCfg, node.Options{
+			Logger:                    logger,
+			TaintedCopy:               true,
+			DisableClientDestinations: true,
+			RouterLimit:               MaxStorePeers,
+		})
 		if routerErr != nil {
 			logger.Error("failed to initialize embedded router", "error", routerErr)
 			return 1
@@ -223,6 +230,36 @@ func run(args []string, stdout, stderr io.Writer) int {
 			logger.Warn("failed to read embedded router status", "error", statusErr)
 		}
 		logger.Info("embedded router started successfully", "router_hash", clientStatus.RouterHash)
+	}
+
+	var probeRunning atomic.Int32
+	var initialPassDone atomic.Int32
+	var probeWG sync.WaitGroup
+	triggerProbePass := func(probeCtx context.Context) {
+		if store.Len() == 0 {
+			return
+		}
+		if *runOnce {
+			if success := prober.ProbeAll(probeCtx); success > 0 {
+				logger.Debug("active crawl: probing pass completed", "reachable_peers", success)
+			}
+			return
+		}
+		if initialPassDone.CompareAndSwap(0, 1) {
+			if success := prober.ProbeBatch(probeCtx, maxProbesPerPass); success > 0 {
+				logger.Debug("active crawl: initial probing pass completed", "reachable_peers", success)
+			}
+			return
+		}
+		if !probeRunning.CompareAndSwap(0, 1) {
+			return
+		}
+		probeWG.Go(func() {
+			defer probeRunning.Store(0)
+			if success := prober.ProbeBatch(probeCtx, maxProbesPerPass); success > 0 {
+				logger.Debug("active crawl: probing pass completed", "reachable_peers", success)
+			}
+		})
 	}
 
 	activeCrawlPass := func(crawlCtx context.Context) {
@@ -254,12 +291,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 
-		if store.Len() > 0 {
-			success := prober.ProbeAll(crawlCtx)
-			if success > 0 {
-				logger.Debug("active crawl: probing pass completed", "reachable_peers", success)
-			}
-		}
+		triggerProbePass(crawlCtx)
 	}
 
 	refreshPass := func(refreshCtx context.Context) error {
@@ -382,6 +414,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		select {
 		case <-ctx.Done():
 			logger.Info("shutting down reseed server...")
+			probeWG.Wait()
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			for _, s := range httpServers {
 				_ = s.Shutdown(shutdownCtx)
@@ -478,8 +511,10 @@ func configureActiveClientRouter(baseDir, tempDir string, netID uint8, routerPor
 		cfg.TempDir = tempDir
 	}
 	cfg.State.TaintedCopy = true
+	cfg.State.MaxDestinations = 1
 	cfg.Network.ID = uint32(netID)
 	cfg.Router.Floodfill = true // Operate as Floodfill router by default to participate in NetDB replication
+	cfg.Router.Transit = false  // Do not relay third-party transit tunnels on the reseed crawler
 
 	port := uint16(0)
 	if routerPort > 0 && routerPort <= 65535 {
@@ -520,8 +555,8 @@ func configureActiveClientRouter(baseDir, tempDir string, netID uint8, routerPor
 	cfg.Tunnel.BuildPendingCapacity = 48
 	cfg.Tunnel.MaintenanceInterval = 10 * time.Second
 
-	// Expand NetDB capacity for deep network exploration
-	cfg.NetDB.BucketCapacity = 128
+	// Bound NetDB capacity to match PeerStore retention limits
+	cfg.NetDB.BucketCapacity = 32
 	cfg.NetDB.LookupCapacity = 48
 
 	return cfg

@@ -425,25 +425,39 @@ func (m *TransportMux) currentTime() time.Time {
 // bounded 24-hour reseed window so a cold router can fetch 90-minute-fresh
 // replacements instead of deadlocking with a populated but unusable NetDB.
 func (m *TransportMux) UsableRemoteRouterInfos(now time.Time) int {
+	return m.countUsableRemoteRouterInfos(now, 0)
+}
+
+// HasUsableRemoteRouterInfos reports whether at least minimum peers have a
+// verified transport address usable to bootstrap a live session.
+func (m *TransportMux) HasUsableRemoteRouterInfos(now time.Time, minimum int) bool {
+	if minimum <= 0 {
+		return true
+	}
+	return m.countUsableRemoteRouterInfos(now, minimum) >= minimum
+}
+
+func (m *TransportMux) countUsableRemoteRouterInfos(now time.Time, limit int) int {
 	if m == nil || m.database == nil {
 		return 0
 	}
 	nowMillis := uint64(now.UnixMilli())
 	nowSeconds := uint64(now.Unix())
-	_, peers := m.database.Routers().Snapshot()
 	count := 0
-	for _, peer := range peers {
+	m.database.Routers().Visit(func(peer controlplanenetdb.RouterRef) bool {
 		if controlplanenetdb.ReseedRouterInfoFresh(peer.Info, nowMillis) != nil {
-			continue
+			return true
 		}
-		if m.ntcp2 != nil && dataplane.RouterNTCP2PeerCapable(peer.Info, nowMillis) {
+		ntcp2Capable := m.ntcp2 != nil && dataplane.RouterNTCP2PeerCapable(peer.Info, nowMillis)
+		ssu2Capable := m.ssu2 != nil && dataplane.RouterSSU2PeerCapable(peer.Info, nowSeconds)
+		if ntcp2Capable || ssu2Capable {
 			count++
-			continue
+			if limit > 0 && count >= limit {
+				return false
+			}
 		}
-		if m.ssu2 != nil && dataplane.RouterSSU2PeerCapable(peer.Info, nowSeconds) {
-			count++
-		}
-	}
+		return true
+	})
 	return count
 }
 

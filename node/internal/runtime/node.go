@@ -23,18 +23,20 @@ import (
 )
 
 type Options struct {
-	SocketRuntime     dataplane.RouterSocketRuntime
-	Transport         dataplane.RouterTransportManager
-	HTTPClient        *http.Client
-	Clock             dataplane.RouterClock
-	Logger            *slog.Logger
-	Listener          Listener
-	NAT               controlplane.NATRuntime
-	PanicReporter     ingress.Reporter
-	Embedded          bool
-	TaintedCopy       bool
-	PromoteToMaster   *bool
-	LockRetryInterval time.Duration
+	SocketRuntime             dataplane.RouterSocketRuntime
+	Transport                 dataplane.RouterTransportManager
+	HTTPClient                *http.Client
+	Clock                     dataplane.RouterClock
+	Logger                    *slog.Logger
+	Listener                  Listener
+	NAT                       controlplane.NATRuntime
+	PanicReporter             ingress.Reporter
+	Embedded                  bool
+	DisableClientDestinations bool
+	RouterLimit               int
+	TaintedCopy               bool
+	PromoteToMaster           *bool
+	LockRetryInterval         time.Duration
 }
 
 type nodeService interface {
@@ -83,7 +85,8 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 	core, err := controlplane.NewController(cfg, controlplane.ControllerOptions{
 		SocketRuntime: options.SocketRuntime, Transport: options.Transport, HTTPClient: options.HTTPClient,
 		Clock: options.Clock, Logger: options.Logger, NAT: options.NAT, PanicReporter: options.PanicReporter, Registry: registry,
-		Embedded: options.Embedded, TaintedCopy: options.TaintedCopy,
+		Embedded: options.Embedded, DisableClientDestinations: options.DisableClientDestinations,
+		RouterLimit: options.RouterLimit, TaintedCopy: options.TaintedCopy,
 		PromoteToMaster: options.PromoteToMaster, LockRetryInterval: options.LockRetryInterval,
 	})
 	if err != nil {

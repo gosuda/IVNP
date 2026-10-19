@@ -11,10 +11,18 @@ import (
 	"gosuda.org/ivnp/node"
 )
 
+type crawlerSeenEntry struct {
+	published uint64
+	lastSeen  uint64
+}
+
 // ActiveCrawler harvests live, verified RouterInfos directly from the embedded router's NetDB
 // and actively conducts targeted DHT tree exploration to fill empty K-Buckets.
 type ActiveCrawler struct {
-	store *PeerStore
+	store          *PeerStore
+	lastGeneration uint64
+	lastEvictions  uint64
+	seen           map[foundation.Hash]crawlerSeenEntry
 }
 
 func NewActiveCrawler(store *PeerStore) *ActiveCrawler {
@@ -28,26 +36,45 @@ func (c *ActiveCrawler) Harvest(subsystem *node.Subsystem) int {
 		return 0
 	}
 	localHash := subsystem.Hash()
-	c.store.SetLocalHash(localHash)
+	if c.store.LocalHash() != localHash {
+		c.store.SetLocalHash(localHash)
+	}
 
 	// Continuous turnover: prune stale peers when approaching capacity limit
 	if c.store.Len() >= MaxStorePeers-100 {
 		c.store.PruneStale(24 * time.Hour)
 	}
 
-	refs := subsystem.NetDBRoutersSnapshot()
 	admitted := 0
-	for _, ref := range refs {
-		if ref.Info.Hash() == localHash {
-			continue
+	gen := subsystem.NetDBGeneration()
+	if gen == 0 || gen != c.lastGeneration {
+		c.lastGeneration = gen
+		evictions := c.store.Evictions()
+		if c.seen == nil || evictions != c.lastEvictions || len(c.seen) > MaxStorePeers*4 {
+			c.seen = make(map[foundation.Hash]crawlerSeenEntry, MaxStorePeers)
+			c.lastEvictions = evictions
 		}
-		raw := ref.Info.Bytes()
-		if len(raw) == 0 {
-			continue
-		}
-		if _, isNew := c.store.AddOrUpdateWithSeen(ref.Info, raw, ref.LastSeen); isNew {
-			admitted++
-		}
+		subsystem.NetDBVisitRouters(func(ref controlplane.NetworkDatabaseRouterRef) bool {
+			hash := ref.Hash
+			if hash == (foundation.Hash{}) {
+				hash = ref.Info.Hash()
+			}
+			if hash == localHash {
+				return true
+			}
+			if prev, ok := c.seen[hash]; ok && ref.Info.Published <= prev.published && ref.LastSeen <= prev.lastSeen {
+				return true
+			}
+			raw := ref.Info.Bytes()
+			if len(raw) == 0 {
+				return true
+			}
+			c.seen[hash] = crawlerSeenEntry{published: ref.Info.Published, lastSeen: ref.LastSeen}
+			if _, isNew := c.store.AddOrUpdateWithSeen(ref.Info, raw, ref.LastSeen); isNew {
+				admitted++
+			}
+			return true
+		})
 	}
 
 	// Record confirmed tunnel build acceptance for hops in active tunnels

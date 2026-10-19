@@ -42,17 +42,22 @@ func (s transportPeerSource) PeerAtEndpoint(source netip.AddrPort) (foundation.H
 	if !source.IsValid() {
 		return foundation.Hash{}, false
 	}
-	_, peers := s.database.Routers().Snapshot()
 	var matched foundation.Hash
 	found := false
-	for _, peer := range peers {
+	ambiguous := false
+	s.database.Routers().Visit(func(peer controlplanenetdb.RouterRef) bool {
 		if !dataplane.RouterSSU2PeerEndpointMatches(peer.Info, source) {
-			continue
+			return true
 		}
 		if found && matched != peer.Hash {
-			return foundation.Hash{}, false
+			ambiguous = true
+			return false
 		}
 		matched, found = peer.Hash, true
+		return true
+	})
+	if ambiguous {
+		return foundation.Hash{}, false
 	}
 	return matched, found
 }

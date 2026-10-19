@@ -14,16 +14,17 @@ type ssu2SetupPacket struct {
 
 func (m *SSU2Manager) establishedPacket(packet []byte) bool {
 	destination, err := dataplanessu2.PeekDestinationID(packet, m.introKey)
-	if _, err := dataplanessu2.PeekSessionRequest(packet, m.introKey, m.networkID); err == nil {
-		return false
-	}
 	if err != nil {
 		return false
 	}
 	m.mu.RLock()
 	known := m.sessionsByID[destination] != nil
 	m.mu.RUnlock()
-	return known
+	if !known {
+		return false
+	}
+	_, err = dataplanessu2.PeekSessionRequest(packet, m.introKey, m.networkID)
+	return err != nil
 }
 
 func (m *SSU2Manager) enqueueSetupPacket(packet dataplanessu2.Datagram) {

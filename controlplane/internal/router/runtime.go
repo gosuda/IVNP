@@ -510,14 +510,21 @@ type usableReseedPeerCounter interface {
 	UsableRemoteRouterInfos(time.Time) int
 }
 
-func (r *Router) usableReseedPeers(now time.Time) int {
+type usableReseedPeerThreshold interface {
+	HasUsableRemoteRouterInfos(time.Time, int) bool
+}
+
+func (r *Router) hasUsableReseedPeers(now time.Time, minimum int) bool {
+	if threshold, ok := r.deps.Transport.(usableReseedPeerThreshold); ok {
+		return threshold.HasUsableRemoteRouterInfos(now, minimum)
+	}
 	if counter, ok := r.deps.Transport.(usableReseedPeerCounter); ok {
-		return counter.UsableRemoteRouterInfos(now)
+		return counter.UsableRemoteRouterInfos(now) >= minimum
 	}
 	// A custom transport that does not expose verified address capability is
 	// conservatively counted as zero. Retained-table size is never a substitute
 	// for proof that a remote peer is transport-usable.
-	return 0
+	return false
 }
 
 func (r *Router) startReseed(ctx context.Context) <-chan struct{} {
@@ -525,7 +532,18 @@ func (r *Router) startReseed(ctx context.Context) <-chan struct{} {
 		return nil
 	}
 	now := r.deps.Clock.Now()
-	if r.usableReseedPeers(now) >= reseedBootstrapMinimum {
+	r.reseedMu.Lock()
+	if r.reseedRunning {
+		done := r.reseedDone
+		r.reseedMu.Unlock()
+		return done
+	}
+	if now.Before(r.reseedNext) {
+		r.reseedMu.Unlock()
+		return nil
+	}
+	r.reseedMu.Unlock()
+	if r.hasUsableReseedPeers(now, reseedBootstrapMinimum) {
 		return nil
 	}
 	r.reseedMu.Lock()

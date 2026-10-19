@@ -485,7 +485,8 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 	inboundSource, err := tunnel.NewNetDBInboundBuildSource(tunnel.NetDBInboundBuildSourceConfig{
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: tunnelPolicy.Inbound.Hops,
 		Lifetime: uint64(lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
-		Eligible: f.eligible, Connected: f.connected, AllowUnknownTransports: f.allowUnknownTransports,
+		Eligible: f.eligible, Connected: f.connected, CandidateLimit: daemonTunnelBuildCandidates,
+		AllowUnknownTransports: f.allowUnknownTransports,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create destination inbound build source: %w", err)
@@ -493,7 +494,8 @@ func (f *destinationRuntimeFactory) create(name string, local *foundation.LocalD
 	outboundSource, err := tunnel.NewNetDBOutboundBuildSource(tunnel.NetDBOutboundBuildSourceConfig{
 		Table: f.database.Routers(), Profiles: profiles, LocalRouter: f.localRouter, Hops: tunnelPolicy.Outbound.Hops,
 		Lifetime: uint64(lifetime.Milliseconds()), CircuitID: randomNonZeroID, TunnelID: randomNonZeroID,
-		Eligible: f.eligible, Connected: f.connected, AllowUnknownTransports: f.allowUnknownTransports,
+		Eligible: f.eligible, Connected: f.connected, CandidateLimit: daemonTunnelBuildCandidates,
+		AllowUnknownTransports: f.allowUnknownTransports,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create destination outbound build source: %w", err)

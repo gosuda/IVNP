@@ -151,11 +151,16 @@ func PeekSessionRequest(packet, introKey []byte, networkID uint8) (LongHeader, e
 		return LongHeader{}, ErrHandshake
 	}
 	var raw [LongHeaderLen]byte
-	copy(raw[:], packet[:LongHeaderLen])
-	if err := xorHeaderMask(raw[:8], introKey, packet[len(packet)-24:len(packet)-12]); err != nil {
+	copy(raw[8:16], packet[8:16])
+	if err := xorHeaderMask(raw[8:16], introKey, packet[len(packet)-12:]); err != nil {
 		return LongHeader{}, err
 	}
-	if err := xorHeaderMask(raw[8:16], introKey, packet[len(packet)-12:]); err != nil {
+	if PacketType(raw[12]) != SessionRequest || raw[13] != Version || raw[14] != networkID || raw[15] != 0 {
+		return LongHeader{}, ErrHandshake
+	}
+	copy(raw[:8], packet[:8])
+	copy(raw[16:], packet[16:LongHeaderLen])
+	if err := xorHeaderMask(raw[:8], introKey, packet[len(packet)-24:len(packet)-12]); err != nil {
 		return LongHeader{}, err
 	}
 	if err := maskHeaderExtension(raw[16:], introKey); err != nil {

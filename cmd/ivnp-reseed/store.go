@@ -24,6 +24,7 @@ type PeerStore struct {
 	byFamily   map[string]map[foundation.Hash]struct{}
 	maxPeers   int
 	localHash  foundation.Hash
+	evictions  uint64
 }
 
 func NewPeerStore() *PeerStore {
@@ -33,6 +34,12 @@ func NewPeerStore() *PeerStore {
 		byFamily:   make(map[string]map[foundation.Hash]struct{}),
 		maxPeers:   MaxStorePeers,
 	}
+}
+
+func (s *PeerStore) Evictions() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.evictions
 }
 
 func (s *PeerStore) SetLocalHash(h foundation.Hash) {
@@ -71,7 +78,7 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 	lastSeen := now
 	if seenAt > 0 {
 		seenTime := time.UnixMilli(int64(seenAt))
-		if seenTime.After(lastSeen) {
+		if !seenTime.After(now) {
 			lastSeen = seenTime
 		}
 	}
@@ -81,7 +88,7 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 		contact := extractRouterAddresses(info)
 		rec := &PeerRecord{
 			Hash:        hash,
-			Raw:         bytes.Clone(raw),
+			Raw:         raw,
 			PublishedAt: time.UnixMilli(int64(info.Published)),
 			Family:      contact.family,
 			IsFloodfill: foundation.NetworkDatabaseIsFloodfill(info),
@@ -107,6 +114,7 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 		if hasGroup, tops := s.topsAnyContentionLocked(rec); hasGroup && !tops {
 			return nil, false
 		}
+		rec.Raw = bytes.Clone(raw)
 
 		// Enforce bounded memory: evict a batch of lowest-utility peers when reaching capacity
 		// to allow continuous turnover and admission of newly discovered DHT peers.
@@ -420,6 +428,7 @@ func (s *PeerStore) deletePeerLocked(hash foundation.Hash) {
 	}
 	s.deindexPeerLocked(rec)
 	delete(s.peers, hash)
+	s.evictions++
 }
 
 // eachContentionGroupLocked invokes fn on every member set rec competes in:
@@ -533,6 +542,14 @@ func compareRetention(a, b *PeerRecord) int {
 }
 
 func (s *PeerStore) RecordProbeResult(hash foundation.Hash, success bool, rtt time.Duration) {
+	s.recordProbeResult(hash, success, rtt, true)
+}
+
+func (s *PeerStore) RecordPassiveProbeResult(hash foundation.Hash, success bool, rtt time.Duration) {
+	s.recordProbeResult(hash, success, rtt, false)
+}
+
+func (s *PeerStore) recordProbeResult(hash foundation.Hash, success bool, rtt time.Duration, updateLastSeen bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -554,7 +571,9 @@ func (s *PeerStore) RecordProbeResult(hash foundation.Hash, success bool, rtt ti
 		rec.Stats.WinSuccess++
 		rec.Stats.ConsecutiveFails = 0
 		rec.Stats.IsReachable = true
-		rec.Stats.LastSeen = now
+		if updateLastSeen {
+			rec.Stats.LastSeen = now
+		}
 		rec.Stats.LastRTT = rtt
 		if rec.Stats.EWMARTT == 0 {
 			rec.Stats.EWMARTT = rtt
@@ -567,6 +586,7 @@ func (s *PeerStore) RecordProbeResult(hash foundation.Hash, success bool, rtt ti
 		if rec.Stats.ConsecutiveFails >= 2 {
 			rec.Stats.IsReachable = false
 		}
+		s.evictions++
 	}
 
 	rec.Score = calculateScore(rec)
@@ -591,7 +611,7 @@ func (s *PeerStore) SaveToFile(filePath string) error {
 	}
 	s.mu.RUnlock()
 
-	data, err := json.MarshalIndent(records, "", "  ")
+	data, err := json.Marshal(records)
 	if err != nil {
 		return err
 	}

@@ -3,7 +3,10 @@ package registry
 import (
 	"runtime"
 	"sync/atomic"
+	"time"
 )
+
+const processStatsCacheWindowNano = int64(250 * time.Millisecond)
 
 // Registry holds node-wide operational metrics tracked via atomic counters and gauges.
 type Registry struct{ state *registryState }
@@ -25,19 +28,21 @@ const (
 var zeroRegistryState registryState
 
 type registryState struct {
-	lifecycle   lifecycleMetrics
-	reseed      reseedMetrics
-	transport   transportMetrics
-	netdb       netdbMetrics
-	tunnel      tunnelMetrics
-	admission   admissionMetrics
-	proxy       proxyMetrics
-	control     controlMetrics
-	bootstrap   bootstrapMetrics
-	publication publicationMetrics
-	sam         samMetrics
-	garlic      garlicMetrics
-	ssu2        ssu2Metrics
+	lifecycle         lifecycleMetrics
+	reseed            reseedMetrics
+	transport         transportMetrics
+	netdb             netdbMetrics
+	tunnel            tunnelMetrics
+	admission         admissionMetrics
+	proxy             proxyMetrics
+	control           controlMetrics
+	bootstrap         bootstrapMetrics
+	publication       publicationMetrics
+	sam               samMetrics
+	garlic            garlicMetrics
+	ssu2              ssu2Metrics
+	processSampleNano atomic.Int64
+	processSample     atomic.Pointer[ProcessSnapshot]
 }
 
 type lifecycleMetrics struct{ starts, stops, failures, running, ingressPanics atomic.Uint64 }
@@ -156,13 +161,37 @@ func (r *Registry) metrics() *registryState {
 	return &zeroRegistryState
 }
 
+func processSnapshot(s *registryState) ProcessSnapshot {
+	now := time.Now().UnixNano()
+	last := s.processSampleNano.Load()
+	cached := s.processSample.Load()
+	if cached != nil && now-last < processStatsCacheWindowNano {
+		sample := *cached
+		sample.Goroutines = uint64(runtime.NumGoroutine())
+		return sample
+	}
+	if cached == nil || s.processSampleNano.CompareAndSwap(last, now) {
+		var memory runtime.MemStats
+		runtime.ReadMemStats(&memory)
+		sample := ProcessSnapshot{
+			Goroutines: uint64(runtime.NumGoroutine()), HeapInuseBytes: memory.HeapInuse, HeapObjects: memory.HeapObjects,
+			AllocatedBytesTotal: memory.TotalAlloc, MallocsTotal: memory.Mallocs,
+			GCCyclesTotal: uint64(memory.NumGC), GCPauseNanosecondsTotal: memory.PauseTotalNs,
+		}
+		s.processSample.Store(&sample)
+		s.processSampleNano.Store(now)
+		return sample
+	}
+	sample := *cached
+	sample.Goroutines = uint64(runtime.NumGoroutine())
+	return sample
+}
+
 func (r *Registry) Snapshot() Snapshot {
 	if r == nil {
 		return Snapshot{}
 	}
 	s := r.metrics()
-	var memory runtime.MemStats
-	runtime.ReadMemStats(&memory)
 	return Snapshot{
 		Lifecycle: LifecycleSnapshot{s.lifecycle.starts.Load(), s.lifecycle.stops.Load(), s.lifecycle.failures.Load(), s.lifecycle.running.Load(), s.lifecycle.ingressPanics.Load()},
 		Reseed:    ReseedSnapshot{s.reseed.attempts.Load(), s.reseed.successes.Load(), s.reseed.failures.Load(), s.reseed.bytes.Load(), s.reseed.sources.Load()},
@@ -199,11 +228,7 @@ func (r *Registry) Snapshot() Snapshot {
 		SAM:         SAMSnapshot{s.sam.udpInvalid.Load(), s.sam.udpBackpressure.Load(), s.sam.protocolFailures.Load()},
 		Garlic:      GarlicSnapshot{s.garlic.newSessionSent.Load(), s.garlic.newSessionReceived.Load(), s.garlic.existingSessionSent.Load(), s.garlic.existingSessionReceived.Load(), s.garlic.dhStepsSent.Load(), s.garlic.dhStepsReceived.Load(), s.garlic.tunnelClovesForwarded.Load()},
 		SSU2:        SSU2Snapshot{s.ssu2.vectorIOEnabled.Load(), s.ssu2.kernelDropAccounting.Load(), s.ssu2.received.Load(), s.ssu2.enqueued.Load(), s.ssu2.processed.Load(), s.ssu2.receiveQueueDrops.Load(), s.ssu2.kernelDrops.Load(), s.ssu2.sendEnqueued.Load(), s.ssu2.sent.Load(), s.ssu2.sendFailed.Load(), s.ssu2.sendQueueDrops.Load(), s.ssu2.receiveMultiBatches.Load(), s.ssu2.sendMultiBatches.Load(), s.ssu2.ingressQueueDepth.Load(), s.ssu2.egressQueueDepth.Load(), s.ssu2.dispatchDrops.Load()},
-		Process: ProcessSnapshot{
-			Goroutines: uint64(runtime.NumGoroutine()), HeapInuseBytes: memory.HeapInuse, HeapObjects: memory.HeapObjects,
-			AllocatedBytesTotal: memory.TotalAlloc, MallocsTotal: memory.Mallocs,
-			GCCyclesTotal: uint64(memory.NumGC), GCPauseNanosecondsTotal: memory.PauseTotalNs,
-		},
+		Process:     processSnapshot(s),
 	}
 }
 
@@ -296,12 +321,19 @@ func (r *Registry) IncControlRequests()           { r.metrics().control.requests
 func (r *Registry) IncControlFailures()           { r.metrics().control.failures.Add(1) }
 func (r *Registry) SetControlActive(v uint64)     { r.metrics().control.active.Store(v) }
 func (r *Registry) SetBootstrapStage(v uint64)    { r.metrics().bootstrap.stage.Store(v) }
+func (r *Registry) BootstrapStage() uint64        { return r.metrics().bootstrap.stage.Load() }
 func (r *Registry) SetRouterReachable(v uint64)   { r.metrics().bootstrap.routerReachable.Store(v) }
 func (r *Registry) IncPublicationRouterInfoSuccesses() {
 	r.metrics().publication.routerInfoSuccesses.Add(1)
 }
+func (r *Registry) PublicationRouterInfoSuccesses() uint64 {
+	return r.metrics().publication.routerInfoSuccesses.Load()
+}
 func (r *Registry) IncPublicationLeaseSet2Successes() {
 	r.metrics().publication.leaseSet2Successes.Add(1)
+}
+func (r *Registry) PublicationLeaseSet2Successes() uint64 {
+	return r.metrics().publication.leaseSet2Successes.Load()
 }
 func (r *Registry) IncSAMUDPInvalid()                  { r.metrics().sam.udpInvalid.Add(1) }
 func (r *Registry) IncSAMUDPBackpressureRejected()     { r.metrics().sam.udpBackpressure.Add(1) }

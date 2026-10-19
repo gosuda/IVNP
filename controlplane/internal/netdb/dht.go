@@ -48,6 +48,7 @@ type Table struct {
 	mu            sync.RWMutex
 	local         foundation.Hash
 	routers       map[foundation.Hash]routerEntry
+	floodfills    map[foundation.Hash]struct{}
 	routing       kBucketSet
 	generation    uint64
 	selectionPool chan *routerSelectionBuffer
@@ -61,7 +62,9 @@ func NewTable(local foundation.Hash, bucketCapacity int) *Table {
 	}
 	selectionWorkers := parallelism.CPUs()
 	table := &Table{
-		local: local, routers: make(map[foundation.Hash]routerEntry), routing: newKBucketSet(bucketCapacity),
+		local: local, routers: make(map[foundation.Hash]routerEntry),
+		floodfills:    make(map[foundation.Hash]struct{}),
+		routing:       newKBucketSet(bucketCapacity),
 		selectionPool: make(chan *routerSelectionBuffer, selectionWorkers),
 		subnetQuota:   DefaultBucketSubnetQuota,
 	}
@@ -106,6 +109,7 @@ func (t *Table) evictOldestLocked() {
 	}
 	if found {
 		delete(t.routers, oldest)
+		delete(t.floodfills, oldest)
 		t.routing.remove(t.local, oldest)
 		t.generation++
 	}
@@ -116,6 +120,15 @@ func (t *Table) Len() int {
 	n := len(t.routers)
 	t.mu.RUnlock()
 	return n
+}
+
+// Counts returns the current total and floodfill router counts without allocating.
+func (t *Table) Counts() (routers, floodfills int) {
+	t.mu.RLock()
+	routers = len(t.routers)
+	floodfills = len(t.floodfills)
+	t.mu.RUnlock()
+	return routers, floodfills
 }
 
 // Local returns the routing table's local identity hash.
@@ -163,10 +176,46 @@ func (t *Table) borrowSelection(routing bool) *routerSelectionBuffer {
 	return buffer
 }
 
+func (t *Table) borrowSelectionFloodfills() *routerSelectionBuffer {
+	buffer := <-t.selectionPool
+	buffer.peers = buffer.peers[:0]
+	t.mu.RLock()
+	if len(t.floodfills) > 0 {
+		for hash := range t.floodfills {
+			if entry, ok := t.routers[hash]; ok && entry.floodfill {
+				buffer.peers = append(buffer.peers, RouterRef{Hash: hash, Info: entry.info, Floodfill: true, LastSeen: entry.lastSeen})
+			}
+		}
+	} else {
+		for hash, entry := range t.routers {
+			if entry.floodfill {
+				buffer.peers = append(buffer.peers, RouterRef{Hash: hash, Info: entry.info, Floodfill: true, LastSeen: entry.lastSeen})
+			}
+		}
+	}
+	t.mu.RUnlock()
+	return buffer
+}
+
 func (t *Table) releaseSelection(buffer *routerSelectionBuffer) {
 	clear(buffer.peers)
 	buffer.peers = buffer.peers[:0]
 	t.selectionPool <- buffer
+}
+
+// Visit iterates over a borrowed snapshot of all retained RouterInfos using
+// the pooled selection buffer, stopping early when fn returns false.
+func (t *Table) Visit(fn func(RouterRef) bool) {
+	if t == nil || fn == nil {
+		return
+	}
+	buffer := t.borrowSelection(false)
+	defer t.releaseSelection(buffer)
+	for _, peer := range buffer.peers {
+		if !fn(peer) {
+			return
+		}
+	}
 }
 
 // Snapshot copies every RouterInfo in the independent NetDB data store.
@@ -276,6 +325,11 @@ func (t *Table) StoreVerified(info foundation.NetworkDatabaseRouterInfo, floodfi
 			old.lastSeen = seenAt
 		}
 		t.routers[hash] = old
+		if floodfill {
+			t.floodfills[hash] = struct{}{}
+		} else {
+			delete(t.floodfills, hash)
+		}
 		if !t.routingAllowsSubnetsLocked(hash, subnets[:subnetCount]) {
 			t.routing.remove(t.local, hash)
 		}
@@ -294,6 +348,9 @@ func (t *Table) StoreVerified(info foundation.NetworkDatabaseRouterInfo, floodfi
 		lastSeen:    seenAt,
 		subnets:     subnets,
 		subnetCount: subnetCount,
+	}
+	if floodfill {
+		t.floodfills[hash] = struct{}{}
 	}
 	t.generation++
 }
@@ -396,6 +453,7 @@ func (t *Table) Remove(hash foundation.Hash) bool {
 		return false
 	}
 	delete(t.routers, hash)
+	delete(t.floodfills, hash)
 	t.routing.remove(t.local, hash)
 	t.generation++
 	return true
@@ -421,6 +479,7 @@ func (t *Table) Expire(cutoff uint64) int {
 				continue
 			}
 			delete(t.routers, candidate.Hash)
+			delete(t.floodfills, candidate.Hash)
 			t.routing.remove(t.local, candidate.Hash)
 			batchRemoved++
 		}
@@ -502,7 +561,12 @@ func (t *Table) closestInto(dst []RouterRef, target foundation.Hash, floodfillOn
 		return dst
 	}
 	limit := cap(dst)
-	buffer := t.borrowSelection(false)
+	var buffer *routerSelectionBuffer
+	if floodfillOnly {
+		buffer = t.borrowSelectionFloodfills()
+	} else {
+		buffer = t.borrowSelection(false)
+	}
 	defer t.releaseSelection(buffer)
 	for _, candidate := range buffer.peers {
 		_, skip := excluded[candidate.Hash]
