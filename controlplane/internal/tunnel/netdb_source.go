@@ -583,11 +583,17 @@ func selectDiverseHopsWithExcluded(refs []controlplanenetdb.RouterRef, profiles 
 				continue
 			}
 			// A live authenticated session is fresher reachability evidence than
-			// recorded failure history; connected peers remain selectable so a
-			// mesh can re-converge the moment any transport session re-forms.
+			// recorded transport failure history, while repeated tunnel-build
+			// rejections still quarantine the peer until cooldown recovery.
 			connected := policy.connected != nil && policy.connected(ref.Hash)
-			if !connected && !spec.ignoreCooldown && !profiles.EligibleAt(ref.Hash, nowMillis) {
-				continue
+			if !spec.ignoreCooldown {
+				if connected {
+					if !profiles.BuildEligibleAt(ref.Hash, nowMillis) {
+						continue
+					}
+				} else if !profiles.EligibleAt(ref.Hash, nowMillis) {
+					continue
+				}
 			}
 			if err := controlplanenetdb.RouterInfoFresh(ref.Info, nowMillis); err != nil {
 				if !spec.allowReseedFresh || controlplanenetdb.ReseedRouterInfoFresh(ref.Info, nowMillis) != nil {
@@ -621,7 +627,7 @@ func selectDiverseHopsWithExcluded(refs []controlplanenetdb.RouterRef, profiles 
 			candidates = collectCandidates(candidateCollectionSpec{allowFloodfill: true, allowReseedFresh: true})
 		}
 	}
-	if len(candidates) < wanted && len(refs) <= 8 {
+	if len(candidates) < wanted {
 		candidates = collectCandidates(candidateCollectionSpec{
 			allowFloodfill:   true,
 			allowReseedFresh: policy.exploratory,
@@ -672,6 +678,21 @@ func selectDiverseHopsWithExcluded(refs []controlplanenetdb.RouterRef, profiles 
 				return nil
 			}
 		}
+	} else if len(selected) > 3 {
+		reordered := slices.Clone(selected)
+		middle := reordered[1 : len(reordered)-1]
+		sortHopCandidates(middle)
+		slices.Reverse(middle)
+		compatible := true
+		for index, candidate := range reordered {
+			if !peerAllowedAtPosition(candidate, index, wanted, activePolicy) || index != 0 && !tunnelPathCompatible(reordered[:index], candidate) {
+				compatible = false
+				break
+			}
+		}
+		if compatible {
+			selected = reordered
+		}
 	}
 	hops := make([]ShortBuildHop, len(selected))
 	for index := range selected {
@@ -680,7 +701,6 @@ func selectDiverseHopsWithExcluded(refs []controlplanenetdb.RouterRef, profiles 
 	return hops
 }
 func selectDiverseHop(candidates, selected []hopCandidate, wanted, relaxation int, policy peerSelectionPolicy) int {
-	haveV4, haveV6 := selectedAddressFamilies(selected)
 	if policy.exploratory {
 		highCapacityTarget := max(0, wanted-2)
 		highCapacitySelected := 0
@@ -690,15 +710,15 @@ func selectDiverseHop(candidates, selected []hopCandidate, wanted, relaxation in
 			}
 		}
 		if highCapacitySelected < highCapacityTarget {
-			choice := selectHopFromTier(candidates, selected, wanted, relaxation, 0, haveV4, haveV6, policy)
+			choice := selectHopFromTier(candidates, selected, wanted, relaxation, 0, policy)
 			if choice != -1 {
 				return choice
 			}
 		}
-		return selectHopFromTier(candidates, selected, wanted, relaxation, allPeerTiers, haveV4, haveV6, policy)
+		return selectHopFromTier(candidates, selected, wanted, relaxation, allPeerTiers, policy)
 	}
 	for peerTier := uint8(0); peerTier < 3; peerTier++ {
-		choice := selectHopFromTier(candidates, selected, wanted, relaxation, peerTier, haveV4, haveV6, policy)
+		choice := selectHopFromTier(candidates, selected, wanted, relaxation, peerTier, policy)
 		if choice != -1 {
 			return choice
 		}
@@ -706,47 +726,37 @@ func selectDiverseHop(candidates, selected []hopCandidate, wanted, relaxation in
 	return -1
 }
 
-func selectHopFromTier(candidates, selected []hopCandidate, wanted, relaxation int, peerTier uint8, haveV4, haveV6 bool, policy peerSelectionPolicy) int {
+func selectHopFromTier(candidates, selected []hopCandidate, wanted, relaxation int, peerTier uint8, policy peerSelectionPolicy) int {
 	var nextByMask [16]int
 	nextPos := len(selected) + 1
-	for _, next := range candidates {
-		if selectedContains(selected, next.hop.Router) || !peerAllowedAtPosition(next, nextPos, wanted, policy) {
-			continue
+	needsFuture := nextPos < wanted
+	if needsFuture {
+		for _, next := range candidates {
+			if selectedContains(selected, next.hop.Router) || !peerAllowedAtPosition(next, nextPos, wanted, policy) {
+				continue
+			}
+			nextByMask[next.transports&0x0f]++
 		}
-		nextByMask[next.transports&0x0f]++
 	}
 	choice := -1
-	choiceAddsFamily := false
-	choiceFutureOptions := -1
-	needsFuture := nextPos < wanted
 	for index, candidate := range candidates {
 		if !hopCandidateAllowed(candidate, selected, wanted, relaxation, peerTier, policy) {
 			continue
 		}
-		futureOptions := hopFutureOptionsFromMasks(nextByMask, selected, candidate, wanted, policy)
-		if needsFuture && futureOptions == 0 {
+		if needsFuture && hopFutureOptionsFromMasks(nextByMask, selected, candidate, wanted, policy) == 0 {
 			continue
 		}
-		addsFamily := len(candidate.v4) != 0 && !haveV4 || len(candidate.v6) != 0 && !haveV6
 		if choice == -1 {
-			choice, choiceAddsFamily, choiceFutureOptions = index, addsFamily, futureOptions
-			continue
-		}
-		if addsFamily != choiceAddsFamily {
-			if addsFamily {
-				choice, choiceAddsFamily, choiceFutureOptions = index, addsFamily, futureOptions
-			}
-			continue
-		}
-		if futureOptions != choiceFutureOptions {
-			if futureOptions > choiceFutureOptions {
-				choice, choiceAddsFamily, choiceFutureOptions = index, addsFamily, futureOptions
+			choice = index
+			if policy.exploratory || len(selected) == 0 || len(selected)+1 >= wanted {
+				return choice
 			}
 			continue
 		}
 		if !policy.exploratory && len(selected) > 0 && len(selected)+1 < wanted &&
+			candidate.membership == candidates[choice].membership &&
 			int64(candidate.order) > int64(candidates[choice].order) {
-			choice, choiceAddsFamily, choiceFutureOptions = index, addsFamily, futureOptions
+			choice = index
 		}
 	}
 	return choice
@@ -1046,14 +1056,6 @@ func prefixConflict(selected []hopCandidate, candidate hopCandidate, restriction
 		}
 	}
 	return false
-}
-
-func selectedAddressFamilies(selected []hopCandidate) (hasV4, hasV6 bool) {
-	for _, candidate := range selected {
-		hasV4 = hasV4 || len(candidate.v4) != 0
-		hasV6 = hasV6 || len(candidate.v6) != 0
-	}
-	return hasV4, hasV6
 }
 
 func routerMetadata(info foundation.NetworkDatabaseRouterInfo) (string, [][4]byte, [][16]byte, []uint16) {
