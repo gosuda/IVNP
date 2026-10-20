@@ -63,7 +63,7 @@ data_dir = /var/lib/ivnp
 
 [network]
 id = 2
-profile = public ; public | small_private | office_lan
+profile = public ; public | dedicated | direct
 
 [router]
 floodfill = false
@@ -159,12 +159,12 @@ func runService(ctx context.Context) error {
 
 ### Multi-Network Overlays, Private Presets, and Happy Eyeballs
 
-A single `Router` can host independent I2P network contexts (such as the public `netId=2` network alongside a private `netId=42` mesh). Preset constructors (`NewSmallPrivateNetwork` for 3 to 20 nodes and `NewOfficeLANNetwork` for 2+ node flat-subnet LAN meshes) configure floodfill participation, 1-hop or 2-hop tunnel pools, `/16` subnet quota bypass, and NetDB confirmation thresholds automatically. A `Destination` bound to multiple networks shares one cryptographic identity and `.b32.i2p` address across all of them:
+A single `Router` can host independent I2P network contexts (such as the public `netId=2` network alongside a dedicated `netId=42` mesh). Preset constructors (`NewDedicatedNetwork` for 2 to 20+ node dedicated overlays and `NewDirectNetwork` for 2+ node low-latency direct meshes) configure floodfill participation, 1-hop tunnel pools, `/16` subnet quota tuning, and NetDB confirmation thresholds automatically. A `Destination` bound to multiple networks shares one cryptographic identity and `.b32.i2p` address across all of them:
 
 ```go
 cfg := ivnp.DefaultRouterConfig()
 cfg.Networks = []ivnp.NetworkConfig{
-	ivnp.NewOfficeLANNetwork("private-mesh", 42,
+	ivnp.NewDirectNetwork("private-mesh", 42,
 		ivnp.WithListenAddress("0.0.0.0:19111"),
 		ivnp.WithPeerSeeds(meshSeedRouterInfos...),
 		ivnp.WithPeerAdmission(ivnp.AdmitPeers(allowedPeerHashes...)),
@@ -179,7 +179,7 @@ if err != nil {
 }
 defer router.Close()
 
-destCfg := ivnp.OfficeLANDestinationConfig()
+destCfg := ivnp.DirectDestinationConfig()
 destCfg.Networks = []string{"private-mesh", "i2p"}
 dest, err := router.NewDestination(ctx, destCfg)
 ```

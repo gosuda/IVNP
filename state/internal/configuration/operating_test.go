@@ -401,38 +401,38 @@ func TestParseOperatingRequiresExactReseedNetworkQuery(t *testing.T) {
 }
 
 func TestParseOperatingNetworkProfilesAndOverrides(t *testing.T) {
-	office, err := ParseOperating("[network]\nid = 77\nprofile = office_lan\n", "/etc/ivnp/ivnp.conf")
+	direct, err := ParseOperating("[network]\nid = 77\nprofile = direct\n", "/etc/ivnp/ivnp.conf")
 	if err != nil {
-		t.Fatalf("office_lan profile error: %v", err)
+		t.Fatalf("direct profile error: %v", err)
 	}
-	if office.Network.ID != 77 || office.Network.Profile != NetworkProfileOfficeLAN || !office.Router.Floodfill || !office.Router.Transit {
-		t.Fatalf("office network/router = %#v %#v", office.Network, office.Router)
+	if direct.Network.ID != 77 || direct.Network.Profile != NetworkProfileDirect || !direct.Router.Floodfill || !direct.Router.Transit {
+		t.Fatalf("direct network/router = %#v %#v", direct.Network, direct.Router)
 	}
-	if !office.NetDB.DisableBucketSubnetQuota || office.NetDB.BucketSubnetQuota != 0 || office.NetDB.MinRouters != 1 || office.NetDB.RouterInfoFloodfillK != 1 || office.NetDB.LeaseSetFloodfillK != 1 {
-		t.Fatalf("office netdb = %#v", office.NetDB)
+	if !direct.NetDB.DisableBucketSubnetQuota || direct.NetDB.BucketSubnetQuota != 0 || direct.NetDB.MinRouters != 1 || direct.NetDB.RouterInfoFloodfillK != 1 || direct.NetDB.LeaseSetFloodfillK != 1 {
+		t.Fatalf("direct netdb = %#v", direct.NetDB)
 	}
-	if office.Tunnel.Hops != 1 || !office.Tunnel.DisableIPRestriction || office.Tunnel.IPRestriction != 0 || office.Tunnel.MaintenanceInterval != 3*time.Second || office.Tunnel.ProbeTimeout != 5*time.Second {
-		t.Fatalf("office tunnel = %#v", office.Tunnel)
+	if direct.Tunnel.Hops != 1 || !direct.Tunnel.DisableIPRestriction || direct.Tunnel.IPRestriction != 0 || direct.Tunnel.MaintenanceInterval != 3*time.Second || direct.Tunnel.ProbeTimeout != 5*time.Second {
+		t.Fatalf("direct tunnel = %#v", direct.Tunnel)
 	}
-	if office.Reseed.Enabled || len(office.Reseed.Endpoints) != 0 || len(office.HTTPProxy.Outproxies) != 0 || len(office.AddressBook.Subscriptions) != 0 {
-		t.Fatalf("office external dependencies remained enabled: reseed=%#v outproxies=%#v subscriptions=%#v", office.Reseed, office.HTTPProxy.Outproxies, office.AddressBook.Subscriptions)
+	if direct.Reseed.Enabled || len(direct.Reseed.Endpoints) != 0 || len(direct.HTTPProxy.Outproxies) != 0 || len(direct.AddressBook.Subscriptions) != 0 {
+		t.Fatalf("direct external dependencies remained enabled: reseed=%#v outproxies=%#v subscriptions=%#v", direct.Reseed, direct.HTTPProxy.Outproxies, direct.AddressBook.Subscriptions)
 	}
 
-	smallOverride, err := ParseOperating("[network]\nid = 88\nprofile = small_private\n[tunnel]\nhops = 2\nip_restriction = 0\nprobe_timeout = 8s\nprobe_failure_threshold = 3\n[netdb]\nmin_routers = 4\nbucket_subnet_quota = 0\nrouter_info_floodfill_k = 3\nlease_set_floodfill_k = 3\nexploration_bootstrap_delay = 250ms\nexploration_steady_delay = 2s\n[reseed]\nbucket_subnet_quota = 0\nbucket_admit_limit = 32\nverify_anchor_count = 4\nmerge_wait = 1s\n", "/etc/ivnp/ivnp.conf")
+	dedicatedOverride, err := ParseOperating("[network]\nid = 88\nprofile = dedicated\n[tunnel]\nhops = 2\nip_restriction = 0\nprobe_timeout = 8s\nprobe_failure_threshold = 3\n[netdb]\nmin_routers = 4\nbucket_subnet_quota = 0\nrouter_info_floodfill_k = 3\nlease_set_floodfill_k = 3\nexploration_bootstrap_delay = 250ms\nexploration_steady_delay = 2s\n[reseed]\nbucket_subnet_quota = 0\nbucket_admit_limit = 32\nverify_anchor_count = 4\nmerge_wait = 1s\n", "/etc/ivnp/ivnp.conf")
 	if err != nil {
-		t.Fatalf("small_private override error: %v", err)
+		t.Fatalf("dedicated override error: %v", err)
 	}
-	if smallOverride.Network.Profile != NetworkProfileSmallPrivate || smallOverride.Tunnel.Hops != 2 || !smallOverride.Tunnel.DisableIPRestriction || smallOverride.Tunnel.ProbeTimeout != 8*time.Second || smallOverride.Tunnel.ProbeFailureThreshold != 3 {
-		t.Fatalf("small_private tunnel override = %#v", smallOverride.Tunnel)
+	if dedicatedOverride.Network.Profile != NetworkProfileDedicated || dedicatedOverride.Tunnel.Hops != 2 || !dedicatedOverride.Tunnel.DisableIPRestriction || dedicatedOverride.Tunnel.ProbeTimeout != 8*time.Second || dedicatedOverride.Tunnel.ProbeFailureThreshold != 3 {
+		t.Fatalf("dedicated tunnel override = %#v", dedicatedOverride.Tunnel)
 	}
-	if smallOverride.NetDB.MinRouters != 4 || !smallOverride.NetDB.DisableBucketSubnetQuota || smallOverride.NetDB.RouterInfoFloodfillK != 3 || smallOverride.NetDB.LeaseSetFloodfillK != 3 {
-		t.Fatalf("small_private netdb override = %#v", smallOverride.NetDB)
+	if dedicatedOverride.NetDB.MinRouters != 4 || !dedicatedOverride.NetDB.DisableBucketSubnetQuota || dedicatedOverride.NetDB.RouterInfoFloodfillK != 3 || dedicatedOverride.NetDB.LeaseSetFloodfillK != 3 {
+		t.Fatalf("dedicated netdb override = %#v", dedicatedOverride.NetDB)
 	}
-	if smallOverride.NetDB.ExplorationBootstrapDelay != 250*time.Millisecond || smallOverride.NetDB.ExplorationSteadyDelay != 2*time.Second {
-		t.Fatalf("small_private netdb exploration override = %#v", smallOverride.NetDB)
+	if dedicatedOverride.NetDB.ExplorationBootstrapDelay != 250*time.Millisecond || dedicatedOverride.NetDB.ExplorationSteadyDelay != 2*time.Second {
+		t.Fatalf("dedicated netdb exploration override = %#v", dedicatedOverride.NetDB)
 	}
-	if !smallOverride.Reseed.DisableBucketSubnetQuota || smallOverride.Reseed.BucketAdmitLimit != 32 || smallOverride.Reseed.VerifyAnchorCount != 4 || smallOverride.Reseed.MergeWait != time.Second {
-		t.Fatalf("small_private reseed override = %#v", smallOverride.Reseed)
+	if !dedicatedOverride.Reseed.DisableBucketSubnetQuota || dedicatedOverride.Reseed.BucketAdmitLimit != 32 || dedicatedOverride.Reseed.VerifyAnchorCount != 4 || dedicatedOverride.Reseed.MergeWait != time.Second {
+		t.Fatalf("dedicated reseed override = %#v", dedicatedOverride.Reseed)
 	}
 
 	if _, err := ParseOperating("[network]\nprofile = unknown_profile\n", "/etc/ivnp/ivnp.conf"); !errors.Is(err, ErrInvalidOperating) {

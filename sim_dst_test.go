@@ -951,23 +951,23 @@ func TestDeterministicFleetIdentities(t *testing.T) {
 	}
 }
 
-// TestSimOfficeLANTwoNodeMesh verifies that two routers configured with
-// NetworkProfileOfficeLAN on a private network ID converge over virtual
+// TestSimDirectTwoNodeMesh verifies that two routers configured with
+// NetworkProfileDirect on a private network ID converge over virtual
 // NTCP2/SSU2 links without a third-party floodfill, build 1-hop exploratory
 // and client tunnels (exercising OBEP == IBGW reply routing), confirm
 // LeaseSet2 publication (K = 1), and exchange bidirectional stream and
 // Datagram2 traffic inside a synctest bubble.
-func TestSimOfficeLANTwoNodeMesh(t *testing.T) {
+func TestSimDirectTwoNodeMesh(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sim := newSimNet(t, 2088)
 		alice := sim.AddRouter(t, simNodeConfig{
 			Name:      "alice",
-			Profile:   NetworkProfileOfficeLAN,
+			Profile:   NetworkProfileDirect,
 			NetworkID: 88,
 		})
 		bob := sim.AddRouter(t, simNodeConfig{
 			Name:      "bob",
-			Profile:   NetworkProfileOfficeLAN,
+			Profile:   NetworkProfileDirect,
 			NetworkID: 88,
 		})
 		sim.Mesh(simnet.LinkConfig{Latency: time.Millisecond, Jitter: 250 * time.Microsecond})
@@ -976,34 +976,34 @@ func TestSimOfficeLANTwoNodeMesh(t *testing.T) {
 		sim.WaitReady(t, 60*time.Second)
 
 		ctx := t.Context()
-		destCfg := OfficeLANDestinationConfig()
+		destCfg := DirectDestinationConfig()
 		target, err := bob.router.NewDestination(ctx, destCfg)
 		if err != nil {
-			t.Fatalf("bob office destination: %v", err)
+			t.Fatalf("bob direct destination: %v", err)
 		}
 		defer target.Close()
 		source, err := alice.router.NewDestination(ctx, destCfg)
 		if err != nil {
-			t.Fatalf("alice office destination: %v", err)
+			t.Fatalf("alice direct destination: %v", err)
 		}
 		defer source.Close()
 
-		assertSimStreamAndDatagramRoundTrip(t, sim, source, target, "office-lan-2node")
+		assertSimStreamAndDatagramRoundTrip(t, sim, source, target, "direct-2node")
 	})
 }
 
-// TestSimSmallPrivateMesh verifies that a 4-node small private mesh on a
-// shared /16 subnet (NetworkProfileSmallPrivate, netId = 42) builds 1-hop
-// exploratory and 2-hop client tunnels, satisfies K = 2 floodfill publication
+// TestSimDedicatedMesh verifies that a 4-node dedicated mesh on a
+// shared /16 subnet (NetworkProfileDedicated, netId = 42) builds 1-hop
+// exploratory and client tunnels, satisfies K = 2 floodfill publication
 // confirmations, and routes bidirectional stream and Datagram2 traffic.
-func TestSimSmallPrivateMesh(t *testing.T) {
+func TestSimDedicatedMesh(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sim := newSimNet(t, 2042)
 		nodes := make([]*simNode, 4)
 		for i := range nodes {
 			nodes[i] = sim.AddRouter(t, simNodeConfig{
 				Name:      fmt.Sprintf("priv%d", i+1),
-				Profile:   NetworkProfileSmallPrivate,
+				Profile:   NetworkProfileDedicated,
 				NetworkID: 42,
 			})
 		}
@@ -1013,19 +1013,19 @@ func TestSimSmallPrivateMesh(t *testing.T) {
 		sim.WaitReady(t, 90*time.Second)
 
 		ctx := t.Context()
-		destCfg := SmallPrivateDestinationConfig()
+		destCfg := DedicatedDestinationConfig()
 		target, err := nodes[3].router.NewDestination(ctx, destCfg)
 		if err != nil {
-			t.Fatalf("target small-private destination: %v", err)
+			t.Fatalf("target dedicated destination: %v", err)
 		}
 		defer target.Close()
 		source, err := nodes[0].router.NewDestination(ctx, destCfg)
 		if err != nil {
-			t.Fatalf("source small-private destination: %v", err)
+			t.Fatalf("source dedicated destination: %v", err)
 		}
 		defer source.Close()
 
-		assertSimStreamAndDatagramRoundTrip(t, sim, source, target, "small-private-4node")
+		assertSimStreamAndDatagramRoundTrip(t, sim, source, target, "dedicated-4node")
 	})
 }
 

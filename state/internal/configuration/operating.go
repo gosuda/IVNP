@@ -70,9 +70,9 @@ type Operating struct {
 type NetworkProfile string
 
 const (
-	NetworkProfilePublic       NetworkProfile = "public"
-	NetworkProfileSmallPrivate NetworkProfile = "small_private"
-	NetworkProfileOfficeLAN    NetworkProfile = "office_lan"
+	NetworkProfilePublic    NetworkProfile = "public"
+	NetworkProfileDedicated NetworkProfile = "dedicated"
+	NetworkProfileDirect    NetworkProfile = "direct"
 )
 
 // Network specifies network ID, preset profile, and enabled IP protocol families.
@@ -491,8 +491,8 @@ func applyNetworkProfile(operating *Operating, profile NetworkProfile) error {
 	case NetworkProfilePublic:
 		operating.Network.Profile = NetworkProfilePublic
 		return nil
-	case NetworkProfileSmallPrivate:
-		operating.Network.Profile = NetworkProfileSmallPrivate
+	case NetworkProfileDedicated:
+		operating.Network.Profile = NetworkProfileDedicated
 		operating.Router.Floodfill = true
 		operating.Router.Transit = true
 		operating.NetDB.BucketSubnetQuota = 16
@@ -523,8 +523,8 @@ func applyNetworkProfile(operating *Operating, profile NetworkProfile) error {
 		operating.HTTPProxy.Outproxies = []string{}
 		operating.AddressBook.Subscriptions = nil
 		return nil
-	case NetworkProfileOfficeLAN:
-		operating.Network.Profile = NetworkProfileOfficeLAN
+	case NetworkProfileDirect:
+		operating.Network.Profile = NetworkProfileDirect
 		operating.Router.Floodfill = true
 		operating.Router.Transit = true
 		operating.NetDB.BucketSubnetQuota = 0

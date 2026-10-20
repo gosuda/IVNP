@@ -158,12 +158,12 @@ type NetworkProfile = state.ConfigurationNetworkProfile
 const (
 	// NetworkProfilePublic selects the official I2P public network defaults.
 	NetworkProfilePublic NetworkProfile = state.ConfigurationNetworkProfilePublic
-	// NetworkProfileSmallPrivate tunes NetDB, tunnel hop diversity, and probe
-	// intervals for small private meshes (2 to 20 nodes).
-	NetworkProfileSmallPrivate NetworkProfile = state.ConfigurationNetworkProfileSmallPrivate
-	// NetworkProfileOfficeLAN tunes NetDB, subnet admission, tunnel hop
-	// diversity, and fast probe intervals for office and LAN deployments.
-	NetworkProfileOfficeLAN NetworkProfile = state.ConfigurationNetworkProfileOfficeLAN
+	// NetworkProfileDedicated tunes NetDB, tunnel hop diversity, and probe
+	// intervals for dedicated overlay networks (2 to 20+ nodes).
+	NetworkProfileDedicated NetworkProfile = state.ConfigurationNetworkProfileDedicated
+	// NetworkProfileDirect tunes NetDB, subnet admission, tunnel hop
+	// diversity, and fast probe intervals for low-latency direct meshes.
+	NetworkProfileDirect NetworkProfile = state.ConfigurationNetworkProfileDirect
 )
 
 // NetDBConfig overrides NetDB routing and admission parameters for a network
@@ -201,8 +201,8 @@ type NetworkConfig struct {
 	// "-stream"/"-datagram2" suffix grammar stays unambiguous.
 	Name      string
 	NetworkID uint32
-	// Profile selects the baseline operating preset ("public", "small_private",
-	// or "office_lan"). Empty defaults to NetworkProfilePublic.
+	// Profile selects the baseline operating preset ("public", "dedicated",
+	// or "direct"). Empty defaults to NetworkProfilePublic.
 	Profile NetworkProfile
 	NTCP2   TransportConfig
 	SSU2    TransportConfig
@@ -239,7 +239,7 @@ func WithNetworkProfile(profile NetworkProfile) NetworkOption {
 	return func(c *NetworkConfig) {
 		c.Profile = profile
 		switch profile {
-		case NetworkProfileSmallPrivate, NetworkProfileOfficeLAN:
+		case NetworkProfileDedicated, NetworkProfileDirect:
 			direction := TunnelDirectionConfig{Hops: 1, Count: 2}
 			c.Exploratory = TunnelPoolConfig{Inbound: direction, Outbound: direction, RenewBefore: 180 * time.Second}
 			c.Participation = ParticipationContributor
@@ -410,17 +410,17 @@ func NewNetwork(name string, netID uint32, opts ...NetworkOption) NetworkConfig 
 	return cfg
 }
 
-// NewSmallPrivateNetwork builds a dedicated-network entry tuned for small
-// private meshes (2 to 20 nodes): 1-hop exploratory tunnels, floodfill and
+// NewDedicatedNetwork builds a dedicated-network entry tuned for dedicated
+// overlay networks (2 to 20+ nodes): 1-hop exploratory tunnels, floodfill and
 // transit participation enabled, relaxed NetDB readiness, and faster probe
 // recovery.
-func NewSmallPrivateNetwork(name string, netID uint32, opts ...NetworkOption) NetworkConfig {
+func NewDedicatedNetwork(name string, netID uint32, opts ...NetworkOption) NetworkConfig {
 	defaults := DefaultRouterConfig()
 	direction := TunnelDirectionConfig{Hops: 1, Count: 2}
 	cfg := NetworkConfig{
 		Name:          name,
 		NetworkID:     netID,
-		Profile:       NetworkProfileSmallPrivate,
+		Profile:       NetworkProfileDedicated,
 		NTCP2:         defaults.NTCP2,
 		SSU2:          defaults.SSU2,
 		Exploratory:   TunnelPoolConfig{Inbound: direction, Outbound: direction, RenewBefore: 180 * time.Second},
@@ -434,17 +434,17 @@ func NewSmallPrivateNetwork(name string, netID uint32, opts ...NetworkOption) Ne
 	return cfg
 }
 
-// NewOfficeLANNetwork builds a dedicated-network entry tuned for office and
-// LAN meshes: subnet bucket quotas and hop IP restrictions disabled, 1-hop
+// NewDirectNetwork builds a dedicated-network entry tuned for low-latency
+// direct meshes: subnet bucket quotas and hop IP restrictions disabled, 1-hop
 // exploratory tunnels, floodfill and transit participation enabled, and fast
-// LAN maintenance and health probes.
-func NewOfficeLANNetwork(name string, netID uint32, opts ...NetworkOption) NetworkConfig {
+// maintenance and health probes.
+func NewDirectNetwork(name string, netID uint32, opts ...NetworkOption) NetworkConfig {
 	defaults := DefaultRouterConfig()
 	direction := TunnelDirectionConfig{Hops: 1, Count: 2}
 	cfg := NetworkConfig{
 		Name:          name,
 		NetworkID:     netID,
-		Profile:       NetworkProfileOfficeLAN,
+		Profile:       NetworkProfileDirect,
 		NTCP2:         defaults.NTCP2,
 		SSU2:          defaults.SSU2,
 		Exploratory:   TunnelPoolConfig{Inbound: direction, Outbound: direction, RenewBefore: 180 * time.Second},
@@ -503,7 +503,7 @@ func networkPlan(cfg RouterConfig) ([]NetworkConfig, string, error) {
 		}
 		netIDs[networks[i].NetworkID] = struct{}{}
 		switch networks[i].Profile {
-		case "", NetworkProfilePublic, NetworkProfileSmallPrivate, NetworkProfileOfficeLAN:
+		case "", NetworkProfilePublic, NetworkProfileDedicated, NetworkProfileDirect:
 		default:
 			return nil, "", invalidConfig(field + ".Profile")
 		}

@@ -133,9 +133,9 @@ func DefaultDestinationConfig() DestinationConfig {
 	return DestinationConfig{Policy: DestinationPolicy{Kind: DestinationPublicLS2}, Tunnels: defaultTunnelPool(2), PacketQueue: PacketQueueConfig{MaxPackets: 64, MaxBytes: 1 << 20}}
 }
 
-// SmallPrivateDestinationConfig returns destination defaults tuned for small
-// private meshes (1-hop client tunnels, 2 active tunnels per direction).
-func SmallPrivateDestinationConfig() DestinationConfig {
+// DedicatedDestinationConfig returns destination defaults tuned for dedicated
+// overlay networks (1-hop client tunnels, 2 active tunnels per direction).
+func DedicatedDestinationConfig() DestinationConfig {
 	direction := TunnelDirectionConfig{Hops: 1, Count: 2}
 	return DestinationConfig{
 		Policy:      DestinationPolicy{Kind: DestinationPublicLS2},
@@ -144,9 +144,9 @@ func SmallPrivateDestinationConfig() DestinationConfig {
 	}
 }
 
-// OfficeLANDestinationConfig returns destination defaults tuned for office and
-// LAN meshes (1-hop client tunnels, 1 active and 1 backup tunnel per direction).
-func OfficeLANDestinationConfig() DestinationConfig {
+// DirectDestinationConfig returns destination defaults tuned for low-latency
+// direct meshes (1-hop client tunnels, 1 active and 1 backup tunnel per direction).
+func DirectDestinationConfig() DestinationConfig {
 	direction := TunnelDirectionConfig{Hops: 1, Count: 1, Backup: 1}
 	return DestinationConfig{
 		Policy:      DestinationPolicy{Kind: DestinationPublicLS2},

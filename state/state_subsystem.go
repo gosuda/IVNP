@@ -31,12 +31,12 @@ type (
 )
 
 const (
-	ConfigurationNetworkProfilePublic       = configuration.NetworkProfilePublic
-	ConfigurationNetworkProfileSmallPrivate = configuration.NetworkProfileSmallPrivate
-	ConfigurationNetworkProfileOfficeLAN    = configuration.NetworkProfileOfficeLAN
-	SecureStateRemoteELSAuthorizationDH     = securestore.RemoteELSAuthorizationDH
-	SecureStateRemoteELSAuthorizationNone   = securestore.RemoteELSAuthorizationNone
-	SecureStateRemoteELSAuthorizationPSK    = securestore.RemoteELSAuthorizationPSK
+	ConfigurationNetworkProfilePublic     = configuration.NetworkProfilePublic
+	ConfigurationNetworkProfileDedicated  = configuration.NetworkProfileDedicated
+	ConfigurationNetworkProfileDirect     = configuration.NetworkProfileDirect
+	SecureStateRemoteELSAuthorizationDH   = securestore.RemoteELSAuthorizationDH
+	SecureStateRemoteELSAuthorizationNone = securestore.RemoteELSAuthorizationNone
+	SecureStateRemoteELSAuthorizationPSK  = securestore.RemoteELSAuthorizationPSK
 )
 
 var (

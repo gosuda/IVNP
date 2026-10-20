@@ -26,8 +26,8 @@ This document covers Layers L6 through L9 of IVNP: the root embedded Go library 
 | Network Profile Preset | Constructor (`networks.go`) | Destination Preset (`config.go`) | Default Hops / Count | Subnet Quota & IP Diversity | NetDB Readiness / Publication `K` |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `NetworkProfilePublic` (`"public"`) | `NewNetwork(name, id, opts...)` | `DefaultDestinationConfig()` | `2` exploratory, `3` client (`3+1` tunnels) | `/16` K-bucket quota `2`; `/16` tunnel diversity | `MinRouters = 50`, `RouterInfoK = 5`, `LeaseSetK = 4` |
-| `NetworkProfileSmallPrivate` (`"small_private"`) | `NewSmallPrivateNetwork(name, id, opts...)` | `SmallPrivateDestinationConfig()` | `1` exploratory, `2` client (`2+1` tunnels) | Subnet quota disabled; `IPRestriction = 0` | `MinRouters = 2`, `RouterInfoK = 2`, `LeaseSetK = 2` |
-| `NetworkProfileOfficeLAN` (`"office_lan"`) | `NewOfficeLANNetwork(name, id, opts...)` | `OfficeLANDestinationConfig()` | `1` exploratory, `1` client (`2+0` tunnels) | Subnet quota disabled; `IPRestriction = 0`; NAT mapping off | `MinRouters = 1`, `RouterInfoK = 1`, `LeaseSetK = 1` |
+| `NetworkProfileDedicated` (`"dedicated"`) | `NewDedicatedNetwork(name, id, opts...)` | `DedicatedDestinationConfig()` | `1` exploratory, `1` client (`2+0` tunnels) | `/16` K-bucket quota `16`; `IPRestriction = 2` | `MinRouters = 2`, `RouterInfoK = 2`, `LeaseSetK = 2` |
+| `NetworkProfileDirect` (`"direct"`) | `NewDirectNetwork(name, id, opts...)` | `DirectDestinationConfig()` | `1` exploratory, `1` client (`1+1` tunnels) | Subnet quota disabled; `IPRestriction = 0` | `MinRouters = 1`, `RouterInfoK = 1`, `LeaseSetK = 1` |
 
 Per-network behavior can be customized via `WithNetworkProfile`, `WithListenAddress`, `WithAdvertisedAddress`, `WithPeerSeeds`, `WithReseedServers`, `WithTrustedReseedCerts`, `WithNetDBConfig(NetDBConfig)`, `WithTunnelTiming(lifetime, renewBefore, healthProbe)`, `WithIPRestriction(mode)`, `WithExploratoryTunnels`, `WithPublicParticipation`, and `WithPeerAdmission(fn)` (using `AdmitPeers(hashes...)`, `RejectPeers(hashes...)`, and `ChainAdmission(checks...)`).
 

@@ -210,11 +210,11 @@ func TestEmbeddedMultiNetworkDestination(t *testing.T) {
 	}
 }
 
-// TestEmbeddedTwoNodeOfficeLANMesh verifies that a 2-node office LAN mesh on a
+// TestEmbeddedTwoNodeDirectMesh verifies that a 2-node direct mesh on a
 // shared /24 subnet forms 1-hop exploratory and client tunnels, publishes
 // LeaseSets without a dedicated third-party floodfill, and exchanges stream
-// traffic using NewOfficeLANNetwork and OfficeLANDestinationConfig.
-func TestEmbeddedTwoNodeOfficeLANMesh(t *testing.T) {
+// traffic using NewDirectNetwork and DirectDestinationConfig.
+func TestEmbeddedTwoNodeDirectMesh(t *testing.T) {
 	const netID = 88
 	mesh := newEmbeddedMemoryNetwork(foundation.NetworkDatabaseRouterInfo{})
 
@@ -228,8 +228,8 @@ func TestEmbeddedTwoNodeOfficeLANMesh(t *testing.T) {
 		cfg.Persistence = &PersistenceConfig{Directory: base}
 		bind := netip.MustParseAddrPort("127.0.0.1:0")
 		adv := netip.MustParseAddrPort(advertised)
-		cfg.SetNetworks(NewOfficeLANNetwork(
-			"office",
+		cfg.SetNetworks(NewDirectNetwork(
+			"direct",
 			netID,
 			WithListenAddress(bind, bind),
 			WithAdvertisedAddress(adv, adv),
@@ -247,7 +247,7 @@ func TestEmbeddedTwoNodeOfficeLANMesh(t *testing.T) {
 		router := newEmbeddedTestRouterN(t, configs[i], func(string) dataplane.RouterTransportManager { return tr })
 		infos[i] = append([]byte(nil), tr.routerInfo().Bytes()...)
 		if len(infos[i]) == 0 {
-			t.Fatal("office node did not publish its RouterInfo")
+			t.Fatal("direct node did not publish its RouterInfo")
 		}
 		if err := router.Close(); err != nil {
 			t.Fatal(err)
@@ -264,8 +264,8 @@ func TestEmbeddedTwoNodeOfficeLANMesh(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), embeddedTestTimeout)
 	defer cancel()
-	destCfg := OfficeLANDestinationConfig()
-	destCfg.Networks = []string{"office"}
+	destCfg := DirectDestinationConfig()
+	destCfg.Networks = []string{"direct"}
 	source, err := routers[0].NewDestination(ctx, destCfg)
 	if err != nil {
 		t.Fatal(err)
@@ -277,7 +277,7 @@ func TestEmbeddedTwoNodeOfficeLANMesh(t *testing.T) {
 	}
 	defer target.Close()
 
-	listener, err := target.Listen("office", ":9090")
+	listener, err := target.Listen("direct", ":9090")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,9 +290,9 @@ func TestEmbeddedTwoNodeOfficeLANMesh(t *testing.T) {
 		}
 	}()
 
-	outbound, err := source.DialContext(ctx, "office", net.JoinHostPort(target.B32(), "9090"))
+	outbound, err := source.DialContext(ctx, "direct", net.JoinHostPort(target.B32(), "9090"))
 	if err != nil {
-		t.Fatalf("2-node office dial failed: %v", err)
+		t.Fatalf("2-node direct dial failed: %v", err)
 	}
 	defer outbound.Close()
 
@@ -300,14 +300,14 @@ func TestEmbeddedTwoNodeOfficeLANMesh(t *testing.T) {
 	select {
 	case inbound = <-accepted:
 	case <-ctx.Done():
-		t.Fatalf("2-node office accept timed out: %v", ctx.Err())
+		t.Fatalf("2-node direct accept timed out: %v", ctx.Err())
 	}
 	defer inbound.Close()
 
 	deadline := time.Now().Add(5 * time.Second)
 	_ = outbound.SetDeadline(deadline)
 	_ = inbound.SetDeadline(deadline)
-	payload := []byte("two-node office lan")
+	payload := []byte("two-node direct mesh")
 	if _, err := outbound.Write(payload); err != nil {
 		t.Fatal(err)
 	}
@@ -320,11 +320,11 @@ func TestEmbeddedTwoNodeOfficeLANMesh(t *testing.T) {
 	}
 }
 
-// TestEmbeddedSmallPrivateMeshWithPeerAdmission verifies that a 3-node
-// SmallPrivate mesh on a shared /24 subnet builds 2-hop client tunnels,
+// TestEmbeddedDedicatedMeshWithPeerAdmission verifies that a 3-node
+// Dedicated mesh on a shared /24 subnet builds 1-hop client tunnels,
 // confirms K = 2 LeaseSet2 publications, exchanges stream and Datagram2
 // traffic, and enforces PeerAdmission allowlists.
-func TestEmbeddedSmallPrivateMeshWithPeerAdmission(t *testing.T) {
+func TestEmbeddedDedicatedMeshWithPeerAdmission(t *testing.T) {
 	const netID = 42
 	mesh := newEmbeddedMemoryNetwork(foundation.NetworkDatabaseRouterInfo{})
 
@@ -343,7 +343,7 @@ func TestEmbeddedSmallPrivateMeshWithPeerAdmission(t *testing.T) {
 			WithAdvertisedAddress(adv, adv),
 		}
 		baseOpts = append(baseOpts, opts...)
-		cfg.SetNetworks(NewSmallPrivateNetwork("priv", netID, baseOpts...))
+		cfg.SetNetworks(NewDedicatedNetwork("priv", netID, baseOpts...))
 		return cfg
 	}
 
@@ -360,7 +360,7 @@ func TestEmbeddedSmallPrivateMeshWithPeerAdmission(t *testing.T) {
 		infos[i] = append([]byte(nil), tr.routerInfo().Bytes()...)
 		allowedHashes[i] = router.Hash()
 		if len(infos[i]) == 0 {
-			t.Fatal("small-private node did not publish its RouterInfo")
+			t.Fatal("dedicated node did not publish its RouterInfo")
 		}
 		if err := router.Close(); err != nil {
 			t.Fatal(err)
@@ -393,7 +393,7 @@ func TestEmbeddedSmallPrivateMeshWithPeerAdmission(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), embeddedTestTimeout)
 	defer cancel()
-	destCfg := SmallPrivateDestinationConfig()
+	destCfg := DedicatedDestinationConfig()
 	destCfg.Networks = []string{"priv"}
 	source, err := routers[0].NewDestination(ctx, destCfg)
 	if err != nil {
@@ -421,7 +421,7 @@ func TestEmbeddedSmallPrivateMeshWithPeerAdmission(t *testing.T) {
 
 	outbound, err := source.DialContext(ctx, "priv", net.JoinHostPort(target.B32(), "9092"))
 	if err != nil {
-		t.Fatalf("small-private 2-hop dial failed: %v", err)
+		t.Fatalf("dedicated dial failed: %v", err)
 	}
 	defer outbound.Close()
 
@@ -429,14 +429,14 @@ func TestEmbeddedSmallPrivateMeshWithPeerAdmission(t *testing.T) {
 	select {
 	case inbound = <-accepted:
 	case <-ctx.Done():
-		t.Fatalf("small-private accept timed out: %v", ctx.Err())
+		t.Fatalf("dedicated accept timed out: %v", ctx.Err())
 	}
 	defer inbound.Close()
 
 	deadline := time.Now().Add(5 * time.Second)
 	_ = outbound.SetDeadline(deadline)
 	_ = inbound.SetDeadline(deadline)
-	payload := []byte("small-private-2hop-stream")
+	payload := []byte("dedicated-stream")
 	if _, err := outbound.Write(payload); err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +460,7 @@ func TestEmbeddedSmallPrivateMeshWithPeerAdmission(t *testing.T) {
 	defer receiver.Close()
 	_ = sender.SetDeadline(deadline)
 	_ = receiver.SetDeadline(deadline)
-	dgram := []byte("small-private-2hop-datagram2")
+	dgram := []byte("dedicated-datagram2")
 	if _, err := sender.WriteTo(dgram, receiver.LocalAddr()); err != nil {
 		t.Fatal(err)
 	}
@@ -527,11 +527,11 @@ func (s *loopbackUDPSocket) WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (i
 	return s.UDPConn.WriteToUDPAddrPort(b, target)
 }
 
-// TestE2ELoopbackOfficeLANMesh boots two real embedded Routers over live
-// kernel TCP/UDP loopback sockets using NewOfficeLANNetwork, exchanges their
+// TestE2ELoopbackDirectMesh boots two real embedded Routers over live
+// kernel TCP/UDP loopback sockets using NewDirectNetwork, exchanges their
 // signed RouterInfos, waits for router readiness, and verifies end-to-end
 // streaming and Datagram2 communication.
-func TestE2ELoopbackOfficeLANMesh(t *testing.T) {
+func TestE2ELoopbackDirectMesh(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
@@ -567,7 +567,7 @@ func TestE2ELoopbackOfficeLANMesh(t *testing.T) {
 		sockRuntime.virtualByPort[udpBind.Port()] = udpAdv
 
 		cfg := DefaultRouterConfig()
-		cfg.SetNetworks(NewOfficeLANNetwork(
+		cfg.SetNetworks(NewDirectNetwork(
 			"lan",
 			88,
 			WithListenAddress(tcpBind, udpBind),
@@ -583,7 +583,7 @@ func TestE2ELoopbackOfficeLANMesh(t *testing.T) {
 		}
 		r, err := newRouter(ctx, cfg, specs, def)
 		if err != nil {
-			t.Fatalf("start loopback office router %d: %v", i, err)
+			t.Fatalf("start loopback direct router %d: %v", i, err)
 		}
 		t.Cleanup(func() { _ = r.Close() })
 		routers[i] = r
@@ -610,7 +610,7 @@ func TestE2ELoopbackOfficeLANMesh(t *testing.T) {
 		}
 	}
 
-	destCfg := OfficeLANDestinationConfig()
+	destCfg := DirectDestinationConfig()
 	destCfg.Networks = []string{"lan"}
 	source, err := routers[0].NewDestination(ctx, destCfg)
 	if err != nil {
@@ -638,7 +638,7 @@ func TestE2ELoopbackOfficeLANMesh(t *testing.T) {
 
 	outbound, err := source.DialContext(ctx, "lan", net.JoinHostPort(target.B32(), "8080"))
 	if err != nil {
-		t.Fatalf("live loopback office dial: %v", err)
+		t.Fatalf("live loopback direct dial: %v", err)
 	}
 	defer outbound.Close()
 
@@ -646,14 +646,14 @@ func TestE2ELoopbackOfficeLANMesh(t *testing.T) {
 	select {
 	case inbound = <-accepted:
 	case <-ctx.Done():
-		t.Fatalf("live loopback office accept timed out: %v", ctx.Err())
+		t.Fatalf("live loopback direct accept timed out: %v", ctx.Err())
 	}
 	defer inbound.Close()
 
 	deadline := time.Now().Add(10 * time.Second)
 	_ = outbound.SetDeadline(deadline)
 	_ = inbound.SetDeadline(deadline)
-	msg := []byte("live-kernel-loopback-office-lan")
+	msg := []byte("live-kernel-loopback-direct")
 	if _, err := outbound.Write(msg); err != nil {
 		t.Fatal(err)
 	}
