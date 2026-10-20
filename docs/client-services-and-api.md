@@ -13,7 +13,7 @@ This document covers Layers L6 through L9 of IVNP: the root embedded Go library 
 - **`ivnp.Router`**: Created via `NewRouter(ctx, cfg)`. Owns local NTCP2/SSU2 sockets, NetDB state, exploratory tunnel pools, and a shared packet memory budget (`Limits.PacketQueueBytes`, default `64 MiB`). `NewRouter` starts local workers immediately and does not create an application destination or block on network readiness.
 - **`ivnp.Destination`**: Created via `router.NewDestination(ctx, destCfg)`. Owns a private `foundation.LocalDestination` keypair (cloned and wiped on `Close()`), dedicated inbound and outbound client tunnel pools, a private `RequestManager` for tunneled `LeaseSet` lookups, a `GarlicRatchetManager`, and all child `net.Conn`, `net.Listener`, and packet sockets. `NewDestination` returns only after observing an active inbound/outbound tunnel pair and confirmed `LeaseSet` publication on every bound network.
 
-### 1.2 Multi-Network Contexts & Peer Admission (`networks.go`)
+### 1.2 Multi-Network Contexts, Private Presets & Peer Admission (`networks.go`, `config.go`)
 
 `RouterConfig.Networks` allows a single `Router` to run isolated I2P protocol contexts side by side (for example, the public `netId = 2` network alongside a private `netId = 42` overlay):
 
@@ -23,7 +23,13 @@ This document covers Layers L6 through L9 of IVNP: the root embedded Go library 
 | `ParticipationWarm` (Default) | `NOP` | `512` | `false` | Long-running nodes contributing transit bandwidth |
 | `ParticipationContributor` | `NOPf` | `2048` | `true` | High-capacity public floodfill and transit routers |
 
-Custom peer admission policies can be attached per network via `WithPeerAdmission(fn)` using `AdmitPeers(hashes...)`, `RejectPeers(hashes...)`, and `ChainAdmission(checks...)`.
+| Network Profile Preset | Constructor (`networks.go`) | Destination Preset (`config.go`) | Default Hops / Count | Subnet Quota & IP Diversity | NetDB Readiness / Publication `K` |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `NetworkProfilePublic` (`"public"`) | `NewNetwork(name, id, opts...)` | `DefaultDestinationConfig()` | `2` exploratory, `3` client (`3+1` tunnels) | `/16` K-bucket quota `2`; `/16` tunnel diversity | `MinRouters = 50`, `RouterInfoK = 5`, `LeaseSetK = 4` |
+| `NetworkProfileDedicated` (`"dedicated"`) | `NewDedicatedNetwork(name, id, opts...)` | `DedicatedDestinationConfig()` | `1` exploratory, `1` client (`2+0` tunnels) | `/16` K-bucket quota `16`; `IPRestriction = 2` | `MinRouters = 2`, `RouterInfoK = 2`, `LeaseSetK = 2` |
+| `NetworkProfileDirect` (`"direct"`) | `NewDirectNetwork(name, id, opts...)` | `DirectDestinationConfig()` | `1` exploratory, `1` client (`1+1` tunnels) | Subnet quota disabled; `IPRestriction = 0` | `MinRouters = 1`, `RouterInfoK = 1`, `LeaseSetK = 1` |
+
+Per-network behavior can be customized via `WithNetworkProfile`, `WithListenAddress`, `WithAdvertisedAddress`, `WithPeerSeeds`, `WithReseedURLs`, `WithTrustedReseedCerts`, `WithNetDBConfig(NetDBConfig)`, `WithTunnelTiming(maintenanceInterval, probeTimeout, failureThreshold)`, `WithIPRestriction(mode)`, `WithExploratoryPool`, `WithPublicParticipation`, and `WithPeerAdmission(fn)` (using `AdmitPeers(hashes...)`, `RejectPeers(hashes...)`, and `ChainAdmission(checks...)`). See [Private Networks, Presets & Parameter Tuning Guide](private-networks-and-presets.md) for the complete raw parameter matrix and deployment recipes.
 
 ### 1.3 Stream Dialing, Happy Eyeballs & Merged Listeners (`stream_facade.go`)
 

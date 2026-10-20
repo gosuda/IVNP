@@ -10,7 +10,8 @@ const (
 	maxConfigBytes              = 1 << 20
 	maxReseedEndpoints          = 32
 	maxReseedEndpointBytes      = 512
-	maxBootstrapRouterInfoFiles = 8
+	maxBootstrapRouterInfoFiles = 64
+	maxReseedTrustedCertFiles   = 16
 	maxOperatingPathBytes       = 4_096
 	maxConfigLine               = len("bootstrap_router_info_files = ") + maxBootstrapRouterInfoFiles*maxOperatingPathBytes + maxBootstrapRouterInfoFiles - 1
 	maxConfigEntries            = 4_096

@@ -6,7 +6,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha512"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/pem"
 	"errors"
 	"math/big"
 	"testing"
@@ -117,5 +120,37 @@ func TestDefaultSU3SignersLoadExactCertificateNames(t *testing.T) {
 func TestDefaultSU3SignersRejectCertificatesOutsideInjectedTime(t *testing.T) {
 	if _, err := DefaultSU3SignersAt(time.Unix(0, 0)); !errors.Is(err, ErrDefaultSigners) {
 		t.Fatalf("DefaultSU3SignersAt() error = %v, want ErrDefaultSigners", err)
+	}
+}
+
+func TestMergeSU3SignersAdmitsCustomPEMCertificate(t *testing.T) {
+	private, err := rsa.GenerateKey(rand.Reader, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "custom-reseed@internal.example"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	derBytes, err := x509.CreateCertificate(rand.Reader, template, template, &private.PublicKey, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+
+	merged, err := MergeSU3Signers(nil, [][]byte{pemBytes}, now)
+	if err != nil {
+		t.Fatalf("MergeSU3Signers() error = %v", err)
+	}
+	signer, ok := merged["custom-reseed@internal.example"]
+	if !ok || signer.SigningType != foundation.SigningRSASHA512_4096 || len(signer.PublicKey) != su3RSASignatureLen {
+		t.Fatalf("merged signer = %#v, ok=%t", signer, ok)
+	}
+	if _, err := MergeSU3Signers(nil, [][]byte{[]byte("invalid-pem")}, now); !errors.Is(err, ErrSignerCertificate) {
+		t.Fatalf("invalid PEM error = %v, want ErrSignerCertificate", err)
 	}
 }

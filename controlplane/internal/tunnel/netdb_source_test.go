@@ -600,3 +600,139 @@ func TestNetDBBuildSourcesUseFullProfilePopulation(t *testing.T) {
 		t.Fatalf("inbound did not select high-profile peer from full population: %#v", inboundBuild.Hops)
 	}
 }
+
+func TestSmallNetworkHopSelectionFallbacks(t *testing.T) {
+	t.Run("two-node outbound allows coalesced reply gateway when no other peer exists", func(t *testing.T) {
+		onlyPeer := verifiedX25519RouterTransport(t, 1, "NTCP2", "192.0.2.1", "", "OfR")
+		table := controlplanenetdb.NewTable(foundation.Hash{9}, 8)
+		table.StoreVerified(onlyPeer, false, 1)
+		nextTunnel := uint32(100)
+		source, err := NewNetDBOutboundBuildSource(NetDBOutboundBuildSourceConfig{
+			Table: table, Profiles: NewPeerProfiles(PeerProfilesConfig{}), LocalRouter: foundation.Hash{9},
+			Hops: 1, Lifetime: 100, Exploratory: true,
+			CircuitID: func() uint32 { return 70 },
+			TunnelID:  func() uint32 { nextTunnel++; return nextTunnel },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		build, err := source.NextOutboundForReply(context.Background(), 50, ReplyRoute{Gateway: onlyPeer.Hash(), TunnelID: 10})
+		if err != nil {
+			t.Fatalf("NextOutboundForReply() error = %v", err)
+		}
+		if len(build.Hops) != 1 || build.Hops[0].Router != onlyPeer.Hash() || !build.AllowCoalescedReply {
+			t.Fatalf("coalesced 2-node outbound build = %#v", build)
+		}
+	})
+
+	t.Run("client multi-hop relaxes subTier when all peers hash to same subTier", func(t *testing.T) {
+		left := verifiedX25519Router(t, 1)
+		right := verifiedX25519Router(t, 2)
+		table := controlplanenetdb.NewTable(foundation.Hash{9}, 8)
+		table.StoreVerified(left, false, 1)
+		table.StoreVerified(right, false, 1)
+
+		var collidedKey foundation.Hash
+		for marker := 1; marker < 1<<16; marker++ {
+			binary.BigEndian.PutUint16(collidedKey[14:16], uint16(marker))
+			keys := newJavaPeerSelectionKeys(collidedKey)
+			if keys.subTier(left.Hash()) < 2 && keys.subTier(right.Hash()) < 2 {
+				break
+			}
+		}
+
+		nextTunnel := uint32(100)
+		source, err := NewNetDBOutboundBuildSource(NetDBOutboundBuildSourceConfig{
+			Table: table, Profiles: NewPeerProfiles(PeerProfilesConfig{}), LocalRouter: foundation.Hash{9},
+			ReplyRouter: foundation.Hash{8}, ReplyTunnelID: 10,
+			Hops: 2, Lifetime: 100, SelectionKey: collidedKey,
+			CircuitID: func() uint32 { return 70 },
+			TunnelID:  func() uint32 { nextTunnel++; return nextTunnel },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		build, err := source.NextOutbound(context.Background(), 50)
+		if err != nil {
+			t.Fatalf("NextOutbound() with collided subTiers error = %v", err)
+		}
+		if len(build.Hops) != 2 || build.Hops[0].Router == build.Hops[1].Router {
+			t.Fatalf("relaxed client 2-hop build = %#v", build.Hops)
+		}
+	})
+}
+
+func TestClientThreeHopSelectionVariesMiddleHopAcrossBuilds(t *testing.T) {
+	table := controlplanenetdb.NewTable(foundation.Hash{}, 64)
+	for marker := byte(1); marker <= 32; marker++ {
+		info := verifiedX25519RouterTransport(t, marker, "NTCP2", "192.0.2.1", "", "OR")
+		table.StoreVerified(info, false, 1)
+	}
+	nextTunnel := uint32(100)
+	nextCircuit := uint32(200)
+	targetCounter := uint64(0)
+	var ipRestriction uint8
+	source, err := NewNetDBOutboundBuildSource(NetDBOutboundBuildSourceConfig{
+		Table: table, Profiles: NewPeerProfiles(PeerProfilesConfig{}),
+		ReplyRouter: foundation.Hash{9}, ReplyTunnelID: 10,
+		Hops: 3, CandidateLimit: 64, Lifetime: 100, IPRestriction: &ipRestriction,
+		CircuitID: func() uint32 { nextCircuit++; return nextCircuit },
+		TunnelID:  func() uint32 { nextTunnel++; return nextTunnel },
+		Target: func(uint64) foundation.Hash {
+			targetCounter++
+			var target foundation.Hash
+			binary.BigEndian.PutUint64(target[24:], targetCounter)
+			return target
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	middlePeers := make(map[foundation.Hash]struct{})
+	for buildIndex := range 24 {
+		build, buildErr := source.NextOutbound(context.Background(), uint64(500+buildIndex))
+		if buildErr != nil {
+			t.Fatal(buildErr)
+		}
+		middlePeers[build.Hops[1].Router] = struct{}{}
+	}
+	if len(middlePeers) < 2 {
+		t.Fatalf("24 three-hop client builds selected only %d distinct middle hop", len(middlePeers))
+	}
+}
+
+func TestConnectedPeerRespectsBuildFailureCooldownWhenAlternativesExist(t *testing.T) {
+	failingConnected := verifiedX25519RouterTransport(t, 1, "NTCP2", "192.0.2.1", "", "OR")
+	healthy := verifiedX25519RouterTransport(t, 2, "NTCP2", "198.51.100.1", "", "OR")
+	table := controlplanenetdb.NewTable(foundation.Hash{9}, 8)
+	table.StoreVerified(failingConnected, false, 1)
+	table.StoreVerified(healthy, false, 1)
+
+	profiles := NewPeerProfiles(PeerProfilesConfig{Window: 8})
+	now := uint64(1_000)
+	profiles.RecordTransportFailure(failingConnected.Hash(), now)
+
+	nextTunnel := uint32(100)
+	source, err := NewNetDBInboundBuildSource(NetDBInboundBuildSourceConfig{
+		Table: table, Profiles: profiles, LocalRouter: foundation.Hash{9},
+		Hops: 1, CandidateLimit: 8, Lifetime: 100, Exploratory: true,
+		Connected: func(peer foundation.Hash) bool { return peer == failingConnected.Hash() },
+		CircuitID: func() uint32 { return 70 },
+		TunnelID:  func() uint32 { nextTunnel++; return nextTunnel },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		profiles.Record(failingConnected.Hash(), Observation{Kind: BuildObservation, Success: false, AtMillis: now})
+	}
+	for attempt := range 8 {
+		build, buildErr := source.NextInbound(context.Background(), now+1, 0)
+		if buildErr != nil {
+			t.Fatal(buildErr)
+		}
+		if build.Hops[0].Router != healthy.Hash() {
+			t.Fatalf("attempt %d selected build-quarantined connected peer %x", attempt, build.Hops[0].Router)
+		}
+	}
+}

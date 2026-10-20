@@ -1114,3 +1114,74 @@ func testRequestFollowupDeadline(t *testing.T, route string) {
 		}
 	})
 }
+
+func TestRequestManagerPreservesFifthQueryResponseWindowAfterWakeup(t *testing.T) {
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+	initial := requestTestHash(1)
+	addRequestTestFloodfill(database, initial)
+	fifth := requestTestHash(5)
+	key := requestTestHash(99)
+	sender := &interleavingRequestTestSender{
+		blockPeer: fifth,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	now := uint64(100)
+	manager, err := NewRequestManager(database, sender, requestTestRoute{gateway: requestTestHash(8)}, RequestManagerConfig{
+		Capacity: 8, MaxCandidates: 8, TimeoutMillis: 50_000, Now: func() uint64 { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	waiter, err := manager.LookupLeaseSet(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.active.Wait()
+
+	for step := byte(2); step <= 4; step++ {
+		next := requestTestHash(step)
+		addRequestTestFloodfill(database, next)
+		prev := requestTestHash(step - 1)
+		manager.HandleDatabaseSearchReply(context.Background(), foundation.I2NPDatabaseSearchReplyMessage{
+			Key: key, From: prev, Peers: next[:],
+		})
+		manager.active.Wait()
+	}
+
+	unknown := requestTestHash(6)
+	addRequestTestFloodfill(database, fifth)
+	peers := make([]byte, 2*foundation.HashLength)
+	copy(peers[:foundation.HashLength], fifth[:])
+	copy(peers[foundation.HashLength:], unknown[:])
+	replyDone := make(chan struct{})
+	go func() {
+		manager.HandleDatabaseSearchReply(context.Background(), foundation.I2NPDatabaseSearchReplyMessage{
+			Key: key, From: requestTestHash(4), Peers: peers,
+		})
+		close(replyDone)
+	}()
+	select {
+	case <-sender.entered:
+	case <-time.After(time.Second):
+		t.Fatal("fifth query did not enter Send")
+	}
+	addRequestTestFloodfill(database, unknown)
+	manager.HandleDatabaseStore(context.Background(), foundation.I2NPDatabaseStoreMessage{
+		Key: unknown, Type: foundation.I2NPStoreRouterInfo,
+	})
+	close(sender.release)
+	<-replyDone
+	manager.active.Wait()
+
+	store := foundation.I2NPDatabaseStoreMessage{Key: key, Type: foundation.I2NPStoreLeaseSet2}
+	if !manager.ExpectsDatabaseStore(store) {
+		t.Fatal("fifth query prematurely expired on wakeup before its response window elapsed")
+	}
+	manager.HandleDatabaseStore(context.Background(), store)
+	if outcome := <-waiter; outcome.Err != nil {
+		t.Fatalf("fifth query store completion = %#v", outcome)
+	}
+}

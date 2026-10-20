@@ -102,6 +102,7 @@ type lookupCandidate struct {
 	hash       foundation.Hash
 	attempted  bool
 	sent       bool
+	settled    bool
 	refreshing bool
 }
 
@@ -424,7 +425,10 @@ func (m *RequestManager) HandleDatabaseSearchReply(ctx context.Context, reply fo
 	if m.responders != nil && req.deadline > m.now() && responderEligible(m.database, reply.From, m.now()) {
 		m.responders.Record(reply.From)
 	}
-	req.responseDeadline = 0
+	req.markSettled(reply.From)
+	if !req.hasUnsettledSent() {
+		req.responseDeadline = 0
+	}
 	for off := 0; off < len(reply.Peers) && len(req.candidates) < m.maxCandidates; off += foundation.HashLength {
 		var peer foundation.Hash
 		copy(peer[:], reply.Peers[off:off+foundation.HashLength])
@@ -442,9 +446,12 @@ func (m *RequestManager) HandleDatabaseSearchReply(ctx context.Context, reply fo
 	} else {
 		var terminal error
 		work, terminal = m.prepareSendLocked(lookupKey, req)
+		if work != nil || terminal != nil {
+			req.responseDeadline = 0
+		}
 		if terminal != nil {
 			m.completeLocked(lookupKey, req, terminal)
-		} else if work == nil && req.typeID == ExplorationLookup && allCandidatesSent(req) {
+		} else if work == nil && m.explorationConvergedLocked(req) {
 			m.completeLocked(lookupKey, req, nil)
 		}
 	}
@@ -564,6 +571,7 @@ func (m *RequestManager) expireLocked(key requestKey, req *pendingRequest, nowMi
 		return false, nil
 	}
 	req.responseDeadline = 0
+	req.settleAllSent()
 	next, terminal := m.prepareSendLocked(key, req)
 	if terminal != nil {
 		m.completeLocked(key, req, terminal)
@@ -660,8 +668,40 @@ func (r *pendingRequest) unmarkSent(peer foundation.Hash) {
 	idx := r.candidateIndex(peer)
 	if idx >= 0 && r.candidates[idx].sent {
 		r.candidates[idx].sent = false
+		r.candidates[idx].settled = false
 		r.sentCount--
 	}
+}
+
+func (r *pendingRequest) markSettled(peer foundation.Hash) {
+	idx := r.candidateIndex(peer)
+	if idx >= 0 && r.candidates[idx].sent {
+		r.candidates[idx].settled = true
+	}
+}
+
+func (r *pendingRequest) settleAllSent() {
+	for i := range r.candidates {
+		if r.candidates[i].sent {
+			r.candidates[i].settled = true
+		}
+	}
+}
+
+func (r *pendingRequest) hasUnsettledSent() bool {
+	for i := range r.candidates {
+		if r.candidates[i].sent && !r.candidates[i].settled {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *RequestManager) explorationConvergedLocked(req *pendingRequest) bool {
+	if req.typeID != ExplorationLookup || req.hasUnsettledSent() {
+		return false
+	}
+	return allCandidatesSent(req) || req.sentCount >= min(m.maxCandidates, javaIterativeSearchLimit)
 }
 
 func (r *pendingRequest) anyAttempted() bool {
@@ -710,6 +750,12 @@ func (m *RequestManager) prepareSendLocked(key requestKey, req *pendingRequest) 
 		return nil, ErrRequestExpired
 	}
 	if req.sentCount >= min(m.maxCandidates, javaIterativeSearchLimit) {
+		if req.hasUnsettledSent() && req.responseDeadline > m.now() {
+			return nil, nil
+		}
+		if req.typeID == ExplorationLookup {
+			return nil, nil
+		}
 		return nil, ErrRequestExpired
 	}
 	selectedIndex := -1
@@ -743,6 +789,7 @@ func (m *RequestManager) prepareSendLocked(key requestKey, req *pendingRequest) 
 		req.candidates[selectedIndex].attempted = true
 		if !req.candidates[selectedIndex].sent {
 			req.candidates[selectedIndex].sent = true
+			req.candidates[selectedIndex].settled = false
 			req.sentCount++
 		}
 		req.inFlight = true
@@ -848,8 +895,12 @@ func (m *RequestManager) send(work sendWork) {
 			req.responseDeadline = min(req.deadline, saturatingAddMillis(m.now(), databaseLookupAttemptTimeout))
 			if req.wakeups > 0 {
 				req.wakeups--
-				req.responseDeadline = 0
 				next, err = m.prepareSendLocked(work.key, req)
+				if next != nil || err != nil {
+					req.responseDeadline = 0
+				} else {
+					req.wakeups = 0
+				}
 				if req.wakeups == 0 {
 					req.wakeupDeadline = time.Time{}
 				}

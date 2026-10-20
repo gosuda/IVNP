@@ -191,13 +191,23 @@ func (p *PeerProfiles) Snapshot(peer foundation.Hash) (PeerProfile, bool) {
 // transport cooldown allow selecting peer at now. Java I2P keeps send failures
 // separate from tunnel history and does not quarantine after one build result.
 func (p *PeerProfiles) EligibleAt(peer foundation.Hash, now uint64) bool {
+	return p.eligibleAt(peer, now, false)
+}
+
+// BuildEligibleAt reports whether authenticated build history allows selecting
+// peer at now when a live transport session already proves reachability.
+func (p *PeerProfiles) BuildEligibleAt(peer foundation.Hash, now uint64) bool {
+	return p.eligibleAt(peer, now, true)
+}
+
+func (p *PeerProfiles) eligibleAt(peer foundation.Hash, now uint64, ignoreTransport bool) bool {
 	if p == nil {
 		return true
 	}
 	p.mu.RLock()
 	transport := p.transport[peer]
 	state, ok := p.peers[peer]
-	if transport.lastFailure > transport.lastSuccess {
+	if !ignoreTransport && transport.lastFailure > transport.lastSuccess {
 		delay := profileTransportBaseDelay << min(transport.failures-1, 5)
 		delay = min(delay, profileTransportMaxDelay)
 		if now < transport.lastFailure || now-transport.lastFailure < delay {

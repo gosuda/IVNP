@@ -154,3 +154,43 @@ func TestConfirmedPublicationTargetDefaults(t *testing.T) {
 		t.Fatalf("RouterInfo default sent = %d, want %d (err: %v)", sent, RouterInfoPublicationFloodfillK, err)
 	}
 }
+
+func TestConfirmedPublicationDoesNotResendToAlreadyConfirmedTargets(t *testing.T) {
+	var local, gateway, key foundation.Hash
+	local[0], gateway[0], key[0] = 1, 2, 9
+	database := NewDatabase(local, DefaultBucketCapacity)
+	onlyFloodfill := requestTestHash(3)
+	addRequestTestFloodfill(database, onlyFloodfill)
+
+	now := uint64(1_000)
+	sender := &publicationTestSender{}
+	registry := NewPublicationTokenRegistry(func() uint64 { return now }, func() uint32 { return 17 })
+	publication := newConfirmedPublication(database, sender, publicationTestRoute{gateway: gateway}, registry, func() uint64 { return now }, func() uint32 { return 23 }, key, foundation.I2NPStoreLeaseSet2, nil, LeaseSetPublicationFloodfillK, nil)
+	publication.replace([]byte{1})
+
+	sent, err := publication.maintain(context.Background(), true)
+	if err != nil || sent != 1 || len(sender.messages) != 1 {
+		t.Fatalf("initial publication = %d, %v, %d messages", sent, err, len(sender.messages))
+	}
+	store, err := foundation.I2NPParseDatabaseStore(sender.messages[0].Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !registry.HandleDeliveryStatus(foundation.I2NPDeliveryStatusMessage{MessageID: store.ReplyToken, Timestamp: now}) {
+		t.Fatal("acknowledgement not correlated")
+	}
+
+	now += PublicationConfirmTimeout + 1
+	if sent, err = publication.maintain(context.Background(), true); err != nil || sent != 0 {
+		t.Fatalf("confirmed floodfill received duplicate store: sent=%d err=%v", sent, err)
+	}
+
+	secondFloodfill := requestTestHash(4)
+	addRequestTestFloodfill(database, secondFloodfill)
+	if sent, err = publication.maintain(context.Background(), true); err != nil || sent != 1 {
+		t.Fatalf("newly discovered floodfill publication = %d, %v", sent, err)
+	}
+	if sender.targets[len(sender.targets)-1] != secondFloodfill {
+		t.Fatalf("new publication target = %x, want %x", sender.targets[len(sender.targets)-1], secondFloodfill)
+	}
+}

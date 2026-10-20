@@ -71,6 +71,7 @@ type BootstrapConfig struct {
 	PriorityReseedTimeout time.Duration
 	ReseedURLs            []string
 	ReseedTimeout         time.Duration
+	TrustedCerts          [][]byte
 }
 
 type TunnelPoolConfig = destination.TunnelPoolConfig
@@ -130,6 +131,28 @@ func DefaultRouterConfig() RouterConfig {
 
 func DefaultDestinationConfig() DestinationConfig {
 	return DestinationConfig{Policy: DestinationPolicy{Kind: DestinationPublicLS2}, Tunnels: defaultTunnelPool(2), PacketQueue: PacketQueueConfig{MaxPackets: 64, MaxBytes: 1 << 20}}
+}
+
+// DedicatedDestinationConfig returns destination defaults tuned for dedicated
+// overlay networks (1-hop client tunnels, 2 active tunnels per direction).
+func DedicatedDestinationConfig() DestinationConfig {
+	direction := TunnelDirectionConfig{Hops: 1, Count: 2}
+	return DestinationConfig{
+		Policy:      DestinationPolicy{Kind: DestinationPublicLS2},
+		Tunnels:     TunnelPoolConfig{Inbound: direction, Outbound: direction, RenewBefore: 180 * time.Second},
+		PacketQueue: PacketQueueConfig{MaxPackets: 64, MaxBytes: 1 << 20},
+	}
+}
+
+// DirectDestinationConfig returns destination defaults tuned for low-latency
+// direct meshes (1-hop client tunnels, 1 active and 1 backup tunnel per direction).
+func DirectDestinationConfig() DestinationConfig {
+	direction := TunnelDirectionConfig{Hops: 1, Count: 1, Backup: 1}
+	return DestinationConfig{
+		Policy:      DestinationPolicy{Kind: DestinationPublicLS2},
+		Tunnels:     TunnelPoolConfig{Inbound: direction, Outbound: direction, RenewBefore: 180 * time.Second},
+		PacketQueue: PacketQueueConfig{MaxPackets: 64, MaxBytes: 1 << 20},
+	}
 }
 
 func defaultExploratoryTunnelPool(count int) TunnelPoolConfig {

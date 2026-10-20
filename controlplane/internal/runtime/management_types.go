@@ -1,5 +1,9 @@
 package noderuntime
 
+import (
+	"cmp"
+)
+
 type ManagementStatus struct {
 	Ready      bool             `json:"ready"`
 	State      string           `json:"state,omitempty"`
@@ -10,6 +14,7 @@ type ManagementStatus struct {
 type ReadinessDetails struct {
 	BootstrapStage             uint64 `json:"bootstrap_stage"`
 	NetDBRouters               uint64 `json:"netdb_routers"`
+	MinNetDBRouters            uint64 `json:"min_netdb_routers,omitempty"`
 	RouterInfoPublications     uint64 `json:"router_info_publications"`
 	LeaseSet2Publications      uint64 `json:"lease_set2_publications"`
 	ExploratoryInboundTunnels  uint64 `json:"exploratory_inbound_tunnels"`
@@ -40,8 +45,8 @@ const (
 	ReadinessFloodfillAdvertisement = "floodfill_advertisement"
 )
 
-// readinessMinimumNetDBRouters is the RouterInfo count the data plane needs
-// before peer selection is considered representative.
+// readinessMinimumNetDBRouters is the default RouterInfo count the data plane
+// needs before peer selection is considered representative on the public network.
 const readinessMinimumNetDBRouters = 50
 
 // ReadinessCondition is one unmet data-plane readiness requirement. Current
@@ -63,7 +68,8 @@ func UnmetReadinessConditions(readiness ReadinessDetails) []ReadinessCondition {
 			unmet = append(unmet, ReadinessCondition{Key: key, Numeric: true, Current: current, Required: required})
 		}
 	}
-	minimum(ReadinessNetDBRouters, readiness.NetDBRouters, readinessMinimumNetDBRouters)
+	requiredRouters := cmp.Or(readiness.MinNetDBRouters, uint64(readinessMinimumNetDBRouters))
+	minimum(ReadinessNetDBRouters, readiness.NetDBRouters, requiredRouters)
 	minimum(ReadinessRouterInfoPublication, readiness.RouterInfoPublications, 1)
 	minimum(ReadinessLeaseSet2Publication, readiness.LeaseSet2Publications, 1)
 	minimum(ReadinessExploratoryInbound, readiness.ExploratoryInboundTunnels, 1)

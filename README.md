@@ -61,6 +61,10 @@ On first start with the default `-config ivnp.conf` path, `ivnpd` creates `ivnp.
 [paths]
 data_dir = /var/lib/ivnp
 
+[network]
+id = 2
+profile = public ; public | dedicated | direct
+
 [router]
 floodfill = false
 transit = true
@@ -153,14 +157,14 @@ func runService(ctx context.Context) error {
 }
 ```
 
-### Multi-Network Overlays and Happy Eyeballs
+### Multi-Network Overlays, Private Presets, and Happy Eyeballs
 
-A single `Router` can host independent I2P network contexts (such as the public `netId=2` network alongside a private `netId=42` mesh). A `Destination` bound to multiple networks shares one cryptographic identity and `.b32.i2p` address across all of them:
+A single `Router` can host independent I2P network contexts (such as the public `netId=2` network alongside a dedicated `netId=42` mesh). Preset constructors (`NewDedicatedNetwork` for 2 to 20+ node dedicated overlays and `NewDirectNetwork` for 2+ node low-latency direct meshes) configure floodfill participation, 1-hop tunnel pools, `/16` subnet quota tuning, and NetDB confirmation thresholds automatically. A `Destination` bound to multiple networks shares one cryptographic identity and `.b32.i2p` address across all of them:
 
 ```go
 cfg := ivnp.DefaultRouterConfig()
 cfg.Networks = []ivnp.NetworkConfig{
-	ivnp.NewNetwork("private-mesh", 42,
+	ivnp.NewDirectNetwork("private-mesh", 42,
 		ivnp.WithListenAddress("0.0.0.0:19111"),
 		ivnp.WithPeerSeeds(meshSeedRouterInfos...),
 		ivnp.WithPeerAdmission(ivnp.AdmitPeers(allowedPeerHashes...)),
@@ -175,7 +179,7 @@ if err != nil {
 }
 defer router.Close()
 
-destCfg := ivnp.DefaultDestinationConfig()
+destCfg := ivnp.DirectDestinationConfig()
 destCfg.Networks = []string{"private-mesh", "i2p"}
 dest, err := router.NewDestination(ctx, destCfg)
 ```
@@ -253,6 +257,7 @@ Detailed architectural guides, codebase maps, and wire-level protocol references
 | [**Garlic, Streaming & Datagrams**](docs/garlic-streaming-and-datagrams.md) | `ECIES-X25519-AEAD-Ratchet` state machine, two-phase `NewSession` commit, I2P Streaming TCB, congestion control, and Datagram1/Raw/Datagram2/Datagram3 codecs |
 | [**Control Plane & NetDB**](docs/controlplane-and-netdb.md) | Split Kademlia XOR NetDB, floodfill operations, iterative lookups, confirmed publication, paired tunnel pool maintenance, SU3 reseed verification, and UPnP/NAT-PMP port mapping |
 | [**Client Services & Public API**](docs/client-services-and-api.md) | Root Go API (`gosuda.org/ivnp`), SAM v3.3 server/client, HTTP & SOCKS5 proxies, AddressBook, and `ivnpd` WebUI REST/SSE API |
+| [**Private Networks, Presets & Tuning Guide**](docs/private-networks-and-presets.md) | `public`, `dedicated`, and `direct` presets, complete raw parameter matrices, realistic deployment scenarios (clipboard-sync sidecars, LAN meshes, multi-site overlays), and Go/INI tuning recipes |
 | [**Verification, Simulation & Tooling**](docs/testing-and-simulation.md) | Standard test/lint commands, architectural DAG checks, deterministic simulation testing (`simnet` & `dstoverlay`), and live network integration tests |
 | [**Subsystem Reference: L0-L3 (Utilities, Crypto, Foundation & State)**](docs/subsystems-l0-l3-foundation-and-state.md) | Code-level reference for `internal/*`, `cryptography`, `foundation`, `observability`, `interfaces/*`, and `state` (`router.state` binary bundle layout) |
 | [**Subsystem Reference: L4 (`dataplane`)**](docs/subsystems-l4-dataplane.md) | Code-level walkthrough of `DataPlane`, `Service`, 64-shard Bloom replay filter, `GarlicReceiver`, `NTCP2Manager`, `SSU2Manager` worker loops, and 64-shard `tunnel.Runtime` |

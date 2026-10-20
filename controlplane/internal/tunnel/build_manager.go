@@ -106,11 +106,12 @@ type ShortBuildOptions struct {
 // and ReplyTunnelID identify an existing inbound tunnel used by the OBEP for
 // the OutboundTunnelBuildReply.
 type OutboundBuild struct {
-	CircuitID     uint32
-	Hops          []ShortBuildHop
-	ReplyRouter   foundation.Hash
-	ReplyTunnelID uint32
-	ExpiresAt     uint64
+	CircuitID           uint32
+	Hops                []ShortBuildHop
+	ReplyRouter         foundation.Hash
+	ReplyTunnelID       uint32
+	ExpiresAt           uint64
+	AllowCoalescedReply bool
 
 	// retireID is assigned by Rotator for a renewal. It is intentionally kept
 	// out of the source-facing build contract: no caller may retire a tunnel
@@ -522,7 +523,7 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 			build.attempt.failPreparation()
 		}
 	}()
-	startOutboundRejected := build.CircuitID == 0 || len(build.Hops) < 1 || len(build.Hops) > foundation.I2NPMaxVariableBuildRecords || build.ReplyRouter == (foundation.Hash{}) || build.ReplyTunnelID == 0 || build.Hops[len(build.Hops)-1].Router == build.ReplyRouter
+	startOutboundRejected := build.CircuitID == 0 || len(build.Hops) < 1 || len(build.Hops) > foundation.I2NPMaxVariableBuildRecords || build.ReplyRouter == (foundation.Hash{}) || build.ReplyTunnelID == 0 || (!build.AllowCoalescedReply && build.Hops[len(build.Hops)-1].Router == build.ReplyRouter)
 	if !startOutboundRejected {
 		startOutboundRejected = build.ExpiresAt <= now
 	}
@@ -670,6 +671,9 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 		}
 		m.scheduleBuildRetry()
 		return 0, err
+	}
+	if m.profiles != nil {
+		m.profiles.RecordTransportSuccess(build.Hops[0].Router, m.now())
 	}
 	m.armOutboundDeadline(replyID)
 	return replyID, nil
@@ -874,6 +878,9 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 			m.scheduleBuildRetry()
 			return 0, err
 		}
+		if m.profiles != nil {
+			m.profiles.RecordTransportSuccess(build.Hops[0].Router, m.now())
+		}
 		m.armInboundDeadline(replyID)
 		return replyID, nil
 	}
@@ -1028,7 +1035,7 @@ func (m *BuildManager) handleInboundReply(message foundation.I2NPMessage) error 
 	if m.pool != nil {
 		owner = m.pool.Owner()
 	}
-	circuit := dataplane.TunnelInboundCircuit{ID: pending.build.CircuitID, Owner: owner, Transforms: transforms, Endpoint: dataplane.TunnelNewEndpoint(128, 0), Local: m.localDelivery, ExpiresAt: pending.build.ExpiresAt}
+	circuit := dataplane.TunnelInboundCircuit{ID: pending.build.CircuitID, Owner: owner, Transforms: transforms, Endpoint: dataplane.TunnelNewEndpoint(128, 0), Local: m.inboundLocalDelivery, ExpiresAt: pending.build.ExpiresAt}
 	entry := Entry{
 		ID: circuit.ID, Direction: Inbound, Expires: circuit.ExpiresAt, Owner: owner,
 		Gateway: pending.build.Hops[0].Router, GatewayTunnelID: pending.build.Hops[0].ReceiveTunnelID,
@@ -1056,6 +1063,18 @@ func (m *BuildManager) handleInboundReply(message foundation.I2NPMessage) error 
 		m.logger.Info("tunnel build reply authenticated", "owner_kind", ownerKind, "owner", owner, "direction", "inbound", "reply_id", message.Header.ID, "latency_ms", now-pending.startedAt, "hop_count", len(pending.build.Hops))
 	}
 	return nil
+}
+
+func (m *BuildManager) inboundLocalDelivery(message foundation.I2NPMessage) error {
+	if message.Header.Type == foundation.I2NPOutboundTunnelBuildReply {
+		if err := m.HandleReply(message); !errors.Is(err, ErrBuildPending) {
+			return err
+		}
+	}
+	if m.localDelivery == nil {
+		return nil
+	}
+	return m.localDelivery(message)
 }
 
 func (m *BuildManager) hasInboundPending(id uint32) bool {
@@ -1106,6 +1125,9 @@ func (m *BuildManager) handleTransit(ctx context.Context, source BuildSource, me
 	defer clearBuildKey(&keys)
 	if !m.validTransitRequest(request, keys, now, source) {
 		return ErrBuildRejected
+	}
+	if source.Direct && source.Router != (foundation.Hash{}) && m.profiles != nil {
+		m.profiles.RecordTransportSuccess(source.Router, now)
 	}
 	if !m.reserveTransit(message.Header.ID, replayHash, now) {
 		return ErrBuildTransit

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -484,5 +485,62 @@ func TestStreamEndpointsFiltering(t *testing.T) {
 	_, err = dest.streamEndpoints("tcp", DialPolicy{Networks: []string{"unknown"}})
 	if !errors.Is(err, ErrUnsupportedNetwork) {
 		t.Fatalf("expected ErrUnsupportedNetwork, got %v", err)
+	}
+}
+
+func TestNetworkPresetsAndOptions(t *testing.T) {
+	bind := netip.MustParseAddrPort("127.0.0.1:19100")
+	adv := netip.MustParseAddrPort("192.0.2.50:19100")
+	dedicated := NewDedicatedNetwork(
+		"dedicated",
+		42,
+		WithListenAddress(bind, bind),
+		WithAdvertisedAddress(adv, adv),
+		WithPeerSeeds([]byte{1, 2, 3}),
+		WithNetDBConfig(NetDBConfig{MinRouters: 3}),
+		WithTunnelTiming(3*time.Second, 2*time.Second, 3),
+		WithIPRestriction(1),
+	)
+	direct := NewDirectNetwork("direct", 88)
+
+	cfg := DefaultRouterConfig()
+	cfg.SetNetworks(dedicated, direct)
+	specs, def, err := networkSpecs(cfg)
+	if err != nil {
+		t.Fatalf("networkSpecs failed: %v", err)
+	}
+	if def != "dedicated" || len(specs) != 2 {
+		t.Fatalf("def=%q len=%d", def, len(specs))
+	}
+
+	dedicatedOp := specs[0].Operating
+	if dedicatedOp.Network.Profile != NetworkProfileDedicated || dedicatedOp.NetDB.MinRouters != 3 || dedicatedOp.NetDB.BucketSubnetQuota != 16 {
+		t.Fatalf("unexpected dedicated operating NetDB: %+v", dedicatedOp.NetDB)
+	}
+	if dedicatedOp.Tunnel.IPRestriction != 1 || dedicatedOp.Tunnel.DisableIPRestriction || dedicatedOp.Tunnel.MaintenanceInterval != 3*time.Second || dedicatedOp.Tunnel.ProbeTimeout != 2*time.Second || dedicatedOp.Tunnel.ProbeFailureThreshold != 3 {
+		t.Fatalf("unexpected dedicated operating Tunnel: %+v", dedicatedOp.Tunnel)
+	}
+	if !dedicatedOp.Router.Floodfill || !dedicatedOp.Router.Transit {
+		t.Fatalf("expected contributor participation on dedicated network: %+v", dedicatedOp.Router)
+	}
+
+	directOp := specs[1].Operating
+	if directOp.Network.Profile != NetworkProfileDirect {
+		t.Fatalf("unexpected direct profile: %q", directOp.Network.Profile)
+	}
+	if !directOp.NetDB.DisableBucketSubnetQuota || directOp.NetDB.BucketSubnetQuota != 0 || !directOp.Reseed.DisableBucketSubnetQuota {
+		t.Fatalf("expected direct subnet quota disabled: netdb=%+v reseed=%+v", directOp.NetDB, directOp.Reseed)
+	}
+	if !directOp.Tunnel.DisableIPRestriction || directOp.Tunnel.IPRestriction != 0 || directOp.Tunnel.MaintenanceInterval != 3*time.Second || directOp.Tunnel.ProbeTimeout != 5*time.Second || directOp.Tunnel.ProbeFailureThreshold != 2 {
+		t.Fatalf("unexpected direct operating Tunnel: %+v", directOp.Tunnel)
+	}
+
+	dedicatedDest := DedicatedDestinationConfig()
+	if dedicatedDest.Tunnels.Inbound.Hops != 1 || dedicatedDest.Tunnels.Inbound.Count != 2 {
+		t.Fatalf("unexpected DedicatedDestinationConfig: %+v", dedicatedDest.Tunnels)
+	}
+	directDest := DirectDestinationConfig()
+	if directDest.Tunnels.Inbound.Hops != 1 || directDest.Tunnels.Inbound.Count != 1 || directDest.Tunnels.Inbound.Backup != 1 {
+		t.Fatalf("unexpected DirectDestinationConfig: %+v", directDest.Tunnels)
 	}
 }

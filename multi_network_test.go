@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gosuda.org/ivnp/dataplane"
+	"gosuda.org/ivnp/foundation"
 )
 
 // multiNetTestConfig builds a two-context router configuration: the "i2p"
@@ -206,5 +207,461 @@ func TestEmbeddedMultiNetworkDestination(t *testing.T) {
 	}
 	if address, ok := from.(Addr); !ok || address.Hash != source.Hash() {
 		t.Fatalf("dedicated datagram source = %v", from)
+	}
+}
+
+// TestEmbeddedTwoNodeDirectMesh verifies that a 2-node direct mesh on a
+// shared /24 subnet forms 1-hop exploratory and client tunnels, publishes
+// LeaseSets without a dedicated third-party floodfill, and exchanges stream
+// traffic using NewDirectNetwork and DirectDestinationConfig.
+func TestEmbeddedTwoNodeDirectMesh(t *testing.T) {
+	const netID = 88
+	mesh := newEmbeddedMemoryNetwork(foundation.NetworkDatabaseRouterInfo{})
+
+	makeNodeConfig := func(t *testing.T, advertised string) RouterConfig {
+		t.Helper()
+		base := t.TempDir()
+		if err := os.Chmod(base, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		cfg := DefaultRouterConfig()
+		cfg.Persistence = &PersistenceConfig{Directory: base}
+		bind := netip.MustParseAddrPort("127.0.0.1:0")
+		adv := netip.MustParseAddrPort(advertised)
+		cfg.SetNetworks(NewDirectNetwork(
+			"direct",
+			netID,
+			WithListenAddress(bind, bind),
+			WithAdvertisedAddress(adv, adv),
+		))
+		return cfg
+	}
+
+	configs := []RouterConfig{
+		makeNodeConfig(t, "192.0.2.10:19001"),
+		makeNodeConfig(t, "192.0.2.11:19002"),
+	}
+	infos := make([][]byte, len(configs))
+	for i := range configs {
+		tr := mesh.transport()
+		router := newEmbeddedTestRouterN(t, configs[i], func(string) dataplane.RouterTransportManager { return tr })
+		infos[i] = append([]byte(nil), tr.routerInfo().Bytes()...)
+		if len(infos[i]) == 0 {
+			t.Fatal("direct node did not publish its RouterInfo")
+		}
+		if err := router.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configs[0].Networks[0].Bootstrap.RouterInfos = [][]byte{infos[1]}
+	configs[1].Networks[0].Bootstrap.RouterInfos = [][]byte{infos[0]}
+
+	routers := make([]*Router, len(configs))
+	for i, cfg := range configs {
+		tr := mesh.transport()
+		routers[i] = newEmbeddedTestRouterN(t, cfg, func(string) dataplane.RouterTransportManager { return tr })
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), embeddedTestTimeout)
+	defer cancel()
+	destCfg := DirectDestinationConfig()
+	destCfg.Networks = []string{"direct"}
+	source, err := routers[0].NewDestination(ctx, destCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	target, err := routers[1].NewDestination(ctx, destCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+
+	listener, err := target.Listen("direct", ":9090")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- conn
+		}
+	}()
+
+	outbound, err := source.DialContext(ctx, "direct", net.JoinHostPort(target.B32(), "9090"))
+	if err != nil {
+		t.Fatalf("2-node direct dial failed: %v", err)
+	}
+	defer outbound.Close()
+
+	var inbound net.Conn
+	select {
+	case inbound = <-accepted:
+	case <-ctx.Done():
+		t.Fatalf("2-node direct accept timed out: %v", ctx.Err())
+	}
+	defer inbound.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	_ = outbound.SetDeadline(deadline)
+	_ = inbound.SetDeadline(deadline)
+	payload := []byte("two-node direct mesh")
+	if _, err := outbound.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(inbound, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("received %q, want %q", got, payload)
+	}
+}
+
+// TestEmbeddedDedicatedMeshWithPeerAdmission verifies that a 3-node
+// Dedicated mesh on a shared /24 subnet builds 1-hop client tunnels,
+// confirms K = 2 LeaseSet2 publications, exchanges stream and Datagram2
+// traffic, and enforces PeerAdmission allowlists.
+func TestEmbeddedDedicatedMeshWithPeerAdmission(t *testing.T) {
+	const netID = 42
+	mesh := newEmbeddedMemoryNetwork(foundation.NetworkDatabaseRouterInfo{})
+
+	makeNodeConfig := func(t *testing.T, advertised string, opts ...NetworkOption) RouterConfig {
+		t.Helper()
+		base := t.TempDir()
+		if err := os.Chmod(base, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		cfg := DefaultRouterConfig()
+		cfg.Persistence = &PersistenceConfig{Directory: base}
+		bind := netip.MustParseAddrPort("127.0.0.1:0")
+		adv := netip.MustParseAddrPort(advertised)
+		baseOpts := []NetworkOption{
+			WithListenAddress(bind, bind),
+			WithAdvertisedAddress(adv, adv),
+		}
+		baseOpts = append(baseOpts, opts...)
+		cfg.SetNetworks(NewDedicatedNetwork("priv", netID, baseOpts...))
+		return cfg
+	}
+
+	configs := []RouterConfig{
+		makeNodeConfig(t, "192.0.2.21:19101"),
+		makeNodeConfig(t, "192.0.2.22:19102"),
+		makeNodeConfig(t, "192.0.2.23:19103"),
+	}
+	infos := make([][]byte, len(configs))
+	allowedHashes := make([]Hash, len(configs))
+	for i := range configs {
+		tr := mesh.transport()
+		router := newEmbeddedTestRouterN(t, configs[i], func(string) dataplane.RouterTransportManager { return tr })
+		infos[i] = append([]byte(nil), tr.routerInfo().Bytes()...)
+		allowedHashes[i] = router.Hash()
+		if len(infos[i]) == 0 {
+			t.Fatal("dedicated node did not publish its RouterInfo")
+		}
+		if err := router.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	admitAllowed := AdmitPeers(allowedHashes...)
+	var outsider Hash
+	outsider[0] = 0xff
+	if err := admitAllowed(context.Background(), PeerAdmission{Peer: outsider}); err == nil {
+		t.Fatal("AdmitPeers admitted unlisted outsider hash")
+	}
+
+	for i := range configs {
+		var seeds [][]byte
+		for j := range configs {
+			if j != i {
+				seeds = append(seeds, infos[j])
+			}
+		}
+		configs[i].Networks[0].Bootstrap.RouterInfos = seeds
+		configs[i].Networks[0].AdmitPeer = admitAllowed
+	}
+
+	routers := make([]*Router, len(configs))
+	for i, cfg := range configs {
+		tr := mesh.transport()
+		routers[i] = newEmbeddedTestRouterN(t, cfg, func(string) dataplane.RouterTransportManager { return tr })
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), embeddedTestTimeout)
+	defer cancel()
+	destCfg := DedicatedDestinationConfig()
+	destCfg.Networks = []string{"priv"}
+	source, err := routers[0].NewDestination(ctx, destCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	target, err := routers[2].NewDestination(ctx, destCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+
+	listener, err := target.Listen("priv", ":9092")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- conn
+		}
+	}()
+
+	outbound, err := source.DialContext(ctx, "priv", net.JoinHostPort(target.B32(), "9092"))
+	if err != nil {
+		t.Fatalf("dedicated dial failed: %v", err)
+	}
+	defer outbound.Close()
+
+	var inbound net.Conn
+	select {
+	case inbound = <-accepted:
+	case <-ctx.Done():
+		t.Fatalf("dedicated accept timed out: %v", ctx.Err())
+	}
+	defer inbound.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	_ = outbound.SetDeadline(deadline)
+	_ = inbound.SetDeadline(deadline)
+	payload := []byte("dedicated-stream")
+	if _, err := outbound.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(inbound, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("received %q, want %q", got, payload)
+	}
+
+	sender, err := source.ListenPacket("priv-datagram2", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+	receiver, err := target.ListenPacket("priv-datagram2", ":9093")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.Close()
+	_ = sender.SetDeadline(deadline)
+	_ = receiver.SetDeadline(deadline)
+	dgram := []byte("dedicated-datagram2")
+	if _, err := sender.WriteTo(dgram, receiver.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 128)
+	n, from, err := receiver.ReadFrom(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != string(dgram) {
+		t.Fatalf("datagram = %q, want %q", buf[:n], dgram)
+	}
+	if addr, ok := from.(Addr); !ok || addr.Hash != source.Hash() {
+		t.Fatalf("datagram sender = %v, want %v", from, source.Hash())
+	}
+}
+
+type loopbackSocketRuntime struct {
+	virtualByPort map[uint16]netip.AddrPort
+}
+
+func (r *loopbackSocketRuntime) ListenStream(_ context.Context, endpoint dataplane.RouterEndpoint) (net.Listener, error) {
+	return net.Listen("tcp", endpoint.Address)
+}
+
+func (r *loopbackSocketRuntime) DialStream(ctx context.Context, endpoint dataplane.RouterEndpoint) (net.Conn, error) {
+	addrPort, err := netip.ParseAddrPort(endpoint.Address)
+	if err != nil {
+		return nil, err
+	}
+	target := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), addrPort.Port())
+	var dialer net.Dialer
+	return dialer.DialContext(ctx, "tcp", target.String())
+}
+
+func (r *loopbackSocketRuntime) ListenUDP(_ context.Context, endpoint dataplane.RouterEndpoint) (dataplane.RouterUDPSocket, error) {
+	addr, err := net.ResolveUDPAddr("udp", endpoint.Address)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return nil, err
+	}
+	return &loopbackUDPSocket{UDPConn: conn, virtualByPort: r.virtualByPort}, nil
+}
+
+type loopbackUDPSocket struct {
+	*net.UDPConn
+	virtualByPort map[uint16]netip.AddrPort
+}
+
+func (s *loopbackUDPSocket) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
+	n, addr, err := s.UDPConn.ReadFromUDPAddrPort(b)
+	if err == nil {
+		if mapped, ok := s.virtualByPort[addr.Port()]; ok {
+			addr = mapped
+		}
+	}
+	return n, addr, err
+}
+
+func (s *loopbackUDPSocket) WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (int, error) {
+	target := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), addr.Port())
+	return s.UDPConn.WriteToUDPAddrPort(b, target)
+}
+
+// TestE2ELoopbackDirectMesh boots two real embedded Routers over live
+// kernel TCP/UDP loopback sockets using NewDirectNetwork, exchanges their
+// signed RouterInfos, waits for router readiness, and verifies end-to-end
+// streaming and Datagram2 communication.
+func TestE2ELoopbackDirectMesh(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	reserveLoopbackPair := func(t *testing.T) (netip.AddrPort, netip.AddrPort) {
+		t.Helper()
+		tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		tcpAddr := netip.MustParseAddrPort(tcpLn.Addr().String())
+		_ = tcpLn.Close()
+
+		udpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		udpAddr := netip.MustParseAddrPort(udpConn.LocalAddr().String())
+		_ = udpConn.Close()
+		return tcpAddr, udpAddr
+	}
+
+	sockRuntime := &loopbackSocketRuntime{virtualByPort: make(map[uint16]netip.AddrPort)}
+	routers := make([]*Router, 2)
+	virtualHosts := []netip.Addr{
+		netip.MustParseAddr("192.0.2.10"),
+		netip.MustParseAddr("192.0.2.11"),
+	}
+	for i := range routers {
+		tcpBind, udpBind := reserveLoopbackPair(t)
+		tcpAdv := netip.AddrPortFrom(virtualHosts[i], tcpBind.Port())
+		udpAdv := netip.AddrPortFrom(virtualHosts[i], udpBind.Port())
+		sockRuntime.virtualByPort[tcpBind.Port()] = tcpAdv
+		sockRuntime.virtualByPort[udpBind.Port()] = udpAdv
+
+		cfg := DefaultRouterConfig()
+		cfg.SetNetworks(NewDirectNetwork(
+			"lan",
+			88,
+			WithListenAddress(tcpBind, udpBind),
+			WithAdvertisedAddress(tcpAdv, udpAdv),
+			WithTunnelTiming(2*time.Second, 5*time.Second, 1),
+		))
+		specs, def, err := networkSpecs(cfg)
+		if err != nil {
+			t.Fatalf("networkSpecs %d: %v", i, err)
+		}
+		for j := range specs {
+			specs[j].Options.SocketRuntime = sockRuntime
+		}
+		r, err := newRouter(ctx, cfg, specs, def)
+		if err != nil {
+			t.Fatalf("start loopback direct router %d: %v", i, err)
+		}
+		t.Cleanup(func() { _ = r.Close() })
+		routers[i] = r
+	}
+
+	ri0, err := routers[0].Node().ExportLocalRouterInfo("lan")
+	if err != nil {
+		t.Fatalf("export router 0 RouterInfo: %v", err)
+	}
+	ri1, err := routers[1].Node().ExportLocalRouterInfo("lan")
+	if err != nil {
+		t.Fatalf("export router 1 RouterInfo: %v", err)
+	}
+	if _, err := routers[0].Node().ImportRouterInfo(ctx, "lan", ri1); err != nil {
+		t.Fatalf("import router 1 RouterInfo into router 0: %v", err)
+	}
+	if _, err := routers[1].Node().ImportRouterInfo(ctx, "lan", ri0); err != nil {
+		t.Fatalf("import router 0 RouterInfo into router 1: %v", err)
+	}
+
+	for i, r := range routers {
+		if err := r.WaitReady(ctx); err != nil {
+			t.Fatalf("router %d WaitReady: %v", i, err)
+		}
+	}
+
+	destCfg := DirectDestinationConfig()
+	destCfg.Networks = []string{"lan"}
+	source, err := routers[0].NewDestination(ctx, destCfg)
+	if err != nil {
+		t.Fatalf("router 0 NewDestination: %v", err)
+	}
+	defer source.Close()
+	target, err := routers[1].NewDestination(ctx, destCfg)
+	if err != nil {
+		t.Fatalf("router 1 NewDestination: %v", err)
+	}
+	defer target.Close()
+
+	listener, err := target.Listen("lan", ":8080")
+	if err != nil {
+		t.Fatalf("target listen: %v", err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- conn
+		}
+	}()
+
+	outbound, err := source.DialContext(ctx, "lan", net.JoinHostPort(target.B32(), "8080"))
+	if err != nil {
+		t.Fatalf("live loopback direct dial: %v", err)
+	}
+	defer outbound.Close()
+
+	var inbound net.Conn
+	select {
+	case inbound = <-accepted:
+	case <-ctx.Done():
+		t.Fatalf("live loopback direct accept timed out: %v", ctx.Err())
+	}
+	defer inbound.Close()
+
+	deadline := time.Now().Add(10 * time.Second)
+	_ = outbound.SetDeadline(deadline)
+	_ = inbound.SetDeadline(deadline)
+	msg := []byte("live-kernel-loopback-direct")
+	if _, err := outbound.Write(msg); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(msg))
+	if _, err := io.ReadFull(inbound, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(msg) {
+		t.Fatalf("got %q, want %q", got, msg)
 	}
 }

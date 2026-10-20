@@ -316,12 +316,15 @@ var (
 	ReseedErrInsecureURL                                     = reseed.ErrInsecureURL
 	ReseedErrInvalidURL                                      = reseed.ErrInvalidURL
 	ReseedErrNoRouterInfos                                   = reseed.ErrNoRouterInfos
+	ReseedErrSignerCertificate                               = reseed.ErrSignerCertificate
 	ReseedErrSU3Malformed                                    = reseed.ErrSU3Malformed
 	ReseedErrSU3Signature                                    = reseed.ErrSU3Signature
 	ReseedErrSU3Signer                                       = reseed.ErrSU3Signer
 	ReseedErrTooManyEntries                                  = reseed.ErrTooManyEntries
 	ReseedErrUnsafeRedirect                                  = reseed.ErrUnsafeRedirect
 	ReseedErrUnsignedArchive                                 = reseed.ErrUnsignedArchive
+	ReseedMergeSU3Signers                                    = reseed.MergeSU3Signers
+	ReseedParseSU3SignerCertificate                          = reseed.ParseSU3SignerCertificate
 	ReseedVerifySU3                                          = reseed.VerifySU3
 	RouterErrLocalRouterInfoOptions                          = router.ErrLocalRouterInfoOptions
 	RouterErrPublicationMaintenanceConfig                    = router.ErrPublicationMaintenanceConfig
