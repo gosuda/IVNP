@@ -273,7 +273,7 @@ func TestRenewalClaimsRetryDuringGraceWithoutDoubleInstallation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			firstReply := schedulingAcceptedReply(t, manager.pending[firstID])
+			firstReply := schedulingAcceptedReply(t, manager.pending[firstID]) // +checklocksignore
 			now += buildRequestTimeout()
 			manager.Expire(now)
 			if manager.Pending() != 0 {
@@ -289,7 +289,7 @@ func TestRenewalClaimsRetryDuringGraceWithoutDoubleInstallation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			retryReply := schedulingAcceptedReply(t, manager.pending[retryID])
+			retryReply := schedulingAcceptedReply(t, manager.pending[retryID]) // +checklocksignore
 			winner, loser := firstReply, retryReply
 			if !lateWins {
 				winner, loser = retryReply, firstReply

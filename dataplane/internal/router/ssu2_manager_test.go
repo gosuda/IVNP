@@ -176,7 +176,9 @@ func TestSSU2RetransmissionContractsWindowAndMTU(t *testing.T) {
 	session.packetsTransmitted = 10
 	sent := &ssu2SentPacket{packetSize: ssu2MinimumNetworkMTU + ssu2MTUStep}
 
+	session.sendMu.Lock()
 	session.noteCongestionLocked(time.Unix(1, 0), sent)
+	session.sendMu.Unlock()
 	if session.sendWindowBytes != ssu2MaximumNetworkMTU || session.sendWindowRemaining != 1_000 {
 		t.Fatalf("congested window = %d/%d", session.sendWindowRemaining, session.sendWindowBytes)
 	}
@@ -300,6 +302,7 @@ func TestSSU2RouterInfoStorePreservesSignedWireBytes(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestSSU2RelayRouterInfoStoreCacheReusesAndRefreshesLocalSnapshot(t *testing.T) {
 	local, static, intro := newSSU2TestLocal(t, "127.0.0.1:23456")
 	now := time.UnixMilli(1_700_000_000_000)
@@ -1872,7 +1875,7 @@ func TestSSU2SendWaitsForWindowAndResumesAfterACK(t *testing.T) {
 		if !session.sendMu.TryLock() {
 			t.Fatal("window-exhausted send retained sendMu")
 		}
-		session.sendMu.Unlock()
+		session.sendMu.Unlock() // +checklocksignore
 
 		session.acknowledge([]dataplanessu2.ACKRange{{Start: 1, End: 1}}, sentAt.Add(time.Millisecond))
 		synctest.Wait()
@@ -1965,7 +1968,7 @@ func TestSSU2ACKProceedsWhileEgressCompletionIsPending(t *testing.T) {
 		if !session.sendMu.TryLock() {
 			t.Fatal("egress completion wait retained sendMu")
 		}
-		session.sendMu.Unlock()
+		session.sendMu.Unlock() // +checklocksignore
 
 		session.acknowledge([]dataplanessu2.ACKRange{{Start: 1, End: 1}}, time.Now())
 		if len(session.sent) != 0 {
@@ -2311,7 +2314,7 @@ func TestSSU2SendDoesNotHoldFrameMuDuringCapacityWait(t *testing.T) {
 			<-done
 			t.Fatal("send held frameMu while waiting for send capacity")
 		}
-		session.frameMu.mu.Unlock()
+		session.frameMu.mu.Unlock() // +checklocksignore
 		session.ReleaseSensitive()
 		if err := <-done; !errors.Is(err, ErrSSU2Session) && !errors.Is(err, ErrSSU2SendStalled) {
 			t.Fatalf("blocked send error = %v, want session teardown error", err)

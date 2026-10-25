@@ -43,14 +43,20 @@ type LocalRouterInfoConfig struct {
 // Snapshot always returns an independent wire copy, so callers cannot mutate
 // the retained advertisement.
 type LocalRouterInfo struct {
-	mu        sync.RWMutex
-	identity  []byte
-	private   ed25519.PrivateKey
-	hash      foundation.Hash
-	contacts  RouterInfoContacts
-	raw       []byte
+	mu sync.RWMutex
+	// +checklocks:mu
+	identity []byte
+	// +checklocks:mu
+	private ed25519.PrivateKey
+	hash    foundation.Hash
+	// +checklocks:mu
+	contacts RouterInfoContacts
+	// +checklocks:mu
+	raw []byte
+	// +checklocks:mu
 	published uint64
-	version   uint64
+	// +checklocks:mu
+	version uint64
 }
 
 // NewLocalRouterInfo validates and copies a locally-owned Ed25519 identity.

@@ -83,6 +83,7 @@ func TestLocalRouterInfoPublishesVerifiedOwnedAdvertisement(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestLocalRouterInfoSnapshotRejectsCorruptedRetainedBytes(t *testing.T) {
 	local, err := foundation.GenerateLocalAddress()
 	if err != nil {

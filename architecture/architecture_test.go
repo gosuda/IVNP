@@ -3,6 +3,7 @@ package architecture_test
 import (
 	"encoding/json"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -127,6 +128,109 @@ func TestPublicImportsUseCanonicalPathsWithoutAliases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestUnsafeImportsAreRestrictedAndABIStructsUseHostLayout(t *testing.T) {
+	allowedUnsafeFiles := map[string]bool{
+		"dataplane/internal/transport/ssu2/batch_linux_vector.go": false,
+		"state/internal/filesystem_store/secure_windows.go":       false,
+	}
+	err := filepath.Walk("..", func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel := filepath.ToSlash(strings.TrimPrefix(path, "../"))
+		fset := token.NewFileSet()
+		file, parseErr := parser.ParseFile(fset, path, nil, 0)
+		if parseErr != nil {
+			return parseErr
+		}
+		importsUnsafe := false
+		for _, spec := range file.Imports {
+			if strings.Trim(spec.Path.Value, `"`) == "unsafe" {
+				importsUnsafe = true
+				break
+			}
+		}
+		if !importsUnsafe {
+			return nil
+		}
+		if _, allowed := allowedUnsafeFiles[rel]; !allowed {
+			t.Errorf("%s imports \"unsafe\" outside the architecture allowlist", rel)
+			return nil
+		}
+		allowedUnsafeFiles[rel] = true
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				typeSpec, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				structType, ok := typeSpec.Type.(*ast.StructType)
+				if !ok || !isFixedABIStructCandidate(structType) {
+					continue
+				}
+				if !hasLeadingHostLayoutField(structType) {
+					t.Errorf("%s: struct %s in unsafe file must embed structs.HostLayout as its first field", rel, typeSpec.Name.Name)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rel, seen := range allowedUnsafeFiles {
+		if !seen {
+			t.Errorf("stale unsafe allowlist entry %s (file missing or no longer imports unsafe)", rel)
+		}
+	}
+}
+
+func isFixedABIStructCandidate(structType *ast.StructType) bool {
+	if structType.Fields == nil || len(structType.Fields.List) == 0 {
+		return false
+	}
+	for _, field := range structType.Fields.List {
+		switch fieldType := field.Type.(type) {
+		case *ast.ArrayType:
+			if fieldType.Len == nil {
+				return false
+			}
+		case *ast.MapType, *ast.ChanType, *ast.FuncType, *ast.InterfaceType:
+			return false
+		case *ast.Ident:
+			if fieldType.Name == "string" || fieldType.Name == "error" || fieldType.Name == "any" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func hasLeadingHostLayoutField(structType *ast.StructType) bool {
+	if structType.Fields == nil || len(structType.Fields.List) == 0 {
+		return false
+	}
+	sel, ok := structType.Fields.List[0].Type.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkgIdent, ok := sel.X.(*ast.Ident)
+	return ok && pkgIdent.Name == "structs" && sel.Sel.Name == "HostLayout"
 }
 
 func subsystemInternalOwner(path string) string {

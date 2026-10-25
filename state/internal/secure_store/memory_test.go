@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// +checklocksignore
 func TestMemoryStoreOwnsSnapshotsAndWipesOnClose(t *testing.T) {
 	store := NewMemoryStore()
 	t.Cleanup(func() { _ = store.Close() })

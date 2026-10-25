@@ -57,8 +57,10 @@ func (s *requestTestSender) contextErrors() []error {
 }
 
 type failFirstRequestSender struct {
-	mu        sync.Mutex
-	failures  int
+	mu sync.Mutex
+	// +checklocks:mu
+	failures int
+	// +checklocks:mu
 	attempted int
 }
 

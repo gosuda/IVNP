@@ -36,16 +36,22 @@ type DestinationBandwidthSnapshot struct {
 // local destination. It contains no process-global state and is safe for
 // concurrent ingress and egress use.
 type DestinationBandwidthLimiter struct {
-	mu       sync.Mutex
-	rate     uint64
-	burst    uint64
-	tokens   uint64
+	mu    sync.Mutex
+	rate  uint64
+	burst uint64
+	// +checklocks:mu
+	tokens uint64
+	// +checklocks:mu
 	fraction uint64
-	last     time.Time
-	now      func() time.Time
+	// +checklocks:mu
+	last time.Time
+	now  func() time.Time
+	// +checklocks:mu
 	accepted uint64
-	blocked  uint64
-	waiters  uint32
+	// +checklocks:mu
+	blocked uint64
+	// +checklocks:mu
+	waiters uint32
 }
 
 func NewDestinationBandwidthLimiter(config DestinationBandwidthConfig) (*DestinationBandwidthLimiter, error) {
@@ -157,6 +163,7 @@ func (l *DestinationBandwidthLimiter) Snapshot() DestinationBandwidthSnapshot {
 	return snapshot
 }
 
+// +checklocks:l.mu
 func (l *DestinationBandwidthLimiter) refillLocked(now time.Time) {
 	if now.Before(l.last) {
 		// A source without a monotonic component may move backwards. Never mint

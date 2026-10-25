@@ -50,7 +50,9 @@ func TestSSU2PeerTestOutcomeTable(t *testing.T) {
 		if withFive {
 			state.message5 = &dataplanessu2.PeerTestBlock{Message: 5, Address: endpoint}
 		}
+		manager.mu.Lock()
 		result, done := manager.peerTestResultLocked(state, false)
+		manager.mu.Unlock()
 		if !done {
 			t.Fatal("complete peer-test evidence did not produce an outcome")
 		}
@@ -103,16 +105,21 @@ func TestSSU2NewTokenCacheExpiryAndPathTimeout(t *testing.T) {
 	manager.newTokens[newTokenCacheKey(peer, remote, 2)] = ssu2NewTokenLease{
 		peer: peer, endpoint: remote.String(), destination: 2, token: 3, expires: now.Add(time.Second),
 	}
+	manager.mu.Lock()
 	if token := manager.cachedNewTokenLocked(peer, remote, 2); token != 3 {
+		manager.mu.Unlock()
 		t.Fatalf("cached 1-RTT token = %d, want 3", token)
 	}
 	if token := manager.cachedNewTokenLocked(peer, remote, 3); token != 0 {
+		manager.mu.Unlock()
 		t.Fatalf("destination-isolated 1-RTT token = %d, want 0", token)
 	}
 	manager.newTokens[newTokenCacheKey(peer, remote, 2)] = ssu2NewTokenLease{destination: 2, expires: now.Add(-time.Second)}
 	if token := manager.cachedNewTokenLocked(peer, remote, 2); token != 0 {
+		manager.mu.Unlock()
 		t.Fatalf("expired cached token = %d, want fallback token request", token)
 	}
+	manager.mu.Unlock()
 }
 
 func TestSSU2ManagerLiveEgressShutdownAndIOStats(t *testing.T) {
@@ -868,9 +875,14 @@ func TestSSU2NewTokenCacheIsBoundedReplacesAndClears(t *testing.T) {
 	second := &ssu2TransportSession{peer: peer, remote: remote, sendID: 9002}
 	manager.storeNewToken(first, dataplanessu2.NewToken{Token: 1, Expiration: expiration})
 	manager.storeNewToken(second, dataplanessu2.NewToken{Token: 2, Expiration: expiration})
-	if manager.cachedNewTokenLocked(peer, remote, first.sendID) != 0 ||
-		manager.cachedNewTokenLocked(peer, remote, second.sendID) != 2 ||
-		len(manager.newTokens) != ssu2MaxNewTokens {
+	manager.mu.Lock()
+	evictedFirst := manager.cachedNewTokenLocked(peer, remote, first.sendID)
+	retainedSecond := manager.cachedNewTokenLocked(peer, remote, second.sendID)
+	tokenCount := len(manager.newTokens)
+	manager.mu.Unlock()
+	if evictedFirst != 0 ||
+		retainedSecond != 2 ||
+		tokenCount != ssu2MaxNewTokens {
 		t.Fatal("NewToken per-peer endpoint replacement or bounded eviction failed")
 	}
 	if err := manager.Close(); err != nil {

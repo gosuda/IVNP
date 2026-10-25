@@ -34,14 +34,18 @@ type ResponderProfileStoreConfig struct {
 
 // ResponderProfileStore persists authenticated reply history, bound to the local
 // router and network. The checksum detects corruption, not malicious local writes.
+//
+// Lock hierarchy: ResponderProfileStore.mu -> ResponderProfiles.mu ->
+// Table.mu (database.routers.mu).
 type ResponderProfileStore struct {
-	mu          sync.Mutex
-	path        string
-	profiles    *ResponderProfiles
-	database    *Database
-	networkID   uint32
-	local       foundation.Hash
-	now         func() uint64
+	mu        sync.Mutex
+	path      string
+	profiles  *ResponderProfiles
+	database  *Database
+	networkID uint32
+	local     foundation.Hash
+	now       func() uint64
+	// +checklocks:mu
 	savedDigest [sha256.Size]byte
 }
 

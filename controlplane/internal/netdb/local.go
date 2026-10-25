@@ -12,11 +12,14 @@ import (
 // retain encryption or signing private keys; callers supply public keys and a
 // signer when they serialize a publication.
 type LocalLeaseSet struct {
-	mu       sync.RWMutex
+	mu sync.RWMutex
+	// +checklocks:mu
 	identity []byte
 	hash     foundation.Hash
-	leases   []foundation.NetworkDatabaseLease
-	version  uint64
+	// +checklocks:mu
+	leases []foundation.NetworkDatabaseLease
+	// +checklocks:mu
+	version uint64
 }
 
 // LocalLeaseSetSnapshot is an immutable-at-return view of local inbound lease

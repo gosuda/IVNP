@@ -59,46 +59,70 @@ type RemoteELSContext struct {
 	Authorization controlplanenetdb.ELSClientAuthorization
 }
 
+// StreamingTunnelSender coordinates route resolution, reply reservations, and
+// failure exclusions for a destination's outbound tunnel sends.
+//
+// Lock order: lifecycleMu -> replyPolicyMu -> remoteMu -> seedMu.
 type StreamingTunnelSender struct {
-	execution            *dataplane.RouterPreparedRouteSender
-	owner                foundation.Hash
-	database             *controlplanenetdb.Database
-	requests             *controlplanenetdb.RequestManager
-	pool                 *controlplanetunnel.Pool
-	seedRouterInfo       controlplanetunnel.RouterInfoSeeder
-	prepareTunnel        func(context.Context, foundation.Hash) error
-	awaitControl         func(context.Context) error
-	tunnels              *dataplane.TunnelRuntime
-	replySlots           chan struct{}
-	replies              sync.WaitGroup
-	replyGates           map[foundation.Hash]*ratchetReplyGate
-	replyGateCapacity    int
-	logger               *slog.Logger
-	now                  func() uint64
-	lifecycleMu          sync.RWMutex
-	released             bool
-	remoteMu             sync.RWMutex
-	replyPolicyMu        sync.RWMutex
-	remoteELS            map[foundation.Hash]RemoteELSContext
-	generation           uint64
-	policyGeneration     uint64
-	localPublication     foundation.Hash
+	execution      *dataplane.RouterPreparedRouteSender
+	owner          foundation.Hash
+	database       *controlplanenetdb.Database
+	requests       *controlplanenetdb.RequestManager
+	pool           *controlplanetunnel.Pool
+	seedRouterInfo controlplanetunnel.RouterInfoSeeder
+	prepareTunnel  func(context.Context, foundation.Hash) error
+	awaitControl   func(context.Context) error
+	tunnels        *dataplane.TunnelRuntime
+	replySlots     chan struct{}
+	replies        sync.WaitGroup
+	// +checklocks:remoteMu
+	replyGates map[foundation.Hash]*ratchetReplyGate
+	// +checklocks:lifecycleMu
+	// +checklocks:remoteMu
+	replyGateCapacity int
+	logger            *slog.Logger
+	now               func() uint64
+	lifecycleMu       sync.RWMutex
+	// +checklocks:lifecycleMu
+	released      bool
+	remoteMu      sync.RWMutex
+	replyPolicyMu sync.RWMutex
+	// +checklocks:remoteMu
+	remoteELS map[foundation.Hash]RemoteELSContext
+	// +checklocks:remoteMu
+	generation uint64
+	// +checklocks:replyPolicyMu
+	// +checklocks:remoteMu
+	// +checklocksreadany
+	policyGeneration uint64
+	// +checklocks:remoteMu
+	localPublication foundation.Hash
+	// +checklocks:remoteMu
 	localPublicationType foundation.I2NPStoreType
-	pending              map[routePreparationKey]*routePreparation
-	pendingCapacity      int
-	waiterCapacity       int
-	waiters              int
-	preparationTimeout   time.Duration
-	preparationCtx       context.Context
-	cancelPreparation    context.CancelFunc
-	preparing            sync.WaitGroup
-	seedMu               sync.Mutex
-	seedCache            [streamingSeedCacheCapacity]streamingSeedCacheEntry
-	seedNext             uint8
-	leaseNext            atomic.Uint64
-	failedRoutes         map[failedRoutePath]uint64
-	failedLeases         map[failedLeasePath]failedLeaseEvidence
-	failedRouteCapacity  int
+	// +checklocks:remoteMu
+	pending map[routePreparationKey]*routePreparation
+	// +checklocks:remoteMu
+	pendingCapacity int
+	// +checklocks:remoteMu
+	waiterCapacity int
+	// +checklocks:remoteMu
+	waiters            int
+	preparationTimeout time.Duration
+	preparationCtx     context.Context
+	cancelPreparation  context.CancelFunc
+	preparing          sync.WaitGroup
+	seedMu             sync.Mutex
+	// +checklocks:seedMu
+	seedCache [streamingSeedCacheCapacity]streamingSeedCacheEntry
+	// +checklocks:seedMu
+	seedNext  uint8
+	leaseNext atomic.Uint64
+	// +checklocks:remoteMu
+	failedRoutes map[failedRoutePath]uint64
+	// +checklocks:remoteMu
+	failedLeases map[failedLeasePath]failedLeaseEvidence
+	// +checklocks:remoteMu
+	failedRouteCapacity int
 }
 
 type routePreparationKey struct {
@@ -240,6 +264,7 @@ func (f *streamingHandshakeFeedback) NoResponse() {
 const sendFailureMarkMillis = 10_000
 
 // The caller holds lifecycleMu; reacquiring it can deadlock behind release.
+// +checklocksexclude:s.remoteMu
 func (s *StreamingTunnelSender) retireUnresponsiveRoute(receipt dataplane.RouterPreparedRouteReceipt, markExpires uint64) {
 	s.remoteMu.Lock()
 	defer s.remoteMu.Unlock()
@@ -252,6 +277,7 @@ func (s *StreamingTunnelSender) retireUnresponsiveRoute(receipt dataplane.Router
 // for the remote lease it used: the pair mark forces the next attempt onto
 // a different circuit, and once distinct circuits each went silent the
 // lease itself is excluded for the route's remaining validity.
+// +checklocksexclude:s.remoteMu
 func (s *StreamingTunnelSender) retireSilentRoute(receipt dataplane.RouterPreparedRouteReceipt) {
 	s.remoteMu.Lock()
 	defer s.remoteMu.Unlock()
@@ -261,6 +287,7 @@ func (s *StreamingTunnelSender) retireSilentRoute(receipt dataplane.RouterPrepar
 	}
 }
 
+// +checklocks:s.remoteMu
 func (s *StreamingTunnelSender) recordFailedRouteLocked(receipt dataplane.RouterPreparedRouteReceipt, markExpires uint64) {
 	now := s.now()
 	var oldest failedRoutePath
@@ -280,6 +307,7 @@ func (s *StreamingTunnelSender) recordFailedRouteLocked(receipt dataplane.Router
 	s.failedRoutes[failedRoutePath{remote: receipt.Remote, circuit: receipt.Circuit, gateway: receipt.Gateway, tunnelID: receipt.TunnelID}] = markExpires
 }
 
+// +checklocks:s.remoteMu
 func (s *StreamingTunnelSender) recordFailedLeaseLocked(receipt dataplane.RouterPreparedRouteReceipt) {
 	now := s.now()
 	path := failedLeasePath{remote: receipt.Remote, gateway: receipt.Gateway, tunnelID: receipt.TunnelID}
@@ -314,6 +342,7 @@ func (s *StreamingTunnelSender) recordFailedLeaseLocked(receipt dataplane.Router
 // a completed refresh. An identical LeaseSet means the marks measured
 // transient loss rather than a dead remote path; a rotated LeaseSet cannot
 // match their (gateway, tunnelID) keys anyway.
+// +checklocksexclude:s.remoteMu
 func (s *StreamingTunnelSender) clearFailureMarks(remote foundation.Hash) {
 	s.remoteMu.Lock()
 	defer s.remoteMu.Unlock()
@@ -428,18 +457,25 @@ func (s *StreamingTunnelSender) RefreshLocalLeaseSet() error {
 	if s.released {
 		return dataplane.RouterErrDataPlaneConfig
 	}
+	generation, changed := s.advanceLocalPublication()
+	if !changed {
+		return nil
+	}
+	s.execution.InvalidateRoutes(generation)
+	return nil
+}
+
+// +checklocksexclude:s.remoteMu
+func (s *StreamingTunnelSender) advanceLocalPublication() (uint64, bool) {
 	s.remoteMu.Lock()
+	defer s.remoteMu.Unlock()
 	publication, kind := localPublicationFingerprint(s.database, s.owner)
 	if publication == s.localPublication && kind == s.localPublicationType {
-		s.remoteMu.Unlock()
-		return nil
+		return 0, false
 	}
 	s.localPublication, s.localPublicationType = publication, kind
 	s.generation++
-	generation := s.generation
-	s.remoteMu.Unlock()
-	s.execution.InvalidateRoutes(generation)
-	return nil
+	return s.generation, true
 }
 
 func localPublicationFingerprint(database *controlplanenetdb.Database, owner foundation.Hash) (foundation.Hash, foundation.I2NPStoreType) {
@@ -552,6 +588,7 @@ func (s *StreamingTunnelSender) PrepareDestination(ctx context.Context, remote f
 	}
 }
 
+// +checklocksexclude:s.remoteMu
 func (s *StreamingTunnelSender) prepare(ctx context.Context, remote foundation.Hash) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -591,6 +628,7 @@ func (s *StreamingTunnelSender) prepare(ctx context.Context, remote foundation.H
 	}
 }
 
+// +checklocksexclude:s.remoteMu
 func (s *StreamingTunnelSender) startPreparation(remote foundation.Hash) (*routePreparation, error) {
 	s.remoteMu.Lock()
 	defer s.remoteMu.Unlock()
@@ -928,6 +966,8 @@ func releaseRemoteELSPolicies(policies map[foundation.Hash]RemoteELSContext) {
 		delete(policies, hash)
 	}
 }
+
+// +checklocksexclude:s.seedMu
 func (s *StreamingTunnelSender) seedLeaseGateway(ctx context.Context, outbound controlplanetunnel.Entry, gateway foundation.Hash) {
 	if s.seedRouterInfo == nil || outbound.HopCount == 0 || gateway == (foundation.Hash{}) {
 		return

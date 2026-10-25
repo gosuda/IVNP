@@ -24,7 +24,8 @@ var errUnexpectedSocketDial = errors.New("unexpected dial")
 var errPriorityUnavailable = errors.New("priority server unavailable")
 
 type eventLog struct {
-	mu     sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	events []string
 }
 
@@ -221,12 +222,17 @@ type fakeReseed struct {
 	err       error
 	fn        func(context.Context, []string, *controlplanenetdb.Database, uint64) (controlplanereseed.ReseedResult, error)
 
-	mu        sync.Mutex
-	context   context.Context
+	mu sync.Mutex
+	// +checklocks:mu
+	context context.Context
+	// +checklocks:mu
 	endpoints []string
-	database  *controlplanenetdb.Database
-	seenAt    uint64
-	calls     int
+	// +checklocks:mu
+	database *controlplanenetdb.Database
+	// +checklocks:mu
+	seenAt uint64
+	// +checklocks:mu
+	calls int
 }
 
 func (r *fakeReseed) FetchAny(ctx context.Context, endpoints []string, database *controlplanenetdb.Database, seenAt uint64) (controlplanereseed.ReseedResult, error) {

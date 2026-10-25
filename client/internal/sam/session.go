@@ -42,17 +42,18 @@ func datagramStyleProtocol(style sessionStyle) uint8 {
 }
 
 type samSession struct {
-	server           *Server
-	root             *samSession
-	id               string
-	style            sessionStyle
-	endpoint         destination.DestinationEndpoint
-	control          *serverConnection
-	ctx              context.Context
-	cancel           context.CancelFunc
-	sourceIP         netip.Addr
-	fromPort         uint16
-	toPort           uint16
+	server   *Server
+	root     *samSession
+	id       string
+	style    sessionStyle
+	endpoint destination.DestinationEndpoint
+	control  *serverConnection
+	ctx      context.Context
+	cancel   context.CancelFunc
+	sourceIP netip.Addr
+	fromPort uint16
+	toPort   uint16
+	// +checklocks:mu
 	listenPort       uint16
 	protocol         uint8
 	listenProtocol   uint8
@@ -62,11 +63,17 @@ type samSession struct {
 	datagramOverhead int
 	now              func() int64
 
-	forward             bool
-	mu                  sync.Mutex
-	listener            net.Listener
-	subscription        destination.MessageSubscription
-	children            map[string]*samSession
+	// +checklocks:mu
+	forward bool
+	// mu guards forward, listener, subscription, children, and attachments. Never held while acquiring server.mu.
+	mu sync.Mutex
+	// +checklocks:mu
+	listener net.Listener
+	// +checklocks:mu
+	subscription destination.MessageSubscription
+	// +checklocks:mu
+	children map[string]*samSession
+	// +checklocks:mu
 	attachments         map[net.Conn]struct{}
 	queueBytes          *byteBudget
 	acceptOnce          sync.Once
@@ -87,6 +94,7 @@ func newRootSession(server *Server, id string, style sessionStyle, endpoint dest
 	return s
 }
 
+// +checklocksexclude:s.server.mu
 func (s *samSession) attach(connection net.Conn) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -98,6 +106,8 @@ func (s *samSession) attach(connection net.Conn) error {
 	s.attachments[connection] = struct{}{}
 	return nil
 }
+
+// +checklocksexclude:s.server.mu
 func (s *samSession) detach(connection net.Conn) {
 	s.mu.Lock()
 	delete(s.attachments, connection)
@@ -180,6 +190,7 @@ func (s *samSession) closeChild() {
 	})
 }
 
+// +checklocksexclude:s.server.mu
 func (s *samSession) ensureListener() (net.Listener, error) {
 	if s.style != styleStream {
 		return nil, ErrProtocol
@@ -238,6 +249,7 @@ func (s *samSession) removeChild(id string) error {
 	return nil
 }
 
+// +checklocksexclude:s.server.mu
 func (s *samSession) beginForward() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -248,6 +260,7 @@ func (s *samSession) beginForward() bool {
 	return true
 }
 
+// +checklocksexclude:s.server.mu
 func (s *samSession) endForward() {
 	s.mu.Lock()
 	s.forward = false

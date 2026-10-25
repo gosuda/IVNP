@@ -93,7 +93,9 @@ func TestPreparedRouteRetirementWaitsBeforeWiping(t *testing.T) {
 		if err := sender.InstallRoute(route); err != nil {
 			t.Fatal(err)
 		}
+		sender.routesMu.RLock()
 		retained := sender.routes[route.Remote].route
+		sender.routesMu.RUnlock()
 		sent := make(chan error, 1)
 		go func() { sent <- sender.SendRatchetReply(t.Context(), route.Remote, []byte{1}) }()
 		<-entered
@@ -333,7 +335,9 @@ func TestHandshakeRetirementDoesNotWaitForAdmittedWrite(t *testing.T) {
 		if !ok {
 			t.Fatal("missing route")
 		}
+		sender.routesMu.RLock()
 		retained := sender.routes[route.Remote].route
+		sender.routesMu.RUnlock()
 		sent := make(chan error, 1)
 		go func() { sent <- sender.SendRatchetReply(t.Context(), route.Remote, []byte{1}) }()
 		<-entered

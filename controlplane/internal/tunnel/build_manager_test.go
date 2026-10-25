@@ -44,6 +44,7 @@ func (r *buildXorShiftReader) Read(dst []byte) (int, error) {
 type buildReplyRegistry struct {
 	mu      sync.Mutex
 	entries map[[8]byte]dataplane.GarlicReplyKey
+	// +checklocks:mu
 	removed [][8]byte
 }
 
@@ -450,6 +451,7 @@ func TestBuildManagerAcceptsAuthenticatedReplyDuringJavaGracePeriod(t *testing.T
 	}
 }
 
+// +checklocksignore
 func TestBuildManagerRetainsEveryTimedOutBuildUntilJavaGraceExpires(t *testing.T) {
 	const start = uint64(1_700_000_000_000)
 	now := start
@@ -541,6 +543,7 @@ func TestBuildManagerRetainsEveryTimedOutBuildUntilJavaGraceExpires(t *testing.T
 	}
 }
 
+// +checklocksignore
 func TestBuildManagerRetainsInboundAndVariableCreatorsDuringJavaGrace(t *testing.T) {
 	now := uint64(100)
 	manager, err := NewBuildManager(BuildManagerConfig{
@@ -573,6 +576,7 @@ func TestBuildManagerRetainsInboundAndVariableCreatorsDuringJavaGrace(t *testing
 	}
 }
 
+// +checklocksignore
 func TestBuildManagerDelayedSweepDoesNotExtendJavaGrace(t *testing.T) {
 	const activeDeadline = uint64(100)
 	now := activeDeadline + buildReplyGracePeriod + 1
@@ -647,6 +651,7 @@ func TestRandomizedBuildMessageDeadlineUsesJavaFuzzRange(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestBuildManagerClearsReplyRegistryAfterReplyErrorAndExpiry(t *testing.T) {
 	replyKeys := newBuildReplyRegistry()
 	profiles := NewPeerProfiles(PeerProfilesConfig{})
@@ -705,6 +710,7 @@ func TestBuildManagerClearsReplyRegistryAfterReplyErrorAndExpiry(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestBuildManagerMultiHopTimeoutRecordsEveryPeer(t *testing.T) {
 	profiles := NewPeerProfiles(PeerProfilesConfig{})
 	manager, err := NewBuildManager(BuildManagerConfig{
@@ -731,6 +737,7 @@ func TestBuildManagerMultiHopTimeoutRecordsEveryPeer(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestBuildManagerDeadlineExpiresAndWakesOwnerImmediately(t *testing.T) {
 	now := uint64(1)
 	var (
@@ -773,6 +780,8 @@ func TestBuildManagerDeadlineExpiresAndWakesOwnerImmediately(t *testing.T) {
 		t.Fatalf("exploratory outbound timeouts = %d, want 1", got)
 	}
 }
+
+// +checklocksignore
 func TestBuildManagerRollsBackPoolWhenRuntimeInstallFails(t *testing.T) {
 	const (
 		managerNow = uint64(100)
@@ -814,6 +823,7 @@ func TestBuildManagerRollsBackPoolWhenRuntimeInstallFails(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestBuildManagerRestoresRetiredTunnelWhenRuntimeInstallFails(t *testing.T) {
 	const (
 		managerNow = uint64(100)
@@ -866,6 +876,7 @@ func TestBuildManagerRestoresRetiredTunnelWhenRuntimeInstallFails(t *testing.T) 
 	}
 }
 
+// +checklocksignore
 func TestBuildManagerBuildsInboundAcrossTransitAndRejectsStaleRequests(t *testing.T) {
 	now := uint64(1_700_000_000_000)
 	creator := sha256.Sum256([]byte("inbound-creator"))
@@ -1189,6 +1200,7 @@ func TestBuildManagerRejectsTransitWhenAdmissionDenies(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestBuildManagerAuthenticatesTransitBeforeReservation(t *testing.T) {
 	const now = uint64(1_700_000_000_000)
 	privateBytes := make([]byte, 32)
@@ -1267,6 +1279,7 @@ func TestBuildManagerAuthenticatesTransitBeforeReservation(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestBuildManagerModernPendingAccountsForVariableBuilds(t *testing.T) {
 	const now = uint64(1_700_000_000_000)
 	privateBytes := make([]byte, 32)
@@ -1327,6 +1340,7 @@ func testShortBuildHop(t *testing.T, label string, tunnelID uint32) (ShortBuildH
 	return hop, append([]byte(nil), privateBytes[:]...)
 }
 
+// +checklocksignore
 func TestInboundCreatorFakeRecordIsRealAndTamperChecked(t *testing.T) {
 	const now = uint64(1_700_000_000_000)
 	local := sha256.Sum256([]byte("fake-record-creator"))
@@ -1643,6 +1657,7 @@ func TestBuildManagerCloseCancelsActiveSendAndClearsPending(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestBuildManagerReleaseSensitiveClearsOwnedKeys(t *testing.T) {
 	static := make([]byte, 32)
 	static[0] = 1

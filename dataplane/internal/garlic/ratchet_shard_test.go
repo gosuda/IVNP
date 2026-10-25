@@ -484,6 +484,7 @@ func TestRatchetManagerDefaultWindowAdmitsDHReplacement(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestRatchetTagObserverRemovesAllCollisionOwners(t *testing.T) {
 	manager := &RatchetManager{
 		tagRoutes: make(map[dataplanegarlicecies.SessionTag]int),
@@ -525,6 +526,7 @@ func TestRatchetTagObserverRemovesAllCollisionOwners(t *testing.T) {
 	assertOwner(3)
 }
 
+// +checklocksignore
 func TestRatchetTagObserverConcurrentOwnership(t *testing.T) {
 	manager := &RatchetManager{
 		tagRoutes: make(map[dataplanegarlicecies.SessionTag]int),
@@ -560,6 +562,7 @@ func TestRatchetTagObserverConcurrentOwnership(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestRatchetManagerPrunesAndExpiresIndexedTags(t *testing.T) {
 	previous := runtime.GOMAXPROCS(2)
 	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
@@ -603,6 +606,7 @@ func TestRatchetManagerPrunesAndExpiresIndexedTags(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestRatchetManagerReleaseClearsCollidingRoutes(t *testing.T) {
 	previous := runtime.GOMAXPROCS(2)
 	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
@@ -620,6 +624,7 @@ func TestRatchetManagerReleaseClearsCollidingRoutes(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestRatchetManagerConsumesIndexedTagOnAuthenticationFailure(t *testing.T) {
 	manager, remote, _, remotePeer := ratchetShardPair(t, RatchetConfig{MaxSessions: 4, MaxInboundTags: 64, TagLookahead: 4})
 	packet, err := remote.EncryptExisting(make([]byte, 256), remotePeer, nil, RatchetOptions{}, 1_001)

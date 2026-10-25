@@ -23,6 +23,8 @@ func (s *Store) AcquireLock() (*Lock, error) {
 	if s == nil {
 		return nil, ErrStoreConfig
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.validConfig(); err != nil {
 		return nil, err
 	}

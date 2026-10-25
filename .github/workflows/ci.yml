@@ -20,14 +20,24 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.27.3'
           cache: true
       - name: Install gojgp
-        run: go install github.com/gosuda/JustGoodPractices/cmd/gojgp@v1.2.0
+        run: |
+          tmp=$(mktemp -d)
+          trap 'rm -rf -- "$tmp"' EXIT
+          cd "$tmp"
+          go mod init tools
+          go get github.com/gosuda/JustGoodPractices/cmd/gojgp@v1.2.0 golang.org/x/tools@v0.51.0
+          go install github.com/gosuda/JustGoodPractices/cmd/gojgp
+      - name: Install checklocks
+        run: go install gvisor.dev/gvisor/tools/checklocks/cmd/checklocks@v0.0.0-20261024223036-c3e0783a533c
       - name: Run all tests
         run: go test -count=1 ./...
       - name: Run go vet
         run: go vet ./...
+      - name: Run checklocks
+        run: go vet -vettool="$(go env GOPATH)/bin/checklocks" -inferred=false ./...
       - name: Run gojgp
         run: gojgp lint ./...
 
@@ -60,7 +70,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.27.3'
           cache: true
       - name: Generate durable-sync overlay
         # Patches the current GOROOT's sync primitives so lock waits inside a
@@ -96,7 +106,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.27.3'
           cache: true
       - name: Build packages
         run: go build ./...

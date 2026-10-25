@@ -95,16 +95,26 @@ type natMappingPublisher struct {
 	retryInterval  time.Duration
 	wait           func(context.Context, time.Duration) bool
 
-	mu              sync.Mutex
-	started         bool
-	closed          bool
-	ctx             context.Context
-	cancel          context.CancelFunc
-	active          map[int]*activeNATMapping
-	cachedNAT       natPMPClient
-	cachedNATIP     netip.Addr
-	cachedPublic    netip.Addr
-	cachedUPnP      upnp.Gateway
+	mu sync.Mutex
+	// +checklocks:mu
+	started bool
+	// +checklocks:mu
+	closed bool
+	// +checklocks:mu
+	ctx context.Context
+	// +checklocks:mu
+	cancel context.CancelFunc
+	// +checklocks:mu
+	active map[int]*activeNATMapping
+	// +checklocks:mu
+	cachedNAT natPMPClient
+	// +checklocks:mu
+	cachedNATIP netip.Addr
+	// +checklocks:mu
+	cachedPublic netip.Addr
+	// +checklocks:mu
+	cachedUPnP upnp.Gateway
+	// +checklocks:mu
 	upnpUnavailable bool
 	wg              sync.WaitGroup
 }
@@ -550,6 +560,7 @@ func (p *natMappingPublisher) publish(ctx context.Context) {
 	}
 }
 
+// +checklocks:p.mu
 func (p *natMappingPublisher) addressesLocked() []router.PublishedAddress {
 	addresses := make([]router.PublishedAddress, len(p.base))
 	for i := range p.base {
@@ -565,6 +576,7 @@ func (p *natMappingPublisher) addressesLocked() []router.PublishedAddress {
 	return addresses
 }
 
+// +checklocks:p.mu
 func (p *natMappingPublisher) reachableLocked() bool {
 	if len(p.active) != 0 {
 		return true

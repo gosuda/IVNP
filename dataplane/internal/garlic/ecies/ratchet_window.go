@@ -33,6 +33,7 @@ func (s *tagSet) inboundAt(index uint32) (receiveTag, bool) {
 	return slot, slot.present && slot.index == index
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) pruneInboundBeforeLocked(set *tagSet, floor uint32) {
 	for set.receiveFloor < floor {
 		if slot, present := set.inboundAt(set.receiveFloor); present {
@@ -42,6 +43,7 @@ func (m *RatchetManager) pruneInboundBeforeLocked(set *tagSet, floor uint32) {
 	}
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) removeTagSetTagsLocked(set *tagSet) {
 	for index := range set.receiveTags {
 		if slot := set.receiveTags[index]; slot.present {
@@ -52,6 +54,8 @@ func (m *RatchetManager) removeTagSetTagsLocked(set *tagSet) {
 
 // Calculate eviction without changing either tag index. Under a tight budget,
 // skipped historical packets lose priority to the future receive window.
+//
+// +checklocks:m.mu
 func (m *RatchetManager) inboundPruneFloorLocked(set *tagSet, highWater uint32, needed int) (uint32, error) {
 	floor := set.receiveFloor
 	minimum := uint32(0)
@@ -77,6 +81,7 @@ func (m *RatchetManager) inboundPruneFloorLocked(set *tagSet, highWater uint32, 
 	return floor, nil
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) advanceInboundWindowLocked(set *tagSet, received uint32) error {
 	highWater := max(set.receivedHighWater, received+1)
 	target := min(uint32(65536), highWater+uint32(m.config.TagLookahead))

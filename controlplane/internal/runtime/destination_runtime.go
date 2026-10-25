@@ -91,8 +91,10 @@ func (p DestinationPolicy) durable() *state.SecureStateEncryptedLeaseSetPolicy {
 }
 
 type destinationBuildReplyRegistry struct {
-	mu       sync.RWMutex
-	next     uint64
+	mu sync.RWMutex
+	// +checklocks:mu
+	next uint64
+	// +checklocks:mu
 	handlers []destinationBuildReplyRegistration
 }
 
@@ -158,8 +160,10 @@ func (r *destinationBuildReplyRegistry) HandleReply(message foundation.I2NPMessa
 }
 
 type destinationRequestRegistry struct {
-	mu       sync.RWMutex
-	next     uint64
+	mu sync.RWMutex
+	// +checklocks:mu
+	next uint64
+	// +checklocks:mu
 	handlers []destinationRequestRegistration
 }
 
@@ -245,8 +249,10 @@ func (r *destinationRequestRegistry) Close() error {
 }
 
 type destinationPublisherRegistry struct {
-	mu         sync.RWMutex
-	next       uint64
+	mu sync.RWMutex
+	// +checklocks:mu
+	next uint64
+	// +checklocks:mu
 	publishers []destinationPublisherRegistration
 }
 
@@ -692,20 +698,12 @@ func (d *Controller) CreateDestination(ctx context.Context, name string, policy 
 
 	d.destinationMu.Lock()
 	defer d.destinationMu.Unlock()
-	d.mu.Lock()
-	if d.closed || d.destinationFactory == nil {
-		d.mu.Unlock()
+	if d.destinationFactory == nil {
 		return DestinationSummary{}, ErrDestinationCreation
 	}
-	if d.bundle.DestinationPrivate[name] != nil || d.bundle.Destinations[name].Destination != nil {
-		d.mu.Unlock()
-		return DestinationSummary{}, ErrDestinationExists
+	if err := d.checkCreateDestinationAllowed(name); err != nil {
+		return DestinationSummary{}, err
 	}
-	if len(d.bundle.DestinationPrivate)+len(d.bundle.Destinations) >= d.config.State.MaxDestinations || d.clientRuntimeCount() >= d.config.State.MaxDestinations {
-		d.mu.Unlock()
-		return DestinationSummary{}, ErrTooManyDestinations
-	}
-	d.mu.Unlock()
 
 	var destination *foundation.LocalDestination
 	var err error
@@ -772,6 +770,25 @@ func (d *Controller) CreateDestination(ctx context.Context, name string, policy 
 	releaseDestinationPrivate(previous.DestinationPrivate)
 	releaseEncryptedLeaseSetPolicies(previous.EncryptedLeaseSetPolicies)
 	return DestinationSummary{Name: name, Address: runtime.local.B32(), Default: name == "default"}, nil
+}
+
+// +checklocksexclude:d.mu
+func (d *Controller) checkCreateDestinationAllowed(name string) error {
+	d.mu.Lock()
+	closed := d.closed
+	exists := d.bundle.DestinationPrivate[name] != nil || d.bundle.Destinations[name].Destination != nil
+	tooMany := len(d.bundle.DestinationPrivate)+len(d.bundle.Destinations) >= d.config.State.MaxDestinations
+	d.mu.Unlock()
+	if closed {
+		return ErrDestinationCreation
+	}
+	if exists {
+		return ErrDestinationExists
+	}
+	if tooMany || d.clientRuntimeCount() >= d.config.State.MaxDestinations {
+		return ErrTooManyDestinations
+	}
+	return nil
 }
 
 // DestroyDestination removes a named destination from persistent storage and stops its runtime.

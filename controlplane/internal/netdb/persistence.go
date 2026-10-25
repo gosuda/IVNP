@@ -29,6 +29,8 @@ var routerSnapshotMagic = [8]byte{'I', 'V', 'N', 'P', 'N', 'D', 'B', 0}
 
 // RouterInfoStore persists only verified remote RouterInfos. Its complete file
 // replacement format is intentionally independent of private router state.
+//
+// Lock hierarchy: RouterInfoStore.mu -> Table.mu (database.routers.mu).
 type RouterInfoStore struct {
 	path      string
 	database  *Database
@@ -36,7 +38,8 @@ type RouterInfoStore struct {
 	local     foundation.Hash
 	max       int
 
-	mu              sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	savedGeneration uint64
 }
 
@@ -112,6 +115,7 @@ func (s *RouterInfoStore) Load(nowMillis uint64) (RouterInfoLoadResult, error) {
 	return result, err
 }
 
+// +checklocks:s.mu
 func (s *RouterInfoStore) loadLocked(data []byte, nowMillis uint64) (RouterInfoLoadResult, error) {
 	if len(data) < routerSnapshotHeader || !bytes.Equal(data[:8], routerSnapshotMagic[:]) || binary.BigEndian.Uint16(data[8:10]) != routerSnapshotVersion || binary.BigEndian.Uint32(data[10:14]) != s.networkID || !bytes.Equal(data[14:14+foundation.HashLength], s.local[:]) {
 		return RouterInfoLoadResult{}, ErrRouterSnapshotHeader

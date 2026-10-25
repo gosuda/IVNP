@@ -70,16 +70,22 @@ type TransportMux struct {
 	metrics  *observability.Registry
 	now      func() time.Time
 
-	lifecycleMu  sync.Mutex
-	started      bool
-	closed       bool
-	managers     [2]dataplane.RouterTransportManager
+	lifecycleMu sync.Mutex
+	// +checklocks:lifecycleMu
+	started bool
+	// +checklocks:lifecycleMu
+	closed bool
+	// +checklocks:lifecycleMu
+	managers [2]dataplane.RouterTransportManager
+	// +checklocks:lifecycleMu
 	managerCount int
-	closeOnce    sync.Once
-	closeErr     error
-	random       func([]byte) (int, error)
-	setupSlots   chan struct{}
-	dataSender   *dataplane.RouterEstablishedSender
+	// +checklocks:lifecycleMu
+	closedManagers bool
+	// +checklocks:lifecycleMu
+	closeErr   error
+	random     func([]byte) (int, error)
+	setupSlots chan struct{}
+	dataSender *dataplane.RouterEstablishedSender
 }
 
 var _ dataplane.RouterTransportManager = (*TransportMux)(nil)
@@ -153,8 +159,10 @@ func (m *TransportMux) Close() error {
 	return m.closeManagersLocked()
 }
 
+// +checklocks:m.lifecycleMu
 func (m *TransportMux) closeManagersLocked() error {
-	m.closeOnce.Do(func() {
+	if !m.closedManagers {
+		m.closedManagers = true
 		errs := make([]error, 0, m.managerCount)
 		for index := range m.managerCount {
 			manager := m.managers[index]
@@ -163,7 +171,7 @@ func (m *TransportMux) closeManagersLocked() error {
 			}
 		}
 		m.closeErr = errors.Join(errs...)
-	})
+	}
 	return m.closeErr
 }
 

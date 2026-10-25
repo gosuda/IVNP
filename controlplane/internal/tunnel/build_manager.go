@@ -166,7 +166,8 @@ type BuildSource struct {
 }
 
 type synchronizedReader struct {
-	mu     sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	reader io.Reader
 }
 
@@ -183,6 +184,8 @@ type BuildScheduleFunc func(time.Duration, func()) func()
 // BuildManager creates and processes short-record and compatibility variable
 // tunnel builds. Active creator and transit replay state is capacity-bounded;
 // timed-out creator state is retained for Java's fixed late-reply grace period.
+//
+// Lock order: lifecycleMu -> mu -> {creatorBudget.mu, pool.mu}.
 type BuildManager struct {
 	runtime          dataplane.TunnelCircuitRuntime
 	pool             *Pool
@@ -207,20 +210,31 @@ type BuildManager struct {
 	schedule         BuildScheduleFunc
 	creatorBudget    *CreatorBudget
 	stats            *BuildStatistics
-	creators         map[*creatorAttempt]struct{}
-	claims           map[*creatorClaim]struct{}
+	// +checklocks:mu
+	creators map[*creatorAttempt]struct{}
+	// +checklocks:mu
+	claims map[*creatorClaim]struct{}
 
-	lifecycleMu     sync.RWMutex
-	mu              sync.Mutex
-	pending         map[uint32]*pendingOutboundBuild
-	pendingInbound  map[uint32]*pendingInboundBuild
+	lifecycleMu sync.RWMutex
+	mu          sync.Mutex
+	// +checklocks:mu
+	pending map[uint32]*pendingOutboundBuild
+	// +checklocks:mu
+	pendingInbound map[uint32]*pendingInboundBuild
+	// +checklocks:mu
 	pendingVariable map[uint32]*pendingVariableBuild
-	recent          map[uint32]recentCreatorBuild
-	transit         map[uint32]uint64
-	transitRecords  map[[32]byte]uint64
-	released        bool
-	ctx             context.Context
-	cancel          context.CancelFunc
+	// +checklocks:mu
+	recent map[uint32]recentCreatorBuild
+	// +checklocks:mu
+	transit map[uint32]uint64
+	// +checklocks:mu
+	transitRecords map[[32]byte]uint64
+	// +checklocks:mu
+	// +checklocks:lifecycleMu
+	// +checklocksreadany
+	released bool
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
 type pendingOutboundBuild struct {
@@ -394,7 +408,7 @@ func (m *BuildManager) ReleaseSensitive() {
 	}
 	m.released = true
 	for attempt := range m.creators {
-		attempt.finishLocked()
+		m.finishCreatorLocked(attempt)
 	}
 	m.creatorBudget.unregister(m)
 	clear(m.claims)
@@ -409,7 +423,7 @@ func (m *BuildManager) ReleaseSensitive() {
 		delete(m.pending, id)
 	}
 	for id, recent := range m.recent {
-		recent.finishLocked()
+		m.finishRecentCreatorLocked(recent)
 		m.clearRecentCreatorBuild(recent)
 		delete(m.recent, id)
 	}
@@ -467,6 +481,7 @@ func (m *BuildManager) Close() error {
 	return nil
 }
 
+// +checklocksexclude:m.mu
 func (m *BuildManager) isReleased() bool {
 	if m == nil {
 		return true
@@ -1077,6 +1092,7 @@ func (m *BuildManager) inboundLocalDelivery(message foundation.I2NPMessage) erro
 	return m.localDelivery(message)
 }
 
+// +checklocksexclude:m.mu
 func (m *BuildManager) hasInboundPending(id uint32) bool {
 	m.mu.Lock()
 	_, active := m.pendingInbound[id]
@@ -1258,6 +1274,7 @@ func (m *BuildManager) installTransitCircuit(request ShortBuildRequest, keys Sho
 	return m.runtime.RegisterInbound(circuit)
 }
 
+// +checklocksexclude:m.mu
 func (m *BuildManager) reserveTransit(id uint32, recordHash [32]byte, now uint64) bool {
 	if id == 0 {
 		return false
@@ -1284,6 +1301,8 @@ func (m *BuildManager) reserveTransit(id uint32, recordHash [32]byte, now uint64
 	m.transitRecords[recordHash] = now + shortBuildReplayLifetime
 	return true
 }
+
+// +checklocksexclude:m.mu
 func (m *BuildManager) releaseTransit(id uint32, recordHash [32]byte) {
 	m.mu.Lock()
 	delete(m.transit, id)
@@ -1426,21 +1445,21 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 	for id, recent := range m.recent {
 		if recent.deadline <= nowMillis {
 			delete(m.recent, id)
-			recent.finishLocked()
+			m.finishRecentCreatorLocked(recent)
 			expiredRecent = append(expiredRecent, recent)
 		}
 	}
 	for id, pending := range m.pending {
 		if pending.deadline <= nowMillis {
 			delete(m.pending, id)
-			pending.build.attempt.timeoutLocked()
+			m.timeoutCreatorLocked(pending.build.attempt)
 			pending.timedOut = true
 			graceDeadline := saturatingDeadline(pending.deadline, buildReplyGracePeriod)
 			pending.deadline = graceDeadline
 			cancelBuildDeadline(pending.cancelDeadline)
 			recent := recentCreatorBuild{replyID: id, deadline: graceDeadline, outbound: pending}
 			if graceDeadline <= nowMillis {
-				recent.finishLocked()
+				m.finishRecentCreatorLocked(recent)
 				expiredRecent = append(expiredRecent, recent)
 			} else {
 				pending.cancelDeadline = m.scheduleBuildDeadline(nowMillis, graceDeadline)
@@ -1452,13 +1471,13 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 	for id, pending := range m.pendingInbound {
 		if pending.deadline <= nowMillis {
 			delete(m.pendingInbound, id)
-			pending.build.attempt.timeoutLocked()
+			m.timeoutCreatorLocked(pending.build.attempt)
 			graceDeadline := saturatingDeadline(pending.deadline, buildReplyGracePeriod)
 			pending.deadline = graceDeadline
 			cancelBuildDeadline(pending.cancelDeadline)
 			recent := recentCreatorBuild{replyID: id, deadline: graceDeadline, inbound: pending}
 			if graceDeadline <= nowMillis {
-				recent.finishLocked()
+				m.finishRecentCreatorLocked(recent)
 				expiredRecent = append(expiredRecent, recent)
 			} else {
 				pending.cancelDeadline = m.scheduleBuildDeadline(nowMillis, graceDeadline)
@@ -1470,13 +1489,13 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 	for id, pending := range m.pendingVariable {
 		if pending.deadline <= nowMillis {
 			delete(m.pendingVariable, id)
-			pending.build.attempt.timeoutLocked()
+			m.timeoutCreatorLocked(pending.build.attempt)
 			graceDeadline := saturatingDeadline(pending.deadline, buildReplyGracePeriod)
 			pending.deadline = graceDeadline
 			cancelBuildDeadline(pending.cancelDeadline)
 			recent := recentCreatorBuild{replyID: id, deadline: graceDeadline, variable: pending}
 			if graceDeadline <= nowMillis {
-				recent.finishLocked()
+				m.finishRecentCreatorLocked(recent)
 				expiredRecent = append(expiredRecent, recent)
 			} else {
 				pending.cancelDeadline = m.scheduleBuildDeadline(nowMillis, graceDeadline)
@@ -1497,6 +1516,10 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 	}
 	m.mu.Unlock()
 
+	return m.finishExpiredBuilds(expiredOutbound, expiredInbound, expiredVariable, expiredRecent, nowMillis)
+}
+
+func (m *BuildManager) finishExpiredBuilds(expiredOutbound []*pendingOutboundBuild, expiredInbound []*pendingInboundBuild, expiredVariable []*pendingVariableBuild, expiredRecent []recentCreatorBuild, nowMillis uint64) int {
 	expiredCount := len(expiredOutbound) + len(expiredInbound) + len(expiredVariable)
 	if expiredCount != 0 {
 		if m.stats != nil {
@@ -1565,6 +1588,7 @@ func (m *BuildManager) PendingDirection(direction Direction) int {
 	return m.pendingDirectionLocked(direction)
 }
 
+// +checklocks:m.mu
 func (m *BuildManager) pendingDirectionLocked(direction Direction) int {
 	count := 0
 	for attempt := range m.creators {
@@ -1743,6 +1767,7 @@ func validateShortBuildHops(hops []ShortBuildHop) error {
 	return nil
 }
 
+// +checklocks:m.mu
 func (m *BuildManager) replyIDInUseLocked(id uint32) bool {
 	if m.pending[id] != nil || m.pendingInbound[id] != nil || m.pendingVariable[id] != nil {
 		return true
@@ -1751,6 +1776,7 @@ func (m *BuildManager) replyIDInUseLocked(id uint32) bool {
 	return recent
 }
 
+// +checklocksexclude:m.mu
 func (m *BuildManager) takePending(id uint32) *pendingOutboundBuild {
 	m.mu.Lock()
 	pending := m.pending[id]
@@ -1776,6 +1802,7 @@ func (m *BuildManager) removePending(id uint32) {
 	}
 }
 
+// +checklocksexclude:m.mu
 func (m *BuildManager) takeInboundPending(id uint32) *pendingInboundBuild {
 	m.mu.Lock()
 	pending := m.pendingInbound[id]
@@ -1933,6 +1960,7 @@ func buildPeerDiagnostics(hops []ShortBuildHop) []string {
 	return peers
 }
 
+// +checklocksexclude:m.mu
 func (m *BuildManager) armOutboundDeadline(replyID uint32) {
 	now := m.now()
 	m.mu.Lock()
@@ -1944,6 +1972,7 @@ func (m *BuildManager) armOutboundDeadline(replyID uint32) {
 	m.mu.Unlock()
 }
 
+// +checklocksexclude:m.mu
 func (m *BuildManager) armInboundDeadline(replyID uint32) {
 	now := m.now()
 	m.mu.Lock()

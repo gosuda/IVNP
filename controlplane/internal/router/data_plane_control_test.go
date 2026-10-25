@@ -29,8 +29,9 @@ var (
 )
 
 type controlPlaneTunnelSender struct {
-	mu       sync.Mutex
-	handle   func(context.Context, foundation.I2NPMessage) error
+	mu     sync.Mutex
+	handle func(context.Context, foundation.I2NPMessage) error
+	// +checklocks:mu
 	messages []foundation.I2NPMessage
 }
 
@@ -300,7 +301,8 @@ type dataPlanePublicationLoop struct {
 	database *controlplanenetdb.Database
 	now      uint64
 	owner    *controlplanenetdb.LeaseSetPublisher
-	stores   []foundation.I2NPDatabaseStoreMessage
+	// +checklocks:mu
+	stores []foundation.I2NPDatabaseStoreMessage
 }
 
 func (l *dataPlanePublicationLoop) Send(_ context.Context, _ controlplanenetdb.RouterRef, message foundation.I2NPMessage) error {

@@ -41,10 +41,13 @@ type historyResponse struct {
 
 // historyRing retains the most recent telemetry samples across node restarts.
 type historyRing struct {
-	mu      sync.RWMutex
+	mu sync.RWMutex
+	// +checklocks:mu
 	samples [historyCapacity]historySample
-	next    int
-	count   int
+	// +checklocks:mu
+	next int
+	// +checklocks:mu
+	count int
 }
 
 func (h *historyRing) add(sample historySample) {
@@ -111,10 +114,13 @@ type actionsLogResponse struct {
 
 // actionLog retains the most recent administrative actions in memory.
 type actionLog struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	entries [actionLogCapacity]actionEntry
-	next    int
-	count   int
+	// +checklocks:mu
+	next int
+	// +checklocks:mu
+	count int
 }
 
 func (l *actionLog) record(action, outcome, detail string) {

@@ -18,13 +18,19 @@ import (
 
 // PeerStore provides thread-safe, memory-bounded peer indexing and snapshot persistence.
 type PeerStore struct {
-	mu         sync.RWMutex
-	peers      map[foundation.Hash]*PeerRecord
+	mu sync.RWMutex
+	// +checklocks:mu
+	peers map[foundation.Hash]*PeerRecord
+	// +checklocks:mu
 	bySubnet16 map[[2]byte]map[foundation.Hash]struct{}
-	byFamily   map[string]map[foundation.Hash]struct{}
-	maxPeers   int
-	localHash  foundation.Hash
-	evictions  uint64
+	// +checklocks:mu
+	byFamily map[string]map[foundation.Hash]struct{}
+	// +checklocks:mu
+	maxPeers int
+	// +checklocks:mu
+	localHash foundation.Hash
+	// +checklocks:mu
+	evictions uint64
 }
 
 func NewPeerStore() *PeerStore {
@@ -212,12 +218,15 @@ func (s *PeerStore) RecordTunnelBuildResult(hash foundation.Hash, accepted bool)
 	rec.Score = calculateScore(rec)
 }
 
+// +checklocks:s.mu
 func (s *PeerStore) evictWorstLocked() {
 	s.evictBatchLocked(1)
 }
 
 // evictBatchLocked evicts up to count lowest-utility peers to free up capacity for newly discovered nodes.
 // Candidates in sparse buckets (<= 4 peers) are protected to preserve K-Bucket diversity.
+//
+// +checklocks:s.mu
 func (s *PeerStore) evictBatchLocked(count int) int {
 	if count <= 0 || len(s.peers) == 0 {
 		return 0
@@ -290,6 +299,7 @@ func (s *PeerStore) PruneStale(maxAge time.Duration) int {
 	return s.pruneStaleLocked(maxAge)
 }
 
+// +checklocks:s.mu
 func (s *PeerStore) pruneStaleLocked(maxAge time.Duration) int {
 	if maxAge <= 0 {
 		maxAge = 24 * time.Hour
@@ -344,6 +354,7 @@ func (s *PeerStore) PruneRedundant() int {
 	return len(evict)
 }
 
+// +checklocks:s.mu
 func (s *PeerStore) indexPeerLocked(rec *PeerRecord) {
 	for _, ip := range rec.IPv4 {
 		if !ip.Is4() {
@@ -367,6 +378,7 @@ func (s *PeerStore) indexPeerLocked(rec *PeerRecord) {
 	}
 }
 
+// +checklocks:s.mu
 func (s *PeerStore) deindexPeerLocked(rec *PeerRecord) {
 	for _, ip := range rec.IPv4 {
 		if !ip.Is4() {
@@ -390,6 +402,7 @@ func (s *PeerStore) deindexPeerLocked(rec *PeerRecord) {
 	}
 }
 
+// +checklocks:s.mu
 func (s *PeerStore) deletePeerLocked(hash foundation.Hash) {
 	rec, found := s.peers[hash]
 	if !found {
@@ -402,6 +415,8 @@ func (s *PeerStore) deletePeerLocked(hash foundation.Hash) {
 
 // eachContentionGroupLocked invokes fn on every member set rec competes in:
 // one per IPv4 /16 subnet it occupies, plus its declared router family.
+//
+// +checklocks:s.mu
 func (s *PeerStore) eachContentionGroupLocked(rec *PeerRecord, fn func(members map[foundation.Hash]struct{})) {
 	for _, ip := range rec.IPv4 {
 		if ip.Is4() {
@@ -416,6 +431,9 @@ func (s *PeerStore) eachContentionGroupLocked(rec *PeerRecord, fn func(members m
 // topsAnyContentionLocked reports whether rec belongs to at least one
 // contention group and whether it outranks every other member in at least one
 // of them. A peer that tops no group loses every claim during selection.
+//
+// +checklocks:s.mu
+// +checklocksignore
 func (s *PeerStore) topsAnyContentionLocked(rec *PeerRecord) (hasGroup, tops bool) {
 	s.eachContentionGroupLocked(rec, func(members map[foundation.Hash]struct{}) {
 		hasGroup = true
@@ -441,6 +459,9 @@ func (s *PeerStore) topsAnyContentionLocked(rec *PeerRecord) (hasGroup, tops boo
 
 // evictDominatedLocked drops co-members of rec's contention groups that no
 // longer top any of their own groups after rec took their claim.
+//
+// +checklocks:s.mu
+// +checklocksignore
 func (s *PeerStore) evictDominatedLocked(rec *PeerRecord) {
 	seen := make(map[foundation.Hash]struct{})
 	var evict []foundation.Hash

@@ -20,8 +20,10 @@ import (
 )
 
 type nodeSockets struct {
-	mu   sync.Mutex
-	net  *simnet.Network
+	mu sync.Mutex
+	// +checklocks:mu
+	net *simnet.Network
+	// +checklocks:mu
 	host *simnet.Host
 }
 

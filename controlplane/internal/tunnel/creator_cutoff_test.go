@@ -85,5 +85,5 @@ func startCutoffBuild(t *testing.T, manager *BuildManager, attempt *creatorAttem
 	if err != nil {
 		t.Fatal(err)
 	}
-	return schedulingAcceptedReply(t, manager.pending[replyID])
+	return schedulingAcceptedReply(t, manager.pending[replyID]) // +checklocksignore
 }

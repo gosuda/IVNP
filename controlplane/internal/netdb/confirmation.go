@@ -33,12 +33,20 @@ type publicationTokenOwner func(foundation.I2NPDeliveryStatusMessage) bool
 // PublicationTokenRegistry is the single bounded allocation domain for every
 // NetDB publication producer. Tokens keep their high bit clear, leaving the
 // high-bit domain available to tunnel health probes.
+//
+// Lock hierarchy: LeaseSetPublisher.mu -> confirmedPublication.mu ->
+// PublicationTokenRegistry.mu. HandleDeliveryStatus releases r.mu before
+// invoking the owner callback so confirmedPublication.confirm never inverts
+// that order.
 type PublicationTokenRegistry struct {
 	mu     sync.Mutex
 	now    func() uint64
 	random func() uint32
+	// +checklocks:mu
 	active map[uint32]publicationTokenOwner
+	// +checklocks:mu
 	recent map[uint32]uint64
+	// +checklocks:mu
 	closed bool
 }
 
@@ -118,27 +126,38 @@ type publicationAttempt struct {
 	sentAt, deadline uint64
 }
 
+// confirmedPublication coordinates K-way floodfill DatabaseStore delivery.
+// Lock hierarchy: LeaseSetPublisher.mu -> confirmedPublication.mu ->
+// {PublicationTokenRegistry.mu, Table.mu}.
 type confirmedPublication struct {
-	database         *Database
-	sender           LeaseSetPublishSender
-	route            ReplyPathSource
-	registry         *PublicationTokenRegistry
-	now              func() uint64
-	random           func() uint32
-	key              foundation.Hash
-	typeID           foundation.I2NPStoreType
-	preferred        []foundation.Hash
-	targetK          int
-	data             []byte
-	generation       uint64
-	targets          []RouterRef
-	nextTarget       int
-	attempts         map[uint32]publicationAttempt
+	database  *Database
+	sender    LeaseSetPublishSender
+	route     ReplyPathSource
+	registry  *PublicationTokenRegistry
+	now       func() uint64
+	random    func() uint32
+	key       foundation.Hash
+	typeID    foundation.I2NPStoreType
+	preferred []foundation.Hash
+	targetK   int
+	// +checklocks:mu
+	data []byte
+	// +checklocks:mu
+	generation uint64
+	// +checklocks:mu
+	targets []RouterRef
+	// +checklocks:mu
+	nextTarget int
+	// +checklocks:mu
+	attempts map[uint32]publicationAttempt
+	// +checklocks:mu
 	confirmedTargets map[foundation.Hash]struct{}
-	confirmed        int
-	nextRetry        uint64
-	logger           *slog.Logger
-	mu               sync.Mutex
+	// +checklocks:mu
+	confirmed int
+	// +checklocks:mu
+	nextRetry uint64
+	logger    *slog.Logger
+	mu        sync.Mutex
 }
 
 func newConfirmedPublication(database *Database, sender LeaseSetPublishSender, route ReplyPathSource, registry *PublicationTokenRegistry, now func() uint64, random func() uint32, key foundation.Hash, typeID foundation.I2NPStoreType, preferred []foundation.Hash, targetK int, logger *slog.Logger) *confirmedPublication {
@@ -347,6 +366,7 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 	return sent, first
 }
 
+// +checklocks:p.mu
 func (p *confirmedPublication) snapshotTargets() []RouterRef {
 	targets := make([]RouterRef, 0, publicationTargetSnapshot+len(p.preferred))
 	for _, hash := range p.preferred {

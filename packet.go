@@ -29,20 +29,26 @@ type UnauthPacket struct {
 var _ net.PacketConn = (*PacketConn)(nil)
 
 type packetSocket struct {
-	owner                       *Destination
-	endpoint                    destination.DestinationEndpoint
-	network                     string
-	protocol                    uint8
-	local                       Addr
-	maxPayload                  int
-	subscription                destination.MessageSubscription
-	mu                          sync.Mutex
-	closed                      bool
-	closeDone                   chan struct{}
-	closeErr                    error
-	readDeadline, writeDeadline time.Time
-	operations                  map[*packetOperation]struct{}
-	active                      sync.WaitGroup
+	owner        *Destination
+	endpoint     destination.DestinationEndpoint
+	network      string
+	protocol     uint8
+	local        Addr
+	maxPayload   int
+	subscription destination.MessageSubscription
+	// mu guards closed, readDeadline, writeDeadline, and operations. Never held while acquiring owner.mu.
+	mu sync.Mutex
+	// +checklocks:mu
+	closed    bool
+	closeDone chan struct{}
+	closeErr  error
+	// +checklocks:mu
+	readDeadline time.Time
+	// +checklocks:mu
+	writeDeadline time.Time
+	// +checklocks:mu
+	operations map[*packetOperation]struct{}
+	active     sync.WaitGroup
 }
 
 // packetTarget splits a packet network name into a bound endpoint and a wire
@@ -286,8 +292,11 @@ func (s *packetSocket) Close() error {
 }
 
 type packetByteBudget struct {
-	mu          sync.Mutex
-	used, limit int64
+	mu sync.Mutex
+	// +checklocks:mu
+	used int64
+	// +checklocks:mu
+	limit int64
 }
 
 func newPacketBudget(limit int64) destination.ByteBudget { return &packetByteBudget{limit: limit} }

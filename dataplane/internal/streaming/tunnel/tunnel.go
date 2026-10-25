@@ -119,6 +119,13 @@ type TunnelNetworkConfig struct {
 }
 
 // TunnelNetwork manages streaming connections routed over I2P tunnels.
+//
+// Lock hierarchy:
+//   - TunnelNetwork.mu and TunnelNetwork.outboundMu are independent and never held
+//     while acquiring tunnelConn.mu or tunnelConn.readMu.
+//   - Within a tunnelConn: readMu -> mu, and readMu -> readLimit.mu;
+//     tunnelConn.mu is never held while acquiring TunnelNetwork.mu,
+//     TunnelNetwork.outboundMu, readLimit.mu, or writeLimit.mu.
 type TunnelNetwork struct {
 	localHash            foundation.Hash
 	localIdentity        foundation.Identity
@@ -134,15 +141,22 @@ type TunnelNetwork struct {
 	handshakeTimeout     time.Duration
 	handshakeObserver    HandshakeObserver
 
-	mu             sync.RWMutex
-	listeners      map[uint16]*tunnelListener
-	byID           map[uint32]*tunnelConn
-	outboundPorts  map[uint16]int
-	inboundPorts   map[uint16]int
-	inbound        map[inboundKey]*tunnelConn
-	synPending     map[inboundKey]struct{}
-	synTokens      chan struct{}
-	idSeq          atomic.Uint32
+	mu sync.RWMutex
+	// +checklocks:mu
+	listeners map[uint16]*tunnelListener
+	// +checklocks:mu
+	byID map[uint32]*tunnelConn
+	// +checklocks:mu
+	outboundPorts map[uint16]int
+	// +checklocks:mu
+	inboundPorts map[uint16]int
+	// +checklocks:mu
+	inbound map[inboundKey]*tunnelConn
+	// +checklocks:mu
+	synPending map[inboundKey]struct{}
+	synTokens  chan struct{}
+	idSeq      atomic.Uint32
+	// +checklocks:mu
 	closed         bool
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -462,6 +476,8 @@ func (n *TunnelNetwork) ListenStream(ctx context.Context, address string) (net.L
 	return listener, nil
 }
 
+// +checklocks:n.mu
+// +checklocksexclude:n.outboundMu
 func (n *TunnelNetwork) availablePortLocked(port uint16, accepted map[uint16]int) (uint16, error) {
 	if port != 0 {
 		if n.listeners[port] != nil || n.outboundPorts[port] != 0 || accepted[port] != 0 {
@@ -645,19 +661,17 @@ func (n *TunnelNetwork) finishSynchronize(ctx context.Context, delivery Delivery
 		return err
 	}
 	connection := n.newConn(localID, packet.ReceiveStreamID, delivery.From, peer.identity, delivery.ToPort, delivery.FromPort, false)
-	connection.handshakeFeedback = feedback
 	connection.standardConn = listener.standardConn
+	connection.mu.Lock()
+	connection.handshakeFeedback = feedback
 	connection.setPeerControlLocked(peer)
-	if len(packet.Payload) != 0 {
-		connection.mu.Lock()
-		queued := connection.enqueuePayloadLocked(packet.Payload)
+	if len(packet.Payload) != 0 && !connection.enqueuePayloadLocked(packet.Payload) {
 		connection.mu.Unlock()
-		if !queued {
-			connection.abort(false)
-			return ErrTunnelBackpressure
-		}
+		connection.abort(false)
+		return ErrTunnelBackpressure
 	}
-	connection.setPeerMaxPayloadSize(peerMaxPayloadSize)
+	connection.updatePeerMaxPayloadSizeLocked(peerMaxPayloadSize)
+	connection.mu.Unlock()
 	if err = n.registerInbound(key, connection); err != nil {
 		return err
 	}
@@ -714,6 +728,10 @@ func (n *TunnelNetwork) newConn(localID, remoteID uint32, peer foundation.Hash, 
 	return connection
 }
 
+// +checklocksexclude:n.mu
+// +checklocksexclude:n.outboundMu
+// +checklocksexclude:connection.mu
+// +checklocksexclude:connection.readMu
 func (n *TunnelNetwork) register(connection *tunnelConn) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -748,6 +766,10 @@ func (n *TunnelNetwork) register(connection *tunnelConn) error {
 	return nil
 }
 
+// +checklocksexclude:n.mu
+// +checklocksexclude:n.outboundMu
+// +checklocksexclude:connection.mu
+// +checklocksexclude:connection.readMu
 func (n *TunnelNetwork) registerInbound(key inboundKey, connection *tunnelConn) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -768,6 +790,10 @@ func (n *TunnelNetwork) registerInbound(key inboundKey, connection *tunnelConn) 
 	return nil
 }
 
+// +checklocksexclude:n.mu
+// +checklocksexclude:n.outboundMu
+// +checklocksexclude:connection.mu
+// +checklocksexclude:connection.readMu
 func (n *TunnelNetwork) unregister(connection *tunnelConn) {
 	n.mu.Lock()
 	if n.byID[connection.localID] == connection {
@@ -780,6 +806,10 @@ func (n *TunnelNetwork) unregister(connection *tunnelConn) {
 	n.mu.Unlock()
 }
 
+// +checklocks:n.mu
+// +checklocksexclude:n.outboundMu
+// +checklocksexclude:connection.mu
+// +checklocksexclude:connection.readMu
 func (n *TunnelNetwork) releasePortLocked(connection *tunnelConn) {
 	if !connection.portReserved {
 		return
@@ -1260,13 +1290,18 @@ func (h *retrySchedule) fix(index int) {
 }
 
 type tunnelConn struct {
-	network           *TunnelNetwork
+	network *TunnelNetwork
+	// +checklocks:mu
 	handshakeFeedback HandshakeFeedback
 
-	localID, remoteID uint32
-	peer              foundation.Hash
-	peerIdentity      foundation.Identity
-	peerSigningType   foundation.SigningKeyType
+	localID uint32
+	// +checklocks:mu
+	remoteID     uint32
+	peer         foundation.Hash
+	peerIdentity foundation.Identity
+	// +checklocks:mu
+	peerSigningType foundation.SigningKeyType
+	// +checklocks:mu
 	peerSigningPublic []byte
 	localPort         uint16
 	remotePort        uint16
@@ -1277,32 +1312,52 @@ type tunnelConn struct {
 	applicationClosed atomic.Bool
 	inboundKey        *inboundKey
 	handshakeCtx      context.Context
-	handshakeFailed   bool
+	// +checklocks:mu
+	handshakeFailed bool
 
-	mu                 sync.Mutex
-	nextSequence       uint32
-	expect             uint32
-	pending            map[uint32]pendingPacket
-	reordered          map[uint32]receivedPacket
-	preSynchronize     []deferredDelivery
-	synchronize        []byte
-	synchronizeLease   *wireLease
-	syncSent           time.Time
-	syncRetries        int
-	rto                dataplanestreaming.RTOEstimator
-	congestion         dataplanestreaming.CongestionWindow
+	mu sync.Mutex
+	// +checklocks:mu
+	nextSequence uint32
+	// +checklocks:mu
+	expect uint32
+	// +checklocks:mu
+	pending map[uint32]pendingPacket
+	// +checklocks:mu
+	reordered map[uint32]receivedPacket
+	// +checklocks:mu
+	preSynchronize []deferredDelivery
+	// +checklocks:mu
+	synchronize []byte
+	// +checklocks:mu
+	synchronizeLease *wireLease
+	// +checklocks:mu
+	syncSent time.Time
+	// +checklocks:mu
+	syncRetries int
+	// +checklocks:mu
+	rto dataplanestreaming.RTOEstimator
+	// +checklocks:mu
+	congestion dataplanestreaming.CongestionWindow
+	// +checklocks:mu
 	peerMaxPayloadSize int
 	retryUpdateQueued  atomic.Bool
-	nextPaced          time.Time
-	peerClosedOK       bool
-	localWriteClosed   bool
+	// +checklocks:mu
+	nextPaced time.Time
+	// +checklocks:mu
+	peerClosedOK bool
+	// +checklocks:mu
+	localWriteClosed bool
+	// +checklocks:mu
 	localCloseSequence uint32
-	reset              bool
+	// +checklocks:mu
+	reset bool
 
-	reads           chan []byte
-	readCurrent     []byte
-	readMu          sync.Mutex
-	peerClosed      chan struct{}
+	reads chan []byte
+	// +checklocks:readMu
+	readCurrent []byte
+	readMu      sync.Mutex
+	peerClosed  chan struct{}
+	// +checklocks:mu
 	peerOnce        sync.Once
 	established     chan struct{}
 	establishOnce   sync.Once
@@ -1497,6 +1552,10 @@ func (c *tunnelConn) handle(ctx context.Context, delivery Delivery, packet Packe
 	return nil
 }
 
+// +checklocks:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) preparePeerLocked(delivery Delivery, packet Packet) error {
 	if c.remoteID != 0 || packet.Flags&FlagReset != 0 {
 		// Java authenticates RESET by recipient ID and signature, not reply ID.
@@ -1547,6 +1606,10 @@ type deferredDelivery struct {
 	delivery Delivery
 }
 
+// +checklocks:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) queuePreSynchronizeLocked(delivery Delivery, packet Packet) error {
 	if packet.SendStreamID != c.localID || packet.ReceiveStreamID == 0 || packet.Sequence >= uint32(InitialWindow) {
 		return invalidTunnelPacket("invalid packet before SYN reply", packet)
@@ -1567,6 +1630,10 @@ func (c *tunnelConn) queuePreSynchronizeLocked(delivery Delivery, packet Packet)
 	return nil
 }
 
+// +checklocks:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) handleSequenceLocked(packet Packet) (bool, bool) {
 	received := receivedPacket{payload: packet.Payload, close: packet.Flags&FlagClose != 0}
 	if packet.Sequence == c.expect {
@@ -1586,6 +1653,10 @@ func (c *tunnelConn) handleSequenceLocked(packet Packet) (bool, bool) {
 	return true, false
 }
 
+// +checklocks:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) enqueueExpectedLocked(received receivedPacket) bool {
 	if !c.enqueueReceivedLocked(received) {
 		return false
@@ -1604,6 +1675,10 @@ func (c *tunnelConn) enqueueExpectedLocked(received receivedPacket) bool {
 	}
 }
 
+// +checklocks:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) acknowledgeLocked(through uint32, nacks []byte, now time.Time) []leasedSend {
 	if len(nacks)%4 != 0 || len(nacks) > 4*MaxWindow {
 		return nil
@@ -1652,6 +1727,10 @@ func (c *tunnelConn) acknowledgeLocked(through uint32, nacks []byte, now time.Ti
 	return resend
 }
 
+// +checklocks:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) enqueueReceivedLocked(packet receivedPacket) bool {
 	if !c.enqueuePayloadLocked(packet.payload) {
 		return false
@@ -1663,6 +1742,10 @@ func (c *tunnelConn) enqueueReceivedLocked(packet receivedPacket) bool {
 	return true
 }
 
+// +checklocks:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) enqueuePayloadLocked(payload []byte) bool {
 	if len(payload) == 0 {
 		return true
@@ -1714,12 +1797,20 @@ func (c *tunnelConn) sendSynchronize(ctx context.Context, originator bool) error
 	return err
 }
 
+// +checklocks:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) releaseSynchronizeLocked() {
 	c.synchronizeLease.release()
 	c.synchronize = nil
 	c.synchronizeLease = nil
 }
 
+// +checklocksexclude:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) sendACK() error {
 	c.mu.Lock()
 	if c.remoteID == 0 || c.isDoneLocked() {
@@ -1736,6 +1827,11 @@ func (c *tunnelConn) sendACK() error {
 	}
 	return c.queueProtocolOwned(wire, lease)
 }
+
+// +checklocks:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) acknowledgmentsLocked() (uint32, []byte) {
 	highest := c.expect - 1
 	for sequence := range c.reordered {
@@ -1762,6 +1858,10 @@ func (c *tunnelConn) acknowledgmentsLocked() (uint32, []byte) {
 	return through, nacks[:nackBytes]
 }
 
+// +checklocksexclude:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) sendWire(ctx context.Context, wire []byte) error {
 	return c.sendWireOwned(ctx, wire, nil)
 }
@@ -1771,10 +1871,19 @@ func (c *tunnelConn) sendWire(ctx context.Context, wire []byte) error {
 // A delivery failure only drops this copy: SYN-ACK and CLOSE state live in
 // synchronize/pending and are retried by the retransmission schedule, while a
 // bare ACK is superseded by the next inbound packet.
+//
+// +checklocksexclude:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) queueProtocolOwned(wire []byte, lease *wireLease) error {
 	return c.queueProtocolRequest(sendRequest{connection: c, wire: wire, lease: lease, ctx: c.network.ctx, abortOnFailure: true})
 }
 
+// +checklocksexclude:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) queueProtocolRequest(request sendRequest) error {
 	var err error
 	c.network.outboundMu.RLock()
@@ -1797,6 +1906,10 @@ func (c *tunnelConn) queueProtocolRequest(request sendRequest) error {
 	return err
 }
 
+// +checklocksexclude:c.mu
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.network.mu
+// +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) sendWireOwned(ctx context.Context, wire []byte, lease *wireLease) error {
 	if err := ctx.Err(); err != nil {
 		lease.release()
@@ -2270,10 +2383,12 @@ func (c *tunnelConn) SetWriteDeadline(deadline time.Time) error {
 	return nil
 }
 
+// +checklocks:c.mu
 func (c *tunnelConn) signalPeerClosedLocked() {
 	c.peerOnce.Do(func() { close(c.peerClosed) })
 }
 
+// +checklocks:c.mu
 func (c *tunnelConn) signalWakeLocked() {
 	select {
 	case c.wake <- struct{}{}:
@@ -2296,6 +2411,7 @@ func (c *tunnelConn) isDone() bool {
 	}
 }
 
+// +checklocks:c.mu
 func (c *tunnelConn) isDoneLocked() bool {
 	select {
 	case <-c.done:
@@ -2415,6 +2531,7 @@ type controlPeer struct {
 	signingPublic []byte
 }
 
+// +checklocks:c.mu
 func (c *tunnelConn) setPeerControlLocked(peer controlPeer) {
 	c.peerIdentity = peer.identity
 	c.peerSigningType = peer.signingType
@@ -2528,6 +2645,7 @@ func (c *tunnelConn) setPeerMaxPayloadSize(advertised int) {
 	c.mu.Unlock()
 }
 
+// +checklocks:c.mu
 func (c *tunnelConn) updatePeerMaxPayloadSizeLocked(advertised int) {
 	if advertised < 0 {
 		return

@@ -6,9 +6,14 @@ import (
 )
 
 // Session manages an established NTCP2 connection with directional encryption states.
+//
+// Lock hierarchy: lifecycle -> writeMu.
 type Session struct {
-	conn      net.Conn
-	send      *Direction
+	conn net.Conn
+	// +checklocks:lifecycle
+	// +checklocks:writeMu
+	send *Direction
+	// +checklocks:lifecycle
 	receive   *Direction
 	writeMu   sync.Mutex
 	lifecycle sync.RWMutex
@@ -19,6 +24,9 @@ func NewSession(conn net.Conn, send, receive *Direction) *Session {
 	return &Session{conn: conn, send: send, receive: receive}
 }
 func (s *Session) Conn() net.Conn { return s.conn }
+
+// +checklocksexclude:s.lifecycle
+// +checklocksexclude:s.writeMu
 func (s *Session) Write(plaintext []byte) error {
 	s.lifecycle.RLock()
 	defer s.lifecycle.RUnlock()
@@ -29,6 +37,9 @@ func (s *Session) Write(plaintext []byte) error {
 	}
 	return s.send.WriteFrame(s.conn, plaintext)
 }
+
+// +checklocksexclude:s.lifecycle
+// +checklocksexclude:s.writeMu
 func (s *Session) Read(dst []byte) ([]byte, error) {
 	s.lifecycle.RLock()
 	defer s.lifecycle.RUnlock()
@@ -37,15 +48,20 @@ func (s *Session) Read(dst []byte) ([]byte, error) {
 	}
 	return s.receive.ReadFrame(s.conn, dst)
 }
+
+// +checklocksexclude:s.lifecycle
+// +checklocksexclude:s.writeMu
 func (s *Session) Close() error {
 	var err error
 	s.closeOnce.Do(func() {
 		err = s.conn.Close()
 		s.lifecycle.Lock()
+		s.writeMu.Lock()
 		if s.send != nil {
 			s.send.ReleaseSensitive()
 			s.send = nil
 		}
+		s.writeMu.Unlock()
 		if s.receive != nil {
 			s.receive.ReleaseSensitive()
 			s.receive = nil

@@ -137,6 +137,13 @@ type sendWork struct {
 // dependency on router or tunnel implementations. DatabaseStore admission is
 // intentionally upstream: call HandleDatabaseStore only after Database has
 // accepted the store.
+//
+// Lock hierarchy:
+//   - RequestManager.mu -> ResponderProfiles.mu -> Table.mu (database.routers.mu)
+//   - RequestManager.mu and RequestManager.randMu are disjoint; neither lock may
+//     be held while acquiring the other.
+//   - RequestManager.mu and Database.leasesMu are disjoint; lookupPresent
+//     queries leasesMu outside RequestManager.mu.
 type RequestManager struct {
 	database *Database
 	sender   RequestSender
@@ -149,18 +156,22 @@ type RequestManager struct {
 	timeoutMillis uint64
 	now           func() uint64
 	responders    *ResponderProfiles
-	rand          io.Reader
-	logger        *slog.Logger
-	randMu        sync.Mutex
+	// +checklocks:randMu
+	rand   io.Reader
+	logger *slog.Logger
+	randMu sync.Mutex
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	pending map[requestKey]*pendingRequest
+	// +checklocks:mu
 	closed  bool
 	active  sync.WaitGroup
 	workers sync.WaitGroup
 	jobs    chan sendWork
 	ctx     context.Context
-	cancel  context.CancelFunc
+	// +checklocks:mu
+	cancel context.CancelFunc
 }
 
 // NewRequestManager creates a bounded request manager. A clock is required so
@@ -562,6 +573,8 @@ func (m *RequestManager) Expire(nowMillis uint64) int {
 	return removed
 }
 
+// +checklocks:m.mu
+// +checklocksexclude:m.randMu
 func (m *RequestManager) expireLocked(key requestKey, req *pendingRequest, nowMillis uint64) (bool, *sendWork) {
 	if req.deadline <= nowMillis {
 		m.completeLocked(key, req, ErrRequestExpired)
@@ -626,6 +639,7 @@ func (m *RequestManager) Pending() int {
 	return n
 }
 
+// +checklocksexclude:m.mu
 func (m *RequestManager) lookupPresent(typeID LookupType, key foundation.Hash) bool {
 	switch typeID {
 	case RouterInfoLookup:
@@ -697,6 +711,7 @@ func (r *pendingRequest) hasUnsettledSent() bool {
 	return false
 }
 
+// +checklocks:m.mu
 func (m *RequestManager) explorationConvergedLocked(req *pendingRequest) bool {
 	if req.typeID != ExplorationLookup || req.hasUnsettledSent() {
 		return false
@@ -713,6 +728,7 @@ func (r *pendingRequest) anyAttempted() bool {
 	return false
 }
 
+// +checklocks:m.mu
 func (m *RequestManager) addCandidateLocked(req *pendingRequest, peer foundation.Hash) bool {
 	if len(req.candidates) == m.maxCandidates {
 		return false
@@ -723,6 +739,8 @@ func (m *RequestManager) addCandidateLocked(req *pendingRequest, peer foundation
 	req.candidates = append(req.candidates, lookupCandidate{hash: peer})
 	return true
 }
+
+// +checklocks:m.mu
 func (m *RequestManager) promoteFallbackLocked(req *pendingRequest) {
 	for len(req.fallbacks) != 0 && len(req.candidates) < m.maxCandidates {
 		peer := req.fallbacks[0]
@@ -733,6 +751,7 @@ func (m *RequestManager) promoteFallbackLocked(req *pendingRequest) {
 	}
 }
 
+// +checklocks:m.mu
 func (m *RequestManager) addWakeupLocked(ctx context.Context, req *pendingRequest) {
 	if deadline, ok := ctx.Deadline(); ok {
 		req.wakeupDeadline = earlierSendDeadline(req.wakeupDeadline, deadline)
@@ -742,6 +761,8 @@ func (m *RequestManager) addWakeupLocked(ctx context.Context, req *pendingReques
 	}
 }
 
+// +checklocks:m.mu
+// +checklocksexclude:m.randMu
 func (m *RequestManager) prepareSendLocked(key requestKey, req *pendingRequest) (*sendWork, error) {
 	if req.inFlight {
 		return nil, nil
@@ -961,6 +982,7 @@ func saturatingAddMillis(now, delta uint64) uint64 {
 	return now + delta
 }
 
+// +checklocksexclude:m.mu
 func (m *RequestManager) nextMessageID() (uint32, error) {
 	var bytes [4]byte
 	m.randMu.Lock()
@@ -976,6 +998,8 @@ func databaseLookupExpiration(now uint64) uint64 {
 	return now + databaseLookupEnvelopeLifetime
 }
 
+// +checklocks:m.mu
+// +checklocksexclude:m.randMu
 func (m *RequestManager) completeLocked(key requestKey, req *pendingRequest, err error) {
 	req.cancel()
 	delete(m.pending, key)

@@ -26,11 +26,13 @@ const embeddedTestTimeout = 20 * time.Second
 var errMemoryIdentityPublication = errors.New("memory network requires control-plane identity publication")
 
 type embeddedMemoryNetwork struct {
-	mu        sync.RWMutex
+	mu sync.RWMutex
+	// +checklocks:mu
 	endpoints map[foundation.Hash]*embeddedMemoryTransport
 	flood     foundation.Hash
 	floodDB   *controlplane.NetworkDatabase
-	nextID    uint32
+	// +checklocks:mu
+	nextID uint32
 }
 
 type embeddedMemoryTransport struct {

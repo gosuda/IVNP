@@ -59,22 +59,32 @@ type controlUsage struct {
 }
 
 type ControlQueue struct {
-	handler   ControlHandler
-	limits    ControlQueueLimits
-	messages  chan ControlMessage
-	mu        sync.Mutex
-	usage     controlUsage
-	sources   map[I2NPSource]controlUsage
-	started   bool
-	stopped   bool
-	ctx       context.Context
-	cancel    context.CancelFunc
-	done      chan struct{}
-	idle      chan struct{}
-	err       error
+	handler  ControlHandler
+	limits   ControlQueueLimits
+	messages chan ControlMessage
+	mu       sync.Mutex
+	// +checklocks:mu
+	usage controlUsage
+	// +checklocks:mu
+	sources map[I2NPSource]controlUsage
+	// +checklocks:mu
+	started bool
+	// +checklocks:mu
+	stopped bool
+	ctx     context.Context
+	// +checklocks:mu
+	cancel context.CancelFunc
+	done   chan struct{}
+	// +checklocks:mu
+	idle chan struct{}
+	// +checklocks:mu
+	err error
+	// +checklocks:mu
 	submitted uint64
+	// +checklocks:mu
 	completed uint64
-	progress  chan struct{}
+	// +checklocks:mu
+	progress chan struct{}
 }
 
 func NewControlQueue(handler ControlHandler, limits ControlQueueLimits) (*ControlQueue, error) {

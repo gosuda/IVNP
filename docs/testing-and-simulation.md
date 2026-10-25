@@ -6,31 +6,37 @@ This document specifies the verification gates, static analysis tools, determini
 
 ## 1. Standard Test Suite, Race Detection & Static Analysis
 
-Run the unit test suite, race detector, canonical import formatter, and static analyzer from the repository root:
+Run the unit test suite, race detector, canonical import formatter, lock analyzer, and static linter from the repository root:
 
 ```sh
 go test ./...
 go test -race ./...
 go run gosuda.org/ivnp/tools/importformatter -write
 go vet ./...
+go vet -vettool="$(go env GOPATH)/bin/checklocks" -inferred=false ./...
 gojgp lint ./...
 ```
 
 ### 1.1 Architectural Boundary Verification (`architecture/architecture_test.go`)
 
-`go test ./architecture/...` runs two structural enforcement tests over the module AST and package graph:
+`go test ./architecture/...` runs three structural enforcement tests over the module AST and package graph:
 
 1. **`TestImportLayersAreAcyclic`**: Executes `go list -test -json ./...` and verifies that every internal import satisfies the 10-layer unidirectional DAG (`L0` through `L9`):
    - Lower layers never import higher layers (`importedLayer <= importerLayer`).
    - Cross-subsystem imports pass exclusively through each subsystem's root facade package (`controlplane`, `dataplane`, `client`, `node`, `foundation`, `observability`, `state`, `cryptography`).
    - `dataplane` (`L4`) never imports persistent control state (`state`, `L3`).
-2. **`TestCanonicalSubsystemImportsAreUnaliased`**: Parses every `.go` file in the repository and rejects package import aliases on canonical subsystem root paths.
+2. **`TestPublicImportsUseCanonicalPathsWithoutAliases`**: Parses every `.go` file in the repository and rejects package import aliases on canonical subsystem root paths.
+3. **`TestUnsafeImportsAreRestrictedAndABIStructsUseHostLayout`**: Rejects `"unsafe"` imports in non-test files outside the explicit OS-boundary allowlist (`dataplane/internal/transport/ssu2/batch_linux_vector.go` and `state/internal/filesystem_store/secure_windows.go`), and verifies that fixed-size kernel ABI structs declared in unsafe files (`mmsghdr`) embed `structs.HostLayout` as their first field.
 
-### 1.2 Canonical Import Formatter (`tools/importformatter/main.go`)
+### 1.2 Static Lock & Atomic Verification (`checklocks`)
+
+`go vet -vettool="$(go env GOPATH)/bin/checklocks" -inferred=false ./...` runs gVisor's SSA lock and atomic analyzer across every package. It verifies lock acquisition/release balance across all control-flow paths and enforces `// +checklocks:`, `// +checklocksread:`, and `// +checklocksreadany` field/method guards on concurrent state machines (`SSU2Manager`, `ssu2TransportSession`, `NTCP2Manager`, `PreparedRouteSender`, `TagStore`, `Reassembler`, `Conn`, `tunnelConn`, `BuildManager`, `CreatorBudget`, `Health`, `PairedPoolMaintainer`, `destinationRuntime`, and `simnet.Network`).
+
+### 1.3 Canonical Import Formatter (`tools/importformatter/main.go`)
 
 `go run gosuda.org/ivnp/tools/importformatter -write` rewrites Go source files so that all imports appear in a single `import (...)` block without blank lines or comment-interrupted subgroups, sorted in standard `gofmt` order.
 
-### 1.3 Embedded WebUI Verification (`cmd/ivnpd/webui`)
+### 1.4 Embedded WebUI Verification (`cmd/ivnpd/webui`)
 
 When modifying the SvelteKit frontend under `cmd/ivnpd/webui`, run type/accessibility checks and rebuild the static bundle embedded by `cmd/ivnpd/webui_server.go` (`//go:embed all:webui/build`):
 

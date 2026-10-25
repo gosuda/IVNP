@@ -77,32 +77,40 @@ type ntcp2DialAttempt struct {
 }
 
 type NTCP2Manager struct {
-	peers              TransportPeerSource
-	staticPrivate      [32]byte
-	staticIV           [aes.BlockSize]byte
-	networkID          uint8
-	timeout            time.Duration
-	idleTimeout        time.Duration
-	maxClockSkew       time.Duration
-	maxSessions        int
-	mu                 sync.RWMutex
-	started            bool
-	listener           net.Listener
-	bindings           TransportBindings
-	ctx                context.Context
-	cancel             context.CancelFunc
-	err                error
-	done               chan struct{}
-	close              sync.Once
-	wg                 sync.WaitGroup
-	pending            chan struct{}
-	sessions           map[foundation.Hash]*dataplanentcp2.Session
-	sessionsInbound    map[foundation.Hash]bool
-	dialing            map[foundation.Hash]*ntcp2DialAttempt
-	replayMu           sync.Mutex
-	replay             [ntcp2ReplayEntries][32]byte
-	replaySeen         map[[32]byte]struct{}
-	replayCount        uint16
+	peers         TransportPeerSource
+	staticPrivate [32]byte
+	staticIV      [aes.BlockSize]byte
+	networkID     uint8
+	timeout       time.Duration
+	idleTimeout   time.Duration
+	maxClockSkew  time.Duration
+	maxSessions   int
+	mu            sync.RWMutex
+	started       bool
+	listener      net.Listener
+	bindings      TransportBindings
+	ctx           context.Context
+	cancel        context.CancelFunc
+	// +checklocks:mu
+	err     error
+	done    chan struct{}
+	close   sync.Once
+	wg      sync.WaitGroup
+	pending chan struct{}
+	// +checklocks:mu
+	sessions map[foundation.Hash]*dataplanentcp2.Session
+	// +checklocks:mu
+	sessionsInbound map[foundation.Hash]bool
+	// +checklocks:mu
+	dialing  map[foundation.Hash]*ntcp2DialAttempt
+	replayMu sync.Mutex
+	// +checklocks:replayMu
+	replay [ntcp2ReplayEntries][32]byte
+	// +checklocks:replayMu
+	replaySeen map[[32]byte]struct{}
+	// +checklocks:replayMu
+	replayCount uint16
+	// +checklocks:replayMu
 	next               uint16
 	reporter           ingress.Reporter
 	metrics            *observability.Registry
@@ -112,6 +120,8 @@ type NTCP2Manager struct {
 	admitPeer          PeerAdmissionFunc
 }
 
+// +checklocksexclude:m.mu
+// +checklocksexclude:m.replayMu
 func (m *NTCP2Manager) releaseSensitive() {
 	clear(m.staticPrivate[:])
 	clear(m.staticIV[:])
@@ -172,6 +182,8 @@ func NewNTCP2Manager(config NTCP2ManagerConfig) (*NTCP2Manager, error) {
 
 // Start accepts inbound NTCP2 connections from bindings.NTCP2. A nil listener
 // is valid for an outbound-only router.
+//
+// +checklocksexclude:m.mu
 func (m *NTCP2Manager) Start(parent context.Context, bindings TransportBindings) error {
 	if bindings.LocalInfo == nil || bindings.HandleI2NP == nil || bindings.Clock == nil {
 		return ErrNTCP2ManagerConfig
@@ -250,6 +262,9 @@ func (m *NTCP2Manager) Close() error {
 
 // Wait blocks until all handshake and data workers have stopped. It is the
 // manager-owned secret-clear barrier after Close.
+//
+// +checklocksexclude:m.mu
+// +checklocksexclude:m.replayMu
 func (m *NTCP2Manager) Wait() error {
 	m.mu.RLock()
 	started := m.started
@@ -269,6 +284,8 @@ func (m *NTCP2Manager) Wait() error {
 
 // Status reports whether the manager remains active and its first terminal
 // listener error, if any.
+//
+// +checklocksexclude:m.mu
 func (m *NTCP2Manager) Status() TransportStatus {
 	m.mu.RLock()
 	status := TransportStatus{Running: m.started && m.ctx != nil && m.ctx.Err() == nil, Error: m.err}
@@ -278,6 +295,8 @@ func (m *NTCP2Manager) Status() TransportStatus {
 
 // EnsureSession authenticates a bidirectional NTCP2 session without emitting
 // an I2NP message.
+//
+// +checklocksexclude:m.mu
 func (m *NTCP2Manager) EnsureSession(ctx context.Context, peer foundation.Hash) error {
 
 	if ctx == nil {
@@ -658,6 +677,8 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer foundation.Hash) e
 // initiated by the lower identity hash wins; between same-direction sessions
 // the newest handshake wins. The displaced session is closed after m.mu is
 // dropped so its read loop cannot remove the replacement.
+//
+// +checklocksexclude:m.mu
 func (m *NTCP2Manager) install(peer foundation.Hash, session *dataplanentcp2.Session, inbound bool) bool {
 	for {
 		m.mu.Lock()
@@ -713,8 +734,10 @@ type ntcp2IdleConn struct {
 	mu               sync.Mutex
 	timeout          time.Duration
 	lastActivityNano atomic.Int64
-	timer            *time.Timer
-	closed           bool
+	// +checklocks:mu
+	timer *time.Timer
+	// +checklocks:mu
+	closed bool
 }
 
 func (c *ntcp2IdleConn) Read(p []byte) (int, error) {
@@ -1234,6 +1257,7 @@ func writeAll(conn net.Conn, data []byte) error {
 	return nil
 }
 
+// +checklocksexclude:m.mu
 func (m *NTCP2Manager) session(peer foundation.Hash) *dataplanentcp2.Session {
 	m.mu.RLock()
 	session := m.sessions[peer]
@@ -1241,6 +1265,7 @@ func (m *NTCP2Manager) session(peer foundation.Hash) *dataplanentcp2.Session {
 	return session
 }
 
+// +checklocksexclude:m.mu
 func (m *NTCP2Manager) currentBindings() TransportBindings {
 	m.mu.RLock()
 	bindings := m.bindings
@@ -1248,6 +1273,7 @@ func (m *NTCP2Manager) currentBindings() TransportBindings {
 	return bindings
 }
 
+// +checklocksexclude:m.mu
 func (m *NTCP2Manager) contextErr() error {
 	m.mu.RLock()
 	ctx := m.ctx
@@ -1270,6 +1296,8 @@ func (m *NTCP2Manager) timestampValid(timestamp uint32) bool {
 	return delta <= int64(m.maxClockSkew/time.Second)
 }
 
+// +checklocksexclude:m.mu
+// +checklocksexclude:m.replayMu
 func (m *NTCP2Manager) replayedRequest(obfuscatedEphemeral []byte) bool {
 	if len(obfuscatedEphemeral) != 32 {
 		return true
@@ -1294,6 +1322,7 @@ func (m *NTCP2Manager) replayedRequest(obfuscatedEphemeral []byte) bool {
 	return false
 }
 
+// +checklocksexclude:m.mu
 func (m *NTCP2Manager) recordError(err error) {
 	m.mu.Lock()
 	if m.err == nil {

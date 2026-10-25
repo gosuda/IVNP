@@ -44,23 +44,32 @@ type outboundPeer struct {
 }
 
 // SessionManager tracks outbound/inbound session tags and keys for ElGamal/AES garlic encryption.
+//
+// Lock hierarchy: lifecycleMu -> {sessionManagerShard.mu, randomMu, TagStore.mu}.
+// sessionManagerShard.mu and randomMu are never held simultaneously.
 type SessionManager struct {
 	lifecycleMu sync.RWMutex
 	randomMu    sync.Mutex
 	inbound     *TagStore
 	shards      []sessionManagerShard
-	closed      bool
+	// +checklocks:lifecycleMu
+	closed bool
 
+	// +checklocks:lifecycleMu
 	maxTagsPerPeer int
 	tagsPerMessage int
 	tagLifetime    uint64
-	random         io.Reader
+	// +checklocks:randomMu
+	random io.Reader
 }
 
 type sessionManagerShard struct {
-	mu         sync.Mutex
-	peers      map[foundation.Hash]*outboundPeer
-	maxPeers   int
+	mu sync.Mutex
+	// +checklocks:mu
+	peers map[foundation.Hash]*outboundPeer
+	// +checklocks:mu
+	maxPeers int
+	// +checklocks:mu
 	nextExpiry uint64
 }
 
@@ -347,6 +356,9 @@ func (m *SessionManager) installInbound(tags []byte, key [32]byte, now uint64) {
 	}
 }
 
+// +checklocksread:m.lifecycleMu
+// +checklocksexclude:shard.mu
+// +checklocksexclude:m.randomMu
 func (m *SessionManager) releaseReserved(shard *sessionManagerShard, peer foundation.Hash, tag [32]byte, reserved bool) {
 	if !reserved {
 		return
@@ -364,6 +376,8 @@ func (m *SessionManager) releaseReserved(shard *sessionManagerShard, peer founda
 	}
 }
 
+// +checklocksread:m.lifecycleMu
+// +checklocksexclude:m.randomMu
 func (m *SessionManager) readTags(dst []byte) error {
 	m.randomMu.Lock()
 	defer m.randomMu.Unlock()
@@ -378,6 +392,9 @@ func (m *SessionManager) expiresAt(now uint64) uint64 {
 	return now + m.tagLifetime
 }
 
+// +checklocksread:m.lifecycleMu
+// +checklocks:shard.mu
+// +checklocksexclude:m.randomMu
 func (m *SessionManager) installPendingOutboundLocked(shard *sessionManagerShard, peer foundation.Hash, key [32]byte, tags []byte, expires uint64) {
 	state := shard.peers[peer]
 	if state == nil {
@@ -420,6 +437,9 @@ func (m *SessionManager) installPendingOutboundLocked(shard *sessionManagerShard
 	}
 }
 
+// +checklocksread:m.lifecycleMu
+// +checklocks:shard.mu
+// +checklocksexclude:m.randomMu
 func (m *SessionManager) expireOutboundShardLocked(shard *sessionManagerShard, now uint64) int {
 	if now <= shard.nextExpiry {
 		return 0
@@ -459,6 +479,9 @@ func (m *SessionManager) expireOutboundShardLocked(shard *sessionManagerShard, n
 	return removed
 }
 
+// +checklocksread:m.lifecycleMu
+// +checklocks:shard.mu
+// +checklocksexclude:m.randomMu
 func (m *SessionManager) evictPeerLocked(shard *sessionManagerShard) bool {
 	var oldestPeer foundation.Hash
 	var oldest uint64 = ^uint64(0)

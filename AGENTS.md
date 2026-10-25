@@ -31,6 +31,7 @@ IVNP follows a strict unidirectional layered DAG architecture. Subsystems are or
 - **Domain Wire Primitives**: Common wire structures (identities, certificates, mappings, hashes, destinations, signatures, I2NP, RouterInfo, and LeaseSet variants) belong to the foundation layer.
 - **Zero-Allocation Parsing & Serialization**: Wire parsers must provide views over caller-owned input without allocating memory on the heap. Serializers must write directly into caller-provided fixed-capacity storage and must never dynamically grow destinations.
 - **Sensitive Memory Management**: Private cryptographic keys and sensitive credentials must be explicitly cleared/wiped from memory upon release or termination.
+- **Unsafe & Host-ABI Isolation**: Non-test files must not import `"unsafe"` outside the explicit allowlist in `architecture/architecture_test.go`. Fixed-size kernel or C ABI structs declared in an unsafe file must embed `structs.HostLayout` as their leading field and assert size/offset invariants at compile time.
 
 ## Documentation & Technical Writing
 
@@ -42,4 +43,5 @@ IVNP follows a strict unidirectional layered DAG architecture. Subsystems are or
 Before completing any task, always:
 - Audit whether your code changes invalidate or outdate any statements, signatures, tables, or diagrams in `README.md`, `docs/`, or `cmd/ivnp-reseed/README.md`, and update them using the `technical-writing` skill.
 - Run `gosuda.org/ivnp/tools/importformatter` to format and consolidate Go imports canonically (`go run gosuda.org/ivnp/tools/importformatter -write`).
+- Run `checklocks` static lock and atomic verification (`go vet -vettool="$(go env GOPATH)/bin/checklocks" -inferred=false ./...`).
 - Run the `gojgp` linter to ensure code quality and guideline compliance (`gojgp lint ./...`).

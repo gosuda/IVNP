@@ -93,7 +93,9 @@ func TestMaintenanceErrorsPreserveIndependentFailures(t *testing.T) {
 		{name: "exploratory tunnels", run: func(t *testing.T, d *Controller, runtime *destinationRuntime) {
 			ctx, cancel := context.WithCancel(d.ctx)
 			d.ctx = ctx
+			runtime.maintenanceMu.Lock()
 			d.maintainer = runtime.maintainer
+			runtime.maintenanceMu.Unlock()
 			d.tunnelWake = make(chan struct{}, 1)
 			d.maintenanceWG.Add(1)
 			go d.tunnelMaintenanceLoop()

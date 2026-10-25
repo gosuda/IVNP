@@ -22,18 +22,29 @@ import (
 )
 
 type fakeNATPMPClient struct {
-	mu               sync.Mutex
-	gateway          netip.Addr
-	public           netip.Addr
-	publicErr        error
-	mapErr           error
-	external         uint16
-	lifetime         time.Duration
-	requests         []natpmp.MappingRequest
-	unmapCalls       int
-	publicCalls      chan int
+	mu sync.Mutex
+	// +checklocks:mu
+	gateway netip.Addr
+	// +checklocks:mu
+	public netip.Addr
+	// +checklocks:mu
+	publicErr error
+	// +checklocks:mu
+	mapErr error
+	// +checklocks:mu
+	external uint16
+	// +checklocks:mu
+	lifetime time.Duration
+	// +checklocks:mu
+	requests []natpmp.MappingRequest
+	// +checklocks:mu
+	unmapCalls int
+	// +checklocks:mu
+	publicCalls chan int
+	// +checklocks:mu
 	publicCallsCount int
-	events           *[]string
+	// +checklocks:mu
+	events *[]string
 }
 
 func (f *fakeNATPMPClient) PublicAddress(context.Context) (natpmp.PublicAddress, error) {

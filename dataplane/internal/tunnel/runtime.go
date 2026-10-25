@@ -92,8 +92,10 @@ type outboundCircuit struct {
 }
 
 type circuitShard struct {
-	mu       sync.RWMutex
-	inbound  map[uint32]*inboundCircuit
+	mu sync.RWMutex
+	// +checklocks:mu
+	inbound map[uint32]*inboundCircuit
+	// +checklocks:mu
 	outbound map[uint32]*outboundCircuit
 }
 
@@ -112,14 +114,18 @@ type RuntimeConfig struct {
 }
 
 // Runtime manages active inbound and outbound tunnel circuits and routes tunnel messages.
+//
+// Lock hierarchy: metricsMu -> shards[i].mu -> Endpoint.mu -> Reassembler.mu.
+// shards[i].mu is never held while acquiring metricsMu.
 type Runtime struct {
-	gateway   *Gateway
-	now       func() uint64
-	local     foundation.Hash
-	nextID    atomic.Uint32
-	sender    atomic.Pointer[senderBox]
-	shards    [circuitShards]circuitShard
-	blocks    sync.Pool // *[]Block with defaultDeliveryBlocks capacity
+	gateway *Gateway
+	now     func() uint64
+	local   foundation.Hash
+	nextID  atomic.Uint32
+	sender  atomic.Pointer[senderBox]
+	shards  [circuitShards]circuitShard
+	blocks  sync.Pool // *[]Block with defaultDeliveryBlocks capacity
+	// metricsMu serializes active tunnel count gauge updates and precedes shards[i].mu.
 	metricsMu sync.Mutex
 	metrics   *observability.Registry
 	logger    *slog.Logger
@@ -452,6 +458,7 @@ func (r *Runtime) ActiveTunnelCounts() (exploratoryInbound, exploratoryOutbound,
 	return
 }
 
+// +checklocksexclude:r.metricsMu
 func (r *Runtime) publishActiveTunnelCounts() {
 	if r == nil || r.metrics == nil {
 		return

@@ -17,6 +17,7 @@ func TestReassemblerHandlesOutOfOrderFragments(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestReassemblerRejectsMessageOverConfiguredLimit(t *testing.T) {
 	r := NewReassembler(1, 5)
 	if _, _, err := r.Add(Fragment{MessageID: 1, Data: []byte("1234")}, 1); err != nil {

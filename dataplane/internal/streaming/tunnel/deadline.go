@@ -8,11 +8,16 @@ import (
 )
 
 type connDeadline struct {
-	mu         sync.Mutex
-	at         time.Time
-	timer      *time.Timer
-	done       chan struct{}
-	expired    bool
+	mu sync.Mutex
+	// +checklocks:mu
+	at time.Time
+	// +checklocks:mu
+	timer *time.Timer
+	// +checklocks:mu
+	done chan struct{}
+	// +checklocks:mu
+	expired bool
+	// +checklocks:mu
 	generation uint64
 }
 

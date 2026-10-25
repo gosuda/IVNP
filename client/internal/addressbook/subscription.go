@@ -59,9 +59,11 @@ func (s *Service) refresh(parent context.Context) error {
 		return nil
 	}
 
+	s.mu.Lock()
 	sources := cloneSources(s.sources)
 	etags := cloneEntries(s.etag)
 	modified := cloneEntries(s.modified)
+	s.mu.Unlock()
 	type fetchJob struct {
 		raw          string
 		haveSnapshot bool

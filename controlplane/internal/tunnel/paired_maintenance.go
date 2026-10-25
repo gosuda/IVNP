@@ -54,11 +54,15 @@ type PairedPoolMaintainerConfig struct {
 // PairedPoolMaintainer establishes and renews a bidirectional tunnel pool in
 // strict dependency order: bootstrap inbound, outbound through that inbound
 // reply route, then later inbound builds through a live outbound path.
+//
+// Lock order: lifecycleMu -> maintenanceMu -> {inboundSourceMu, outboundSourceMu}.
 type PairedPoolMaintainer struct {
-	pool                   *Pool
-	runtime                dataplane.TunnelCircuitRuntime
-	builder                *BuildManager
-	inboundSource          InboundBuildSource
+	pool    *Pool
+	runtime dataplane.TunnelCircuitRuntime
+	builder *BuildManager
+	// +checklocks:inboundSourceMu
+	inboundSource InboundBuildSource
+	// +checklocks:outboundSourceMu
 	outboundSource         PairedOutboundBuildSource
 	now                    func() uint64
 	inboundTarget          int
@@ -67,15 +71,17 @@ type PairedPoolMaintainer struct {
 	outboundBackup         int
 	renewBefore            uint64
 	bootstrapParallelLimit int
-	hooks                  []MaintenanceHook
-	maintenanceMu          sync.Mutex
-	inboundSourceMu        sync.Mutex
-	outboundSourceMu       sync.Mutex
-	lifecycleMu            sync.RWMutex
-	ctx                    context.Context
-	cancel                 context.CancelFunc
-	pairIndex              atomic.Uint64
-	closed                 bool
+	// +checklocks:lifecycleMu
+	hooks            []MaintenanceHook
+	maintenanceMu    sync.Mutex
+	inboundSourceMu  sync.Mutex
+	outboundSourceMu sync.Mutex
+	lifecycleMu      sync.RWMutex
+	ctx              context.Context
+	cancel           context.CancelFunc
+	pairIndex        atomic.Uint64
+	// +checklocks:lifecycleMu
+	closed bool
 }
 
 func NewPairedPoolMaintainer(config PairedPoolMaintainerConfig) (*PairedPoolMaintainer, error) {
@@ -116,10 +122,18 @@ func (m *PairedPoolMaintainer) Maintain(ctx context.Context) (int, error) {
 	if m.closed {
 		return 0, ErrPairedMaintenanceClosed
 	}
+	return m.maintainActive(ctx, m.hooks)
+}
+
+// +checklocksread:m.lifecycleMu
+// +checklocksexclude:m.maintenanceMu
+// +checklocksexclude:m.inboundSourceMu
+// +checklocksexclude:m.outboundSourceMu
+func (m *PairedPoolMaintainer) maintainActive(ctx context.Context, hooks []MaintenanceHook) (int, error) {
 	if !m.maintenanceMu.TryLock() {
 		return 0, nil
 	}
-	defer m.maintenanceMu.Unlock()
+	defer m.maintenanceMu.Unlock() // +checklocksignore
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -134,7 +148,7 @@ func (m *PairedPoolMaintainer) Maintain(ctx context.Context) (int, error) {
 	m.pool.Expire(now)
 	m.runtime.Expire(now)
 	m.builder.Expire(now)
-	for _, hook := range m.hooks {
+	for _, hook := range hooks {
 		hook(now)
 	}
 	cutoff := saturatingDeadline(now, m.renewBefore)
@@ -282,6 +296,10 @@ func (m *PairedPoolMaintainer) Pair(now uint64) (CircuitPair, bool) {
 	if m.closed {
 		return CircuitPair{}, false
 	}
+	return m.pairActive(now)
+}
+
+func (m *PairedPoolMaintainer) pairActive(now uint64) (CircuitPair, bool) {
 	outbounds := m.pool.SelectableOutbound(now)
 	inbounds := m.pool.PublishableInbound(now)
 	if len(outbounds) == 0 || len(inbounds) == 0 {

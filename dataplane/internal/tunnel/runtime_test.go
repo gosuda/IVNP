@@ -18,7 +18,8 @@ type capturedTunnelMessage struct {
 }
 
 type captureTunnelSender struct {
-	mu       sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	messages []capturedTunnelMessage
 }
 
@@ -204,6 +205,7 @@ func TestRuntimeExpiresCircuitLifecycle(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestRuntimeExpiresIncompleteEndpointReassemblies(t *testing.T) {
 	const started = uint64(1_000)
 	lifetime := uint64(fragmentReassemblyLifetime / time.Millisecond)

@@ -7,12 +7,17 @@ import (
 // CreatorBudget bounds preparing and reply-pending creators across router owners.
 // Waiting is nonblocking and FIFO, with at most one queue entry per registered owner.
 type CreatorBudget struct {
-	mu        sync.Mutex
-	capacity  int
+	mu sync.Mutex
+	// +checklocks:mu
+	capacity int
+	// +checklocks:mu
 	maxOwners int
-	active    int
-	owners    map[*BuildManager]struct{}
-	waiters   []*BuildManager
+	// +checklocks:mu
+	active int
+	// +checklocks:mu
+	owners map[*BuildManager]struct{}
+	// +checklocks:mu
+	waiters []*BuildManager
 }
 
 func NewCreatorBudget(capacity, maxOwners int) *CreatorBudget {
@@ -91,6 +96,7 @@ func (b *CreatorBudget) unregister(owner *BuildManager) {
 	b.mu.Unlock()
 }
 
+// +checklocks:b.mu
 func (b *CreatorBudget) removeWaiterLocked(owner *BuildManager) {
 	for index, waiting := range b.waiters {
 		if waiting == owner {
@@ -102,6 +108,7 @@ func (b *CreatorBudget) removeWaiterLocked(owner *BuildManager) {
 	}
 }
 
+// +checklocks:b.mu
 func (b *CreatorBudget) wakeLocked() {
 	if b.active < b.capacity && len(b.waiters) != 0 {
 		// Build-event callbacks only enqueue work; they must not reenter admission.

@@ -103,7 +103,7 @@ func TestUnansweredHandshakeBoundsAndReleasesConnection(t *testing.T) {
 				if connection == nil {
 					t.Fatal("SYN never reached sender")
 				}
-				if !connection.isDone() || !connection.retryDue().IsZero() || len(connection.pending) != 0 || len(connection.synchronize) != 0 {
+				if !connection.isDone() || !connection.retryDue().IsZero() || len(connection.pending) != 0 || len(connection.synchronize) != 0 { // +checklocksignore
 					t.Fatal("failed handshake retained connection or retry packet ownership")
 				}
 				if network.Stats().Connections != 0 {

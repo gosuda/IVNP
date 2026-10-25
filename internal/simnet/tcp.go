@@ -101,12 +101,19 @@ type TCPConn struct {
 	remote netip.AddrPort
 	peer   *TCPConn
 
-	mu         sync.Mutex
-	recv       [][]byte
-	recvBytes  int
-	pending    map[uint64][]byte
+	// mu guards receive queue and flow-control counters. Never held while acquiring net.mu.
+	mu sync.Mutex
+	// +checklocks:mu
+	recv [][]byte
+	// +checklocks:mu
+	recvBytes int
+	// +checklocks:mu
+	pending map[uint64][]byte
+	// +checklocks:mu
 	pendingLen int
-	recvSeq    uint64
+	// +checklocks:mu
+	recvSeq uint64
+	// +checklocks:mu
 	inflight   int
 	sendSeq    uint64 // guarded by net.mu; wire order of committed chunks
 	dataReady  chan struct{}
@@ -136,9 +143,6 @@ func (h *Host) DialTCP(ctx context.Context, remote netip.AddrPort) (net.Conn, er
 		ctx = context.Background()
 	}
 	n := h.net
-	if n.closed {
-		return nil, ErrClosed
-	}
 	res := &dialResult{done: make(chan struct{})}
 	n.scheduleSYN(h, remote, res)
 	dialOutcome := func() (net.Conn, error) {
@@ -240,7 +244,7 @@ func (n *Network) completeSYN(h *Host, remote netip.AddrPort, res *dialResult) {
 		return
 	default:
 	}
-	local := h.allocDialPortLocked()
+	local := n.allocDialPortLocked(h)
 	if !local.IsValid() {
 		res.err = ErrBound
 		close(res.done)
@@ -285,8 +289,9 @@ func newTCPConn(n *Network, local, remote netip.AddrPort) *TCPConn {
 
 // allocDialPortLocked picks an ephemeral stream port not used by listeners or
 // live dialer ports. Caller holds n.mu.
-func (h *Host) allocDialPortLocked() netip.AddrPort {
-	n := h.net
+//
+// +checklocks:n.mu
+func (n *Network) allocDialPortLocked(h *Host) netip.AddrPort {
 	for range 20000 {
 		port := h.nextDial
 		h.nextDial--
@@ -548,6 +553,9 @@ func (c *TCPConn) deliverSegment(seq uint64, data []byte) {
 
 // nudgeReadLocked wakes a parked reader so it can re-check buffer and
 // end-of-stream state. Caller holds c.mu.
+//
+// +checklocks:c.mu
+// +checklocksexclude:c.net.mu
 func (c *TCPConn) nudgeReadLocked() {
 	select {
 	case c.dataReady <- struct{}{}:

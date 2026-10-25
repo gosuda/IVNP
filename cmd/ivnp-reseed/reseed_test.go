@@ -988,6 +988,7 @@ func TestTunnelBuildAcceptedTrackingAndScoring(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestEvictionDiversityProtection(t *testing.T) {
 	store := NewPeerStore()
 
@@ -1332,6 +1333,7 @@ func TestPeerStoreLocalHashFilter(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestPeerStoreContinuousBatchEviction(t *testing.T) {
 	store := NewPeerStore()
 	store.maxPeers = 100
@@ -1363,6 +1365,7 @@ func TestPeerStoreContinuousBatchEviction(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestPeerStorePruneStale(t *testing.T) {
 	store := NewPeerStore()
 	now := time.Now()
@@ -1546,6 +1549,7 @@ func TestPeerStoreUpdateEvictsOnLostContention(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestPeerStorePruneRedundant(t *testing.T) {
 	store := NewPeerStore()
 	mkPeer := func(b0, b1 byte, ip string, family string, score float64) foundation.Hash {
@@ -1793,6 +1797,7 @@ func TestCalculateProbeCooldown(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestDynamicExplorationBudget(t *testing.T) {
 	var nilCrawler *ActiveCrawler
 	if b := nilCrawler.DynamicExplorationBudget(24); b != 0 {

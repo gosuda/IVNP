@@ -37,12 +37,17 @@ type replyRouterInfoSeed struct {
 }
 
 type replyRouterInfoSeeds struct {
-	mu        sync.Mutex
-	sequence  uint64
-	payloads  map[foundation.Hash]replyRouterInfoPayload
-	seeds     map[replyRouterInfoSeedKey]*replyRouterInfoSeed
+	mu sync.Mutex
+	// +checklocks:mu
+	sequence uint64
+	// +checklocks:mu
+	payloads map[foundation.Hash]replyRouterInfoPayload
+	// +checklocks:mu
+	seeds map[replyRouterInfoSeedKey]*replyRouterInfoSeed
+	// +checklocks:mu
 	nextSweep uint64
-	closed    bool
+	// +checklocks:mu
+	closed bool
 }
 
 type replyRouterInfoSessionPreparer interface {

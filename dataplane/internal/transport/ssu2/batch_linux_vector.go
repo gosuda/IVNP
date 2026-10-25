@@ -6,15 +6,24 @@ import (
 	"encoding/binary"
 	"math/bits"
 	"net/netip"
+	"structs"
 	"syscall"
 	"unsafe"
 )
 
 type mmsghdr struct {
+	_   structs.HostLayout
 	hdr syscall.Msghdr
 	len uint32
 	_   uint32
 }
+
+var (
+	_ [64 - unsafe.Sizeof(mmsghdr{})]byte
+	_ [unsafe.Sizeof(mmsghdr{}) - 64]byte
+	_ [56 - unsafe.Offsetof(mmsghdr{}.len)]byte
+	_ [unsafe.Offsetof(mmsghdr{}.len) - 56]byte
+)
 
 type linuxBatchState struct {
 	msgs       []mmsghdr

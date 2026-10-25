@@ -26,7 +26,8 @@ func SetDeterministicRandomSource(r io.Reader) {
 // math/rand/v2.ChaCha8 are not safe for concurrent use.
 type lockedRandomSource struct {
 	mu sync.Mutex
-	r  io.Reader
+	// +checklocks:mu
+	r io.Reader
 }
 
 func (l *lockedRandomSource) Read(p []byte) (int, error) {

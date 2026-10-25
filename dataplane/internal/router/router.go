@@ -29,10 +29,14 @@ const (
 )
 
 type replayShard struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	buckets [replayBucketCount][]uint64
-	epoch   uint64
+	// +checklocks:mu
+	epoch uint64
+	// +checklocks:mu
 	current uint8
+	// +checklocks:mu
 	started bool
 }
 
@@ -390,6 +394,7 @@ func (s *Service) seen(scope replayScope, id uint32, expiration, nowMillis uint6
 	return false
 }
 
+// +checklocksignore
 func (filter *replayFilter) initialize() {
 	shardCount := parallelism.Workers(replayFilterWords)
 	wordsPerShard := (replayFilterWords + shardCount - 1) / shardCount
@@ -401,6 +406,7 @@ func (filter *replayFilter) initialize() {
 	}
 }
 
+// +checklocks:shard.mu
 func (shard *replayShard) advance(nowMillis uint64) {
 	epoch := nowMillis / replayBucketDurationMillis
 	if !shard.started {

@@ -12,8 +12,10 @@ type tagEntry struct {
 
 // TagStore keeps one-use inbound session tags under a fixed cardinality cap.
 type TagStore struct {
-	mu   sync.Mutex
-	max  int
+	mu sync.Mutex
+	// +checklocks:mu
+	max int
+	// +checklocks:mu
 	tags map[[32]byte]tagEntry
 }
 

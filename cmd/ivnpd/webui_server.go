@@ -76,17 +76,24 @@ type trafficSample struct {
 
 // WebUIServer hosts the static SvelteKit application and its administrative API.
 type WebUIServer struct {
-	config        WebUIConfig
-	policy        webUIAccessPolicy
-	logger        *slog.Logger
+	config WebUIConfig
+	policy webUIAccessPolicy
+	logger *slog.Logger
+	// +checklocks:configMu
 	logLevel      *slog.LevelVar
 	started       time.Time
 	triggerReseed func(context.Context) (<-chan struct{}, error)
 	restartHook   func() error
 
+	// Lock hierarchy:
+	//   nodeMu -> configMu -> actions.mu
+	//   nodeMu -> trafficMu / history.mu
+	//   subscribersMu is independent and never held across nodeMu, configMu, or trafficMu.
+	//
 	// nodeMu guards node. API handlers hold the read lock for their whole
 	// duration, so detachNode returns only after in-flight node calls finish.
-	nodeMu     sync.RWMutex
+	nodeMu sync.RWMutex
+	// +checklocks:nodeMu
 	node       *node.Subsystem
 	restarting atomic.Bool
 
@@ -96,16 +103,19 @@ type WebUIServer struct {
 	tokenHash     [32]byte
 	scriptSources string
 
+	// configMu serializes reads and writes of ConfigPath and its backup file.
 	configMu sync.Mutex
 
 	trafficMu sync.RWMutex
-	traffic   trafficSample
+	// +checklocks:trafficMu
+	traffic trafficSample
 
 	history historyRing
 	actions actionLog
 
 	subscribersMu sync.Mutex
-	subscribers   map[chan []byte]struct{}
+	// +checklocks:subscribersMu
+	subscribers map[chan []byte]struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -155,6 +165,9 @@ func (s *WebUIServer) SetRestartHook(hook func() error) {
 	s.restartHook = hook
 }
 
+// +checklocksexclude:s.configMu
+// +checklocksexclude:s.trafficMu
+// +checklocksexclude:s.subscribersMu
 func (s *WebUIServer) currentNode() *node.Subsystem {
 	s.nodeMu.RLock()
 	defer s.nodeMu.RUnlock()
@@ -163,6 +176,10 @@ func (s *WebUIServer) currentNode() *node.Subsystem {
 
 // detachNode stops API access to the current node and waits for in-flight
 // node calls to finish. The caller owns closing the detached node.
+//
+// +checklocksexclude:s.configMu
+// +checklocksexclude:s.trafficMu
+// +checklocksexclude:s.subscribersMu
 func (s *WebUIServer) detachNode() {
 	s.restarting.Store(true)
 	s.nodeMu.Lock()
@@ -171,6 +188,10 @@ func (s *WebUIServer) detachNode() {
 }
 
 // attachNode serves a started node and ends the restarting state.
+//
+// +checklocksexclude:s.configMu
+// +checklocksexclude:s.trafficMu
+// +checklocksexclude:s.subscribersMu
 func (s *WebUIServer) attachNode(next *node.Subsystem) {
 	s.nodeMu.Lock()
 	s.node = next
@@ -695,6 +716,9 @@ func (s *WebUIServer) broadcastLoop() {
 	}
 }
 
+// +checklocksexclude:s.nodeMu
+// +checklocksexclude:s.configMu
+// +checklocksexclude:s.trafficMu
 func (s *WebUIServer) broadcast(payload []byte) {
 	s.subscribersMu.Lock()
 	defer s.subscribersMu.Unlock()
@@ -706,6 +730,8 @@ func (s *WebUIServer) broadcast(payload []byte) {
 	}
 }
 
+// +checklocksexclude:s.configMu
+// +checklocksexclude:s.subscribersMu
 func (s *WebUIServer) sampleTraffic(now time.Time, snapshot ivnpObservabilitySnapshot) {
 	s.trafficMu.Lock()
 	defer s.trafficMu.Unlock()

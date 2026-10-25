@@ -71,19 +71,25 @@ type GarlicReceiverConfig struct {
 
 // GarlicReceiver authenticates ECIES or explicitly compatible legacy Garlic
 // before dispatching parsed cloves to the existing Service sinks.
+// Lock hierarchy: lifecycleMu -> destinationsMu -> garlicDestinationState.inFlightMu.
 type GarlicReceiver struct {
-	service        *Service
-	destinations   map[foundation.Hash]*garlicDestinationState
-	lifecycleMu    sync.RWMutex
+	service *Service
+	// +checklocks:destinationsMu
+	destinations map[foundation.Hash]*garlicDestinationState
+	lifecycleMu  sync.RWMutex
+	// +checklocks:lifecycleMu
 	released       bool
 	destinationsMu sync.RWMutex
 	replyKeys      *dataplanegarlic.ReplyKeyRegistry
 	now            func() uint64
 	metrics        *observability.Registry
 	logger         *slog.Logger
-	staticPrivate  [32]byte
-	hasStatic      bool
-	replyScratch   *sync.Pool
+	// +checklocks:lifecycleMu
+	staticPrivate [32]byte
+	// +checklocks:lifecycleMu
+	hasStatic bool
+	// +checklocks:lifecycleMu
+	replyScratch *sync.Pool
 }
 
 func (r *GarlicReceiver) MatchesService(service *Service) bool {
@@ -94,6 +100,8 @@ func (r *GarlicReceiver) MatchesService(service *Service) bool {
 // The caller holds the lifecycle read lock, so the field read is synchronized;
 // returning the captured pointer lets Put run after unlocking without racing
 // ReleaseSensitive replacing the field.
+//
+// +checklocksread:r.lifecycleMu
 func (r *GarlicReceiver) getReplyScratch() (*[foundation.I2NPI2PDMaxPayload]byte, *sync.Pool) {
 	pool := r.replyScratch
 	if v, ok := pool.Get().(*[foundation.I2NPI2PDMaxPayload]byte); ok {
@@ -111,11 +119,15 @@ type garlicDestinationState struct {
 	GarlicDestination
 	scratch    sync.Pool
 	inFlightMu sync.Mutex
-	inFlight   int
-	retired    bool
+	// +checklocks:inFlightMu
+	inFlight int
+	// +checklocks:inFlightMu
+	retired bool
 	// drained is created when retirement must wait and closed once the last
 	// in-flight user drops out. A channel (not sync.Cond) keeps the wait
 	// durable under testing/synctest.
+	//
+	// +checklocks:inFlightMu
 	drained chan struct{}
 }
 
@@ -195,6 +207,8 @@ func NewGarlicReceiver(config GarlicReceiverConfig) (*GarlicReceiver, error) {
 // RegisterDestination adds one destination-local authenticated Garlic state.
 // It returns an idempotent removal function which waits for in-flight receive
 // work before releasing the destination's sensitive state.
+//
+// +checklocksexclude:r.destinationsMu
 func (r *GarlicReceiver) RegisterDestination(hash foundation.Hash, destination GarlicDestination) (func(), error) {
 	registerDestinationRejected := r == nil || hash == (foundation.Hash{})
 	if !registerDestinationRejected {
@@ -232,6 +246,8 @@ func (r *GarlicReceiver) RegisterDestination(hash foundation.Hash, destination G
 
 // ReleaseSensitive prevents new receive work, waits for current handlers and
 // destination removals, and clears the copied router static private key.
+//
+// +checklocksexclude:r.destinationsMu
 func (r *GarlicReceiver) ReleaseSensitive() {
 	if r == nil {
 		return
@@ -303,10 +319,10 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 	}
 	r.lifecycleMu.RLock()
 	var unlocked bool
-	unlock := func() {
+	unlock := func() { // +checklocksignore
 		if !unlocked {
 			unlocked = true
-			r.lifecycleMu.RUnlock()
+			r.lifecycleMu.RUnlock() // +checklocksignore
 		}
 	}
 	defer unlock()

@@ -22,11 +22,15 @@ var (
 // DestinationManager owns local Destination sessions independently of router
 // transport sockets. Each session owns exactly one streaming endpoint and its
 // key material stays scoped to that endpoint until Destroy or Close.
+// Lock hierarchy: DestinationManager.mu -> DestinationSession.routeMu -> destinationSubscription.mu.
 type DestinationManager struct {
-	mu        sync.RWMutex
-	sessions  map[foundation.Hash]*DestinationSession
+	mu sync.RWMutex
+	// +checklocks:mu
+	sessions map[foundation.Hash]*DestinationSession
+	// +checklocks:mu
 	defaultID foundation.Hash
-	closed    bool
+	// +checklocks:mu
+	closed bool
 }
 
 // DestinationSessionConfig configures one locally-owned I2P Destination. The
@@ -52,7 +56,8 @@ type DestinationSession struct {
 	once    sync.Once
 
 	routeMu sync.RWMutex
-	routes  map[destination.DestinationRoute]*destinationSubscription
+	// +checklocks:routeMu
+	routes map[destination.DestinationRoute]*destinationSubscription
 }
 
 // NewDestinationManager constructs an empty session registry without network
@@ -375,16 +380,18 @@ func (s *DestinationSession) Close() error {
 }
 
 type destinationSubscription struct {
-	owner       *DestinationSession
-	route       destination.DestinationRoute
-	messages    chan *destination.ReceivedMessage
-	done        chan struct{}
-	maxBytes    int64
+	owner    *DestinationSession
+	route    destination.DestinationRoute
+	messages chan *destination.ReceivedMessage
+	done     chan struct{}
+	maxBytes int64
+	// +checklocks:mu
 	queuedBytes int64
 	shared      destination.ByteBudget
 	mu          sync.Mutex
-	closed      bool
-	once        sync.Once
+	// +checklocks:mu
+	closed bool
+	once   sync.Once
 }
 
 func (s *destinationSubscription) enqueue(delivery dataplanestreamingtunnel.Delivery) error {

@@ -15,14 +15,20 @@ var (
 )
 
 type server struct {
-	mu         sync.Mutex
-	listener   *trackedListener
-	context    context.Context
-	cancel     context.CancelFunc
+	mu sync.Mutex
+	// +checklocks:mu
+	listener *trackedListener
+	// +checklocks:mu
+	context context.Context
+	// +checklocks:mu
+	cancel context.CancelFunc
+	// +checklocks:mu
 	done       chan struct{}
 	activities sync.WaitGroup
-	started    bool
-	closed     bool
+	// +checklocks:mu
+	started bool
+	// +checklocks:mu
+	closed bool
 }
 
 func (s *server) start(ctx context.Context, address string, allowRemote bool, maxConnections int, listen func(context.Context, string, string) (net.Listener, error), serve func(net.Listener)) error {
@@ -58,24 +64,26 @@ func (s *server) start(ctx context.Context, address string, allowRemote bool, ma
 		return err
 	}
 	lifecycle, cancel := context.WithCancel(ctx)
-	s.listener = newTrackedListener(listener, maxConnections)
+	tracked := newTrackedListener(listener, maxConnections)
+	done := make(chan struct{})
+	s.listener = tracked
 	s.context = lifecycle
 	s.cancel = cancel
-	s.done = make(chan struct{})
+	s.done = done
 	s.activities.Add(1)
 	s.started = true
 	go func() {
-		serve(s.listener)
+		serve(tracked)
 		_ = s.close()
 		s.activities.Done()
 		s.activities.Wait()
-		close(s.done)
+		close(done)
 	}()
 	go func() {
 		select {
 		case <-lifecycle.Done():
 			_ = s.close()
-		case <-s.done:
+		case <-done:
 		}
 	}()
 	return nil
@@ -155,8 +163,10 @@ type trackedListener struct {
 	net.Listener
 	sem chan struct{}
 
-	mu     sync.Mutex
-	conns  map[*trackedConn]struct{}
+	mu sync.Mutex
+	// +checklocks:mu
+	conns map[*trackedConn]struct{}
+	// +checklocks:mu
 	closed bool
 }
 

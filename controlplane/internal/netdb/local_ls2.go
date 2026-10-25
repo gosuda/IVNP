@@ -16,11 +16,14 @@ var ErrLocalLeaseSet2 = errors.New("netdb: invalid local LeaseSet2")
 type LocalLeaseSet2 struct {
 	identity foundation.Identity
 	hash     foundation.Hash
-	public   [32]byte
-	types    []foundation.CryptoKeyType
-	offline  *foundation.OfflineSignature
-	mu       sync.RWMutex
-	leases   []foundation.NetworkDatabaseLease2
+	// +checklocks:mu
+	public [32]byte
+	// +checklocks:mu
+	types   []foundation.CryptoKeyType
+	offline *foundation.OfflineSignature
+	mu      sync.RWMutex
+	// +checklocks:mu
+	leases []foundation.NetworkDatabaseLease2
 }
 
 func NewLocalLeaseSet2(destination *foundation.LocalDestination) (*LocalLeaseSet2, error) {

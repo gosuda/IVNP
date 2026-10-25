@@ -243,6 +243,8 @@ func (s *WebUIServer) authorizeConfigWrite(w http.ResponseWriter, r *http.Reques
 
 // readConfigForWrite reads the configuration file and verifies the client
 // revision. The caller must hold configMu.
+//
+// +checklocks:s.configMu
 func (s *WebUIServer) readConfigForWrite(w http.ResponseWriter, revision string) ([]byte, bool) {
 	content, err := os.ReadFile(s.config.ConfigPath)
 	if err != nil {
@@ -359,6 +361,8 @@ func (s *WebUIServer) handleConfigRollback(w http.ResponseWriter, r *http.Reques
 // commitConfig writes the replaced bytes to the backup file, installs next,
 // applies live settings, and writes the PATCH-shaped response. The caller
 // must hold configMu.
+//
+// +checklocks:s.configMu
 func (s *WebUIServer) commitConfig(w http.ResponseWriter, r *http.Request, action string, current, next []byte, nextConfig state.ConfigurationOperating, applied, restartRequired []string) {
 	if bytes.Equal(current, next) || len(applied)+len(restartRequired) == 0 {
 		writeJSONResponse(w, http.StatusOK, configUpdateResult{

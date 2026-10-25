@@ -39,22 +39,26 @@ type PreparedRouteSenderConfig struct {
 }
 
 type PreparedRouteSender struct {
-	owner         foundation.Hash
-	garlic        *dataplanegarlic.SessionManager
-	ratchet       *dataplanegarlic.RatchetManager
-	tunnels       PreparedTunnelWriter
-	now           func() uint64
-	nextID        MessageIDSource
-	lifecycleMu   sync.RWMutex
-	released      bool
-	limiter       *DestinationBandwidthLimiter
-	scratch       chan *streamingSenderScratch
-	scratchSlots  int
-	metrics       *observability.Registry
-	logger        *slog.Logger
-	routesMu      sync.RWMutex
-	routes        map[foundation.Hash]*preparedRouteEntry
-	retiring      map[*preparedRouteEntry]struct{}
+	owner       foundation.Hash
+	garlic      *dataplanegarlic.SessionManager
+	ratchet     *dataplanegarlic.RatchetManager
+	tunnels     PreparedTunnelWriter
+	now         func() uint64
+	nextID      MessageIDSource
+	lifecycleMu sync.RWMutex
+	// +checklocks:lifecycleMu
+	released     bool
+	limiter      *DestinationBandwidthLimiter
+	scratch      chan *streamingSenderScratch
+	scratchSlots int
+	metrics      *observability.Registry
+	logger       *slog.Logger
+	routesMu     sync.RWMutex
+	// +checklocks:routesMu
+	routes map[foundation.Hash]*preparedRouteEntry
+	// +checklocks:routesMu
+	retiring map[*preparedRouteEntry]struct{}
+	// +checklocks:routesMu
 	generation    uint64
 	routeCapacity int
 	routeClock    atomic.Uint64
@@ -86,6 +90,8 @@ func NewPreparedRouteSender(config PreparedRouteSenderConfig) (*PreparedRouteSen
 	return s, nil
 }
 
+// +checklocksexclude:s.lifecycleMu
+// +checklocksexclude:s.routesMu
 func (s *PreparedRouteSender) ReleaseSensitive() {
 	if s == nil {
 		return
@@ -96,14 +102,18 @@ func (s *PreparedRouteSender) ReleaseSensitive() {
 		return
 	}
 	s.released = true
-	for _, route := range s.routes {
-		route.retire()
-	}
+	s.routesMu.Lock()
+	routes := s.routes
 	s.routes = nil
-	for route := range s.retiring {
+	retiring := s.retiring
+	s.retiring = nil
+	s.routesMu.Unlock()
+	for _, route := range routes {
 		route.retire()
 	}
-	s.retiring = nil
+	for route := range retiring {
+		route.retire()
+	}
 	for range s.scratchSlots {
 		clearStreamingSenderScratch(<-s.scratch)
 	}

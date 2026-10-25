@@ -217,36 +217,50 @@ type SSU2Manager struct {
 	// egressDrained, guarded by egressMu, is set once failQueuedEgress runs.
 	// Enqueues holding the read lock check it so a slot can never land in
 	// the queue after the final drain, where no sender would report done.
+	//
+	// +checklocks:egressMu
 	egressDrained bool
 	ioStats       ssu2IOStats
 	metrics       *observability.Registry
 	logger        *slog.Logger
 	kernelDrops   atomic.Uint64
 
-	sessionsByPeer      map[foundation.Hash]*ssu2TransportSession
-	sessionsByID        map[uint64]*ssu2TransportSession
-	outbound            map[foundation.Hash]*ssu2OutboundPending
-	outboundAddr        map[netip.AddrPort]*ssu2OutboundPending
-	inbound             map[uint64]*ssu2InboundPending
-	introducers         map[uint32]foundation.Hash
-	relayGrants         map[foundation.Hash]ssu2RelayTagLease
-	advertisedRelays    map[foundation.Hash]ssu2RelayTagLease
-	relayTagPending     map[foundation.Hash]time.Time
-	relayPublish        chan struct{}
-	relayRevision       uint64
-	publishedRevision   uint64
-	relayPublishMu      sync.Mutex
-	newTokens           map[string]ssu2NewTokenLease
-	peerTests           map[uint32]*ssu2PeerTestState
-	symmetricEvidence   map[string]ssu2PeerTestEvidence
-	relayRequests       map[uint32]*ssu2RelayRequest
-	relayForwards       map[uint32]ssu2RelayForward
+	sessionsByPeer map[foundation.Hash]*ssu2TransportSession
+	sessionsByID   map[uint64]*ssu2TransportSession
+	// +checklocks:mu
+	outbound map[foundation.Hash]*ssu2OutboundPending
+	// +checklocks:mu
+	outboundAddr map[netip.AddrPort]*ssu2OutboundPending
+	// +checklocks:mu
+	inbound          map[uint64]*ssu2InboundPending
+	introducers      map[uint32]foundation.Hash
+	relayGrants      map[foundation.Hash]ssu2RelayTagLease
+	advertisedRelays map[foundation.Hash]ssu2RelayTagLease
+	relayTagPending  map[foundation.Hash]time.Time
+	relayPublish     chan struct{}
+	// +checklocks:mu
+	relayRevision uint64
+	// +checklocks:mu
+	// +checklocks:relayPublishMu
+	// +checklocksreadany
+	publishedRevision uint64
+	relayPublishMu    sync.Mutex
+	newTokens         map[string]ssu2NewTokenLease
+	peerTests         map[uint32]*ssu2PeerTestState
+	// +checklocks:mu
+	symmetricEvidence map[string]ssu2PeerTestEvidence
+	// +checklocks:mu
+	relayRequests map[uint32]*ssu2RelayRequest
+	// +checklocks:mu
+	relayForwards map[uint32]ssu2RelayForward
+	// +checklocks:mu
 	deferredRelayIntros map[uint32]ssu2DeferredRelayIntro
 	relayStoreJobs      chan ssu2RelayStoreJob
 	routerInfoStoresMu  sync.RWMutex
-	routerInfoStores    map[foundation.Hash]ssu2RouterInfoStoreSnapshot
-	reporter            ingress.Reporter
-	admitPeer           PeerAdmissionFunc
+	// +checklocks:routerInfoStoresMu
+	routerInfoStores map[foundation.Hash]ssu2RouterInfoStoreSnapshot
+	reporter         ingress.Reporter
+	admitPeer        PeerAdmissionFunc
 }
 
 // IOStats is the single atomic source for SSU2 socket accounting.
@@ -398,37 +412,47 @@ func (m *SSU2Manager) clearIOBuffers() {
 }
 
 type ssu2TransportSession struct {
-	peer       foundation.Hash
-	sendID     uint64
-	receiveID  uint64
-	inbound    bool
-	remoteMu   sync.RWMutex
+	peer      foundation.Hash
+	sendID    uint64
+	receiveID uint64
+	inbound   bool
+	remoteMu  sync.RWMutex
+	// +checklocks:remoteMu
 	remote     net.Addr
 	send       *dataplanessu2.DataCipher
 	receive    *dataplanessu2.DataCipher
 	lifetimeMu sync.RWMutex
 
-	sendMu                sync.Mutex
-	packetMu              ssu2SendMutex
-	closing               bool
-	receiveMu             sync.Mutex
-	nextPacket            uint32
-	sendPacket            [dataplanessu2.MaxIPv4PacketLen]byte
-	frameMu               ssu2SendMutex
-	frame                 [dataplanessu2.MaxIPv4PacketLen]byte
-	received              dataplanessu2.ACKTracker
-	sent                  map[uint32]*ssu2SentPacket
-	sentSlots             []*ssu2SentPacket
-	sentChunks            [][]byte
-	sentIdleTicks         int
-	sendWindowBytes       int
-	sendWindowRemaining   int
-	slowStartThreshold    int
-	rto                   time.Duration
-	rtt                   time.Duration
-	rttDeviation          time.Duration
-	lastCongestion        time.Time
-	degradedUntil         time.Time
+	sendMu   sync.Mutex
+	packetMu ssu2SendMutex
+	// +checklocks:sendMu
+	closing    bool
+	receiveMu  sync.Mutex
+	nextPacket uint32
+	// +checklocks:sendMu
+	sendPacket [dataplanessu2.MaxIPv4PacketLen]byte
+	frameMu    ssu2SendMutex
+	// +checklocks:frameMu
+	frame [dataplanessu2.MaxIPv4PacketLen]byte
+	// +checklocks:receiveMu
+	received            dataplanessu2.ACKTracker
+	sent                map[uint32]*ssu2SentPacket
+	sentSlots           []*ssu2SentPacket
+	sentChunks          [][]byte
+	sentIdleTicks       int
+	sendWindowBytes     int
+	sendWindowRemaining int
+	slowStartThreshold  int
+	rto                 time.Duration
+	// +checklocks:sendMu
+	rtt time.Duration
+	// +checklocks:sendMu
+	rttDeviation time.Duration
+	// +checklocks:sendMu
+	lastCongestion time.Time
+	// +checklocks:sendMu
+	degradedUntil time.Time
+	// +checklocks:sendMu
 	sendCapacityAvailable chan struct{}
 	largeMTU              int
 	mtu                   atomic.Int32
@@ -437,13 +461,16 @@ type ssu2TransportSession struct {
 	fragmentMu            sync.Mutex
 	ackMu                 sync.Mutex
 	ackQueued             atomic.Bool
-	ackPayload            [3 + 5 + 2*dataplanessu2.MaxACKRanges]byte
-	fragments             map[uint32]*ssu2FragmentAssembly
+	// +checklocks:ackMu
+	ackPayload [3 + 5 + 2*dataplanessu2.MaxACKRanges]byte
+	// +checklocks:fragmentMu
+	fragments map[uint32]*ssu2FragmentAssembly
 
 	lastActivityNano atomic.Int64
 	pathMu           sync.Mutex
-	candidate        *ssu2PathCandidate
-	releaseOnce      sync.Once
+	// +checklocks:pathMu
+	candidate   *ssu2PathCandidate
+	releaseOnce sync.Once
 }
 
 type ssu2PathCandidate struct {
@@ -527,6 +554,7 @@ func (s *ssu2TransportSession) ReleaseSensitive() {
 	})
 }
 
+// +checklocksexclude:s.remoteMu
 func (s *ssu2TransportSession) remoteAddr() net.Addr {
 	s.remoteMu.RLock()
 	remote := s.remote
@@ -534,6 +562,7 @@ func (s *ssu2TransportSession) remoteAddr() net.Addr {
 	return remote
 }
 
+// +checklocksexclude:s.remoteMu
 func (s *ssu2TransportSession) setRemote(remote net.Addr) {
 	s.remoteMu.Lock()
 	s.remote = remote
@@ -655,6 +684,8 @@ func (p *ssu2SentPacket) release() {
 
 // maintainSentCapacity is retransmitLoop's per-tick hook for releasing
 // retransmission capacity a session grew into but no longer needs.
+//
+// +checklocksexclude:s.sendMu
 func (s *ssu2TransportSession) maintainSentCapacity() {
 	s.sendMu.Lock()
 	s.shrinkSentSlotsLocked()
@@ -725,10 +756,11 @@ type ssu2OutboundPending struct {
 	parseMu       sync.Mutex
 	releaseOnExit atomic.Bool
 	releaseOnce   sync.Once
-	packet        [dataplanessu2.MaxIPv4PacketLen]byte
-	ready         chan struct{}
-	err           error
-	timer         *time.Timer
+	// +checklocks:parseMu
+	packet [dataplanessu2.MaxIPv4PacketLen]byte
+	ready  chan struct{}
+	err    error
+	timer  *time.Timer
 }
 
 const ssu2MaxStagedEarlyPackets = 8
@@ -740,16 +772,21 @@ type ssu2StagedPacket struct {
 }
 
 type ssu2InboundPending struct {
-	reassemblyMu  sync.Mutex
-	remote        net.Addr
-	sendID        uint64
-	responder     *dataplanessu2.Responder
-	reassembly    *dataplanessu2.ConfirmedReassembler
-	timer         *time.Timer
+	reassemblyMu sync.Mutex
+	remote       net.Addr
+	sendID       uint64
+	// +checklocks:reassemblyMu
+	responder *dataplanessu2.Responder
+	// +checklocks:reassemblyMu
+	reassembly *dataplanessu2.ConfirmedReassembler
+	timer      *time.Timer
+	// +checklocks:reassemblyMu
 	stagedPackets [ssu2MaxStagedEarlyPackets]ssu2StagedPacket
-	stagedCount   int
+	// +checklocks:reassemblyMu
+	stagedCount int
 }
 
+// +checklocks:p.reassemblyMu
 func (p *ssu2InboundPending) releaseSensitiveHeld() {
 	if p.responder != nil {
 		p.responder.ReleaseSensitive()
@@ -766,6 +803,7 @@ func (p *ssu2InboundPending) releaseSensitiveHeld() {
 	p.stagedCount = 0
 }
 
+// +checklocksexclude:p.reassemblyMu
 func (p *ssu2InboundPending) releaseSensitive() {
 	p.reassemblyMu.Lock()
 	defer p.reassemblyMu.Unlock()
@@ -1592,6 +1630,8 @@ func (m *SSU2Manager) relayPublicationSnapshot() (ssu2IntroducerPublisher, uint6
 	return publisher, revision, leases
 }
 
+// +checklocksexclude:m.relayPublishMu
+// +checklocksexclude:m.mu
 func (m *SSU2Manager) publishRelaySnapshot(ctx context.Context) (bool, error) {
 	m.relayPublishMu.Lock()
 	defer m.relayPublishMu.Unlock()
@@ -1951,6 +1991,7 @@ func (m *SSU2Manager) resolveOutbound(peer foundation.Hash) (ssu2PeerAddress, *n
 	return address, remote, nil
 }
 
+// +checklocks:m.mu
 func (m *SSU2Manager) newOutboundLocked(peer foundation.Hash, address ssu2PeerAddress, remote *net.UDPAddr) (*ssu2OutboundPending, error) {
 	destinationID := m.cachedNewTokenDestinationLocked(peer, remote)
 	var err error
@@ -1967,6 +2008,7 @@ func (m *SSU2Manager) newOutboundLocked(peer foundation.Hash, address ssu2PeerAd
 	return m.newOutboundToLocked(peer, address, remote, destinationID, sourceID)
 }
 
+// +checklocks:m.mu
 func (m *SSU2Manager) newIntroducedOutboundLocked(peer foundation.Hash, address ssu2PeerAddress, endpoint netip.AddrPort, destinationID, sourceID uint64) (*ssu2OutboundPending, error) {
 	if !validSSU2Endpoint(endpoint) {
 		return nil, ErrSSU2Introduction
@@ -1975,6 +2017,7 @@ func (m *SSU2Manager) newIntroducedOutboundLocked(peer foundation.Hash, address 
 	return m.newOutboundToLocked(peer, address, remote, destinationID, sourceID)
 }
 
+// +checklocks:m.mu
 func (m *SSU2Manager) newOutboundToLocked(peer foundation.Hash, address ssu2PeerAddress, remote *net.UDPAddr, destinationID, sourceID uint64) (*ssu2OutboundPending, error) {
 	if len(m.outbound)+len(m.inbound) >= m.maxPending || m.outbound[peer] != nil || remote == nil || remote.Port <= 0 {
 		return nil, ErrSSU2Session
@@ -2272,6 +2315,9 @@ func (m *SSU2Manager) retransmitOne(session *ssu2TransportSession, now time.Time
 	return expired
 }
 
+// +checklocksexclude:session.packetMu
+// +checklocksexclude:session.sendMu
+// +checklocksexclude:session.remoteMu
 func (m *SSU2Manager) retransmitAndNextDue(session *ssu2TransportSession, now time.Time) (bool, time.Time) {
 	session.packetMu.Lock()
 	defer session.packetMu.Unlock()
@@ -2382,8 +2428,10 @@ func (m *SSU2Manager) handlePacket(packet []byte, remote netip.AddrPort) {
 	}
 }
 
+// +checklocksexclude:pending.parseMu
+// +checklocksexclude:m.mu
 func (m *SSU2Manager) handleOutbound(packet []byte, pending *ssu2OutboundPending) bool {
-	if len(packet) > len(pending.packet) {
+	if len(packet) > dataplanessu2.MaxIPv4PacketLen {
 		return true
 	}
 	pending.parseMu.Lock()
@@ -2774,11 +2822,12 @@ func (m *SSU2Manager) peerTestPeerAtEndpoint(source netip.AddrPort) (foundation.
 	return m.peers.PeerAtEndpoint(source)
 }
 
+// +checklocksexclude:m.mu
 func (m *SSU2Manager) peerTestCharlie(alice *ssu2TransportSession, ipv4 bool) *ssu2TransportSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, session := range m.sessionsByPeer {
-		if session == alice || !m.sessionActive(session) {
+		if session == alice || !m.sessionActiveLocked(session) {
 			continue
 		}
 		remote, ok := session.remoteAddr().(*net.UDPAddr)
@@ -2854,6 +2903,7 @@ func (m *SSU2Manager) expirePeerTest(nonce uint32, state *ssu2PeerTestState) {
 	}
 }
 
+// +checklocks:m.mu
 func (m *SSU2Manager) peerTestResultLocked(state *ssu2PeerTestState, final bool) (PeerTestResult, bool) {
 	if state.message4 == nil {
 		if final {
@@ -2938,6 +2988,8 @@ func (m *SSU2Manager) completePeerTest(state *ssu2PeerTestState, result PeerTest
 	}
 }
 
+// +checklocksexclude:pending.parseMu
+// +checklocksexclude:m.mu
 func (m *SSU2Manager) sendSessionRequest(pending *ssu2OutboundPending, token uint64) {
 	pending.parseMu.Lock()
 	m.sendSessionRequestLocked(pending, token)
@@ -2947,6 +2999,8 @@ func (m *SSU2Manager) sendSessionRequest(pending *ssu2OutboundPending, token uin
 	}
 }
 
+// +checklocks:pending.parseMu
+// +checklocksexclude:m.mu
 func (m *SSU2Manager) sendSessionRequestLocked(pending *ssu2OutboundPending, token uint64) {
 	m.mu.RLock()
 	active := m.outbound[pending.peer] == pending && !pending.confirming
@@ -2998,6 +3052,8 @@ func (m *SSU2Manager) sendSessionRequestLocked(pending *ssu2OutboundPending, tok
 	}
 }
 
+// +checklocks:pending.parseMu
+// +checklocksexclude:m.mu
 func (m *SSU2Manager) sendSessionConfirmed(pending *ssu2OutboundPending) {
 	maxPacket := ssu2RemotePacketSizeForMTU(pending.remote, pending.address.mtu)
 	payload, err := m.localConfirmedPayload(maxPacket)
@@ -3133,8 +3189,12 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 	if err != nil {
 		return
 	}
-	pending := &ssu2InboundPending{remote: cloneUDPAddress(remote), sendID: header.SourceID, responder: responder}
-	pending.reassembly = dataplanessu2.NewConfirmedReassembler(responder)
+	pending := &ssu2InboundPending{
+		remote:     cloneUDPAddress(remote),
+		sendID:     header.SourceID,
+		responder:  responder,
+		reassembly: dataplanessu2.NewConfirmedReassembler(responder),
+	}
 	pending.timer = time.AfterFunc(m.timeout, func() {
 		m.mu.Lock()
 		if m.inbound[header.DestinationID] != pending {
@@ -3195,6 +3255,8 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 	}
 }
 
+// +checklocksexclude:m.mu
+// +checklocksexclude:pending.reassemblyMu
 func (m *SSU2Manager) handleInboundPacket(packet []byte, pending *ssu2InboundPending, destinationID uint64, remote netip.AddrPort) {
 	pending.reassemblyMu.Lock()
 	defer pending.reassemblyMu.Unlock()
@@ -3224,6 +3286,8 @@ func (m *SSU2Manager) handleInboundPacket(packet []byte, pending *ssu2InboundPen
 	m.processSessionConfirmedLocked(packet, pending, destinationID, remote)
 }
 
+// +checklocks:pending.reassemblyMu
+// +checklocksexclude:m.mu
 func (m *SSU2Manager) processSessionConfirmedLocked(packet []byte, pending *ssu2InboundPending, destinationID uint64, remote netip.AddrPort) {
 	remoteAddr := ssu2PacketAddr{value: remote}
 	static, payload, complete, err := pending.reassembly.Add(packet)
@@ -3300,6 +3364,7 @@ func (m *SSU2Manager) processSessionConfirmedLocked(packet []byte, pending *ssu2
 	pending.stagedCount = 0
 }
 
+// +checklocksexclude:m.mu
 func (m *SSU2Manager) removeSession(session *ssu2TransportSession) {
 	m.mu.Lock()
 	m.removeSessionLocked(session)
@@ -3310,6 +3375,7 @@ func (m *SSU2Manager) removeSession(session *ssu2TransportSession) {
 	session.ReleaseSensitive()
 }
 
+// +checklocks:m.mu
 func (m *SSU2Manager) removeSessionLocked(session *ssu2TransportSession) {
 	removed := false
 	if m.sessionsByID[session.receiveID] == session {
@@ -3330,6 +3396,8 @@ func (m *SSU2Manager) handleData(session *ssu2TransportSession, packet []byte) {
 	m.handleDataFrom(session, packet, remote)
 }
 
+// +checklocksexclude:session.lifetimeMu
+// +checklocksexclude:session.receiveMu
 func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byte, remote netip.AddrPort) {
 	session.lifetimeMu.RLock()
 	lifetimeHeld := true
@@ -3490,7 +3558,7 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 	}
 	if terminated {
 		lifetimeHeld = false
-		session.lifetimeMu.RUnlock()
+		session.lifetimeMu.RUnlock() // +checklocksignore
 		m.removeSession(session)
 	}
 	if dispatch != nil {
@@ -3500,6 +3568,8 @@ func (m *SSU2Manager) handleDataFrom(session *ssu2TransportSession, packet []byt
 	}
 }
 
+// +checklocksread:session.lifetimeMu
+// +checklocksexclude:session.pathMu
 func (m *SSU2Manager) handleCandidatePath(session *ssu2TransportSession, payload []byte, remote net.Addr) {
 	candidate, ok := cloneUDPAddress(remote).(*net.UDPAddr)
 	if !ok || candidate == nil {
@@ -3574,6 +3644,9 @@ func (m *SSU2Manager) handleCandidatePath(session *ssu2TransportSession, payload
 	}
 }
 
+// +checklocksexclude:session.packetMu
+// +checklocksexclude:session.sendMu
+// +checklocksexclude:m.mu
 func (m *SSU2Manager) sendSessionDataTo(session *ssu2TransportSession, remote net.Addr, payload []byte) error {
 	session.packetMu.Lock()
 	defer session.packetMu.Unlock()
@@ -3800,7 +3873,7 @@ func (m *SSU2Manager) sendSessionDataContext(ctx context.Context, session *ssu2T
 	} else {
 		session.packetMu.Lock()
 	}
-	defer session.packetMu.Unlock()
+	defer session.packetMu.Unlock() // +checklocksignore
 	session.sendMu.Lock()
 	if err := ctx.Err(); err != nil {
 		session.releaseSendReservationLocked(retained, windowBytes)
@@ -3885,6 +3958,7 @@ func (s *ssu2TransportSession) idle(now time.Time, timeout time.Duration) bool {
 	return last == 0 || now.Sub(time.Unix(0, last)) >= timeout
 }
 
+// +checklocksexclude:s.pathMu
 func (s *ssu2TransportSession) expirePath(now time.Time) {
 	s.pathMu.Lock()
 	if s.candidate != nil && !s.candidate.expires.After(now) {
@@ -3895,9 +3969,15 @@ func (s *ssu2TransportSession) expirePath(now time.Time) {
 	s.pathMu.Unlock()
 }
 
+// +checklocksread:m.mu
+func (m *SSU2Manager) sessionActiveLocked(session *ssu2TransportSession) bool {
+	return m.runningLocked() && m.sessionsByID[session.receiveID] == session && m.sessionsByPeer[session.peer] == session
+}
+
+// +checklocksexclude:m.mu
 func (m *SSU2Manager) sessionActive(session *ssu2TransportSession) bool {
 	m.mu.RLock()
-	active := m.runningLocked() && m.sessionsByID[session.receiveID] == session && m.sessionsByPeer[session.peer] == session
+	active := m.sessionActiveLocked(session)
 	m.mu.RUnlock()
 	return active
 }
@@ -3906,6 +3986,8 @@ func (m *SSU2Manager) sessionActive(session *ssu2TransportSession) bool {
 // traffic. Unlike sessionActive it does not require canonical sessionsByPeer
 // ownership: a superseded session must keep sending ACKs and data so the
 // peer's congestion window drains while the newer session takes over.
+//
+// +checklocksexclude:m.mu
 func (m *SSU2Manager) sessionLive(session *ssu2TransportSession) bool {
 	m.mu.RLock()
 	live := m.runningLocked() && m.sessionsByID[session.receiveID] == session
@@ -3913,6 +3995,7 @@ func (m *SSU2Manager) sessionLive(session *ssu2TransportSession) bool {
 	return live
 }
 
+// +checklocksexclude:s.sendMu
 func (s *ssu2TransportSession) acknowledge(ranges []dataplanessu2.ACKRange, now time.Time) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
@@ -3965,6 +4048,7 @@ func (s *ssu2TransportSession) shouldRequestImmediateACKLocked() bool {
 	return s.sendWindowRemaining < s.sendWindowBytes/3
 }
 
+// +checklocks:s.sendMu
 func (s *ssu2TransportSession) signalSendCapacityLocked() {
 	if s.sendCapacityAvailable == nil {
 		return
@@ -3973,6 +4057,7 @@ func (s *ssu2TransportSession) signalSendCapacityLocked() {
 	s.sendCapacityAvailable = nil
 }
 
+// +checklocks:s.sendMu
 func (s *ssu2TransportSession) removeSentAliasesLocked(sent *ssu2SentPacket) {
 	for packetNumber, candidate := range s.sent {
 		if candidate == sent {
@@ -3981,6 +4066,7 @@ func (s *ssu2TransportSession) removeSentAliasesLocked(sent *ssu2SentPacket) {
 	}
 }
 
+// +checklocks:s.sendMu
 func (s *ssu2TransportSession) releaseSendReservationLocked(sent *ssu2SentPacket, windowBytes int) {
 	if sent != nil && !sent.inUse {
 		return
@@ -3995,6 +4081,7 @@ func (s *ssu2TransportSession) releaseSendReservationLocked(sent *ssu2SentPacket
 	s.signalSendCapacityLocked()
 }
 
+// +checklocks:s.sendMu
 func (s *ssu2TransportSession) messageACKedLocked(sent *ssu2SentPacket, now time.Time) {
 	bytesACKed := sent.windowBytes
 	if sent.attempts == 0 {
@@ -4017,6 +4104,7 @@ func (s *ssu2TransportSession) messageACKedLocked(sent *ssu2SentPacket, now time
 	s.sendWindowRemaining = min(s.sendWindowBytes, s.sendWindowRemaining+bytesACKed)
 }
 
+// +checklocks:s.sendMu
 func (s *ssu2TransportSession) recalculateRTOLocked(sample time.Duration) {
 	if s.rtt <= 0 {
 		s.rtt = sample
@@ -4032,6 +4120,7 @@ func (s *ssu2TransportSession) recalculateRTOLocked(sample time.Duration) {
 	s.rto = min(ssu2MaximumRTO, max(ssu2RetransmitInterval, s.rtt+4*s.rttDeviation))
 }
 
+// +checklocks:s.sendMu
 func (s *ssu2TransportSession) noteCongestionLocked(now time.Time, sent *ssu2SentPacket) {
 	mtu := int(s.mtu.Load())
 	s.packetsRetransmitted++
@@ -4053,6 +4142,7 @@ func (s *ssu2TransportSession) noteCongestionLocked(now time.Time, sent *ssu2Sen
 	}
 }
 
+// +checklocks:s.sendMu
 func (s *ssu2TransportSession) adjustMTULocked(packetSize int, success bool) {
 	mtu := int(s.mtu.Load())
 	if success {
@@ -4146,6 +4236,7 @@ func (m *SSU2Manager) admitSSU2Peer(peer foundation.NetworkDatabaseRouterInfo, s
 	return m.peers.AdmitRouterInfo(peer, uint64(now.UnixMilli())) == nil
 }
 
+// +checklocksread:m.mu
 func (m *SSU2Manager) newTokenLocked(remote net.Addr, destinationID, sourceID uint64) (uint64, error) {
 	return m.retryToken(remote, destinationID, sourceID, m.tokenBucket(m.nowLocked()))
 }
@@ -4157,6 +4248,7 @@ func newTokenCacheKey(peer foundation.Hash, remote net.Addr, destination uint64)
 	return string(peer[:]) + "|" + remote.String() + "|" + strconv.FormatUint(destination, 10)
 }
 
+// +checklocksread:m.mu
 func (m *SSU2Manager) newNewTokenLocked(remote net.Addr) (dataplanessu2.NewToken, error) {
 	token, err := m.retryToken(remote, 0, 0, m.tokenBucket(m.nowLocked()))
 	if err != nil {
@@ -4165,6 +4257,7 @@ func (m *SSU2Manager) newNewTokenLocked(remote net.Addr) (dataplanessu2.NewToken
 	return dataplanessu2.NewToken{Token: token, Expiration: uint32(m.nowLocked().Add(m.tokenLifetime).Unix())}, nil
 }
 
+// +checklocksread:m.mu
 func (m *SSU2Manager) consumeNewTokenLocked(token uint64, remote net.Addr) bool {
 	if token == 0 {
 		return false
@@ -4318,6 +4411,7 @@ func (m *SSU2Manager) storeNewToken(session *ssu2TransportSession, token datapla
 	m.mu.Unlock()
 }
 
+// +checklocks:m.mu
 func (m *SSU2Manager) cachedNewTokenLocked(peer foundation.Hash, remote net.Addr, destination uint64) uint64 {
 	key := newTokenCacheKey(peer, remote, destination)
 	lease, ok := m.newTokens[key]
@@ -4330,6 +4424,7 @@ func (m *SSU2Manager) cachedNewTokenLocked(peer foundation.Hash, remote net.Addr
 	return lease.token
 }
 
+// +checklocksread:m.mu
 func (m *SSU2Manager) cachedNewTokenDestinationLocked(peer foundation.Hash, remote net.Addr) uint64 {
 	endpoint := remote.String()
 	best := uint64(0)
@@ -4347,6 +4442,7 @@ func (m *SSU2Manager) cachedNewTokenDestinationLocked(peer foundation.Hash, remo
 	return best
 }
 
+// +checklocksread:m.mu
 func (m *SSU2Manager) consumeTokenLocked(token uint64, remote net.Addr, destinationID, sourceID uint64) bool {
 	bucket := m.tokenBucket(m.nowLocked())
 	expected, err := m.retryToken(remote, destinationID, sourceID, bucket)
@@ -4409,6 +4505,8 @@ func (m *SSU2Manager) retryToken(remote net.Addr, destinationID, sourceID, bucke
 // can drain its congestion window before discarding it. A displaced session
 // is removed from sessionsByID and returned so callers can release it after
 // dropping m.mu.
+//
+// +checklocks:m.mu
 func (m *SSU2Manager) installSessionLocked(session *ssu2TransportSession) (displaced *ssu2TransportSession, ok bool) {
 	if !m.runningLocked() || m.sessionsByID[session.receiveID] != nil {
 		return nil, false
@@ -4441,6 +4539,7 @@ func preferInboundSession(info TransportLocalInfo, peer foundation.Hash) bool {
 	return bytes.Compare(local[:], peer[:]) > 0
 }
 
+// +checklocks:m.mu
 func (m *SSU2Manager) finishOutboundLocked(pending *ssu2OutboundPending, err error) bool {
 	if m.outbound[pending.peer] != pending {
 		return false
@@ -4516,6 +4615,8 @@ func ssu2FailurePhase(err error) string {
 	}
 }
 
+// +checklocksexclude:m.mu
+// +checklocksexclude:pending.reassemblyMu
 func (m *SSU2Manager) removeInbound(destinationID uint64, pending *ssu2InboundPending) {
 	m.mu.Lock()
 	if m.inbound[destinationID] == pending {
@@ -4528,6 +4629,9 @@ func (m *SSU2Manager) removeInbound(destinationID uint64, pending *ssu2InboundPe
 }
 
 // removeInboundHeld is called with pending.reassemblyMu held.
+//
+// +checklocks:pending.reassemblyMu
+// +checklocksexclude:m.mu
 func (m *SSU2Manager) removeInboundHeld(destinationID uint64, pending *ssu2InboundPending) {
 	m.mu.Lock()
 	if m.inbound[destinationID] == pending {
@@ -4552,10 +4656,12 @@ func (m *SSU2Manager) dispatchI2NP(peer foundation.Hash, message foundation.I2NP
 	return m.dispatchI2NPBatch(batch)
 }
 
+// +checklocksread:m.mu
 func (m *SSU2Manager) runningLocked() bool {
 	return m.started && m.ctx != nil && m.ctx.Err() == nil
 }
 
+// +checklocksexclude:m.mu
 func (m *SSU2Manager) currentBindings() TransportBindings {
 	m.mu.RLock()
 	bindings := m.bindings
@@ -4888,6 +4994,7 @@ func (m *SSU2Manager) writeToClass(ctx context.Context, packet []byte, remote ne
 	}
 }
 
+// +checklocksread:m.egressMu
 func (m *SSU2Manager) enqueueEgress(ctx context.Context, packet []byte, addr netip.AddrPort, relay, wait bool, flow uint64, free, queue chan *ssu2EgressSlot) (*ssu2EgressSlot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -5150,6 +5257,7 @@ func (m *SSU2Manager) now() time.Time {
 	return m.currentBindings().Clock.Now()
 }
 
+// +checklocksread:m.mu
 func (m *SSU2Manager) nowLocked() time.Time {
 	return m.bindings.Clock.Now()
 }
@@ -5344,6 +5452,8 @@ func decodeSSU2I2NP(data []byte) (foundation.I2NPMessage, error) {
 	}, nil
 }
 
+// +checklocksread:s.lifetimeMu
+// +checklocksexclude:s.fragmentMu
 func (s *ssu2TransportSession) addFragment(kind uint8, data []byte, now time.Time) (foundation.I2NPMessage, bool, error) {
 	s.fragmentMu.Lock()
 	defer s.fragmentMu.Unlock()

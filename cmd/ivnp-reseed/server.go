@@ -28,9 +28,11 @@ type ReseedServer struct {
 
 	// pkg is swapped atomically once per epoch; readers load an immutable
 	// package pointer so the hot path never takes a lock.
-	pkg       atomic.Pointer[ReseedPackage]
-	mu        sync.RWMutex
-	certPEM   []byte
+	pkg atomic.Pointer[ReseedPackage]
+	mu  sync.RWMutex
+	// +checklocks:mu
+	certPEM []byte
+	// +checklocks:mu
 	pubKeyPEM []byte
 	handler   http.Handler
 }

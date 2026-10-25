@@ -77,6 +77,9 @@ func (r *preparedRouteEntry) retire() {
 
 // InstallRoute rejects stale preparation, including preparation racing policy
 // replacement. Evicted snapshots are wiped only after their final active send.
+//
+// +checklocksexclude:s.lifecycleMu
+// +checklocksexclude:s.routesMu
 func (s *PreparedRouteSender) InstallRoute(route PreparedRoute) error {
 	if route.Owner != s.owner || route.Remote == (foundation.Hash{}) || route.Expires <= s.now() || route.Circuit == (dataplanetunnel.CircuitToken{}) || route.TunnelID == 0 {
 		return ErrDataPlaneConfig
@@ -135,6 +138,9 @@ func (s *PreparedRouteSender) InstallRoute(route PreparedRoute) error {
 
 // InvalidateRoutes advances policy generation before waiting for active uses.
 // New sends cannot acquire retired routes while an old tunnel write drains.
+//
+// +checklocksexclude:s.lifecycleMu
+// +checklocksexclude:s.routesMu
 func (s *PreparedRouteSender) InvalidateRoutes(generation uint64) {
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
@@ -161,6 +167,8 @@ func (s *PreparedRouteSender) InvalidateRoutes(generation uint64) {
 	}
 }
 
+// +checklocksread:s.lifecycleMu
+// +checklocksexclude:s.routesMu
 func (s *PreparedRouteSender) acquireRoute(remote foundation.Hash) (*preparedRouteEntry, error) {
 	s.routesMu.RLock()
 	defer s.routesMu.RUnlock()
@@ -174,6 +182,9 @@ func (s *PreparedRouteSender) acquireRoute(remote foundation.Hash) (*preparedRou
 }
 
 // RetireRoute removes a failed execution plan without retrying its payload.
+//
+// +checklocksexclude:s.lifecycleMu
+// +checklocksexclude:s.routesMu
 func (s *PreparedRouteSender) RetireRoute(remote foundation.Hash) {
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
@@ -197,6 +208,8 @@ func (s *PreparedRouteSender) RetireRoute(remote foundation.Hash) {
 	}
 }
 
+// +checklocksexclude:s.lifecycleMu
+// +checklocksexclude:s.routesMu
 func (s *PreparedRouteSender) HasRoute(remote foundation.Hash, generation uint64) bool {
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
@@ -209,6 +222,8 @@ func (s *PreparedRouteSender) HasRoute(remote foundation.Hash, generation uint64
 	return route != nil && route.route.Generation == generation && route.route.Expires > s.now()
 }
 
+// +checklocksexclude:s.lifecycleMu
+// +checklocksexclude:s.routesMu
 func (s *PreparedRouteSender) RouteReceipt(remote foundation.Hash) (PreparedRouteReceipt, bool) {
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
@@ -222,6 +237,8 @@ func (s *PreparedRouteSender) RouteReceipt(remote foundation.Hash) (PreparedRout
 	return PreparedRouteReceipt{Remote: remote, Generation: route.Generation, Circuit: route.Circuit, Gateway: route.Gateway, TunnelID: route.TunnelID, Expires: route.Expires, owner: s.owner, installation: entry.installation, responseVersion: entry.responseVersion}, true
 }
 
+// +checklocksexclude:s.lifecycleMu
+// +checklocksexclude:s.routesMu
 func (s *PreparedRouteSender) MarkRouteResponsive(receipt PreparedRouteReceipt) {
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
@@ -234,6 +251,8 @@ func (s *PreparedRouteSender) MarkRouteResponsive(receipt PreparedRouteReceipt) 
 
 // RetireUnresponsiveRoute detaches the observed installation unless a later handshake succeeded.
 // Admitted sends retain ownership until completion; retirement never resets crypto.
+//
+// +checklocksignore
 func (s *PreparedRouteSender) RetireUnresponsiveRoute(receipt PreparedRouteReceipt) bool {
 	s.lifecycleMu.RLock()
 	s.routesMu.Lock()
@@ -259,6 +278,7 @@ func (r PreparedRouteReceipt) matches(owner foundation.Hash, entry *preparedRout
 	return entry != nil && r.owner == owner && r.installation != 0 && r.installation == entry.installation && r.Generation == entry.route.Generation
 }
 
+// +checklocksexclude:s.routesMu
 func (s *PreparedRouteSender) retireRouteEntry(route *preparedRouteEntry) {
 	route.retire()
 	s.routesMu.Lock()

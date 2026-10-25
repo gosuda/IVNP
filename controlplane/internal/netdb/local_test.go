@@ -181,6 +181,7 @@ func TestLocalLeaseSetSnapshotMarshalLegacyRejectsMalformedKeysAndSignature(t *t
 	}
 }
 
+// +checklocksignore
 func TestLocalLeaseSetSnapshotRejectsCorruptedRetainedIdentity(t *testing.T) {
 	identity, _, err := foundation.ParseIdentity(legacyIdentity())
 	if err != nil {

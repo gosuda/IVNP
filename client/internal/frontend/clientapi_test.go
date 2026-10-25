@@ -40,7 +40,8 @@ func (resolve destinationResolverFunc) ResolveDestination(ctx context.Context, n
 }
 
 type testNetwork struct {
-	mu        sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	addresses []string
 	dial      func(context.Context, string) (net.Conn, error)
 }
@@ -605,7 +606,8 @@ func (panicCatalog) ListDestinations(context.Context) ([]controlplane.Destinatio
 }
 
 type panicReports struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	reports []ingress.Panic
 }
 

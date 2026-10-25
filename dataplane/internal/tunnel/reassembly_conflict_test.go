@@ -28,6 +28,7 @@ func TestReassemblerRejectsAmbiguousLastAndDuplicates(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestReassemblerEvictsAndExpiresIncompleteEntries(t *testing.T) {
 	r := NewReassembler(1, 64)
 	_, _, _ = r.Add(Fragment{MessageID: 1, Number: 0, Data: []byte("a")}, 1)

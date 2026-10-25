@@ -51,14 +51,22 @@ type Config struct {
 type Network struct {
 	cfg Config
 
-	mu                sync.Mutex
-	control           *control
-	privateDest       string
-	publicDest        string
-	local             samAddr
-	listener          *listener
-	closed            bool
-	done              chan struct{}
+	// mu guards control, destination state, listener, closed, and keepaliveDone. Never held while acquiring listener.mu.
+	mu sync.Mutex
+	// +checklocks:mu
+	control *control
+	// +checklocks:mu
+	privateDest string
+	// +checklocks:mu
+	publicDest string
+	// +checklocks:mu
+	local samAddr
+	// +checklocks:mu
+	listener *listener
+	// +checklocks:mu
+	closed bool
+	done   chan struct{}
+	// +checklocks:mu
 	keepaliveDone     chan struct{}
 	keepaliveInterval time.Duration
 }
@@ -217,7 +225,10 @@ func (n *Network) DialI2P(ctx context.Context, address string) (net.Conn, error)
 		control.Close()
 		return nil, statusError("STREAM STATUS", fields)
 	}
-	return &streamConn{Conn: control.Conn, reader: control.reader, local: n.local, remote: samAddr{host: host, port: port}}, nil
+	n.mu.Lock()
+	local := n.local
+	n.mu.Unlock()
+	return &streamConn{Conn: control.Conn, reader: control.reader, local: local, remote: samAddr{host: host, port: port}}, nil
 }
 
 func (n *Network) ListenI2P(ctx context.Context, address string) (net.Listener, error) {
@@ -493,14 +504,20 @@ func statusError(kind string, fields map[string]string) error {
 type listener struct {
 	network *Network
 	local   samAddr
-	ctx     context.Context
-	cancel  context.CancelFunc
+	// +checklocks:mu
+	ctx context.Context
+	// +checklocks:mu
+	cancel context.CancelFunc
 
-	mu     sync.Mutex
+	// mu guards ctx, cancel, active, and closed. Never held while acquiring network.mu.
+	mu sync.Mutex
+	// +checklocks:mu
 	active net.Conn
+	// +checklocks:mu
 	closed bool
 }
 
+// +checklocksexclude:l.network.mu
 func (l *listener) Accept() (net.Conn, error) {
 	l.mu.Lock()
 	if l.closed {

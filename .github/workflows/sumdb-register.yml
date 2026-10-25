@@ -22,7 +22,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.27.3'
           cache: false
       - name: Fetch module at commit SHA
         shell: bash

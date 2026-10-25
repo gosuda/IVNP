@@ -70,25 +70,33 @@ type HealthConfig struct {
 
 // Health sends delivery-status probes through an outbound/inbound circuit
 // pair. Replies are correlated by both their bounded pending ID and timestamp.
+//
+// Lock order: lifecycleMu -> mu.
 type Health struct {
-	runtime          dataplane.TunnelCircuitRuntime
-	pool             *Pool
-	maintainer       healthMaintainer
-	profiles         *PeerProfiles
-	now              func() uint64
-	timeout          uint64
-	max              int
+	runtime    dataplane.TunnelCircuitRuntime
+	pool       *Pool
+	maintainer healthMaintainer
+	profiles   *PeerProfiles
+	now        func() uint64
+	timeout    uint64
+	// +checklocks:mu
+	max int
+	// +checklocks:mu
 	failureThreshold uint8
 	requireActivity  bool
 
 	lifecycleMu sync.RWMutex
 	mu          sync.Mutex
-	nextID      uint32
-	pending     map[uint32]pendingProbe
-	failures    map[dataplane.TunnelCircuitToken]uint8
-	ctx         context.Context
-	cancel      context.CancelFunc
-	closed      bool
+	// +checklocks:mu
+	nextID uint32
+	// +checklocks:mu
+	pending map[uint32]pendingProbe
+	// +checklocks:mu
+	failures map[dataplane.TunnelCircuitToken]uint8
+	ctx      context.Context
+	cancel   context.CancelFunc
+	// +checklocks:lifecycleMu
+	closed bool
 }
 
 func NewHealth(config HealthConfig) (*Health, error) {
@@ -143,6 +151,11 @@ func (h *Health) Probe(ctx context.Context, pair CircuitPair, peer foundation.Ha
 	if h.closed {
 		return 0, ErrHealthClosed
 	}
+	return h.probeActive(ctx, pair, peer)
+}
+
+// +checklocksexclude:h.mu
+func (h *Health) probeActive(ctx context.Context, pair CircuitPair, peer foundation.Hash) (uint32, error) {
 	if ctx == nil {
 		ctx =
 			context.Background()
@@ -270,6 +283,11 @@ func (h *Health) HandleDeliveryStatus(status foundation.I2NPDeliveryStatusMessag
 	if h.closed {
 		return false
 	}
+	return h.handleDeliveryStatusActive(status)
+}
+
+// +checklocksexclude:h.mu
+func (h *Health) handleDeliveryStatusActive(status foundation.I2NPDeliveryStatusMessage) bool {
 	now := h.now()
 	h.mu.Lock()
 	probe, ok := h.pending[status.MessageID]
@@ -295,6 +313,11 @@ func (h *Health) Expire(ctx context.Context) (expired int, err error) {
 	if h.closed {
 		return 0, ErrHealthClosed
 	}
+	return h.expireActive(ctx)
+}
+
+// +checklocksexclude:h.mu
+func (h *Health) expireActive(ctx context.Context) (expired int, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -352,6 +375,7 @@ func (h *Health) pairActive(pair CircuitPair) bool {
 	return outboundOK && inboundOK && outbound != 0 && inbound != 0
 }
 
+// +checklocksexclude:h.mu
 func (h *Health) clearFailures(circuit dataplane.TunnelCircuitToken) {
 	h.mu.Lock()
 	delete(h.failures, circuit)
@@ -385,6 +409,7 @@ func (h *Health) Close() error {
 	return nil
 }
 
+// +checklocks:h.mu
 func (h *Health) nextPendingIDLocked() uint32 {
 	for {
 		h.nextID = (h.nextID + 1) | (uint32(1) << 31)
@@ -397,16 +422,19 @@ func (h *Health) nextPendingIDLocked() uint32 {
 	}
 }
 
+// +checklocksexclude:h.mu
 func (h *Health) dropPending(id uint32) {
 	h.mu.Lock()
 	delete(h.pending, id)
 	h.mu.Unlock()
 }
 
+// +checklocksexclude:h.mu
 func (h *Health) fail(ctx context.Context, probe pendingProbe) error {
 	return h.failExplicit(ctx, probe, 1, 1)
 }
 
+// +checklocksexclude:h.mu
 func (h *Health) failExplicit(ctx context.Context, probe pendingProbe, outIncrement, inIncrement uint8) error {
 	h.record(probe, false, 0)
 	h.mu.Lock()
