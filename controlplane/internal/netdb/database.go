@@ -52,16 +52,23 @@ type leaseExpiry struct {
 }
 
 // Database stores verified RouterInfos and LeaseSets with memory bounds and TTL expiration.
+//
+// Lock hierarchy: routers.mu (Table.mu) and leasesMu are disjoint leaf locks;
+// neither lock may be held while acquiring the other.
 type Database struct {
-	routers          *Table
-	leasesMu         sync.RWMutex
-	leases           map[foundation.Hash]leaseEntry
-	leaseExpiries    []leaseExpiry
+	routers  *Table
+	leasesMu sync.RWMutex
+	// +checklocks:leasesMu
+	leases map[foundation.Hash]leaseEntry
+	// +checklocks:leasesMu
+	leaseExpiries []leaseExpiry
+	// +checklocks:leasesMu
 	leaseExpiryIndex map[foundation.Hash]int
-	maxLeases        int
-	networkID        uint32
-	gzipPool         sync.Pool
-	metrics          atomic.Pointer[observability.Registry]
+	// +checklocks:leasesMu
+	maxLeases int
+	networkID uint32
+	gzipPool  sync.Pool
+	metrics   atomic.Pointer[observability.Registry]
 }
 
 func NewDatabase(local foundation.Hash, bucketCapacity int) *Database {
@@ -171,6 +178,7 @@ func (d *Database) AdmitVerifiedReseedRouterInfo(info foundation.NetworkDatabase
 	return d.admitRouterInfo(info, seenAt, ReseedRouterInfoMaxAgeMillis, false)
 }
 
+// +checklocksexclude:d.leasesMu
 func (d *Database) admitRouterInfo(info foundation.NetworkDatabaseRouterInfo, seenAt, maxAgeMillis uint64, verify bool) error {
 	if d.networkID != 0 {
 		id, err := foundation.NetworkDatabaseNetID(info)
@@ -603,6 +611,8 @@ func (d *Database) EncryptedLeaseSet(key foundation.Hash) (foundation.NetworkDat
 	return entry.encrypted, ok && entry.typeID == foundation.I2NPStoreEncryptedLeaseSet
 }
 
+// +checklocks:d.leasesMu
+// +checklocksexclude:d.routers.mu
 func (d *Database) storeLeaseEntry(key foundation.Hash, entry leaseEntry) {
 	_, exists := d.leases[key]
 	if !exists && len(d.leases) >= d.maxLeases {
@@ -614,6 +624,7 @@ func (d *Database) storeLeaseEntry(key foundation.Hash, entry leaseEntry) {
 	d.upsertLeaseExpiryLocked(key, entry.expires)
 }
 
+// +checklocks:d.leasesMu
 func (d *Database) upsertLeaseExpiryLocked(key foundation.Hash, expires uint64) {
 	if index, ok := d.leaseExpiryIndex[key]; ok {
 		d.leaseExpiries[index].expires = expires
@@ -633,6 +644,7 @@ func (d *Database) upsertLeaseExpiryLocked(key foundation.Hash, expires uint64) 
 	}
 }
 
+// +checklocks:d.leasesMu
 func (d *Database) popLeaseExpiryLocked() (leaseExpiry, bool) {
 	if len(d.leaseExpiries) == 0 {
 		return leaseExpiry{}, false
@@ -652,6 +664,7 @@ func (d *Database) popLeaseExpiryLocked() (leaseExpiry, bool) {
 	return oldest, true
 }
 
+// +checklocks:d.leasesMu
 func (d *Database) fixLeaseExpiryLocked(index int) {
 	for index > 0 {
 		parent := (index - 1) / 2
@@ -678,6 +691,7 @@ func (d *Database) fixLeaseExpiryLocked(index int) {
 	}
 }
 
+// +checklocksread:d.leasesMu
 func (d *Database) lessLeaseExpiryLocked(left, right int) bool {
 	leftExpiry := d.leaseExpiries[left].expires
 	rightExpiry := d.leaseExpiries[right].expires
@@ -693,6 +707,7 @@ func (d *Database) lessLeaseExpiryLocked(left, right int) bool {
 	return leftExpiry < rightExpiry
 }
 
+// +checklocks:d.leasesMu
 func (d *Database) swapLeaseExpiryLocked(left, right int) {
 	d.leaseExpiries[left], d.leaseExpiries[right] = d.leaseExpiries[right], d.leaseExpiries[left]
 	d.leaseExpiryIndex[d.leaseExpiries[left].key] = left

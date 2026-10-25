@@ -43,13 +43,17 @@ type Entry struct {
 
 // Pool stores active tunnel descriptors with capacity bounds and expiration tracking.
 type Pool struct {
-	mu             sync.RWMutex
-	max            int
-	owner          foundation.Hash
-	tunnels        map[uint32]Entry
+	mu    sync.RWMutex
+	max   int
+	owner foundation.Hash
+	// +checklocks:mu
+	tunnels map[uint32]Entry
+	// +checklocks:mu
 	activeOutbound map[uint32]struct{}
+	// +checklocks:mu
 	outboundTarget int
-	renewBefore    uint64
+	// +checklocks:mu
+	renewBefore uint64
 }
 
 func NewPool(max int) *Pool { return NewOwnedPool(foundation.Hash{}, max) }
@@ -247,6 +251,7 @@ func (p *Pool) SelectableOutbound(now uint64) []Entry {
 	return entries
 }
 
+// +checklocks:p.mu
 func (p *Pool) promoteOutboundLocked(now uint64) {
 	if p.outboundTarget == 0 {
 		return
@@ -303,6 +308,7 @@ func (p *Pool) Expire(now uint64) int {
 	return p.expireLocked(now)
 }
 
+// +checklocks:p.mu
 func (p *Pool) expireLocked(now uint64) (removed int) {
 	for id, entry := range p.tunnels {
 		if entry.Expires <= now {

@@ -45,15 +45,21 @@ type routerSelectionBuffer struct {
 // Table mirrors Java I2P's split NetDB model: routers owns every verified
 // RouterInfo, while routing is the bounded KBucketSet used by DHT traversal.
 type Table struct {
-	mu            sync.RWMutex
-	local         foundation.Hash
-	routers       map[foundation.Hash]routerEntry
-	floodfills    map[foundation.Hash]struct{}
-	routing       kBucketSet
+	mu    sync.RWMutex
+	local foundation.Hash
+	// +checklocks:mu
+	routers map[foundation.Hash]routerEntry
+	// +checklocks:mu
+	floodfills map[foundation.Hash]struct{}
+	// +checklocks:mu
+	routing kBucketSet
+	// +checklocks:mu
 	generation    uint64
 	selectionPool chan *routerSelectionBuffer
-	routerLimit   int
-	subnetQuota   int
+	// +checklocks:mu
+	routerLimit int
+	// +checklocks:mu
+	subnetQuota int
 }
 
 func NewTable(local foundation.Hash, bucketCapacity int) *Table {
@@ -94,6 +100,7 @@ func (t *Table) SetRouterLimit(limit int) {
 	}
 }
 
+// +checklocks:t.mu
 func (t *Table) evictOldestLocked() {
 	var oldest foundation.Hash
 	var oldestSeen uint64
@@ -355,6 +362,7 @@ func (t *Table) StoreVerified(info foundation.NetworkDatabaseRouterInfo, floodfi
 	t.generation++
 }
 
+// +checklocksread:t.mu
 func (t *Table) routingAllowsSubnetsLocked(candidate foundation.Hash, subnets []routingSubnet) bool {
 	if t.subnetQuota <= 0 || len(subnets) == 0 {
 		return true

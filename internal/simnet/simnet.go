@@ -252,23 +252,37 @@ func (h *Host) Name() string { return h.name }
 // Methods are safe for concurrent use; event ordering is deterministic for a
 // given schedule of calls, and per-link randomness is seeded from Config.Seed.
 type Network struct {
-	now    func() time.Time
-	seed   uint64
-	hook   func(Event)
-	inHook bool // guarded by mu; set while n.hook runs
+	now  func() time.Time
+	seed uint64
+	// +checklocks:mu
+	hook func(Event)
+	// +checklocks:mu
+	inHook bool // set while n.hook runs
 	cfg    Config
 
-	mu        sync.Mutex
-	hosts     map[netip.Addr]*Host
-	udp       map[netip.AddrPort]*UDPConn
-	tcp       map[netip.AddrPort]*TCPListener
-	conns     map[*TCPConn]struct{}
-	dialUsed  map[netip.AddrPort]struct{}
-	links     map[[2]netip.Addr]*linkState
-	events    eventHeap
-	seq       uint64
-	closed    bool
-	stats     Stats
+	// mu guards topology, scheduler queues, link states, and stats. Never held while acquiring TCPConn.mu or simDeadline.mu.
+	mu sync.Mutex
+	// +checklocks:mu
+	hosts map[netip.Addr]*Host
+	// +checklocks:mu
+	udp map[netip.AddrPort]*UDPConn
+	// +checklocks:mu
+	tcp map[netip.AddrPort]*TCPListener
+	// +checklocks:mu
+	conns map[*TCPConn]struct{}
+	// +checklocks:mu
+	dialUsed map[netip.AddrPort]struct{}
+	// +checklocks:mu
+	links map[[2]netip.Addr]*linkState
+	// +checklocks:mu
+	events eventHeap
+	// +checklocks:mu
+	seq uint64
+	// +checklocks:mu
+	closed bool
+	// +checklocks:mu
+	stats Stats
+	// +checklocks:mu
 	nextAddr  uint32
 	wake      chan struct{}
 	done      chan struct{}
@@ -309,11 +323,11 @@ func NewNetwork(cfg Config) *Network {
 		conns:     make(map[*TCPConn]struct{}),
 		dialUsed:  make(map[netip.AddrPort]struct{}),
 		links:     make(map[[2]netip.Addr]*linkState),
+		nextAddr:  1,
 		wake:      make(chan struct{}, 1),
 		done:      make(chan struct{}),
 		schedDone: make(chan struct{}),
 	}
-	n.nextAddr = 1
 	go n.run()
 	return n
 }
@@ -352,6 +366,7 @@ func (n *Network) HostAt(name string, addr netip.Addr) *Host {
 	return h
 }
 
+// +checklocks:n.mu
 func (n *Network) allocAddrLocked() (netip.Addr, bool) {
 	base := n.cfg.Prefix.Masked().Addr()
 	for i := 0; i < 65536; i++ {
@@ -427,6 +442,8 @@ func (n *Network) Stats() Stats {
 
 // connsLocked snapshots live connections in (local, remote) order; caller
 // holds n.mu. Sorting keeps Close and ResetLink wake sequencing map-order free.
+//
+// +checklocks:n.mu
 func (n *Network) connsLocked() []*TCPConn {
 	out := make([]*TCPConn, 0, len(n.conns))
 	for c := range n.conns {
@@ -504,6 +521,8 @@ func (n *Network) setDown(from, to netip.Addr, down bool) {
 }
 
 // linkLocked returns the directed link entry, creating it with defaults.
+//
+// +checklocks:n.mu
 func (n *Network) linkLocked(from, to netip.Addr) *linkState {
 	key := [2]netip.Addr{from, to}
 	l, ok := n.links[key]
@@ -529,6 +548,8 @@ func (n *Network) newLinkState(from, to netip.Addr) *linkState {
 }
 
 // emitLocked records an event; caller holds n.mu.
+//
+// +checklocks:n.mu
 func (n *Network) emitLocked(kind EventKind, proto Proto, from, to netip.AddrPort, bytes int) {
 	switch kind {
 	case EventSent:
@@ -636,6 +657,8 @@ func (l *linkState) delayLocked(now time.Time, bytes int) time.Duration {
 }
 
 // scheduleLocked pushes one event; caller holds n.mu.
+//
+// +checklocks:n.mu
 func (n *Network) scheduleLocked(due time.Time, run func()) {
 	n.seq++
 	heap.Push(&n.events, event{due: due, seq: n.seq, run: run})
@@ -804,8 +827,10 @@ func (n *Network) record(kind EventKind, proto Proto, from, to netip.AddrPort, b
 // fresh generation channel so in-flight waiters re-arm against the new value.
 // Inside a synctest bubble the arming timer is a fake-clock timer.
 type simDeadline struct {
-	mu  sync.Mutex
-	t   time.Time
+	mu sync.Mutex
+	// +checklocks:mu
+	t time.Time
+	// +checklocks:mu
 	gen chan struct{}
 }
 

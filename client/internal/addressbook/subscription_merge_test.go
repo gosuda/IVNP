@@ -61,6 +61,7 @@ func TestMultiSubscription304PreservesPerSourceSnapshot(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestPersistedSourcesAreFilteredToCurrentHTTPSSubscriptions(t *testing.T) {
 	currentDestination := newDestinationString(t)
 	staleDestination := newDestinationString(t)
@@ -108,6 +109,7 @@ func TestPersistedSourcesAreFilteredToCurrentHTTPSSubscriptions(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestPersistedNonHTTPSSourceIsNeverAuthoritative(t *testing.T) {
 	destination := newDestinationString(t)
 	statePath := filepath.Join(t.TempDir(), "state.json")

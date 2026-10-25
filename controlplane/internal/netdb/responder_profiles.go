@@ -27,13 +27,19 @@ type responderObservation struct {
 
 // ResponderProfiles holds ranking hints, not authority to admit or contact a peer.
 // Static seeds share the capacity bound but are never persisted as successes.
+//
+// Lock hierarchy: {RequestManager.mu, ResponderProfileStore.mu} ->
+// ResponderProfiles.mu -> Table.mu (database.routers.mu).
 type ResponderProfiles struct {
 	mu       sync.Mutex
 	maxPeers int
 	now      func() uint64
-	peers    map[foundation.Hash]responderObservation
-	order    []foundation.Hash
-	next     uint64
+	// +checklocks:mu
+	peers map[foundation.Hash]responderObservation
+	// +checklocks:mu
+	order []foundation.Hash
+	// +checklocks:mu
+	next uint64
 }
 
 func NewResponderProfiles(config ResponderProfilesConfig) *ResponderProfiles {
@@ -79,6 +85,7 @@ func (p *ResponderProfiles) Seed(peer foundation.Hash) {
 	}
 }
 
+// +checklocks:p.mu
 func (p *ResponderProfiles) recordLocked(observation responderObservation) {
 	if previous, exists := p.peers[observation.peer]; exists {
 		if previous.success && (!observation.success || previous.seenAt > observation.seenAt) {
@@ -103,6 +110,7 @@ func responderObservationFresh(seenAt, now uint64) bool {
 	return seenAt <= now && now-seenAt < responderProfileMaxAgeMillis
 }
 
+// +checklocks:p.mu
 func (p *ResponderProfiles) expireLocked(now uint64) {
 	kept := p.order[:0]
 	for _, peer := range p.order {

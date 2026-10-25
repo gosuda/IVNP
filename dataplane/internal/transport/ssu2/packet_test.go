@@ -117,6 +117,7 @@ func TestDataCipherRejectsPacketBounds(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestDataCipherReleaseZeroizesAndRejectsUse(t *testing.T) {
 	cipher, err := NewDataCipher(bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32))
 	if err != nil {

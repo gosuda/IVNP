@@ -130,6 +130,7 @@ func (m *BuildManager) StartVariableOutbound(ctx context.Context, build Variable
 	return replyID, nil
 }
 
+// +checklocksexclude:m.mu
 func (m *BuildManager) armVariableDeadline(replyID uint32) {
 	now := m.now()
 	m.mu.Lock()
@@ -373,6 +374,8 @@ func cloneVariableOutboundBuild(build VariableOutboundBuild) VariableOutboundBui
 }
 func clearVariableBuildKeys(keys []VariableBuildKeys) { clear(keys) }
 func clearVariableBuildKey(key *VariableBuildKeys)    { *key = VariableBuildKeys{} }
+
+// +checklocksexclude:m.mu
 func (m *BuildManager) takeVariablePending(id uint32) *pendingVariableBuild {
 	m.mu.Lock()
 	pending := m.pendingVariable[id]

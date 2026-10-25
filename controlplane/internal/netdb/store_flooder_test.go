@@ -12,9 +12,11 @@ import (
 )
 
 type storeFloodCapture struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	targets []foundation.Hash
-	stores  []foundation.I2NPDatabaseStoreMessage
+	// +checklocks:mu
+	stores []foundation.I2NPDatabaseStoreMessage
 }
 
 func (s *storeFloodCapture) Send(_ context.Context, target RouterRef, message foundation.I2NPMessage) error {

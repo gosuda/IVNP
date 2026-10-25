@@ -97,6 +97,7 @@ func TestTunnelNetworkPiggybackACKsDoNotSignalLoss(t *testing.T) {
 	})
 }
 
+// +checklocksignore
 func TestTunnelFastRetransmitCountsNACKsAcrossACKProgress(t *testing.T) {
 	network := &TunnelNetwork{retransmit: time.Second, maxRetries: 4, readCapacity: 1}
 	connection := network.newConn(1, 2, foundation.Hash{1}, foundation.Identity{}, 1, 2, true)
@@ -193,6 +194,7 @@ func testRetransmitsSynchronizeReply(t *testing.T, dropReply bool) {
 	})
 }
 
+// +checklocksignore
 func deliverReliabilityPacket(t testing.TB, connection *tunnelConn, packet Packet) {
 	t.Helper()
 	packet.SendStreamID, packet.ReceiveStreamID = connection.localID, connection.remoteID

@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// +checklocksignore
 func TestEmbeddedCloseWipesFactoryRouterKey(t *testing.T) {
 	cfg := daemonTestConfig(t)
 	cfg.Tunnel.Enabled = true

@@ -73,11 +73,14 @@ type StoreFlooder struct {
 	random   func() uint32
 	logger   *slog.Logger
 
-	jobs      chan storeFloodJob
-	done      chan struct{}
-	mu        sync.Mutex
-	start     bool
-	closed    bool
+	jobs chan storeFloodJob
+	done chan struct{}
+	mu   sync.Mutex
+	// +checklocks:mu
+	start bool
+	// +checklocks:mu
+	closed bool
+	// +checklocks:mu
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	recent    map[[32]byte]uint64

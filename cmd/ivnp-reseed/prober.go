@@ -36,9 +36,13 @@ func defaultDialProbe(ctx context.Context, network, address string) (time.Durati
 
 // TokenBucketRateLimiter ensures outgoing probe rate does not trigger DDoS / flood alerts.
 type TokenBucketRateLimiter struct {
-	rate       float64
-	capacity   float64
-	tokens     float64
+	// +checklocks:mu
+	rate float64
+	// +checklocks:mu
+	capacity float64
+	// +checklocks:mu
+	tokens float64
+	// +checklocks:mu
 	lastRefill time.Time
 	mu         sync.Mutex
 }

@@ -30,6 +30,8 @@ const (
 
 // Timers are changed under the same lock as operation admission. A stale timer
 // callback rechecks the current deadline instead of cancelling an extended call.
+//
+// +checklocks:s.mu
 func (s *packetSocket) armLocked(op *packetOperation) {
 	if op.timer != nil {
 		op.timer.Stop()
@@ -54,6 +56,8 @@ func (s *packetSocket) armLocked(op *packetOperation) {
 		}
 	})
 }
+
+// +checklocksexclude:s.owner.mu
 func (s *packetSocket) setDeadline(t time.Time, directions packetDeadline) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -77,6 +81,8 @@ func (s *packetSocket) setDeadline(t time.Time, directions packetDeadline) error
 	}
 	return nil
 }
+
+// +checklocksexclude:s.owner.mu
 func (s *packetSocket) begin(write bool) (*packetOperation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -90,6 +96,8 @@ func (s *packetSocket) begin(write bool) (*packetOperation, error) {
 	s.armLocked(op)
 	return op, nil
 }
+
+// +checklocksexclude:s.owner.mu
 func (s *packetSocket) finish(op *packetOperation) {
 	s.mu.Lock()
 	delete(s.operations, op)

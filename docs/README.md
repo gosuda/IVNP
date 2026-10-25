@@ -40,7 +40,7 @@ This directory contains the architectural specifications, subsystem maps, and wi
 - **[Private Networks, Presets & Parameter Tuning Guide](private-networks-and-presets.md)**
   Explains why public I2P defaults stall 2-to-20 node or single-subnet networks, provides the complete raw parameter matrix across `public`, `dedicated`, and `direct`, maps each preset to realistic engineering workloads (such as personal clipboard-sync sidecars, office LAN service meshes, and multi-site dedicated overlays), and includes runnable Go and `ivnp.conf` configuration recipes.
 - **[Verification, Simulation & Tooling](testing-and-simulation.md)**
-  Documents standard verification commands (`go test`, `importformatter`, `gojgp lint`, `architecture_test.go`), deterministic multi-router simulation testing (`internal/simnet`, `tools/dstoverlay`, `sim_*.go`), and live network integration tests (`tests/integration`).
+  Documents standard verification commands (`go test`, `importformatter`, `checklocks`, `gojgp lint`, `architecture_test.go`), deterministic multi-router simulation testing (`internal/simnet`, `tools/dstoverlay`, `sim_*.go`), and live network integration tests (`tests/integration`).
 - **[Standalone Reseed Server (`ivnp-reseed`)](../cmd/ivnp-reseed/README.md)**
   Documents the standalone network crawler, token-bucket TCP reachability prober, 4-stage Max-Min XOR peer selector, deterministic RSA-4096 SU3 packager, and HTTP server.
 

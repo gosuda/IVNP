@@ -24,10 +24,14 @@ jobs:
           cache: true
       - name: Install gojgp
         run: go install github.com/gosuda/JustGoodPractices/cmd/gojgp@v1.2.0
+      - name: Install checklocks
+        run: go install gvisor.dev/gvisor/tools/checklocks/cmd/checklocks@v0.0.0-20261024223036-c3e0783a533c
       - name: Run all tests
         run: go test -count=1 ./...
       - name: Run go vet
         run: go vet ./...
+      - name: Run checklocks
+        run: go vet -vettool="$(go env GOPATH)/bin/checklocks" -inferred=false ./...
       - name: Run gojgp
         run: gojgp lint ./...
 

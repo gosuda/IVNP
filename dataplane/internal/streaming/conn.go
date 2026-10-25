@@ -21,6 +21,9 @@ type ByteStream interface {
 }
 
 // Conn wraps a ByteStream as a net.Conn with bounded write queuing and state tracking.
+//
+// Lock hierarchy: readMu -> deadlineMu; stateMu is independent and never held
+// alongside readMu or deadlineMu.
 type Conn struct {
 	stream ByteStream
 
@@ -28,17 +31,24 @@ type Conn struct {
 	done   chan struct{}
 	once   sync.Once
 
+	// readMu serializes Read calls and precedes deadlineMu.
 	readMu sync.Mutex
 
-	deadlineMu          sync.Mutex
-	readDeadline        time.Time
-	writeDeadline       time.Time
+	deadlineMu sync.Mutex
+	// +checklocks:deadlineMu
+	readDeadline time.Time
+	// +checklocks:deadlineMu
+	writeDeadline time.Time
+	// +checklocks:deadlineMu
 	activeWriteDeadline time.Time
-	activeRequest       *writeRequest
-	writeActive         bool
+	// +checklocks:deadlineMu
+	activeRequest *writeRequest
+	// +checklocks:deadlineMu
+	writeActive bool
 
 	stateMu sync.Mutex
-	state   State
+	// +checklocks:stateMu
+	state State
 
 	closeErr error
 }
@@ -279,18 +289,27 @@ func (c *Conn) SetWriteDeadline(deadline time.Time) error {
 	return err
 }
 
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.deadlineMu
+// +checklocksexclude:c.stateMu
 func (c *Conn) currentReadDeadline() time.Time {
 	c.deadlineMu.Lock()
 	defer c.deadlineMu.Unlock()
 	return c.readDeadline
 }
 
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.deadlineMu
+// +checklocksexclude:c.stateMu
 func (c *Conn) currentWriteDeadline() time.Time {
 	c.deadlineMu.Lock()
 	defer c.deadlineMu.Unlock()
 	return c.writeDeadline
 }
 
+// +checklocks:c.readMu
+// +checklocksexclude:c.deadlineMu
+// +checklocksexclude:c.stateMu
 func (c *Conn) applyReadDeadline() error {
 	c.deadlineMu.Lock()
 	err := c.stream.SetReadDeadline(c.readDeadline)
@@ -298,6 +317,9 @@ func (c *Conn) applyReadDeadline() error {
 	return err
 }
 
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.deadlineMu
+// +checklocksexclude:c.stateMu
 func (c *Conn) beginWrite(request *writeRequest) error {
 	c.deadlineMu.Lock()
 	c.writeActive, c.activeWriteDeadline, c.activeRequest = true, request.deadline, request
@@ -311,6 +333,9 @@ func (c *Conn) beginWrite(request *writeRequest) error {
 	return err
 }
 
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.deadlineMu
+// +checklocksexclude:c.stateMu
 func (c *Conn) endWrite() time.Time {
 	c.deadlineMu.Lock()
 	deadline := c.activeWriteDeadline

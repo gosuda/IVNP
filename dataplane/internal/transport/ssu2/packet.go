@@ -185,12 +185,17 @@ func xorHeaderMask(dst, key, nonce []byte) error {
 // methods serialize callers so the reusable nonce buffer never escapes to the
 // generic AEAD interface.
 type DataCipher struct {
-	aead       *cryptography.ChaCha20Poly1305
+	// +checklocks:mu
+	aead *cryptography.ChaCha20Poly1305
+	// +checklocks:mu
 	headerKey1 [cryptography.ChaChaKeySize]byte
+	// +checklocks:mu
 	headerKey2 [cryptography.ChaChaKeySize]byte
 	mu         sync.Mutex
-	nonce      [cryptography.ChaChaNonceSize]byte
-	released   bool
+	// +checklocks:mu
+	nonce [cryptography.ChaChaNonceSize]byte
+	// +checklocks:mu
+	released bool
 }
 
 var _ cryptography.Sensitive = (*DataCipher)(nil)
@@ -204,10 +209,10 @@ func NewDataCipher(dataKey, headerKey1, headerKey2 []byte) (*DataCipher, error) 
 		aead.ReleaseSensitive()
 		return nil, cryptography.ErrKeyLength
 	}
-	result := &DataCipher{aead: aead}
-	copy(result.headerKey1[:], headerKey1)
-	copy(result.headerKey2[:], headerKey2)
-	return result, nil
+	var key1, key2 [cryptography.ChaChaKeySize]byte
+	copy(key1[:], headerKey1)
+	copy(key2[:], headerKey2)
+	return &DataCipher{aead: aead, headerKey1: key1, headerKey2: key2}, nil
 }
 
 // ReleaseSensitive serializes with data operations then clears all retained

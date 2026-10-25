@@ -24,6 +24,7 @@ func TestTagStoreConsumesAndExpiresTags(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestTagStoreClearReleasesBackingMapAndRemainsUsable(t *testing.T) {
 	store := NewTagStore(1)
 	tag, key := make([]byte, 32), make([]byte, 32)

@@ -27,16 +27,25 @@ func (muxIPv4Listener) Addr() net.Addr {
 type muxTestTransport struct {
 	mu sync.Mutex
 
+	// +checklocks:mu
 	startErr error
+	// +checklocks:mu
 	closeErr error
-	waitErr  error
-	sendErr  error
-	status   dataplane.RouterTransportStatus
+	// +checklocks:mu
+	waitErr error
+	sendErr error
+	// +checklocks:mu
+	status dataplane.RouterTransportStatus
 
-	starts        int
-	closes        int
-	waits         int
-	sends         int
+	// +checklocks:mu
+	starts int
+	// +checklocks:mu
+	closes int
+	// +checklocks:mu
+	waits int
+	// +checklocks:mu
+	sends int
+	// +checklocks:mu
 	authenticated bool
 }
 

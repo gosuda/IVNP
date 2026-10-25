@@ -153,12 +153,12 @@ func TestTunnelNetworkHonorsJavaPeerPayloadMSS(t *testing.T) {
 
 		connection := outbound.(*tunnelConn)
 		connection.setPeerMaxPayloadSize(0)
-		if connection.peerMaxPayloadSize != minPeerMaxPayloadSize {
-			t.Fatalf("explicit zero MSS = %d, want Java clamp %d", connection.peerMaxPayloadSize, minPeerMaxPayloadSize)
+		if connection.peerMaxPayloadSize != minPeerMaxPayloadSize { // +checklocksignore
+			t.Fatalf("explicit zero MSS = %d, want Java clamp %d", connection.peerMaxPayloadSize, minPeerMaxPayloadSize) // +checklocksignore
 		}
 		connection.setPeerMaxPayloadSize(-1)
-		if connection.peerMaxPayloadSize != minPeerMaxPayloadSize {
-			t.Fatalf("omitted MSS changed negotiated value to %d", connection.peerMaxPayloadSize)
+		if connection.peerMaxPayloadSize != minPeerMaxPayloadSize { // +checklocksignore
+			t.Fatalf("omitted MSS changed negotiated value to %d", connection.peerMaxPayloadSize) // +checklocksignore
 		}
 		connection.setPeerMaxPayloadSize(1812)
 		payload := bytes.Repeat([]byte("java-streaming-mtu"), 1024)
@@ -745,7 +745,7 @@ func TestTunnelNetworkAcknowledgesRetransmittedSynchronizeReply(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { accepted.(*tunnelConn).abort(false) })
-		packet := Packet{SendStreamID: clientConn.localID, ReceiveStreamID: clientConn.remoteID, Flags: FlagSynchronize}
+		packet := Packet{SendStreamID: clientConn.localID, ReceiveStreamID: clientConn.remoteID, Flags: FlagSynchronize} // +checklocksignore
 		wire, err := server.signedControl(packet, controlOptions{includeFrom: true, includeMax: true})
 		if err != nil {
 			t.Fatal(err)
@@ -877,6 +877,7 @@ func TestTunnelNetworkSendsOfflineSignedControl(t *testing.T) {
 	})
 }
 
+// +checklocksignore
 func TestTunnelNetworkAcceptsJavaOfflineSignedSynchronizeReply(t *testing.T) {
 	fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
 	client, server := newTunnelNetworkPair(t, fabric, DefaultRetransmitAfter)
@@ -960,6 +961,7 @@ func TestTunnelNetworkAcceptsJavaOfflineSignedSynchronizeReply(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestTunnelReliabilityKarnFastRetransmitAndNACKs(t *testing.T) {
 	network := &TunnelNetwork{retransmit: time.Second, maxRetries: 4, readCapacity: 1}
 	connection := network.newConn(1, 2, foundation.Hash{1}, foundation.Identity{}, 1, 2, true)
@@ -1047,14 +1049,21 @@ func newTunnelNetworkPair(t *testing.T, fabric *streamFabric, retransmit time.Du
 }
 
 type streamFabric struct {
-	mu              sync.Mutex
-	networks        map[foundation.Hash]*TunnelNetwork
-	dropFirstData   bool
-	dropped         bool
-	maxDataPacket   int
-	maxDataPayload  int
-	initialACKs     int
-	ackCompleted    chan struct{}
+	mu sync.Mutex
+	// +checklocks:mu
+	networks map[foundation.Hash]*TunnelNetwork
+	// +checklocks:mu
+	dropFirstData bool
+	// +checklocks:mu
+	dropped bool
+	// +checklocks:mu
+	maxDataPacket int
+	// +checklocks:mu
+	maxDataPayload int
+	// +checklocks:mu
+	initialACKs  int
+	ackCompleted chan struct{}
+	// +checklocks:mu
 	zeroSYNACKPorts bool
 	beforeSend      func(context.Context, Delivery, Packet) (bool, error)
 }

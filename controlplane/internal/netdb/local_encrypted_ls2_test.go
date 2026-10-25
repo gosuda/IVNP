@@ -156,6 +156,7 @@ func TestEncryptedLeaseSetClientAuthorization(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestLocalEncryptedLeaseSetWriterDoesNotApplyReaderCap(t *testing.T) {
 	const clientCount = 101
 	clients := make([][32]byte, clientCount)
@@ -180,6 +181,7 @@ func TestLocalEncryptedLeaseSetWriterDoesNotApplyReaderCap(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestLocalEncryptedLeaseSetFailureCleanupAndRelease(t *testing.T) {
 	client, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -240,6 +242,7 @@ func TestLocalEncryptedLeaseSetFailureCleanupAndRelease(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestLeaseSetPublisherCloseReleasesSensitiveOwners(t *testing.T) {
 	destination, _, encrypted, now := encryptedTestSet(t, EncryptedLeaseSetAuthorization{})
 	defer destination.ReleaseSensitive()

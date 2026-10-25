@@ -18,6 +18,9 @@ type OutboundBuildSource interface {
 
 // Rotator maintains a target number of outbound tunnels. Maintain is intended
 // for one router maintenance worker; it performs no background work itself.
+//
+// maintenanceMu is acquired non-blockingly via TryLock in Maintain to serialize
+// concurrent maintenance passes.
 type Rotator struct {
 	pool          *Pool
 	runtime       dataplane.TunnelCircuitRuntime
@@ -53,11 +56,13 @@ func NewRotator(config RotatorConfig) (*Rotator, error) {
 // Maintain expires dead state and starts enough replacement builds to cover
 // tunnels already inside the renewal window. Pending builds count toward the
 // target so a slow or hostile network cannot create an unbounded build storm.
+//
+// +checklocksexclude:r.maintenanceMu
 func (r *Rotator) Maintain(ctx context.Context) (started int, err error) {
 	if !r.maintenanceMu.TryLock() {
 		return 0, nil
 	}
-	defer r.maintenanceMu.Unlock()
+	defer r.maintenanceMu.Unlock() // +checklocksignore
 	if ctx == nil {
 		ctx = context.
 			Background()

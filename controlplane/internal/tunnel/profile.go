@@ -77,10 +77,14 @@ type transportProfileState struct {
 // is intentionally integral and deterministic: successful probes improve a
 // score, failures cost twice as much, and lower mean latency wins ties.
 type PeerProfiles struct {
-	mu        sync.RWMutex
-	maxPeers  int
-	window    int
-	peers     map[foundation.Hash]peerProfileState
+	mu sync.RWMutex
+	// +checklocks:mu
+	maxPeers int
+	// +checklocks:mu
+	window int
+	// +checklocks:mu
+	peers map[foundation.Hash]peerProfileState
+	// +checklocks:mu
 	transport map[foundation.Hash]transportProfileState
 }
 
@@ -273,6 +277,7 @@ func (p *PeerProfiles) selectionTier(peer foundation.Hash, advertisedHighCapacit
 	return 2
 }
 
+// +checklocks:p.mu
 func (p *PeerProfiles) evictLocked() {
 	var victim foundation.Hash
 	var victimScore int64
@@ -290,6 +295,7 @@ func (p *PeerProfiles) evictLocked() {
 	delete(p.peers, victim)
 }
 
+// +checklocks:p.mu
 func (p *PeerProfiles) evictTransportLocked() {
 	var victim foundation.Hash
 	var oldest uint64

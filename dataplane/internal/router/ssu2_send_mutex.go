@@ -9,12 +9,14 @@ import (
 // ssu2SendMutex keeps bulk locking allocation-free. Only a control sender
 // waiting behind another writer allocates a cancellation notification.
 type ssu2SendMutex struct {
-	mu       sync.Mutex
-	waitMu   sync.Mutex
-	waiters  atomic.Int32
+	mu      sync.Mutex
+	waitMu  sync.Mutex
+	waiters atomic.Int32
+	// +checklocks:waitMu
 	released chan struct{}
 }
 
+// +checklocksignore
 func (m *ssu2SendMutex) Lock() { m.mu.Lock() }
 
 func (m *ssu2SendMutex) LockContext(ctx context.Context) error {
@@ -48,6 +50,7 @@ func (m *ssu2SendMutex) LockContext(ctx context.Context) error {
 	}
 }
 
+// +checklocksignore
 func (m *ssu2SendMutex) Unlock() {
 	m.mu.Unlock()
 	if m.waiters.Load() == 0 {

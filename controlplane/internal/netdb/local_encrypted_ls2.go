@@ -46,15 +46,24 @@ type ELSClientAuthorization struct {
 
 // LocalEncryptedLeaseSet owns ELS2 policy and delegates the signed inner LS2
 // construction to the same local LS2 producer used by public publication.
+//
+// Lock hierarchy: LocalEncryptedLeaseSet.mu -> LocalLeaseSet2.mu (inner.mu).
 type LocalEncryptedLeaseSet struct {
+	// +checklocks:mu
 	destination *foundation.LocalDestination
-	inner       *LocalLeaseSet2
-	secret      []byte
-	dhClients   [][32]byte
-	pskClients  [][32]byte
-	random      io.Reader
-	mu          sync.RWMutex
-	released    bool
+	// +checklocks:mu
+	inner *LocalLeaseSet2
+	// +checklocks:mu
+	secret []byte
+	// +checklocks:mu
+	dhClients [][32]byte
+	// +checklocks:mu
+	pskClients [][32]byte
+	// +checklocks:mu
+	random io.Reader
+	mu     sync.RWMutex
+	// +checklocks:mu
+	released bool
 }
 
 func NewLocalEncryptedLeaseSet(destination *foundation.LocalDestination, inner *LocalLeaseSet2, authorization EncryptedLeaseSetAuthorization, secret []byte) (*LocalEncryptedLeaseSet, error) {
@@ -379,6 +388,16 @@ func (s *LocalEncryptedLeaseSet) MarshalTo(dst []byte, nowMillis uint64) (writte
 	return s.finishOuter(dst, blinded, &private, published, outerCiphertext)
 }
 
+func (s *LocalEncryptedLeaseSet) innerLeaseSet() *LocalLeaseSet2 {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.inner
+}
+
+// +checklocksread:s.mu
 func (s *LocalEncryptedLeaseSet) finishOuter(dst []byte, blinded [32]byte, private *[32]byte, published uint32, outerCiphertext []byte) (written int, err error) {
 	latest := uint64(0)
 	s.inner.mu.RLock()

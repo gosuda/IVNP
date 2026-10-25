@@ -151,10 +151,13 @@ type Store struct {
 	MaxDestinations int
 	MaxNameBytes    int
 
-	mu       sync.Mutex
-	memory   bool
+	mu sync.Mutex
+	// +checklocks:mu
+	memory bool
+	// +checklocks:mu
 	snapshot []byte
-	closed   bool
+	// +checklocks:mu
+	closed bool
 }
 
 // NewStore creates a Store with default limits.
@@ -166,7 +169,10 @@ func NewStore(statePath, masterKeyPath string) (*Store, error) {
 		MaxDestinations: DefaultMaxDestinations,
 		MaxNameBytes:    DefaultMaxNameBytes,
 	}
-	if err := store.validConfig(); err != nil {
+	store.mu.Lock()
+	err := store.validConfig()
+	store.mu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 	return store, nil
@@ -270,6 +276,7 @@ func (s *Store) LoadOrCreate() (Bundle, error) {
 	return cloneBundle(bundle), nil
 }
 
+// +checklocks:s.mu
 func (s *Store) load() (Bundle, error) {
 	if err := s.validConfig(); err != nil {
 		return Bundle{}, err
@@ -313,6 +320,7 @@ func (s *Store) load() (Bundle, error) {
 	return bundle, nil
 }
 
+// +checklocks:s.mu
 func (s *Store) save(bundle Bundle) error {
 	if err := s.validConfig(); err != nil {
 		return err
@@ -1080,6 +1088,7 @@ func generateBundle() (Bundle, error) {
 	return bundle, nil
 }
 
+// +checklocks:s.mu
 func (s *Store) validConfig() error {
 	if s.closed {
 		return ErrStoreConfig

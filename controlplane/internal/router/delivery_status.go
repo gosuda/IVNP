@@ -16,7 +16,8 @@ type DeliveryStatusHandler interface {
 // claims it. Registration changes publish an immutable copy so authenticated
 // ingress never invokes a handler while holding the registry lock.
 type DeliveryStatusMux struct {
-	mu        sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	next      uint64
 	handlers  atomic.Pointer[[]deliveryStatusRegistration]
 	unmatched atomic.Uint64

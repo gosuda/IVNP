@@ -45,18 +45,27 @@ type LocalRouterInfoConfig struct {
 // retains an immutable snapshot, and admits each successful publication into
 // the supplied local netdb.
 type LocalRouterInfo struct {
-	info     *controlplanenetdb.LocalRouterInfo
+	info *controlplanenetdb.LocalRouterInfo
+	// +checklocks:mu
 	database *controlplanenetdb.Database
 	clock    dataplane.RouterClock
-	metrics  *observability.Registry
+	// +checklocks:mu
+	metrics *observability.Registry
 
-	mu           sync.Mutex
-	addresses    []PublishedAddress
-	peers        []foundation.Hash
-	baseOptions  []foundation.MappingEntry
-	floodfill    bool
-	noTransit    bool
-	bandwidth    byte
+	mu sync.Mutex
+	// +checklocks:mu
+	addresses []PublishedAddress
+	// +checklocks:mu
+	peers []foundation.Hash
+	// +checklocks:mu
+	baseOptions []foundation.MappingEntry
+	// +checklocks:mu
+	floodfill bool
+	// +checklocks:mu
+	noTransit bool
+	// +checklocks:mu
+	bandwidth byte
+	// +checklocks:mu
 	reachability Reachability
 }
 
@@ -283,6 +292,7 @@ func (l *LocalRouterInfo) UpdateSSU2Introducers(ctx context.Context, leases []da
 	return nil
 }
 
+// +checklocks:l.mu
 func (l *LocalRouterInfo) contactsLocked(addresses []PublishedAddress, reachability Reachability) (controlplanenetdb.RouterInfoContacts, error) {
 	options, err := localRouterCapabilities(l.baseOptions, reachability, l.floodfill, l.noTransit, l.bandwidth)
 	if err != nil {

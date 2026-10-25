@@ -101,9 +101,11 @@ func testNTCP2ControlCancellation(t *testing.T, name string) {
 		replacement := controlTestSession(t, replacementConn)
 		peer := foundation.Hash{7}
 		manager := newConfiguredNTCP2Manager(t, nil)
+		manager.mu.Lock()
 		manager.started = true
 		manager.ctx = t.Context()
 		manager.sessions[peer] = session
+		manager.mu.Unlock()
 		sender, err := manager.PreparedSession(peer)
 		if err != nil {
 			t.Fatal(err)

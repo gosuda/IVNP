@@ -63,23 +63,32 @@ type ServerConfig struct {
 
 // Server serves inbound SAM while Network remains the external SAM client.
 type Server struct {
-	config       ServerConfig
-	mu           sync.RWMutex
-	sessions     map[string]*samSession
+	config ServerConfig
+	// mu guards sessions, destinations, connections, cancel, started, closed, and cleanupErr.
+	// Never held while acquiring samSession.mu or serverConnection.writeMu.
+	mu sync.RWMutex
+	// +checklocks:mu
+	sessions map[string]*samSession
+	// +checklocks:mu
 	destinations map[foundation.Hash]*samSession
 	listener     net.Listener
-	connections  map[net.Conn]struct{}
-	udp          net.PacketConn
-	udpIngress   chan udpPacket
-	ctx          context.Context
-	cancel       context.CancelFunc
-	done         chan struct{}
-	wg           sync.WaitGroup
-	started      bool
-	closed       bool
-	sem          chan struct{}
-	queueBytes   *byteBudget
-	cleanupErr   error
+	// +checklocks:mu
+	connections map[net.Conn]struct{}
+	udp         net.PacketConn
+	udpIngress  chan udpPacket
+	ctx         context.Context
+	// +checklocks:mu
+	cancel context.CancelFunc
+	done   chan struct{}
+	wg     sync.WaitGroup
+	// +checklocks:mu
+	started bool
+	// +checklocks:mu
+	closed     bool
+	sem        chan struct{}
+	queueBytes *byteBudget
+	// +checklocks:mu
+	cleanupErr error
 }
 
 func NewServer(config ServerConfig) (*Server, error) {
@@ -261,7 +270,8 @@ func (s *Server) acceptLoop() {
 
 type serverConnection struct {
 	net.Conn
-	reader          *bufio.Reader
+	reader *bufio.Reader
+	// writeMu serializes writes to Conn in writeLine and writeFrame.
 	writeMu         sync.Mutex
 	root            *samSession
 	commandDeadline time.Time
@@ -270,12 +280,15 @@ type serverConnection struct {
 
 func (c *serverConnection) Read(dst []byte) (int, error) { return c.reader.Read(dst) }
 
+// +checklocksexclude:c.writeMu
 func (c *serverConnection) writeLine(line string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	_, err := io.WriteString(c.Conn, line+"\n")
 	return err
 }
+
+// +checklocksexclude:c.writeMu
 func (c *serverConnection) writeFrame(header, body []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
@@ -483,6 +496,7 @@ func (s *Server) destroyDestination(endpoint destination.DestinationEndpoint) er
 	return err
 }
 
+// +checklocksexclude:root.mu
 func (s *Server) addRoot(root *samSession) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -498,6 +512,8 @@ func (s *Server) addRoot(root *samSession) error {
 	s.sessions[root.id], s.destinations[root.endpoint.Hash()] = root, root
 	return nil
 }
+
+// +checklocksexclude:child.mu
 func (s *Server) addChild(child *samSession) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -515,6 +531,8 @@ func (s *Server) session(id string) *samSession {
 	defer s.mu.RUnlock()
 	return s.sessions[id]
 }
+
+// +checklocksexclude:session.mu
 func (s *Server) removeSession(session *samSession) {
 	s.mu.Lock()
 	if s.sessions[session.id] == session {
@@ -522,6 +540,8 @@ func (s *Server) removeSession(session *samSession) {
 	}
 	s.mu.Unlock()
 }
+
+// +checklocksexclude:root.mu
 func (s *Server) removeRoot(root *samSession) {
 	s.mu.Lock()
 	for id, session := range s.sessions {

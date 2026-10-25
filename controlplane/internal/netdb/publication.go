@@ -83,6 +83,9 @@ type LeaseSetPublisherConfig struct {
 // LeaseSetPublisher refreshes local inbound leases and publishes their signed
 // legacy LeaseSet to the closest floodfills. It performs no background work;
 // callers invoke Maintain from their maintenance loop.
+//
+// Lock hierarchy: opGate (channel) -> LeaseSetPublisher.mu ->
+// confirmedPublication.mu -> PublicationTokenRegistry.mu.
 type LeaseSetPublisher struct {
 	local           *LocalLeaseSet
 	local2          *LocalLeaseSet2
@@ -98,9 +101,10 @@ type LeaseSetPublisher struct {
 	random          func() uint32
 	floodfillLimit  int
 	republishBefore uint64
-	confirmed       *confirmedPublication
-	storeType       foundation.I2NPStoreType
-	hash            foundation.Hash
+	// +checklocks:mu
+	confirmed *confirmedPublication
+	storeType foundation.I2NPStoreType
+	hash      foundation.Hash
 
 	// opGate drains sends before mutation or Close; mu keeps ACK/readiness
 	// access independent of network I/O and protects confirmed replacement and
@@ -118,7 +122,8 @@ type LeaseSetPublisher struct {
 	discoveryDay     uint64
 	discoveryHash    foundation.Hash
 	discoveryRetryAt uint64
-	closed           bool
+	// +checklocks:mu
+	closed bool
 }
 
 // NewLeaseSetPublisher validates and owns the publication configuration. Its
@@ -200,7 +205,10 @@ func (p *LeaseSetPublisher) Maintain(ctx context.Context) (int, error) {
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
-	if p.closed {
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
 		return 0, nil
 	}
 	return p.publish(ctx, false)
@@ -223,7 +231,10 @@ func (p *LeaseSetPublisher) Publish(ctx context.Context) (int, error) {
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
-	if p.closed {
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
 		return 0, nil
 	}
 	return p.publish(ctx, true)
@@ -288,7 +299,7 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 	if p.local2 != nil || p.encrypted != nil {
 		local2 := p.local2
 		if p.encrypted != nil {
-			local2 = p.encrypted.inner
+			local2 = p.encrypted.innerLeaseSet()
 			hash, err := p.encrypted.Hash(time.UnixMilli(int64(now)))
 			if err != nil {
 				return 0, err
@@ -332,13 +343,16 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 		}
 		leases, expiresAt = snapshot.Leases, snapshot.ExpiresAt
 	}
+	p.mu.Lock()
+	confirmed := p.confirmed
+	p.mu.Unlock()
 	if len(leases) == 0 || expiresAt <= now {
 		p.leases = nil
 		p.storePayload = nil
 		p.expiresAt = 0
 		p.nextPublication = 0
-		if p.confirmed != nil {
-			p.confirmed.replace(nil)
+		if confirmed != nil {
+			confirmed.replace(nil)
 		}
 		return 0, nil
 	}
@@ -364,13 +378,13 @@ func (p *LeaseSetPublisher) publish(ctx context.Context, force bool) (int, error
 		}
 		p.expiresAt = expiresAt
 		p.nextPublication = 0
-		if p.confirmed != nil {
-			p.confirmed.replace(store)
+		if confirmed != nil {
+			confirmed.replace(store)
 		}
 	}
 	discoveryChanged := p.maintainDiscovery(ctx, now)
-	if p.confirmed != nil {
-		return p.confirmed.maintain(ctx, force || discoveryChanged || changed)
+	if confirmed != nil {
+		return confirmed.maintain(ctx, force || discoveryChanged || changed)
 	}
 	publishRejected := !force && !discoveryChanged && !changed
 	if publishRejected {

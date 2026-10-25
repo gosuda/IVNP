@@ -12,6 +12,8 @@ import (
 // Generated with Java I2P 2.13.0 RatchetTagSet and ChaChaPolyCipherState.
 // Root bytes are 00..1f, directional key material is 20..3f, and the payload is
 // a GarlicClove block containing the big-endian four-byte message index.
+//
+// +checklocksignore
 func TestRatchetWindowJavaI2P2130Vectors(t *testing.T) {
 	vectors := []struct {
 		index  uint32

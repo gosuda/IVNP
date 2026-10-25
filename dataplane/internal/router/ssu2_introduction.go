@@ -24,6 +24,7 @@ const (
 	ssu2RelayRejectGeneralFailure = 64
 )
 
+// +checklocks:m.mu
 func (m *SSU2Manager) finishRelayRequestLocked(nonce uint32, relay *ssu2RelayRequest, err error) {
 	if relay == nil || relay.completed || m.relayRequests[nonce] != relay {
 		return

@@ -14,9 +14,11 @@ type ACKRange struct{ Start, End uint32 }
 
 // ACKTracker retains a bounded descending set of received packet ranges.
 type ACKTracker struct {
-	mu     sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	ranges [MaxACKRanges]ACKRange
-	count  int
+	// +checklocks:mu
+	count int
 }
 
 func (a *ACKTracker) Observe(packet uint32) {
@@ -60,6 +62,7 @@ func (a *ACKTracker) ObserveNew(packet uint32) bool {
 	return false
 }
 
+// +checklocks:a.mu
 func (a *ACKTracker) merge(index int) {
 	if index+1 < a.count && a.ranges[index+1].End != ^uint32(0) && a.ranges[index].Start <= a.ranges[index+1].End+1 {
 		if a.ranges[index+1].Start < a.ranges[index].Start {

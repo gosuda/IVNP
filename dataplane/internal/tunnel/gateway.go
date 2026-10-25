@@ -270,12 +270,17 @@ func marshalBlock(dst []byte, block Block) (int, error) {
 
 // Endpoint parses a decrypted TunnelData payload. Complete unfragmented blocks
 // alias payload; reassembled messages are newly allocated by Reassembler.
+//
+// Lock hierarchy: Endpoint.mu -> Reassembler.mu.
 type Endpoint struct {
 	installed atomic.Bool
 	mu        sync.Mutex
-	reasm     *Reassembler
-	maxMeta   int
-	meta      map[uint32]deliveryMeta
+	// +checklocks:mu
+	reasm *Reassembler
+	// +checklocks:mu
+	maxMeta int
+	// +checklocks:mu
+	meta map[uint32]deliveryMeta
 }
 
 type deliveryMeta struct {
@@ -322,12 +327,6 @@ func (e *Endpoint) Parse(payload []byte, out []Block, nowMillis uint64) (int, er
 	if subtle.ConstantTimeCompare(checksum, expected[:tunnelChecksumLen]) != 1 {
 		return 0, ErrGatewayPayload
 	}
-	locked := false
-	defer func() {
-		if locked {
-			e.mu.Unlock()
-		}
-	}()
 	it := NewBlockIterator(data[start+1:])
 	n := 0
 	for {
@@ -346,54 +345,78 @@ func (e *Endpoint) Parse(payload []byte, out []Block, nowMillis uint64) (int, er
 			n++
 			continue
 		}
-		if !locked {
-			e.mu.Lock()
-			locked = true
-		}
-		if block.FollowOn {
-			if block.Fragment == 0 {
-				return n, ErrGatewayBlock
-			}
-			complete, done, err := e.reasm.Add(Fragment{MessageID: block.MessageID, Number: block.Fragment, Last: block.Last, Data: block.Data}, nowMillis)
-			if err != nil {
-				return n, err
-			}
-			if done {
-				meta, exists := e.meta[block.MessageID]
-				if !exists {
-					return n, ErrFragment
-				}
-				if n == len(out) {
-					return n, ErrGatewayOutput
-				}
-				meta.block.Data, meta.block.Last = complete, true
-				out[n] = meta.block
-				n++
-				delete(e.meta, block.MessageID)
-			}
-			continue
-		}
+		return e.parseFragmented(block, &it, out, n, nowMillis)
+	}
+}
 
-		if err := e.remember(block, nowMillis); err != nil {
-			return n, err
-		}
-		complete, done, err := e.reasm.Add(Fragment{MessageID: block.MessageID, Number: 0, Data: block.Data}, nowMillis)
+// +checklocksexclude:e.mu
+func (e *Endpoint) parseFragmented(block Block, it *BlockIterator, out []Block, n int, nowMillis uint64) (int, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for {
+		var err error
+		n, err = e.appendFragmentedBlockLocked(block, out, n, nowMillis)
 		if err != nil {
 			return n, err
 		}
-		if done {
-			meta := e.meta[block.MessageID]
-			if n == len(out) {
-				return n, ErrGatewayOutput
-			}
-			meta.block.Data, meta.block.Last = complete, true
-			out[n] = meta.block
-			n++
-			delete(e.meta, block.MessageID)
+		var ok bool
+		block, ok, err = it.Next()
+		if err != nil {
+			return n, err
+		}
+		if !ok {
+			return n, nil
 		}
 	}
 }
 
+// +checklocks:e.mu
+func (e *Endpoint) appendFragmentedBlockLocked(block Block, out []Block, n int, nowMillis uint64) (int, error) {
+	if !block.FollowOn && block.Last {
+		if n == len(out) {
+			return n, ErrGatewayOutput
+		}
+		out[n] = block
+		return n + 1, nil
+	}
+	if block.FollowOn {
+		if block.Fragment == 0 {
+			return n, ErrGatewayBlock
+		}
+		complete, done, err := e.reasm.Add(Fragment{MessageID: block.MessageID, Number: block.Fragment, Last: block.Last, Data: block.Data}, nowMillis)
+		if err != nil || !done {
+			return n, err
+		}
+		meta, exists := e.meta[block.MessageID]
+		if !exists {
+			return n, ErrFragment
+		}
+		if n == len(out) {
+			return n, ErrGatewayOutput
+		}
+		meta.block.Data, meta.block.Last = complete, true
+		out[n] = meta.block
+		delete(e.meta, block.MessageID)
+		return n + 1, nil
+	}
+	if err := e.remember(block, nowMillis); err != nil {
+		return n, err
+	}
+	complete, done, err := e.reasm.Add(Fragment{MessageID: block.MessageID, Number: 0, Data: block.Data}, nowMillis)
+	if err != nil || !done {
+		return n, err
+	}
+	meta := e.meta[block.MessageID]
+	if n == len(out) {
+		return n, ErrGatewayOutput
+	}
+	meta.block.Data, meta.block.Last = complete, true
+	out[n] = meta.block
+	delete(e.meta, block.MessageID)
+	return n + 1, nil
+}
+
+// +checklocks:e.mu
 func (e *Endpoint) remember(block Block, nowMillis uint64) error {
 	block.Data = nil
 	if prior, exists := e.meta[block.MessageID]; exists {

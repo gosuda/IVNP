@@ -161,14 +161,18 @@ func (s *simSocketRuntime) ListenUDP(_ context.Context, _ dataplane.RouterEndpoi
 }
 
 type daemonMemoryNetwork struct {
-	mu        sync.RWMutex
+	mu sync.RWMutex
+	// +checklocks:mu
 	endpoints map[foundation.Hash]*daemonMemoryTransport
 	flood     foundation.Hash
 	floodDB   *netdb.Database
 	now       func() uint64
-	stores    []foundation.I2NPDatabaseStoreMessage
-	lookups   int
-	nextID    uint32
+	// +checklocks:mu
+	stores []foundation.I2NPDatabaseStoreMessage
+	// +checklocks:mu
+	lookups int
+	// +checklocks:mu
+	nextID uint32
 }
 
 type daemonMemoryTransport struct {
@@ -586,11 +590,14 @@ func TestDestinationTunnelMaintenanceRequeuesBehindOtherOwners(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(builder.ReleaseSensitive)
-	first.maintainer, err = tunnel.NewPairedPoolMaintainer(tunnel.PairedPoolMaintainerConfig{Pool: pool, Runtime: runtime, Builder: builder, InboundSource: source, OutboundSource: source, Now: func() uint64 { return now }, InboundTarget: 1, OutboundTarget: 1})
+	maintainer, err := tunnel.NewPairedPoolMaintainer(tunnel.PairedPoolMaintainerConfig{Pool: pool, Runtime: runtime, Builder: builder, InboundSource: source, OutboundSource: source, Now: func() uint64 { return now }, InboundTarget: 1, OutboundTarget: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = first.maintainer.Close() })
+	t.Cleanup(func() { _ = maintainer.Close() })
+	first.maintenanceMu.Lock()
+	first.maintainer = maintainer
+	first.maintenanceMu.Unlock()
 	d.requestDestinationTunnelMaintenance(first)
 	d.requestDestinationTunnelMaintenance(second)
 	d.maintainDestinationTunnels(<-d.destinationTunnelWake)
@@ -1111,6 +1118,8 @@ func TestDestinationAddressPoliciesPersistAndWireRemoteELS(t *testing.T) {
 	dh.ReleaseSensitive()
 	psk.ReleaseSensitive()
 }
+
+// +checklocksignore
 func TestDaemonNewProductionGraphPublicAndEncryptedDestinations(t *testing.T) {
 	now := uint64(time.Now().UnixMilli())
 	flood := daemonProductionFloodfill(t, now)
@@ -1460,6 +1469,8 @@ func TestDaemonProductionGraphEncryptedDHAndPSKStreaming(t *testing.T) {
 		t.Run(authorization, func(t *testing.T) { testDaemonProductionGraphEncryptedAuthorization(t, authorization) })
 	}
 }
+
+// +checklocksignore
 func testDaemonProductionGraphEncryptedAuthorization(t *testing.T, authorization string) {
 	now := uint64(time.Now().UnixMilli())
 	flood := daemonProductionFloodfill(t, now)
@@ -1947,13 +1958,18 @@ func TestDestroyRemovesExactReleasedDestinationRuntime(t *testing.T) {
 		if _, lookupErr := removed.requests.LookupRouterInfo(context.Background(), foundation.Hash{99}); !errors.Is(lookupErr, netdb.ErrRequestManagerClosed) {
 			t.Fatalf("destroyed RequestManager accepted work: %v", lookupErr)
 		}
-		if removed.build.Pending() != 0 {
-			t.Fatalf("destroy left %d pending builds", removed.build.Pending())
+		removed.maintenanceMu.Lock()
+		pendingBuilds := removed.build.Pending()
+		expired, healthErr := removed.health.Expire(context.Background())
+		maintained, maintainErr := removed.maintainer.Maintain(context.Background())
+		removed.maintenanceMu.Unlock()
+		if pendingBuilds != 0 {
+			t.Fatalf("destroy left %d pending builds", pendingBuilds)
 		}
-		if expired, healthErr := removed.health.Expire(context.Background()); expired != 0 || !errors.Is(healthErr, tunnel.ErrHealthClosed) {
+		if expired != 0 || !errors.Is(healthErr, tunnel.ErrHealthClosed) {
 			t.Fatalf("destroyed Health accepted work: %d, %v", expired, healthErr)
 		}
-		if maintained, maintainErr := removed.maintainer.Maintain(context.Background()); maintained != 0 || !errors.Is(maintainErr, tunnel.ErrPairedMaintenanceClosed) {
+		if maintained != 0 || !errors.Is(maintainErr, tunnel.ErrPairedMaintenanceClosed) {
 			t.Fatalf("destroyed maintainer accepted work: %d, %v", maintained, maintainErr)
 		}
 		if senderErr := removed.sender.UpdateRemoteELS(nil); !errors.Is(senderErr, dataplane.RouterErrDataPlaneConfig) {

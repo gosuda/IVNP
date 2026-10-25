@@ -18,7 +18,8 @@ import (
 )
 
 type loopController struct {
-	mu        sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	endpoints map[foundation.Hash]*loopEndpoint
 }
 
@@ -38,11 +39,13 @@ func (c *loopController) DestroyDestination(_ context.Context, endpoint destinat
 }
 
 type loopEndpoint struct {
-	local         *foundation.LocalDestination
-	controller    *loopController
-	mu            sync.Mutex
+	local      *foundation.LocalDestination
+	controller *loopController
+	mu         sync.Mutex
+	// +checklocks:mu
 	subscriptions map[destination.DestinationRoute]*loopSubscription
-	closed        bool
+	// +checklocks:mu
+	closed bool
 }
 
 func (e *loopEndpoint) Hash() foundation.Hash { return e.local.Hash() }

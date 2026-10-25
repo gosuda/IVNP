@@ -12,8 +12,10 @@ var (
 
 // ReplyKeyRegistry stores one-time reply keys for encrypted lookups and tunnel build replies.
 type ReplyKeyRegistry struct {
-	mu      sync.Mutex
-	max     int
+	mu sync.Mutex
+	// +checklocks:mu
+	max int
+	// +checklocks:mu
 	entries map[[8]byte]GarlicReplyKey
 }
 

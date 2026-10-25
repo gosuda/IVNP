@@ -34,11 +34,16 @@ var (
 )
 
 // RatchetManager coordinates sharded ECIES ratchet sessions across worker routines.
+//
+// Lock hierarchy: routeMu -> shards[i].mu -> tagMu.
+// tagMu is never held while acquiring routeMu or any shard mutex.
 type RatchetManager struct {
 	routeMu sync.RWMutex
 	tagMu   sync.RWMutex
 	// The lowest live owner routes each tag; collisions retain the other owners.
-	tagRoutes     map[dataplanegarlicecies.SessionTag]int
+	// +checklocks:tagMu
+	tagRoutes map[dataplanegarlicecies.SessionTag]int
+	// +checklocks:tagMu
 	tagCollisions map[dataplanegarlicecies.SessionTag]map[int]struct{}
 	shards        []*dataplanegarlicecies.RatchetManager
 	once          sync.Once
@@ -149,6 +154,8 @@ func (m *RatchetManager) naturalShardIndex(peer foundation.Hash) int {
 	return int(binary.LittleEndian.Uint64(peer[:8]) % uint64(len(m.shards)))
 }
 
+// +checklocksread:m.routeMu
+// +checklocksexclude:m.tagMu
 func (m *RatchetManager) locatePeerLocked(peer foundation.Hash) (int, bool) {
 	primary := m.naturalShardIndex(peer)
 	if m.shards[primary].HasPeer(peer) {
@@ -162,6 +169,8 @@ func (m *RatchetManager) locatePeerLocked(peer foundation.Hash) (int, bool) {
 	return 0, false
 }
 
+// +checklocksread:m.routeMu
+// +checklocksexclude:m.tagMu
 func (m *RatchetManager) locateOtherPeerLocked(peer foundation.Hash, skip int) (*dataplanegarlicecies.RatchetManager, bool) {
 	for index, shard := range m.shards {
 		if index != skip && shard.HasPeer(peer) {
@@ -171,6 +180,8 @@ func (m *RatchetManager) locateOtherPeerLocked(peer foundation.Hash, skip int) (
 	return nil, false
 }
 
+// +checklocksread:m.routeMu
+// +checklocksexclude:m.tagMu
 func (m *RatchetManager) peerShardLocked(peer foundation.Hash) (int, *dataplanegarlicecies.RatchetManager) {
 	if index, ok := m.locatePeerLocked(peer); ok {
 		return index, m.shards[index]
@@ -179,6 +190,8 @@ func (m *RatchetManager) peerShardLocked(peer foundation.Hash) (int, *dataplaneg
 	return index, m.shards[index]
 }
 
+// +checklocksexclude:m.routeMu
+// +checklocksexclude:m.tagMu
 func (m *RatchetManager) packetShard(packet []byte) (int, *dataplanegarlicecies.RatchetManager) {
 	if len(packet) >= 8 {
 		var tag dataplanegarlicecies.SessionTag

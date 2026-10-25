@@ -45,13 +45,17 @@ type PublicationMaintenanceResult struct {
 // PublicationMaintenance is driven by the router's existing maintenance loop.
 // Each call joins its bounded publication work before returning.
 type PublicationMaintenance struct {
+	// +checklocks:mu
 	routerInfo        RouterInfoRefresher
 	networkRouterInfo controlplanenetdb.ConfirmedPublisher
 	leaseSet          LeaseSetRefresher
-	now               func() uint64
-	refresh           uint64
+	// +checklocks:mu
+	now func() uint64
+	// +checklocks:mu
+	refresh uint64
 
-	mu             sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	nextRouterInfo uint64
 }
 

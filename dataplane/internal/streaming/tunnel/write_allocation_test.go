@@ -19,6 +19,7 @@ type acknowledgingWritePeer struct {
 	ack        [HeaderLen]byte
 }
 
+// +checklocksignore
 func (p *acknowledgingWritePeer) SendTunnel(ctx context.Context, delivery Delivery) error {
 	packet, err := dataplanestreaming.Parse(delivery.Payload)
 	if err != nil {

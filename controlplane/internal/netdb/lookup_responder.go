@@ -69,14 +69,18 @@ type LookupResponder struct {
 	wrapper  LookupReplyWrapper
 	logger   *slog.Logger
 
-	jobs    chan lookupJob
-	done    chan struct{}
-	mu      sync.Mutex
+	jobs chan lookupJob
+	done chan struct{}
+	mu   sync.Mutex
+	// +checklocks:mu
 	started bool
-	closed  bool
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	err     error
+	// +checklocks:mu
+	closed bool
+	// +checklocks:mu
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+	// +checklocks:mu
+	err error
 }
 
 func NewLookupResponder(config LookupResponderConfig) (*LookupResponder, error) {

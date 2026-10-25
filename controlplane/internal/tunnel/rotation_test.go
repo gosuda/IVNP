@@ -170,7 +170,7 @@ func TestRotatorRenewalPreservesOldCircuitUntilExpiry(t *testing.T) {
 		t.Fatalf("maintain started=%d err=%v", started, err)
 	}
 	var pending *pendingOutboundBuild
-	for _, candidate := range manager.pending {
+	for _, candidate := range manager.pending { // +checklocksignore
 		pending = candidate
 	}
 	if pending == nil || pending.build.retireID != old.ID {

@@ -33,7 +33,8 @@ func PinSessionEntropy(seed uint64) (restore func()) {
 // several goroutines at once.
 type lockedReader struct {
 	mu sync.Mutex
-	r  io.Reader
+	// +checklocks:mu
+	r io.Reader
 }
 
 func (l *lockedReader) Read(p []byte) (int, error) {

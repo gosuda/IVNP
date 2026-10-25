@@ -11,9 +11,12 @@ var ErrStopped = errors.New("router: service stopped")
 // Lifecycle coordinates router-owned goroutines without leaking work after
 // shutdown. Tasks are admitted only while running and observe the shared ctx.
 type Lifecycle struct {
-	mu      sync.Mutex
-	ctx     context.Context
-	cancel  context.CancelFunc
+	mu sync.Mutex
+	// +checklocks:mu
+	ctx context.Context
+	// +checklocks:mu
+	cancel context.CancelFunc
+	// +checklocks:mu
 	running bool
 	workers sync.WaitGroup
 }

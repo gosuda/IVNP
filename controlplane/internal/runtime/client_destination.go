@@ -26,7 +26,7 @@ func (d *Controller) DestinationController() destination.DestinationController {
 
 func (c clientDestinationController) CreateDestination(ctx context.Context, spec destination.DestinationSpec) (destination.DestinationEndpoint, error) {
 	d := c.daemon
-	if d == nil || d.destinationFactory == nil || d.destinations == nil {
+	if d == nil || d.destinations == nil {
 		return nil, ErrDestinationCreation
 	}
 	if ctx ==
@@ -86,6 +86,9 @@ func (c clientDestinationController) CreateDestination(ctx context.Context, spec
 	}
 	d.destinationMu.Lock()
 	defer d.destinationMu.Unlock()
+	if d.destinationFactory == nil {
+		return nil, ErrDestinationCreation
+	}
 	d.mu.Lock()
 	closed := d.closed
 	d.mu.Unlock()

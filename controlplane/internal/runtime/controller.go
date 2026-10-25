@@ -201,17 +201,24 @@ type TunnelRuntimeSnapshot struct {
 
 // destinationRuntime is the complete client-side ownership boundary. Router
 // exploratory/transit components are intentionally not retained here.
+//
+// Lock order: maintenanceMu -> {publishMu, changeMu}.
 type destinationRuntime struct {
-	name                    string
-	local                   *foundation.LocalDestination
-	ratchet                 *dataplane.GarlicRatchetManager
-	pool                    *tunnel.Pool
-	profiles                *tunnel.PeerProfiles
-	build                   *tunnel.BuildManager
-	maintainer              *tunnel.PairedPoolMaintainer
-	health                  *tunnel.Health
-	requests                *netdb.RequestManager
-	publisher               *destinationPublisher
+	name  string
+	local *foundation.LocalDestination
+	// +checklocks:maintenanceMu
+	ratchet  *dataplane.GarlicRatchetManager
+	pool     *tunnel.Pool
+	profiles *tunnel.PeerProfiles
+	// +checklocks:maintenanceMu
+	build *tunnel.BuildManager
+	// +checklocks:maintenanceMu
+	maintainer *tunnel.PairedPoolMaintainer
+	// +checklocks:maintenanceMu
+	health    *tunnel.Health
+	requests  *netdb.RequestManager
+	publisher *destinationPublisher
+	// +checklocks:maintenanceMu
 	tunnels                 *dataplane.TunnelRuntime
 	sender                  *router.StreamingTunnelSender
 	bandwidth               *dataplane.RouterDestinationBandwidthLimiter
@@ -227,11 +234,14 @@ type destinationRuntime struct {
 	tunnelMaintenanceQueued atomic.Bool
 	publishQueued           atomic.Bool
 	publishMu               sync.Mutex
-	publishNext             time.Time
-	publishTimer            *time.Timer
-	changeMu                sync.Mutex
-	changed                 chan struct{}
-	requestPath             destinationRequestPath
+	// +checklocks:publishMu
+	publishNext time.Time
+	// +checklocks:publishMu
+	publishTimer *time.Timer
+	changeMu     sync.Mutex
+	// +checklocks:changeMu
+	changed     chan struct{}
+	requestPath destinationRequestPath
 }
 
 func (r *destinationRuntime) release() {
@@ -296,6 +306,7 @@ func (r *destinationRuntime) active() bool {
 	return r != nil && !r.released.Load()
 }
 
+// +checklocksexclude:r.changeMu
 func (r *destinationRuntime) changes() <-chan struct{} {
 	r.changeMu.Lock()
 	defer r.changeMu.Unlock()
@@ -305,6 +316,7 @@ func (r *destinationRuntime) changes() <-chan struct{} {
 	return r.changed
 }
 
+// +checklocksexclude:r.changeMu
 func (r *destinationRuntime) notifyChanged() {
 	r.changeMu.Lock()
 	defer r.changeMu.Unlock()
@@ -363,75 +375,93 @@ func (r *destinationRuntime) maintainTunnels(ctx context.Context) (int, error) {
 }
 
 // Controller manages the lifecycle of an embedded IVNP router and its associated local services.
+//
+// Lock order: destinationMu -> mu -> {stateMu, clientRuntimesMu}.
 type Controller struct {
-	config            state.ConfigurationOperating
-	stateMu           sync.Mutex
-	store             *state.SecureStateStore
-	stateLock         *state.SecureStateLock
-	taintedDir        string
-	masterStatePath   string
-	masterKeyPath     string
-	masterNetdbDir    string
+	config  state.ConfigurationOperating
+	stateMu sync.Mutex
+	store   *state.SecureStateStore
+	// +checklocks:stateMu
+	stateLock *state.SecureStateLock
+	// +checklocks:stateMu
+	taintedDir      string
+	masterStatePath string
+	// +checklocks:stateMu
+	masterKeyPath  string
+	masterNetdbDir string
+	// +checklocks:stateMu
 	promoteToMaster   bool
 	lockRetryInterval time.Duration
-	promoted          atomic.Bool
-	bundle            state.SecureStateBundle
-	database          *netdb.Database
-	netdbStore        *netdb.RouterInfoStore
-	responderStore    *netdb.ResponderProfileStore
-	responders        *netdb.ResponderProfiles
-	explorer          *netdb.Explorer
-	localInfo         *router.LocalRouterInfo
-	router            *router.Router
-	registry          *observability.Registry
-	logger            *slog.Logger
-	clock             dataplane.RouterClock
-	admitPeer         dataplane.RouterPeerAdmissionFunc
+	// +checklocks:stateMu
+	promoted atomic.Bool
+	bundle   state.SecureStateBundle
+	database *netdb.Database
+	// +checklocks:stateMu
+	netdbStore *netdb.RouterInfoStore
+	// +checklocks:stateMu
+	responderStore *netdb.ResponderProfileStore
+	// +checklocks:stateMu
+	responders *netdb.ResponderProfiles
+	explorer   *netdb.Explorer
+	localInfo  *router.LocalRouterInfo
+	router     *router.Router
+	registry   *observability.Registry
+	logger     *slog.Logger
+	clock      dataplane.RouterClock
+	// +checklocks:mu
+	admitPeer dataplane.RouterPeerAdmissionFunc
 
-	service                   *dataplane.RouterService
-	tunnels                   *dataplane.TunnelRuntime
-	pool                      *tunnel.Pool
-	profiles                  *tunnel.PeerProfiles
-	tunnelHealth              *tunnel.Health
-	replyKeys                 *dataplane.GarlicReplyKeyRegistry
-	buildManager              *tunnel.BuildManager
-	maintainer                *tunnel.PairedPoolMaintainer
-	requests                  *netdb.RequestManager
-	destinations              *dataplane.RouterDestinationManager
-	garlicSessions            []*dataplane.GarlicSessionManager
-	garlicReceiver            *dataplane.RouterGarlicReceiver
-	statusMux                 *router.DeliveryStatusMux
-	publication               *router.PublicationMaintenance
-	destinationFactory        *destinationRuntimeFactory
-	releaseRouterInfoSeeds    func()
-	closeNativeTransports     func() error
-	maintenanceWG             sync.WaitGroup
-	buildReplies              *destinationBuildReplyRegistry
-	requestHandlers           *destinationRequestRegistry
-	destinationPublishers     *destinationPublisherRegistry
-	clientRuntimes            []*destinationRuntime
-	clientRuntimesMu          sync.RWMutex
-	destinationMu             sync.Mutex
-	maintenanceDone           chan struct{}
-	explorationDone           chan struct{}
-	publicationWake           chan struct{}
-	destinationWake           chan *destinationRuntime
-	destinationTunnelWake     chan *destinationRuntime
-	destinationPublishWake    chan *destinationRuntime
-	bootstrapPoolsStarted     atomic.Bool
-	publishDebounce           time.Duration
-	tunnelWake                chan struct{}
-	netdbSaveWake             chan struct{}
-	lastNetDBSaveMillis       atomic.Uint64
+	service        *dataplane.RouterService
+	tunnels        *dataplane.TunnelRuntime
+	pool           *tunnel.Pool
+	profiles       *tunnel.PeerProfiles
+	tunnelHealth   *tunnel.Health
+	replyKeys      *dataplane.GarlicReplyKeyRegistry
+	buildManager   *tunnel.BuildManager
+	maintainer     *tunnel.PairedPoolMaintainer
+	requests       *netdb.RequestManager
+	destinations   *dataplane.RouterDestinationManager
+	garlicSessions []*dataplane.GarlicSessionManager
+	garlicReceiver *dataplane.RouterGarlicReceiver
+	statusMux      *router.DeliveryStatusMux
+	publication    *router.PublicationMaintenance
+	// +checklocks:destinationMu
+	destinationFactory     *destinationRuntimeFactory
+	releaseRouterInfoSeeds func()
+	closeNativeTransports  func() error
+	maintenanceWG          sync.WaitGroup
+	buildReplies           *destinationBuildReplyRegistry
+	requestHandlers        *destinationRequestRegistry
+	destinationPublishers  *destinationPublisherRegistry
+	// +checklocks:clientRuntimesMu
+	clientRuntimes         []*destinationRuntime
+	clientRuntimesMu       sync.RWMutex
+	destinationMu          sync.Mutex
+	maintenanceDone        chan struct{}
+	explorationDone        chan struct{}
+	publicationWake        chan struct{}
+	destinationWake        chan *destinationRuntime
+	destinationTunnelWake  chan *destinationRuntime
+	destinationPublishWake chan *destinationRuntime
+	bootstrapPoolsStarted  atomic.Bool
+	publishDebounce        time.Duration
+	tunnelWake             chan struct{}
+	netdbSaveWake          chan struct{}
+	lastNetDBSaveMillis    atomic.Uint64
+	// +checklocks:mu
 	startReady                chan struct{}
 	embedded                  bool
 	disableClientDestinations bool
 
-	mu           sync.Mutex
-	started      bool
-	closed       bool
-	ctx          context.Context
-	cancel       context.CancelFunc
+	mu sync.Mutex
+	// +checklocks:mu
+	started bool
+	// +checklocks:mu
+	closed bool
+	ctx    context.Context
+	// +checklocks:mu
+	cancel context.CancelFunc
+	// +checklocks:mu
 	err          error
 	teardownOnce sync.Once
 	teardownErr  error
@@ -1268,7 +1298,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		tunnelWake:             make(chan struct{}, 1),
 		netdbSaveWake:          make(chan struct{}, 1),
 	}
-	for _, clientRuntime := range d.clientRuntimes {
+	for _, clientRuntime := range clientRuntimes {
 		clientRuntime.onRelease = d.removeClientRuntime
 	}
 	if destinationFactory != nil {
@@ -1424,7 +1454,10 @@ func (d *Controller) startMaintenance() {
 	for _, runtime := range d.clientRuntimeSnapshot() {
 		d.requestDestinationMaintenance(runtime)
 	}
-	if d.taintedDir != "" && d.promoteToMaster && d.masterStatePath != "" {
+	d.stateMu.Lock()
+	retryMasterLock := d.taintedDir != "" && d.promoteToMaster && d.masterStatePath != ""
+	d.stateMu.Unlock()
+	if retryMasterLock {
 		d.maintenanceWG.Add(1)
 		go d.masterLockRetryLoop()
 	}
@@ -1651,7 +1684,10 @@ func (d *Controller) maintainOnce(now uint64) {
 	case d.publicationWake <- struct{}{}:
 	default:
 	}
-	if d.netdbStore != nil || d.responderStore != nil {
+	d.stateMu.Lock()
+	hasNetDBStores := d.netdbStore != nil || d.responderStore != nil
+	d.stateMu.Unlock()
+	if hasNetDBStores {
 		lastSave := d.lastNetDBSaveMillis.Load()
 		if lastSave == 0 || now >= lastSave+daemonNetDBSaveIntervalMillis {
 			if d.lastNetDBSaveMillis.CompareAndSwap(lastSave, now) {
@@ -2022,6 +2058,11 @@ func (d *Controller) teardown() error {
 			d.releaseRouterInfoSeeds()
 			d.releaseRouterInfoSeeds = nil
 		}
+		d.destinationMu.Lock()
+		if d.destinationFactory != nil {
+			clear(d.destinationFactory.staticPrivate)
+		}
+		d.destinationMu.Unlock()
 		d.stateMu.Lock()
 		if d.netdbStore != nil {
 			result = errors.Join(result, d.netdbStore.Save())
@@ -2032,9 +2073,6 @@ func (d *Controller) teardown() error {
 		if d.store != nil {
 			result = errors.Join(result, d.store.Save(d.bundle))
 			result = errors.Join(result, d.store.Close())
-		}
-		if d.destinationFactory != nil {
-			clear(d.destinationFactory.staticPrivate)
 		}
 		d.bundle.ReleaseSensitive()
 		if d.stateLock != nil {
@@ -2596,6 +2634,7 @@ func (d *Controller) DestinationBandwidthSnapshot(name string) (dataplane.Router
 	return dataplane.RouterDestinationBandwidthSnapshot{}, false
 }
 
+// +checklocksexclude:d.clientRuntimesMu
 func (d *Controller) clientRuntimeCount() int {
 	d.clientRuntimesMu.RLock()
 	count := len(d.clientRuntimes)
@@ -2603,6 +2642,7 @@ func (d *Controller) clientRuntimeCount() int {
 	return count
 }
 
+// +checklocksexclude:d.clientRuntimesMu
 func (d *Controller) clientRuntimeSnapshot() []*destinationRuntime {
 	d.clientRuntimesMu.RLock()
 	snapshot := append([]*destinationRuntime(nil), d.clientRuntimes...)
@@ -2610,6 +2650,7 @@ func (d *Controller) clientRuntimeSnapshot() []*destinationRuntime {
 	return snapshot
 }
 
+// +checklocksexclude:d.clientRuntimesMu
 func (d *Controller) removeClientRuntime(target *destinationRuntime) {
 	if d == nil || target == nil {
 		return
@@ -3054,6 +3095,8 @@ func (d *Controller) IsPromoted() bool {
 	if d == nil {
 		return false
 	}
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
 	return d.promoted.Load()
 }
 

@@ -112,8 +112,10 @@ const (
 // NewSessionCandidate owns derived ratchet state outside the session and tag
 // maps. Discard is idempotent and is a no-op after commit or retention.
 type NewSessionCandidate struct {
-	mu      sync.Mutex
-	owner   foundation.Hash
+	mu sync.Mutex
+	// +checklocks:mu
+	owner foundation.Hash
+	// +checklocks:mu
 	session *session
 }
 
@@ -238,28 +240,49 @@ type RatchetStats struct {
 // safe for concurrent send/receive calls; packet buffers always remain owned by
 // the caller. Session tags are removed before AEAD verification, so a replay or
 // forgery can never be retried as either an Existing or New Session.
+//
+// Lock hierarchy: RatchetManager.mu -> NewSessionCandidate.mu (in RetainNewSession)
+// and RatchetManager.mu -> TagObserver callbacks.
 type RatchetManager struct {
-	mu            sync.Mutex
-	owner         foundation.Hash
-	private       [32]byte
-	cryptoTypes   [3]uint16
-	cryptoCount   int
-	config        RatchetConfig
-	closed        bool
-	sessions      map[foundation.Hash]*session
-	inbound       map[[ratchetTagLen]byte]tagEntry
-	pending       map[[ratchetTagLen]byte]pendingInitiator
-	replays       map[[32]byte]uint64
-	metrics       *observability.Registry
-	tagObserver   TagObserver
+	mu    sync.Mutex
+	owner foundation.Hash
+	// +checklocks:mu
+	private [32]byte
+	// +checklocks:mu
+	cryptoTypes [3]uint16
+	// +checklocks:mu
+	cryptoCount int
+	// +checklocks:mu
+	config RatchetConfig
+	// +checklocks:mu
+	closed bool
+	// +checklocks:mu
+	sessions map[foundation.Hash]*session
+	// +checklocks:mu
+	inbound map[[ratchetTagLen]byte]tagEntry
+	// +checklocks:mu
+	pending map[[ratchetTagLen]byte]pendingInitiator
+	// +checklocks:mu
+	replays map[[32]byte]uint64
+	// +checklocks:mu
+	metrics *observability.Registry
+	// +checklocks:mu
+	tagObserver TagObserver
+	// +checklocks:mu
 	windowScratch []tagEntry
-	windowTags    map[[ratchetTagLen]byte]struct{}
+	// +checklocks:mu
+	windowTags map[[ratchetTagLen]byte]struct{}
 
-	newSessions       uint64
+	// +checklocks:mu
+	newSessions uint64
+	// +checklocks:mu
 	newSessionReplies uint64
-	existingSessions  uint64
-	nextExpiry        uint64
-	hasTerminated     bool
+	// +checklocks:mu
+	existingSessions uint64
+	// +checklocks:mu
+	nextExpiry uint64
+	// +checklocks:mu
+	hasTerminated bool
 }
 
 // NewRatchetManager creates destination-scoped ECIES state. The local private
@@ -326,12 +349,14 @@ func newRatchetManager(local *foundation.LocalDestination, config RatchetConfig,
 	return &RatchetManager{owner: local.Hash(), private: private, cryptoTypes: cryptoTypes, cryptoCount: cryptoCount, config: config, metrics: config.Metrics, tagObserver: observer, sessions: make(map[foundation.Hash]*session), inbound: make(map[[ratchetTagLen]byte]tagEntry), pending: make(map[[ratchetTagLen]byte]pendingInitiator), replays: make(map[[32]byte]uint64), windowScratch: make([]tagEntry, config.TagLookahead), windowTags: make(map[[ratchetTagLen]byte]struct{}, config.TagLookahead), nextExpiry: ^uint64(0)}, nil
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) noteExpiryLocked(expires uint64) {
 	if expires < m.nextExpiry {
 		m.nextExpiry = expires
 	}
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) addInboundTagLocked(entry tagEntry) {
 	m.inbound[entry.tag] = entry
 	entry.set.recordInbound(entry.tag, entry.n, m.config.TagLookahead)
@@ -340,6 +365,7 @@ func (m *RatchetManager) addInboundTagLocked(entry tagEntry) {
 	}
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) removeInboundTagLocked(tag [ratchetTagLen]byte) {
 	entry, exists := m.inbound[tag]
 	if !exists {
@@ -354,6 +380,7 @@ func (m *RatchetManager) removeInboundTagLocked(tag [ratchetTagLen]byte) {
 	}
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) addPendingTagLocked(tag [ratchetTagLen]byte, pending pendingInitiator) {
 	m.pending[tag] = pending
 	m.noteExpiryLocked(pending.expires)
@@ -362,6 +389,7 @@ func (m *RatchetManager) addPendingTagLocked(tag [ratchetTagLen]byte, pending pe
 	}
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) removePendingTagLocked(tag [ratchetTagLen]byte) {
 	if _, exists := m.pending[tag]; !exists {
 		return
@@ -522,6 +550,7 @@ func RatchetEncryptBufferSizes(payloadLen int, cryptoType uint16) (packet, plain
 
 const ratchetNextKeyBlockLen = 3 + 35
 
+// +checklocks:m.mu
 func (m *RatchetManager) encryptLocked(dst, scratch []byte, peer foundation.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
 	if established := m.sessions[peer]; established != nil && !established.terminated && established.expires >= now {
 		options := RatchetOptions{}
@@ -539,6 +568,7 @@ func (m *RatchetManager) encryptLocked(dst, scratch []byte, peer foundation.Hash
 	return m.encryptNewLocked(dst, peer, remotePublic, cryptoType, payload, now)
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) encryptNewLocked(dst []byte, peer foundation.Hash, remotePublic []byte, cryptoType uint16, payload []byte, now uint64) ([]byte, error) {
 	encryptNewLockedRejected := len(remotePublic) != 32
 	if !encryptNewLockedRejected {
@@ -654,6 +684,7 @@ func (m *RatchetManager) EncryptExistingWithScratch(dst, plain []byte, peer foun
 	return m.encryptExistingLocked(dst, plain, s, payload, options, now)
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) encryptExistingLocked(dst, scratch []byte, s *session, payload []byte, options RatchetOptions, now uint64) ([]byte, error) {
 	if s.expires < now || s.outbound.expires < now || s.inbound.expires < now {
 		return nil, ErrRatchetExpired
@@ -806,6 +837,7 @@ func (m *RatchetManager) Receive(dst, replyDst, packet []byte, now uint64) (Ratc
 	return result, err
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) receiveReplyLocked(dst, packet []byte, tag [ratchetTagLen]byte, pending pendingInitiator, now uint64) (RatchetResult, error) {
 	m.removePendingTagLocked(tag)
 	defer pending.handshake.ReleaseSensitive()
@@ -829,6 +861,7 @@ func (m *RatchetManager) receiveReplyLocked(dst, packet []byte, tag [ratchetTagL
 	return RatchetResult{Payload: payload, Peer: pending.peer, NewSession: true, ReplyRequested: true}, nil
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint64) (RatchetResult, error) {
 	if len(packet) < 32 {
 		return RatchetResult{}, ErrRatchet
@@ -904,6 +937,7 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 	return RatchetResult{Payload: application, Reply: replyDst[:n], Peer: peer, Candidate: candidate, NewSession: true}, nil
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) receiveExistingLocked(dst, packet []byte, tag [ratchetTagLen]byte, entry tagEntry, now uint64) (RatchetResult, error) {
 	// One-time removal happens before authentication. The sender cannot make a
 	// malformed packet fall through to a New Session parse or retry this tag.
@@ -941,6 +975,7 @@ func (m *RatchetManager) receiveExistingLocked(dst, packet []byte, tag [ratchetT
 	return result, nil
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) parseExistingLocked(entry tagEntry, plain []byte, now uint64) (RatchetResult, error) {
 	var out RatchetResult
 	for off := 0; off < len(plain); {
@@ -1001,6 +1036,7 @@ func (m *RatchetManager) parseExistingLocked(entry tagEntry, plain []byte, now u
 	return out, nil
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) consumeNextKeyLocked(current *tagSet, data []byte, now uint64) error {
 	if len(data) != 3 && len(data) != 35 {
 		return ErrRatchet
@@ -1062,6 +1098,7 @@ func (dh *dhRatchet) resolveRemote(key nextKey) (*ecdh.PublicKey, error) {
 	return nil, ErrRatchet
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) receiveReverseKeyLocked(s *session, key nextKey, now uint64) error {
 	dh := &s.forwardDH
 	// Reverse keys may be repeated until the peer sees the new tagset.
@@ -1092,6 +1129,7 @@ func (m *RatchetManager) receiveReverseKeyLocked(s *session, key nextKey, now ui
 	return nil
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) receiveForwardKeyLocked(s *session, current *tagSet, key nextKey, now uint64) error {
 	dh := &s.reverseDH
 	// Old-tagset packets may arrive after the exchange has completed.
@@ -1151,6 +1189,8 @@ func (m *RatchetManager) receiveForwardKeyLocked(s *session, current *tagSet, ke
 }
 
 // Inbound lookahead and collision checks finish before the direction advances.
+//
+// +checklocks:m.mu
 func (m *RatchetManager) prepareRatchetDirectionLocked(s *session, outbound bool, shared []byte, now uint64) (*tagSet, []tagEntry, error) {
 	old := s.inbound
 	if outbound {
@@ -1200,6 +1240,7 @@ func (m *RatchetManager) prepareRatchetDirectionLocked(s *session, outbound bool
 	return next, entries, nil
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) commitRatchetDirectionLocked(s *session, outbound bool, next *tagSet, entries []tagEntry, now uint64) {
 	if outbound {
 		old := s.outbound
@@ -1225,6 +1266,7 @@ func clearTagEntries(entries []tagEntry) {
 	}
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) sessionFromCiphers(peer foundation.Hash, root [32]byte, send, recv *cryptography.ChaCha20Poly1305, now uint64) (*session, error) {
 	if send == nil || recv == nil {
 		return nil, ErrRatchet
@@ -1257,6 +1299,7 @@ func (m *RatchetManager) sessionFromCiphers(peer foundation.Hash, root [32]byte,
 	return s, nil
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) installSessionLocked(s *session, now uint64) error {
 	if s == nil || s.inbound == nil {
 		return ErrRatchet
@@ -1312,6 +1355,7 @@ func (m *RatchetManager) installSessionLocked(s *session, now uint64) error {
 	return nil
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) checkLocked(now uint64) error {
 	if m.closed {
 		return ErrRatchetClosed
@@ -1356,6 +1400,7 @@ func (m *RatchetManager) checkLocked(now uint64) error {
 	return nil
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) expireOldTagsLocked(s *session, now uint64) uint64 {
 	nextExpiry := ^uint64(0)
 	if s.inbound == nil {
@@ -1384,6 +1429,8 @@ func (m *RatchetManager) expireOldTagsLocked(s *session, now uint64) uint64 {
 	}
 	return nextExpiry
 }
+
+// +checklocks:m.mu
 func (m *RatchetManager) removeSessionTagsLocked(s *session) {
 	if s == nil {
 		return
@@ -1393,6 +1440,7 @@ func (m *RatchetManager) removeSessionTagsLocked(s *session) {
 	}
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) sessionVictimLocked() *session {
 	var victim *session
 	for _, s := range m.sessions {
@@ -1403,6 +1451,7 @@ func (m *RatchetManager) sessionVictimLocked() *session {
 	return victim
 }
 
+// +checklocks:m.mu
 func (m *RatchetManager) discardSessionLocked(peer foundation.Hash, s *session) {
 	if s == nil {
 		return

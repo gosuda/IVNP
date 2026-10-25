@@ -90,6 +90,8 @@ type DialContextFunc func(context.Context, string, string) (net.Conn, error)
 // Client serializes requests because NAT-PMP has no transaction ID. A gateway
 // response therefore cannot be safely associated with concurrent operations.
 type Client struct {
+	// mu serializes wire exchanges on the gateway; configuration fields are
+	// caller-initialized before concurrent requests.
 	mu          sync.Mutex
 	Gateway     netip.Addr
 	Port        uint16
@@ -195,6 +197,11 @@ func (p Protocol) opcode() (byte, error) {
 func (c *Client) exchange(ctx context.Context, opcode byte, request []byte, responseLength int) ([]byte, time.Time, netip.Addr, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.exchangeLocked(ctx, opcode, request, responseLength)
+}
+
+// +checklocks:c.mu
+func (c *Client) exchangeLocked(ctx context.Context, opcode byte, request []byte, responseLength int) ([]byte, time.Time, netip.Addr, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, time.Time{}, netip.Addr{}, err
 	}

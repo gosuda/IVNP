@@ -45,13 +45,17 @@ type Router struct {
 	packetWrites     chan struct{}
 	packetQueueLimit int64
 	ctx              context.Context
-	cancel           context.CancelFunc
-	mu               sync.Mutex
-	closed           bool
-	children         map[*Destination]struct{}
-	creating         sync.WaitGroup
-	closeOnce        sync.Once
-	closeErr         error
+	// +checklocks:mu
+	cancel context.CancelFunc
+	// mu guards cancel, closed, and children. Never held across child Destination.Close calls.
+	mu sync.Mutex
+	// +checklocks:mu
+	closed bool
+	// +checklocks:mu
+	children  map[*Destination]struct{}
+	creating  sync.WaitGroup
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewRouter starts local infrastructure. It does not wait for tunnel readiness.
@@ -263,22 +267,26 @@ func (r *Router) Close() error {
 // one endpoint per bound network, all carrying the same identity. Public
 // identity snapshots remain available after Close. Do not copy a Destination.
 type Destination struct {
-	endpoints   map[string]destination.DestinationEndpoint
-	nets        []string
-	owner       *Router
-	ctx         context.Context
+	endpoints map[string]destination.DestinationEndpoint
+	nets      []string
+	owner     *Router
+	ctx       context.Context
+	// +checklocks:mu
 	cancel      context.CancelFunc
 	hash        Hash
 	b32         string
 	public      []byte
 	dialPolicy  DialPolicy
 	packetQueue PacketQueueConfig
-	mu          sync.Mutex
-	closed      bool
-	resources   map[io.Closer]struct{}
-	operations  sync.WaitGroup
-	closeOnce   sync.Once
-	closeErr    error
+	// mu guards cancel, closed, and resources. Never held while acquiring owner.mu or calling resource.Close.
+	mu sync.Mutex
+	// +checklocks:mu
+	closed bool
+	// +checklocks:mu
+	resources  map[io.Closer]struct{}
+	operations sync.WaitGroup
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 func (d *Destination) Hash() Hash { return d.hash }
@@ -308,6 +316,7 @@ func (d *Destination) primaryEndpoint() destination.DestinationEndpoint {
 	return d.endpoints[d.nets[0]]
 }
 
+// +checklocksexclude:d.owner.mu
 func (d *Destination) checkOpen() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -317,6 +326,7 @@ func (d *Destination) checkOpen() error {
 	return nil
 }
 
+// +checklocksexclude:d.owner.mu
 func (d *Destination) beginOperation() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -329,6 +339,7 @@ func (d *Destination) beginOperation() error {
 
 func (d *Destination) endOperation() { d.operations.Done() }
 
+// +checklocksexclude:d.owner.mu
 func (d *Destination) registerResource(resource io.Closer) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -339,6 +350,7 @@ func (d *Destination) registerResource(resource io.Closer) error {
 	return nil
 }
 
+// +checklocksexclude:d.owner.mu
 func (d *Destination) unregisterResource(resource io.Closer) {
 	d.mu.Lock()
 	delete(d.resources, resource)

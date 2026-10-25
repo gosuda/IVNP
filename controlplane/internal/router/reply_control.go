@@ -19,16 +19,23 @@ type ratchetReplyGate struct {
 
 // A reservation pins reply admission before the receiver commits a session.
 // Release rolls back an unsent reservation; Send transfers ownership to a worker.
+//
+// Lock order: mu -> sender.remoteMu.
 type ratchetReplyReservation struct {
-	mu          sync.Mutex
-	sender      *StreamingTunnelSender
-	target      foundation.Hash
-	gate        *ratchetReplyGate
-	previous    *ratchetReplyGate
+	mu     sync.Mutex
+	sender *StreamingTunnelSender
+	target foundation.Hash
+	gate   *ratchetReplyGate
+	// +checklocks:mu
+	previous *ratchetReplyGate
+	// +checklocks:mu
 	transferred bool
-	activated   bool
+	// +checklocks:mu
+	activated bool
+	// +checklocks:mu
 	established bool
-	released    bool
+	// +checklocks:mu
+	released bool
 }
 
 func (s *StreamingTunnelSender) ReserveRatchetReply(target foundation.Hash) (dataplane.RouterRatchetReplyReservation, error) {
@@ -99,6 +106,8 @@ func (r *ratchetReplyReservation) releaseUnactivated() {
 	}
 }
 
+// +checklocks:r.mu
+// +checklocksexclude:r.sender.remoteMu
 func (r *ratchetReplyReservation) releaseLocked() {
 	if r.released || r.transferred {
 		return
@@ -109,6 +118,8 @@ func (r *ratchetReplyReservation) releaseLocked() {
 	r.sender.replies.Done()
 }
 
+// +checklocks:r.mu
+// +checklocksexclude:r.sender.remoteMu
 func (r *ratchetReplyReservation) restorePreviousGate() {
 	s := r.sender
 	s.remoteMu.Lock()
@@ -144,6 +155,8 @@ func (r *ratchetReplyReservation) SendEstablished(ctx context.Context, packet []
 	return r.sendLocked(ctx, packet)
 }
 
+// +checklocks:r.mu
+// +checklocksexclude:r.sender.remoteMu
 func (r *ratchetReplyReservation) sendLocked(ctx context.Context, packet []byte) error {
 	r.transferred = true
 	var err error
@@ -200,6 +213,8 @@ func (r *ratchetReplyReservation) sendOwned(packet []byte) {
 	r.complete(err)
 }
 
+// +checklocksexclude:r.sender.replyPolicyMu
+// +checklocksexclude:r.sender.remoteMu
 func (r *ratchetReplyReservation) sendPrepared(ctx context.Context, packet []byte, receipt dataplane.RouterPreparedRouteReceipt) error {
 	s := r.sender
 	// Authorization changes wait for admitted replies, but publication renewal
@@ -215,6 +230,7 @@ func (r *ratchetReplyReservation) sendPrepared(ctx context.Context, packet []byt
 	return s.execution.SendRatchetReplyOnRoute(ctx, r.target, packet, receipt)
 }
 
+// +checklocksexclude:r.sender.remoteMu
 func (r *ratchetReplyReservation) complete(err error) {
 	s := r.sender
 	s.remoteMu.Lock()
@@ -232,6 +248,7 @@ func (r *ratchetReplyReservation) complete(err error) {
 	s.replies.Done()
 }
 
+// +checklocksexclude:s.remoteMu
 func (s *StreamingTunnelSender) waitForRatchetReply(ctx context.Context, target foundation.Hash) error {
 	for {
 		s.remoteMu.Lock()
@@ -269,6 +286,7 @@ func (s *StreamingTunnelSender) waitForRatchetReply(ctx context.Context, target 
 	}
 }
 
+// +checklocksexclude:s.remoteMu
 func (s *StreamingTunnelSender) releaseReplyReservations() {
 	s.remoteMu.Lock()
 	reservations := make([]*ratchetReplyReservation, 0, len(s.replyGates))

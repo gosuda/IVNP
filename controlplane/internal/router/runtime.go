@@ -193,6 +193,8 @@ type Status struct {
 
 // Router owns an embedded transport runtime. Native transport sockets are not
 // exposed as I2P streams; an optional StreamBackend provides that surface.
+//
+// Lock order: startMu -> {mu, reseedMu}.
 type Router struct {
 	cfg     Config
 	deps    Dependencies
@@ -200,27 +202,45 @@ type Router struct {
 
 	startMu sync.Mutex
 	mu      sync.Mutex
-	state   State
+	// +checklocks:mu
+	state State
+	// +checklocks:startMu
+	// +checklocks:mu
 	started bool
-	ctx     context.Context
-	cancel  context.CancelFunc
-	done    chan struct{}
-	err     error
-	fatal   bool
+	// +checklocks:mu
+	ctx context.Context
+	// +checklocks:mu
+	cancel context.CancelFunc
+	// +checklocks:mu
+	// +checklocks:startMu
+	// +checklocksreadany
+	done chan struct{}
+	// +checklocks:mu
+	err error
+	// +checklocks:mu
+	fatal bool
 
 	closeOnce  sync.Once
 	finishOnce sync.Once
 	wg         sync.WaitGroup
 
-	listeners        []net.Listener
-	ssu2Socket       dataplane.RouterUDPSocket
+	// +checklocks:mu
+	listeners []net.Listener
+	// +checklocks:mu
+	ssu2Socket dataplane.RouterUDPSocket
+	// +checklocks:mu
 	transportStarted bool
 	reseedMu         sync.Mutex
-	reseedRunning    bool
-	reseedDone       chan struct{}
-	reseedErr        error
-	reseedNext       time.Time
-	reseedBackoff    time.Duration
+	// +checklocks:reseedMu
+	reseedRunning bool
+	// +checklocks:reseedMu
+	reseedDone chan struct{}
+	// +checklocks:reseedMu
+	reseedErr error
+	// +checklocks:reseedMu
+	reseedNext time.Time
+	// +checklocks:reseedMu
+	reseedBackoff time.Duration
 }
 
 // New validates and wires an embedded Router. It performs no network I/O.
@@ -527,6 +547,7 @@ func (r *Router) hasUsableReseedPeers(now time.Time, minimum int) bool {
 	return false
 }
 
+// +checklocksexclude:r.reseedMu
 func (r *Router) startReseed(ctx context.Context) <-chan struct{} {
 	if (len(r.cfg.PriorityReseedEndpoints) == 0 && len(r.cfg.ReseedEndpoints) == 0) || r.deps.Reseed == nil {
 		return nil
@@ -660,6 +681,7 @@ func (r *Router) verifyReseedAnchors(ctx context.Context, anchors []foundation.H
 	wg.Wait()
 }
 
+// +checklocksexclude:r.reseedMu
 func (r *Router) reseedResult() error {
 	r.reseedMu.Lock()
 	defer r.reseedMu.Unlock()
@@ -766,6 +788,7 @@ func (r *Router) watchTransport(ctx context.Context) {
 	r.stop(err, true)
 }
 
+// +checklocksexclude:r.mu
 func (r *Router) stop(cause error, fatal bool) {
 	r.closeOnce.Do(func() {
 		r.mu.Lock()
@@ -817,6 +840,7 @@ func (r *Router) stop(cause error, fatal bool) {
 	})
 }
 
+// +checklocksexclude:r.mu
 func (r *Router) finish() {
 	r.wg.Wait()
 	r.mu.Lock()
@@ -829,6 +853,7 @@ func (r *Router) finish() {
 	r.mu.Unlock()
 }
 
+// +checklocksexclude:r.mu
 func (r *Router) recordCloseError(err error) {
 	if err == nil || errors.Is(err, net.ErrClosed) {
 		return
@@ -838,6 +863,7 @@ func (r *Router) recordCloseError(err error) {
 	r.mu.Unlock()
 }
 
+// +checklocks:r.mu
 func (r *Router) recordErrorLocked(err error) {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || r.err != nil {
 		return

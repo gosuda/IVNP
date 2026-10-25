@@ -7,6 +7,7 @@ import (
 	"gosuda.org/ivnp/foundation"
 )
 
+// +checklocksignore
 func TestLeaseRetentionEvictsAndExpires(t *testing.T) {
 	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	database.maxLeases = 1
@@ -24,6 +25,7 @@ func TestLeaseRetentionEvictsAndExpires(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestLeaseRetentionUpdateAtCapacityDoesNotEvictSibling(t *testing.T) {
 	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	database.maxLeases = 2
@@ -45,6 +47,7 @@ func TestLeaseRetentionUpdateAtCapacityDoesNotEvictSibling(t *testing.T) {
 	}
 }
 
+// +checklocksignore
 func TestLeaseExpiryIndexTracksUpdatesAndEarliestEviction(t *testing.T) {
 	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
 	database.maxLeases = 2

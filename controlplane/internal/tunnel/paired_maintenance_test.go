@@ -214,14 +214,14 @@ func TestPairedMaintainerRenewsDirectionsWithOverlap(t *testing.T) {
 		t.Fatalf("parallel renewals started=%d err=%v", started, err)
 	}
 	var inboundPending *pendingInboundBuild
-	for _, pending := range manager.pendingInbound {
+	for _, pending := range manager.pendingInbound { // +checklocksignore
 		inboundPending = pending
 	}
 	if inboundPending == nil || inboundPending.build.retireID != oldInbound.ID {
 		t.Fatalf("inbound renewal=%#v", inboundPending)
 	}
 	var outboundPending *pendingOutboundBuild
-	for _, pending := range manager.pending {
+	for _, pending := range manager.pending { // +checklocksignore
 		outboundPending = pending
 	}
 	if outboundPending == nil || outboundPending.build.retireID != oldOutbound.ID {

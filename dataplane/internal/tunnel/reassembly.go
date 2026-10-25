@@ -34,10 +34,14 @@ type partial struct {
 
 // Reassembler bounds retained incomplete data by entry count and message size.
 type Reassembler struct {
-	mu          sync.Mutex
-	maxEntries  int
-	maxMessage  int
-	entries     map[uint32]*partial
+	mu sync.Mutex
+	// +checklocks:mu
+	maxEntries int
+	// +checklocks:mu
+	maxMessage int
+	// +checklocks:mu
+	entries map[uint32]*partial
+	// +checklocks:mu
 	partialPool sync.Pool
 }
 
@@ -135,6 +139,7 @@ func (r *Reassembler) Expire(cutoff uint64) int {
 	return removed
 }
 
+// +checklocks:r.mu
 func (r *Reassembler) evictOldest() {
 	var oldestID uint32
 	var oldest uint64 = ^uint64(0)
@@ -146,6 +151,7 @@ func (r *Reassembler) evictOldest() {
 	r.remove(oldestID)
 }
 
+// +checklocks:r.mu
 func (r *Reassembler) remove(messageID uint32) {
 	entry := r.entries[messageID]
 	if entry == nil {

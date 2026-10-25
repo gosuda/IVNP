@@ -46,18 +46,25 @@ type snapshot struct{ entries map[string]string }
 
 // Service resolves .i2p hostnames using in-memory snapshots of local files and remote subscriptions.
 type Service struct {
-	config   Config
-	local    map[string]string
-	remote   map[string]string
-	sources  map[string]map[string]string
-	current  atomic.Pointer[snapshot]
-	mu       sync.Mutex
-	ctx      context.Context
-	cancel   context.CancelFunc
-	done     chan struct{}
-	started  bool
-	closed   bool
-	etag     map[string]string
+	config Config
+	local  map[string]string
+	// +checklocks:mu
+	remote map[string]string
+	// +checklocks:mu
+	sources map[string]map[string]string
+	current atomic.Pointer[snapshot]
+	mu      sync.Mutex
+	ctx     context.Context
+	// +checklocks:mu
+	cancel context.CancelFunc
+	done   chan struct{}
+	// +checklocks:mu
+	started bool
+	// +checklocks:mu
+	closed bool
+	// +checklocks:mu
+	etag map[string]string
+	// +checklocks:mu
 	modified map[string]string
 }
 
@@ -93,10 +100,15 @@ func NewService(config Config) (*Service, error) {
 	if err := s.loadLocalHosts(); err != nil {
 		return nil, err
 	}
-	if err := s.restoreState(); err != nil {
+	s.mu.Lock()
+	err := s.restoreState()
+	if err == nil {
+		s.publish()
+	}
+	s.mu.Unlock()
+	if err != nil {
 		return nil, err
 	}
-	s.publish()
 	return s, nil
 }
 
@@ -159,6 +171,7 @@ func (s *Service) ensureDefaultHostsFile() {
 	_ = os.WriteFile(s.config.HostsPath, buf.Bytes(), 0o600)
 }
 
+// +checklocks:s.mu
 func (s *Service) restoreState() error {
 	if s.config.StatePath == "" {
 		return nil
@@ -185,6 +198,7 @@ func (s *Service) restoreState() error {
 	return saveState(s.config.StatePath, s.remote, s.sources, s.etag, s.modified, s.config.MaxFileBytes)
 }
 
+// +checklocks:s.mu
 func (s *Service) restoreSource(raw string, source map[string]string, etag, modified string) error {
 	s.sources[raw] = cloneEntries(source)
 	if etag != "" {
@@ -208,6 +222,7 @@ func (s *Service) restoreSource(raw string, source map[string]string, etag, modi
 	return nil
 }
 
+// +checklocks:s.mu
 func (s *Service) publish() {
 	entries := make(map[string]string, len(s.remote)+len(s.local))
 	maps.Copy(entries, s.remote)

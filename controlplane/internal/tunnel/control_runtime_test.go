@@ -16,7 +16,8 @@ type buildCapturedMessage struct {
 }
 
 type buildCaptureSender struct {
-	mu       sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	messages []buildCapturedMessage
 }
 

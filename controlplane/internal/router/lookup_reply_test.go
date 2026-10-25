@@ -14,7 +14,8 @@ import (
 )
 
 type encryptedLookupReplyCapture struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// +checklocks:mu
 	message foundation.I2NPMessage
 	ready   chan struct{}
 }

@@ -59,17 +59,22 @@ type Daemon struct {
 	metrics         *http.Server
 	metricsListener net.Listener
 	embedded        bool
-	proxyEndpoint   destination.DestinationEndpoint
-	mu              sync.Mutex
-	started         bool
-	closed          bool
-	ctx             context.Context
-	cancel          context.CancelFunc
-	startReady      chan struct{}
-	closeOnce       sync.Once
-	closeErr        error
-	err             error
-	wg              sync.WaitGroup
+	// +checklocks:mu
+	proxyEndpoint destination.DestinationEndpoint
+	mu            sync.Mutex
+	// +checklocks:mu
+	started bool
+	// +checklocks:mu
+	closed bool
+	ctx    context.Context
+	// +checklocks:mu
+	cancel     context.CancelFunc
+	startReady chan struct{}
+	closeOnce  sync.Once
+	closeErr   error
+	// +checklocks:mu
+	err error
+	wg  sync.WaitGroup
 }
 
 func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {

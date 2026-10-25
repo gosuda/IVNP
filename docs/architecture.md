@@ -63,12 +63,13 @@ flowchart TD
 
 Each major subsystem (`cryptography`, `foundation`, `observability`, `state`, `dataplane`, `controlplane`, `client`, `node`) exposes a single root facade package (`<subsystem>/<subsystem>_subsystem.go`) and keeps its implementation packages inside `<subsystem>/internal/...`.
 
-`architecture/architecture_test.go` enforces four structural invariants across every `.go` file in the module:
+`architecture/architecture_test.go` enforces five structural invariants across every `.go` file in the module:
 
 1. **No Cross-Subsystem Internal Bypass**: `subsystemInternalOwner` verifies that `<subsystem>/internal/...` is imported only by packages belonging to that same `<subsystem>`. External callers must import `gosuda.org/ivnp/<subsystem>`.
 2. **Canonical Import Paths Without Aliases**: `TestPublicImportsUseCanonicalPathsWithoutAliases` parses every file's AST and rejects import aliases (`import cp "gosuda.org/ivnp/controlplane"`) on canonical subsystem root paths. Every subsystem exports unambiguous prefixed symbol names (such as `dataplane.TunnelCircuitToken` or `controlplane.NetworkDatabaseTable`) so aliases are never needed.
 3. **Data Plane Isolation from Persistent State**: Even though `dataplane` (L4) sits above `state` (L3) numerically, `importViolation` explicitly forbids `dataplane` from importing `state`. All disk persistence and configuration loading stay in `controlplane` (L5) and `node` (L7).
-4. **Single Consolidated Import Block**: `tools/importformatter` enforces a single `import (...)` block per file, sorted into standard library and module groups.
+4. **Unsafe Import Allowlist & Host-ABI Struct Layout**: `TestUnsafeImportsAreRestrictedAndABIStructsUseHostLayout` restricts `"unsafe"` imports in non-test files to `dataplane/internal/transport/ssu2/batch_linux_vector.go` (`recvmmsg`/`sendmmsg` vector I/O) and `state/internal/filesystem_store/secure_windows.go` (Windows DACL SIDs), and requires every fixed-size ABI struct in an unsafe file (`mmsghdr`) to embed `structs.HostLayout` as its leading field.
+5. **Single Consolidated Import Block**: `tools/importformatter` enforces a single `import (...)` block per file, sorted into standard library and module groups.
 
 ---
 

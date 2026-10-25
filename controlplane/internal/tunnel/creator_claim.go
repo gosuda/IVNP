@@ -22,6 +22,7 @@ type creatorAttempt struct {
 
 // reserveCreator reserves a logical target before source selection or preflight.
 // A timed-out attempt retains its claim but yields the active slot to a retry.
+// +checklocksexclude:m.mu
 func (m *BuildManager) reserveCreator(direction Direction, target, limit int, now, cutoff uint64) (*creatorAttempt, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -84,6 +85,7 @@ func (m *BuildManager) reserveCreator(direction Direction, target, limit int, no
 	return attempt, nil
 }
 
+// +checklocksexclude:m.mu
 func (m *BuildManager) acquireCreator(direction Direction, retireID uint32) (*creatorAttempt, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -104,6 +106,7 @@ func (m *BuildManager) acquireCreator(direction Direction, retireID uint32) (*cr
 	return attempt, nil
 }
 
+// +checklocks:m.mu
 func (m *BuildManager) creatorAdmissionErrorLocked() error {
 	if m.released || m.ctx.Err() != nil {
 		return ErrBuildConfig
@@ -115,65 +118,73 @@ func (m *BuildManager) creatorAdmissionErrorLocked() error {
 	return nil
 }
 
+// +checklocks:m.mu
 func (m *BuildManager) newCreatorLocked(direction Direction) *creatorAttempt {
 	attempt := &creatorAttempt{manager: m, direction: direction, active: true}
 	m.creators[attempt] = struct{}{}
 	return attempt
 }
 
-func (a *creatorAttempt) timeoutLocked() {
+// +checklocks:m.mu
+func (m *BuildManager) timeoutCreatorLocked(a *creatorAttempt) {
 	if a == nil || !a.active {
 		return
 	}
 	a.active = false
-	delete(a.manager.creators, a)
+	delete(m.creators, a)
 	if a.claim != nil && a.claim.busy == a {
 		a.claim.busy = nil
 	}
-	a.manager.creatorBudget.release()
+	m.creatorBudget.release()
 }
 
-func (a *creatorAttempt) finishLocked() {
+// +checklocks:m.mu
+func (m *BuildManager) finishCreatorLocked(a *creatorAttempt) {
 	if a == nil || a.finished {
 		return
 	}
-	a.timeoutLocked()
+	m.timeoutCreatorLocked(a)
 	a.finished = true
 	if a.claim != nil {
 		a.claim.refs--
 		if a.claim.refs == 0 && (!a.claim.done || a.claim.retire.ID == 0) {
-			delete(a.manager.claims, a.claim)
+			delete(m.claims, a.claim)
 		}
 	}
 }
 
+// +checklocksexclude:a.manager.mu
 func (a *creatorAttempt) finish() {
 	if a == nil {
 		return
 	}
-	a.manager.mu.Lock()
-	a.finishLocked()
-	a.manager.mu.Unlock()
+	m := a.manager
+	m.mu.Lock()
+	m.finishCreatorLocked(a)
+	m.mu.Unlock()
 }
 
+// +checklocksexclude:a.manager.mu
 func (a *creatorAttempt) failPreparation() {
 	if a == nil {
 		return
 	}
-	a.manager.mu.Lock()
-	defer a.manager.mu.Unlock()
+	m := a.manager
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if a.finished {
 		return
 	}
 	// A failed preparation cannot consume the capacity its own release exposes.
 	if a.maintained {
-		a.manager.creatorBudget.cancelWait(a.manager)
+		m.creatorBudget.cancelWait(m)
 	}
-	a.finishLocked()
+	m.finishCreatorLocked(a)
 }
 
 // Replacement retires pool selection, not the runtime circuit: peers may still
 // send to its advertised lease until ExpiresAt. Runtime.Expire owns that deadline.
+// +checklocksexclude:m.mu
 func (m *BuildManager) installCreatorEntry(entry Entry, attempt *creatorAttempt, retireID uint32, now uint64) (Entry, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -198,18 +209,20 @@ func (m *BuildManager) installCreatorEntry(entry Entry, attempt *creatorAttempt,
 	return retired, replaced, err
 }
 
-func (recent recentCreatorBuild) finishLocked() {
+// +checklocks:m.mu
+func (m *BuildManager) finishRecentCreatorLocked(recent recentCreatorBuild) {
 	if recent.outbound != nil {
-		recent.outbound.build.attempt.finishLocked()
+		m.finishCreatorLocked(recent.outbound.build.attempt)
 	}
 	if recent.inbound != nil {
-		recent.inbound.build.attempt.finishLocked()
+		m.finishCreatorLocked(recent.inbound.build.attempt)
 	}
 	if recent.variable != nil {
-		recent.variable.build.attempt.finishLocked()
+		m.finishCreatorLocked(recent.variable.build.attempt)
 	}
 }
 
+// +checklocksexclude:p.mu
 func (p *Pool) replaceCreator(entry, retire Entry, target int, cutoff, now uint64) (Entry, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

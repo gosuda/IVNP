@@ -34,6 +34,7 @@ func (r connectResolver) ResolveDestination(ctx context.Context, target string) 
 	return r(ctx, target)
 }
 
+// +checklocksignore
 func newConnectTestServer(t *testing.T, endpoint destination.DestinationEndpoint) (*Server, *samSession) {
 	t.Helper()
 	server, err := NewServer(ServerConfig{Address: "127.0.0.1:0", Controller: &loopController{}})
@@ -51,6 +52,7 @@ func newConnectTestServer(t *testing.T, endpoint destination.DestinationEndpoint
 	return server, session
 }
 
+// +checklocksignore
 func startConnectAttachment(t *testing.T, server *Server) (net.Conn, *bufio.Reader, <-chan error) {
 	t.Helper()
 	client, attachment := net.Pipe()
@@ -94,6 +96,7 @@ func assertConnectEcho(t *testing.T, server *Server) {
 	<-result
 }
 
+// +checklocksignore
 func TestConnectDisconnectCancelsBackendWithoutClosingSession(t *testing.T) {
 	for _, phase := range []string{"resolve", "dial", "source port dial"} {
 		t.Run(phase, func(t *testing.T) {
@@ -251,6 +254,7 @@ func TestConnectUsesRemainingCommandBudget(t *testing.T) {
 	})
 }
 
+// +checklocksignore
 func TestConnectSessionCancellationJoinsMonitor(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		entered := make(chan struct{})
