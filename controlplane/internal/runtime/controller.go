@@ -392,10 +392,9 @@ type Controller struct {
 	// +checklocks:stateMu
 	promoteToMaster   bool
 	lockRetryInterval time.Duration
-	// +checklocks:stateMu
-	promoted atomic.Bool
-	bundle   state.SecureStateBundle
-	database *netdb.Database
+	promoted          atomic.Bool
+	bundle            state.SecureStateBundle
+	database          *netdb.Database
 	// +checklocks:stateMu
 	netdbStore *netdb.RouterInfoStore
 	// +checklocks:stateMu
@@ -3095,8 +3094,6 @@ func (d *Controller) IsPromoted() bool {
 	if d == nil {
 		return false
 	}
-	d.stateMu.Lock()
-	defer d.stateMu.Unlock()
 	return d.promoted.Load()
 }
 
