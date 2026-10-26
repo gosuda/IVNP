@@ -65,15 +65,20 @@ rm -f "$overlay"
 
 ### 2.2 Runtime Compiler Overlay (`tools/dstoverlay/main.go`)
 
-Stock Go `sync.Mutex` and `sync.RWMutex` contention waits are not marked as durably blocked inside a `testing/synctest` bubble, which would stall the virtual clock whenever a background goroutine contends on a lock. `tools/dstoverlay` generates a Go compiler `-overlay` JSON patching six files in `GOROOT/src`:
+Stock Go `sync.Mutex` and `sync.RWMutex` contention waits are not marked as durably blocked inside a `testing/synctest` bubble, which would stall the virtual clock whenever a background goroutine contends on a lock. `tools/dstoverlay` generates a Go compiler `-overlay` JSON patching ten files in `GOROOT/src` and adding one marker file:
 
 | Patched `GOROOT/src` File | Runtime Modification | Purpose in `synctest` Bubble |
 | :--- | :--- | :--- |
-| `runtime/sema.go` | Routes `sync_runtime_SemacquireMutex` and `sync_runtime_SemacquireRWMutex*` through `semacquire1(addr, lifo, profile, skipframes, waitReasonSynctestWaitGroupWait)` when `gp.bubble != nil` and disables `runtime_canSpin` | Marks mutex contention as durably blocked so the virtual clock advances without wall-clock spinning |
-| `internal/sync/mutex.go` | Disables active spinning inside bubbles (`!runtime_canSpin(0)`) | Prevents non-deterministic spin loops before semaphore acquisition |
-| `sync/rwmutex.go` | Exports `const DurableMutexOverlay = true` | Referenced by `sim_main_test.go` (`var _ = sync.DurableMutexOverlay`) so compiling without `-overlay` fails at compile time |
-| `runtime/rand.go` | Seeds the runtime RNG with the fixed key `"ivnp-dst-replay-v1"` | Makes `select` case pseudo-random ordering and `map` iteration order reproducible |
-| `runtime/proc.go` | Turns `sysmon` into a no-op | Eliminates wall-clock background preemption noise (`GODEBUG=asyncpreemptoff=1` disables signal preemption) |
+| `runtime/sema.go` | Exposes `internal_sync_runtime_SemacquireWaitGroup` (`waitReasonSynctestWaitGroupWait`) and routes `semaRoot.queue` treap tickets through `ivnpSemaRand()` | Marks mutex contention as durably blocked and isolates semaphore treap priorities from unrelated `cheaprand()` callers |
+| `runtime/select.go` | Routes `selectgo` pollorder shuffles through `ivnpSelectRandn()` | Isolates `select` case ordering inside a bubble from heap profiling, stack unwinding, and spinlock `cheaprand()` draws |
+| `runtime/time.go` | Routes fake-timer tie-breaking (`t.rand`) through `ivnpTimerRand()` | Keeps same-instant virtual timer firing order independent of `cheaprand()` activity |
+| `runtime/synctest.go` | Calls `ivnpResetBubbleRand()` and resets `pp.schedtick = 0` at bubble start | Resets bubble-scoped PRNG streams, flushes `sync.Pool` caches, and zeroes scheduler tick counters before each simulation |
+| `runtime/mgcscavenge.go` | Makes `(*scavengerState).wake` a no-op | Prevents wall-clock scavenger wakes from injecting `bgscavenge` onto the run queue |
+| `internal/sync/mutex.go` | Routes contended waits inside bubbles through `runtime_SemacquireWaitGroup(&m.sema, true)` and disables wall-clock starvation handoff | Prevents non-durable lock waits and `runtime_nanotime()` starvation transitions |
+| `sync/rwmutex.go` | Routes contended reader/writer waits inside bubbles through `runtime_SemacquireWaitGroup` | Lets the virtual clock advance while goroutines wait on `sync.RWMutex` |
+| `sync/dst_marker.go` | Adds `const DurableMutexOverlay = true` | Referenced by `sim_main_test.go` (`var _ = sync.DurableMutexOverlay`) so compiling without `-overlay` fails at compile time |
+| `runtime/rand.go` | Seeds the runtime RNG with `"ivnp-dst-replay-v1"` and routes bubble `runtime.rand()` calls to `ivnpBubbleRand.chacha8` | Makes map iteration seeds and bubble PRNG state reproducible across processes and test orderings |
+| `runtime/proc.go` | Skips spawning `sysmon` and makes `retake` return `0` | Eliminates wall-clock background thread scheduling and P retakes (`GODEBUG=asyncpreemptoff=1` disables signal preemption) |
 | `crypto/internal/randutil/randutil.go` | Turns `MaybeReadByte` into a no-op | Prevents non-deterministic 1-byte reads from `crypto/rand.Reader` during ECDSA/RSA/Ed25519 signing |
 
 ### 2.3 Virtual Network Engine (`internal/simnet`) & Simulation Harness (`sim_*.go`)

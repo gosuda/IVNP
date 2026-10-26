@@ -142,9 +142,9 @@ IVNP includes a full-stack deterministic simulation suite (`//go:build dst || sy
 
 1. **Compiler Runtime Overlay (`tools/dstoverlay/main.go`)**:
    - Generates a Go build `-overlay` JSON file patching `GOROOT/src`:
-     - Routes contended `sync.Mutex` and `sync.RWMutex` waits inside a `synctest` bubble through `runtime_SemacquireWaitGroup(addr, true)` (`waitReasonSynctestWaitGroupWait`) and disables wall-clock mutex spinning (`runtime_canSpin(0)`) so mutex contention is recognized as durably blocked by the virtual clock.
-     - Pins `runtime/rand.go` (`"ivnp-dst-replay-v1"`) for deterministic `select` case ordering and `map` iteration.
-     - Disables `sysmon` wall-clock preemption in `runtime/proc.go` and makes `randutil.MaybeReadByte` a no-op.
+     - Routes contended `sync.Mutex` and `sync.RWMutex` waits inside a `synctest` bubble through `runtime_SemacquireWaitGroup(addr, true)` (`waitReasonSynctestWaitGroupWait`) and disables wall-clock mutex starvation handoff so mutex contention is recognized as durably blocked by the virtual clock.
+     - Pins `runtime/rand.go` (`"ivnp-dst-replay-v1"`) and resets dedicated bubble-scoped PRNG streams (`ivnpSelectRandn`, `ivnpSemaRand`, `ivnpTimerRand`, and `ivnpBubbleRand.chacha8`), `sync.Pool` caches, and `pp.schedtick` at the start of every `synctest` bubble.
+     - Skips spawning `sysmon` in `runtime/proc.go`, disables background scavenger wakes in `runtime/mgcscavenge.go`, and makes `randutil.MaybeReadByte` a no-op.
      - Defines `sync.DurableMutexOverlay = true` so `sim_main_test.go` refuses to compile if `-overlay` was omitted.
 2. **Entropy & Virtual Link Scheduling (`internal/simnet`)**:
    - `PinSessionEntropy(seed)` replaces `crypto/rand.Reader` with a deterministic `ChaCha8` stream, while `foundation.SetDeterministicRandomSource` and `dataplane.SetDeterministicSeeds` seed router identities, tunnel build records, and streaming ISSNs.

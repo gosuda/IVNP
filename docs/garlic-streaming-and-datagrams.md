@@ -49,7 +49,7 @@ A subtle vulnerability in naive ECIES implementations occurs if an unauthenticat
 1. **Two-Phase `NewSessionCandidate`**:
    - `ReceiveNewSessionCandidate` decrypts the inbound `NewSession` and verifies its `DateTime` block **without mutating any session or tag table state**.
    - `GarlicReceiver` inspects the decrypted garlic cloves (`pendingCloves`, up to 16) for a bundled `DatabaseStore` carrying the peer's `LeaseSet2`.
-   - Only after `leaseSetMatchesRatchetStatic` confirms that the signed `LeaseSet2` advertises the exact X25519 static key from the NS handshake does `GarlicReceiver` invoke `CommitNew(candidate)` (or `RetainNew(candidate)` if the `LeaseSet2` must be matched against an existing entry).
+   - Only after `leaseSetMatchesRatchetStatic` confirms that the signed `LeaseSet2` advertises the exact X25519 static key from the NS handshake does `GarlicReceiver` invoke `CommitNew(candidate)` (or `RetainNew(candidate)` when an existing session is still within its retention window: `unconfirmedNewSessionBurstAge = 1s` before the session is confirmed by a `NewSessionReply` or `ExistingSession` packet, and `newSessionRestartAge = 2m` once confirmed).
 2. **Inbound Reply Ordering Gate (`ReserveInboundReply` / `ReserveRatchetReply`)**:
    - When an inbound NS commits and requires a `NewSessionReply`, `ReserveInboundReply` installs a reservation gate (`ratchetReplyHoldTimeout = 5s`).
    - Any concurrent outbound application packets for that peer wait on `gate.done` until the NSR frame has been dispatched (`ReleaseRatchetReply: true`), guaranteeing that the remote initiator receives the NSR handshake completion before receiving `ExistingSession` tags derived from it.

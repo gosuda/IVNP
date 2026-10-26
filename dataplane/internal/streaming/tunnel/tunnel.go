@@ -1769,6 +1769,7 @@ func (c *tunnelConn) sendSynchronize(ctx context.Context, originator bool) error
 	}
 	wire, err := c.network.signedControl(packet, controlOptions{includeFrom: true, includeMax: true})
 	var lease *wireLease
+	abortOnFailure := !originator && c.handshakeFeedback == nil
 	if err == nil {
 		wire, lease = leaseWire(wire)
 		c.releaseSynchronizeLocked()
@@ -1785,7 +1786,7 @@ func (c *tunnelConn) sendSynchronize(ctx context.Context, originator bool) error
 	if originator {
 		err = c.sendWireOwned(ctx, wire, lease)
 	} else {
-		err = c.queueProtocolOwned(wire, lease)
+		err = c.queueProtocolRequest(sendRequest{connection: c, wire: wire, lease: lease, ctx: c.network.ctx, abortOnFailure: abortOnFailure})
 	}
 	if err != nil {
 		c.mu.Lock()
@@ -1877,7 +1878,7 @@ func (c *tunnelConn) sendWire(ctx context.Context, wire []byte) error {
 // +checklocksexclude:c.network.mu
 // +checklocksexclude:c.network.outboundMu
 func (c *tunnelConn) queueProtocolOwned(wire []byte, lease *wireLease) error {
-	return c.queueProtocolRequest(sendRequest{connection: c, wire: wire, lease: lease, ctx: c.network.ctx, abortOnFailure: true})
+	return c.queueProtocolRequest(sendRequest{connection: c, wire: wire, lease: lease, ctx: c.network.ctx})
 }
 
 // +checklocksexclude:c.mu
@@ -1902,6 +1903,9 @@ func (c *tunnelConn) queueProtocolRequest(request sendRequest) error {
 	c.network.outboundMu.RUnlock()
 	if err != nil {
 		request.finish(err)
+		if !request.allowClosed {
+			c.abort(false)
+		}
 	}
 	return err
 }

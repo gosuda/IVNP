@@ -182,3 +182,54 @@ func TestFullProtocolQueueRetiresConnectionAndWire(t *testing.T) {
 		t.Fatalf("queue rejection retained %d connections", count)
 	}
 }
+
+func TestTransientACKDeliveryFailureDoesNotCloseConnection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
+		client, server := newTunnelNetworkPair(t, fabric, time.Second)
+		listener, err := server.ListenI2P(context.Background(), ":80")
+		if err != nil {
+			t.Fatal(err)
+		}
+		outbound, err := client.DialI2P(context.Background(), server.B32()+":80")
+		if err != nil {
+			t.Fatal(err)
+		}
+		inbound, err := listener.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+
+		ackFailed := make(chan struct{})
+		failedOnce := false
+		server.sender = handshakeSendFunc(func(ctx context.Context, delivery Delivery) error {
+			if !failedOnce {
+				failedOnce = true
+				close(ackFailed)
+				return errors.New("transient transport stall")
+			}
+			return fabric.SendTunnel(ctx, delivery)
+		})
+
+		request := []byte("rebound-request")
+		if _, err := outbound.Write(request); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, len(request))
+		if _, err := io.ReadFull(inbound, got); err != nil || !bytes.Equal(got, request) {
+			t.Fatalf("inbound read = %q, %v", got, err)
+		}
+		<-ackFailed
+		synctest.Wait()
+
+		response := []byte("rebound-response")
+		if _, err := inbound.Write(response); err != nil {
+			t.Fatalf("write after transient ACK send failure = %v", err)
+		}
+		gotResp := make([]byte, len(response))
+		if _, err := io.ReadFull(outbound, gotResp); err != nil || !bytes.Equal(gotResp, response) {
+			t.Fatalf("outbound read = %q, %v", gotResp, err)
+		}
+	})
+}

@@ -7,15 +7,16 @@
 // bubble, which parks with waitReasonSynctestWaitGroupWait and lets virtual
 // time advance. Outside a bubble every patched call keeps its stock behavior.
 //
-// Two further patches remove wall-clock inputs to a GOMAXPROCS=1 dst run:
-// runtime/rand.go seeds the global PRNG from a fixed constant (select
-// pollorder shuffles, map iteration starts, and per-m rand state become
-// process-independent), and runtime/proc.go stops sysmon from retaking a P
-// mid-syscall (a retake requeues the returning goroutine onto the global run
-// queue, reordering it relative to the local queue). Matched runs also need
-// GODEBUG=cryptocustomrand=1 (without it Go 1.27's crypto packages bypass a
-// swapped crypto/rand.Reader for the internal DRBG) and GOGC=off to keep GC
-// marker goroutines out of the single P's run queue. Finally,
+// Two further patches remove wall-clock and cross-bubble inputs to a
+// GOMAXPROCS=1 dst run: runtime/rand.go, runtime/select.go, runtime/sema.go,
+// runtime/time.go, and runtime/synctest.go seed the global PRNG from a fixed
+// constant and reset dedicated bubble-scoped PRNG streams, sync.Pool caches,
+// and pp.schedtick at the start of every synctest bubble; runtime/proc.go and
+// runtime/mgcscavenge.go disable sysmon and background heap scavenger wakes so
+// wall-clock timers never retake a P or inject system goroutines. Matched runs
+// also need GODEBUG=cryptocustomrand=1 (without it Go 1.27's crypto packages
+// bypass a swapped crypto/rand.Reader for the internal DRBG) and GOGC=off to
+// keep GC marker goroutines out of the single P's run queue. Finally,
 // crypto/internal/randutil.MaybeReadByte is neutralized: it steals a byte
 // from custom readers with 50% probability under cryptocustomrand=1, while
 // dst fixtures pass exactly-sized readers that must observe exact
@@ -118,20 +119,119 @@ func internal_sync_runtime_SemacquireWaitGroup(addr *uint32, synctestDurable boo
 		"\t}\n"
 
 	randSeedConstDecl = "\n// ivnpDstRandSeed keys the fixed runtime PRNG used by dst overlay builds.\n" +
-		"const ivnpDstRandSeed = \"ivnp-dst-replay-v1\"\n"
+		"const ivnpDstRandSeed = \"ivnp-dst-replay-v1\"\n\n" +
+		"var ivnpBubbleRand struct {\n" +
+		"\tchacha8    chacha8rand.State\n" +
+		"\tselectRand uint32\n" +
+		"\tsemaRand   uint32\n" +
+		"\ttimerRand  uint32\n" +
+		"}\n\n" +
+		"func ivnpResetBubbleRand() {\n" +
+		"\tif poolcleanup != nil {\n" +
+		"\t\tpoolcleanup()\n" +
+		"\t\tpoolcleanup()\n" +
+		"\t}\n" +
+		"\tvar seed [32]byte\n" +
+		"\tfor i := range seed {\n" +
+		"\t\tseed[i] = ivnpDstRandSeed[i%len(ivnpDstRandSeed)]\n" +
+		"\t}\n" +
+		"\tivnpBubbleRand.chacha8.Init(seed)\n" +
+		"\tivnpBubbleRand.selectRand = 0x64737431\n" +
+		"\tivnpBubbleRand.semaRand = 0x64737432\n" +
+		"\tivnpBubbleRand.timerRand = 0x64737433\n" +
+		"}\n\n" +
+		"//go:nosplit\n" +
+		"func ivnpTimerRand() uint32 {\n" +
+		"\tivnpBubbleRand.timerRand += 0x53c5ca59\n" +
+		"\thi, lo := bits.Mul32(ivnpBubbleRand.timerRand, ivnpBubbleRand.timerRand^0x74743c1b)\n" +
+		"\treturn hi ^ lo\n" +
+		"}\n\n" +
+		"//go:nosplit\n" +
+		"func ivnpSelectRandn(n uint32) uint32 {\n" +
+		"\tif getg().bubble != nil {\n" +
+		"\t\tivnpBubbleRand.selectRand += 0x53c5ca59\n" +
+		"\t\thi, lo := bits.Mul32(ivnpBubbleRand.selectRand, ivnpBubbleRand.selectRand^0x74743c1b)\n" +
+		"\t\treturn uint32((uint64(hi^lo) * uint64(n)) >> 32)\n" +
+		"\t}\n" +
+		"\treturn cheaprandn(n)\n" +
+		"}\n\n" +
+		"//go:nosplit\n" +
+		"func ivnpSemaRand() uint32 {\n" +
+		"\tif getg().bubble != nil {\n" +
+		"\t\tivnpBubbleRand.semaRand += 0x53c5ca59\n" +
+		"\t\thi, lo := bits.Mul32(ivnpBubbleRand.semaRand, ivnpBubbleRand.semaRand^0x74743c1b)\n" +
+		"\t\treturn hi ^ lo\n" +
+		"\t}\n" +
+		"\treturn cheaprand()\n" +
+		"}\n"
+
+	randPerMAnchor = "\tmp := getg().m\n\tc := &mp.chacha8\n"
+
+	randPerMPatch = "\tmp := getg().m\n\tc := &mp.chacha8\n" +
+		"\tif getg().bubble != nil {\n" +
+		"\t\tc = &ivnpBubbleRand.chacha8\n" +
+		"\t}\n"
 
 	readTimeRandomComment = "// readTimeRandom stretches any entropy in the current time"
+
+	sysmonSpawnAnchor = "\tif haveSysmon {\n" +
+		"\t\tsystemstack(func() {\n" +
+		"\t\t\tnewm(sysmon, nil, -1)\n" +
+		"\t\t})\n" +
+		"\t}\n"
+
+	sysmonSpawnGuard = "\t// IVNP dst overlay: do not spawn sysmon. A background OS thread\n" +
+		"\t// polling netpoll, waking the scavenger, or retaking Ps introduces\n" +
+		"\t// wall-clock scheduling jitter into GOMAXPROCS=1 simulations.\n" +
+		"\tif false && haveSysmon {\n" +
+		"\t\tsystemstack(func() {\n" +
+		"\t\t\tnewm(sysmon, nil, -1)\n" +
+		"\t\t})\n" +
+		"\t}\n"
 
 	retakeAnchor = "func retake(now int64) uint32 {\n\tn := 0\n"
 
 	retakeGuard = "func retake(now int64) uint32 {\n" +
 		"\t// IVNP dst overlay: sysmon never retakes a P. A P handed off\n" +
 		"\t// mid-syscall requeues the returning goroutine onto the global run\n" +
-		"\t// queue, reordering it relative to the local run queue — a\n" +
+		"\t// queue, reordering it relative to the local run queue: a\n" +
 		"\t// wall-clock-dependent input under GOMAXPROCS=1. The remainder of\n" +
 		"\t// this function is unreachable.\n" +
 		"\treturn 0\n" +
 		"\tn := 0\n"
+
+	scavengerWakeAnchor = "func (s *scavengerState) wake() {\n\tlock(&s.lock)\n"
+
+	scavengerWakeGuard = "func (s *scavengerState) wake() {\n" +
+		"\t// IVNP dst overlay: keep the background heap scavenger parked so\n" +
+		"\t// wall-clock timer wakes never inject system goroutines or advance\n" +
+		"\t// pp.schedtick during a simulation.\n" +
+		"\tif true {\n" +
+		"\t\treturn\n" +
+		"\t}\n" +
+		"\tlock(&s.lock)\n"
+
+	synctestStartAnchor = "\t// This is newproc, but also records the new g in bubble.main.\n" +
+		"\tpc := sys.GetCallerPC()\n" +
+		"\tsystemstack(func() {\n" +
+		"\t\tfv := *(**funcval)(unsafe.Pointer(&f))\n" +
+		"\t\tbubble.main = newproc1(fv, gp, pc, false, waitReasonZero)\n" +
+		"\t\tpp := getg().m.p.ptr()\n" +
+		"\t\trunqput(pp, bubble.main, true)\n" +
+		"\t\twakep()\n" +
+		"\t})\n"
+
+	synctestStartPatch = "\t// This is newproc, but also records the new g in bubble.main.\n" +
+		"\tpc := sys.GetCallerPC()\n" +
+		"\tsystemstack(func() {\n" +
+		"\t\tivnpResetBubbleRand()\n" +
+		"\t\tfv := *(**funcval)(unsafe.Pointer(&f))\n" +
+		"\t\tbubble.main = newproc1(fv, gp, pc, false, waitReasonZero)\n" +
+		"\t\tpp := getg().m.p.ptr()\n" +
+		"\t\tpp.schedtick = 0\n" +
+		"\t\trunqput(pp, bubble.main, true)\n" +
+		"\t\twakep()\n" +
+		"\t})\n"
 
 	// randutilMaybeReadByte is the stock body of MaybeReadByte; the
 	// replacement makes it a no-op so pinned test readers see exact
@@ -164,9 +264,43 @@ func patches() []patch {
 	return []patch{
 		{
 			file: "runtime/sema.go",
+			edits: []edit{
+				{
+					anchor:      "//go:linkname poll_runtime_Semrelease internal/poll.runtime_Semrelease",
+					replacement: runtimeBridge + "//go:linkname poll_runtime_Semrelease internal/poll.runtime_Semrelease",
+				},
+				{
+					anchor:      "\ts.ticket = cheaprand() | 1\n",
+					replacement: "\ts.ticket = ivnpSemaRand() | 1\n",
+				},
+			},
+		},
+		{
+			file: "runtime/select.go",
 			edits: []edit{{
-				anchor:      "//go:linkname poll_runtime_Semrelease internal/poll.runtime_Semrelease",
-				replacement: runtimeBridge + "//go:linkname poll_runtime_Semrelease internal/poll.runtime_Semrelease",
+				anchor:      "\t\tj := cheaprandn(uint32(norder + 1))\n",
+				replacement: "\t\tj := ivnpSelectRandn(uint32(norder + 1))\n",
+			}},
+		},
+		{
+			file: "runtime/time.go",
+			edits: []edit{{
+				anchor:      "\t\t\tt.rand = cheaprand()\n",
+				replacement: "\t\t\tt.rand = ivnpTimerRand()\n",
+			}},
+		},
+		{
+			file: "runtime/synctest.go",
+			edits: []edit{{
+				anchor:      synctestStartAnchor,
+				replacement: synctestStartPatch,
+			}},
+		},
+		{
+			file: "runtime/mgcscavenge.go",
+			edits: []edit{{
+				anchor:      scavengerWakeAnchor,
+				replacement: scavengerWakeGuard,
 			}},
 		},
 		{
@@ -246,14 +380,24 @@ func patches() []patch {
 					anchor:      readTimeRandomComment,
 					replacement: randSeedConstDecl + "\n" + readTimeRandomComment,
 				},
+				{
+					anchor:      randPerMAnchor,
+					replacement: randPerMPatch,
+				},
 			},
 		},
 		{
 			file: "runtime/proc.go",
-			edits: []edit{{
-				anchor:      retakeAnchor,
-				replacement: retakeGuard,
-			}},
+			edits: []edit{
+				{
+					anchor:      sysmonSpawnAnchor,
+					replacement: sysmonSpawnGuard,
+				},
+				{
+					anchor:      retakeAnchor,
+					replacement: retakeGuard,
+				},
+			},
 		},
 		{
 			file: "crypto/internal/randutil/randutil.go",

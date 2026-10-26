@@ -14,24 +14,25 @@ import (
 )
 
 const (
-	ratchetTagLen              = 8
-	ratchetBlockHeader         = 3
-	ratchetDateTime            = 0
-	ratchetTermination         = 4
-	ratchetPrevious            = 6
-	ratchetNextKey             = 7
-	ratchetACK                 = 8
-	ratchetACKRequest          = 9
-	ratchetGarlicClove         = 11
-	ratchetPadding             = 254
-	DefaultTagLookahead        = 512
-	defaultMaxSessions         = 256
-	defaultMaxTags             = 8192
-	defaultSessionLife         = 10 * 60 * 1000
-	defaultReplayLife          = 5 * 60 * 1000
-	previousSetLife            = 3 * 60 * 1000
-	automaticDHRatchetMessages = 4096
-	newSessionRestartAge       = 2 * 60 * 1000
+	ratchetTagLen                 = 8
+	ratchetBlockHeader            = 3
+	ratchetDateTime               = 0
+	ratchetTermination            = 4
+	ratchetPrevious               = 6
+	ratchetNextKey                = 7
+	ratchetACK                    = 8
+	ratchetACKRequest             = 9
+	ratchetGarlicClove            = 11
+	ratchetPadding                = 254
+	DefaultTagLookahead           = 512
+	defaultMaxSessions            = 256
+	defaultMaxTags                = 8192
+	defaultSessionLife            = 10 * 60 * 1000
+	defaultReplayLife             = 5 * 60 * 1000
+	previousSetLife               = 3 * 60 * 1000
+	automaticDHRatchetMessages    = 4096
+	newSessionRestartAge          = 2 * 60 * 1000
+	unconfirmedNewSessionBurstAge = 1 * 1000
 )
 
 var (
@@ -180,6 +181,7 @@ type session struct {
 	reverseDH  dhRatchet
 	created    uint64
 	expires    uint64
+	confirmed  bool
 	terminated bool
 }
 
@@ -456,7 +458,14 @@ func (m *RatchetManager) RetainNewSession(candidate *NewSessionCandidate, peer f
 }
 
 func recentSession(current *session, now uint64) bool {
-	return current != nil && now >= current.created && now-current.created <= newSessionRestartAge
+	if current == nil || now < current.created {
+		return false
+	}
+	maxAge := uint64(unconfirmedNewSessionBurstAge)
+	if current.confirmed {
+		maxAge = newSessionRestartAge
+	}
+	return now-current.created <= maxAge
 }
 
 // OwnsTag reports whether tag currently addresses an inbound or pending
@@ -854,6 +863,7 @@ func (m *RatchetManager) receiveReplyLocked(dst, packet []byte, tag [ratchetTagL
 	if err != nil {
 		return RatchetResult{}, err
 	}
+	s.confirmed = true
 	if err = m.installSessionLocked(s, now); err != nil {
 		releaseSession(s)
 		return RatchetResult{}, err
@@ -968,6 +978,7 @@ func (m *RatchetManager) receiveExistingLocked(dst, packet []byte, tag [ratchetT
 	// Only authenticated traffic renews receive keys; old DH sets still obey oldUntil.
 	entry.set.expires = max(entry.set.expires, now+m.config.SessionLifetime)
 	entry.set.owner.expires = max(entry.set.owner.expires, entry.set.expires)
+	entry.set.owner.confirmed = true
 	if entry.set == entry.set.owner.inbound {
 		entry.set.owner.reverseDH.send = false
 	}

@@ -300,6 +300,80 @@ func TestRatchetProductionEncryptReplacesRestartableSession(t *testing.T) {
 	}
 }
 
+func TestRatchetUnconfirmedResponderReplacesAfterBurstAge(t *testing.T) {
+	a, b, _, bPeer, now := ratchetPair(t)
+	defer a.ReleaseSensitive()
+	defer b.ReleaseSensitive()
+	bPub := ratchetPublic(t, b)
+
+	ns1, err := a.Encrypt(make([]byte, 2048), bPeer, bPub, 4, clove("syn-1"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got1, err := b.Receive(make([]byte, 2048), make([]byte, 2048), ns1, now)
+	if err != nil || !got1.NewSession || got1.Candidate == nil {
+		t.Fatalf("initial new session = %#v, %v", got1, err)
+	}
+	if commit, commitErr := b.CommitNewSession(got1.Candidate, got1.Peer, now); commitErr != nil || commit != NewSessionInstalled {
+		t.Fatalf("initial commit = %v, %v", commit, commitErr)
+	}
+
+	burstNow := now + unconfirmedNewSessionBurstAge
+	nsBurst, err := a.Encrypt(make([]byte, 2048), bPeer, bPub, 4, clove("burst"), burstNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotBurst, err := b.Receive(make([]byte, 2048), make([]byte, 2048), nsBurst, burstNow)
+	if err != nil || !gotBurst.NewSession || gotBurst.Candidate == nil {
+		t.Fatalf("burst new session = %#v, %v", gotBurst, err)
+	}
+	if retained, retainErr := b.RetainNewSession(gotBurst.Candidate, gotBurst.Peer, burstNow); retainErr != nil || !retained {
+		t.Fatalf("unconfirmed burst retention = %t, %v", retained, retainErr)
+	}
+
+	retryNow := now + unconfirmedNewSessionBurstAge + 1
+	nsRetry, err := a.Encrypt(make([]byte, 2048), bPeer, bPub, 4, clove("syn-retry"), retryNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotRetry, err := b.Receive(make([]byte, 2048), make([]byte, 2048), nsRetry, retryNow)
+	if err != nil || !gotRetry.NewSession || gotRetry.Candidate == nil {
+		t.Fatalf("retry new session = %#v, %v", gotRetry, err)
+	}
+	if retained, retainErr := b.RetainNewSession(gotRetry.Candidate, gotRetry.Peer, retryNow); retainErr != nil || retained {
+		t.Fatalf("unconfirmed retry retention = %t, %v", retained, retainErr)
+	}
+	if commit, commitErr := b.CommitNewSession(gotRetry.Candidate, gotRetry.Peer, retryNow); commitErr != nil || commit != NewSessionReplaced {
+		t.Fatalf("unconfirmed retry commit = %v, %v", commit, commitErr)
+	}
+	if _, err = a.Receive(make([]byte, 2048), make([]byte, 1), gotRetry.Reply, retryNow); err != nil {
+		t.Fatal(err)
+	}
+	confirmPacket, err := a.EncryptExisting(make([]byte, 256), bPeer, clove("ack"), RatchetOptions{}, retryNow+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = b.Receive(make([]byte, 256), nil, confirmPacket, retryNow+1); err != nil {
+		t.Fatal(err)
+	}
+
+	confirmedNow := retryNow + unconfirmedNewSessionBurstAge + 2
+	a.mu.Lock()
+	a.sessions[bPeer].outbound.next = 1 << 16
+	a.mu.Unlock()
+	nsLate, err := a.Encrypt(make([]byte, 2048), bPeer, bPub, 4, clove("late"), confirmedNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLate, err := b.Receive(make([]byte, 2048), make([]byte, 2048), nsLate, confirmedNow)
+	if err != nil || !gotLate.NewSession || gotLate.Candidate == nil {
+		t.Fatalf("late new session = %#v, %v", gotLate, err)
+	}
+	if retained, retainErr := b.RetainNewSession(gotLate.Candidate, gotLate.Peer, confirmedNow); retainErr != nil || !retained {
+		t.Fatalf("confirmed session retention = %t, %v", retained, retainErr)
+	}
+}
+
 // +checklocksignore
 func ratchetPublic(t testing.TB, manager *RatchetManager) []byte {
 	t.Helper()
