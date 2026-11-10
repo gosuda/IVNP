@@ -1262,3 +1262,39 @@ func TestGarlicReceiverReleaseSensitiveReplyScratchRace(t *testing.T) {
 		receiver.ReleaseSensitive()
 	})
 }
+
+func TestGarlicReceiverDeliversLocalDataClovesToDestination(t *testing.T) {
+	f := newRatchetReceiverFixture(t)
+	f.establish(t)
+	var gotFrom, gotTo foundation.Hash
+	var gotBody []byte
+	f.receiver.service.SetDestinationSink(func(from, to foundation.Hash, message foundation.I2NPMessage) error {
+		data, err := foundation.I2NPParseData(message.Payload)
+		if err != nil {
+			return err
+		}
+		gotFrom, gotTo = from, to
+		gotBody = append(gotBody[:0], data.Data...)
+		return nil
+	})
+	content := []byte("i2pd-local-delivery-syn-ack")
+	data := make([]byte, 4+len(content))
+	binary.BigEndian.PutUint32(data, uint32(len(content)))
+	copy(data[4:], content)
+	payload, err := appendRatchetGarlicClove(make([]byte, 256), dataplanegarlic.Delivery{Type: dataplanegarlic.DeliveryLocal}, foundation.I2NPMessage{
+		Header: foundation.I2NPHeader{Type: foundation.I2NPData, ID: 77, Expiration: f.now + 1000}, Payload: data,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := f.remote.EncryptExisting(make([]byte, 512), f.localHash, payload, dataplanegarlic.RatchetOptions{}, f.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receive(packet); err != nil {
+		t.Fatalf("receive DeliveryLocal Data clove: %v", err)
+	}
+	if gotFrom != f.remoteHash || gotTo != f.localHash || !bytes.Equal(gotBody, content) {
+		t.Fatalf("delivered = from %x to %x body %q, want from %x to %x body %q", gotFrom, gotTo, gotBody, f.remoteHash, f.localHash, content)
+	}
+}

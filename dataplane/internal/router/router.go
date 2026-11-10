@@ -257,6 +257,14 @@ func (s *Service) acceptsControl(message foundation.I2NPMessage) bool {
 
 // HandleGarlicCloveSet dispatches decrypted garlic cloves through I2NP replay filters and sinks.
 func (s *Service) HandleGarlicCloveSet(set dataplanegarlic.CloveSet, nowMillis uint64, fromFloodfill bool) error {
+	return s.handleGarlicCloveSet(foundation.Hash{}, set, nowMillis, fromFloodfill)
+}
+
+func (s *Service) handleDestinationGarlicCloveSet(destination foundation.Hash, set dataplanegarlic.CloveSet, nowMillis uint64, fromFloodfill bool) error {
+	return s.handleGarlicCloveSet(destination, set, nowMillis, fromFloodfill)
+}
+
+func (s *Service) handleGarlicCloveSet(destination foundation.Hash, set dataplanegarlic.CloveSet, nowMillis uint64, fromFloodfill bool) error {
 	if err := validateI2NPExpiration(set.Expiration, nowMillis); err != nil {
 		return err
 	}
@@ -278,7 +286,11 @@ func (s *Service) HandleGarlicCloveSet(set dataplanegarlic.CloveSet, nowMillis u
 			result = appendError(result, err)
 			continue
 		}
-		prepared, err := s.prepareClove(clove.Delivery, clove.Message, nowMillis)
+		delivery := clove.Delivery
+		if destination != (foundation.Hash{}) && delivery.Type == dataplanegarlic.DeliveryLocal && clove.Message.Header.Type == foundation.I2NPData {
+			delivery = dataplanegarlic.Delivery{Type: dataplanegarlic.DeliveryDestination, To: destination}
+		}
+		prepared, err := s.prepareClove(delivery, clove.Message, nowMillis)
 		if err != nil {
 			result = appendError(result, err)
 			continue
@@ -291,7 +303,7 @@ func (s *Service) HandleGarlicCloveSet(set dataplanegarlic.CloveSet, nowMillis u
 			result = appendError(result, ErrDuplicate)
 			continue
 		}
-		if err = s.dispatchPreparedClove(foundation.Hash{}, clove.Delivery, clove.Message, prepared, nowMillis, fromFloodfill); err != nil {
+		if err = s.dispatchPreparedClove(foundation.Hash{}, delivery, clove.Message, prepared, nowMillis, fromFloodfill); err != nil {
 			result = appendError(result, err)
 		}
 	}

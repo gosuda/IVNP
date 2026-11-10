@@ -1029,3 +1029,68 @@ func TestRoutePreparationRefreshesExpiredCachedLeaseSet(t *testing.T) {
 		t.Fatalf("refreshed route = %+v, present=%t", receipt, ok)
 	}
 }
+
+func TestRoutePreparationRotatesOutboundCircuitAcrossMultipleLeases(t *testing.T) {
+	sender, _, _ := routeControlFixture(t, nil)
+	pool := controlplanetunnel.NewOwnedPool(sender.owner, 2)
+	for _, entry := range sender.pool.Snapshot(1000) {
+		if err := pool.Add(entry, 1000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	second, err := sender.tunnels.RegisterOutbound(dataplane.TunnelOutboundCircuit{ID: 11, Owner: sender.owner, FirstHop: foundation.Hash{8}, NextTunnelID: 12, ExpiresAt: 95000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sender.tunnels.RemoveCircuit(second) })
+	if err := pool.Add(controlplanetunnel.Entry{ID: 11, Owner: sender.owner, Circuit: second, Direction: controlplanetunnel.Outbound, Expires: 95000}, 1000); err != nil {
+		t.Fatal(err)
+	}
+	sender.pool = pool
+
+	remote, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.ReleaseSensitive()
+	local, err := controlplanenetdb.NewLocalLeaseSet2(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.ReplaceInboundLeases([]foundation.NetworkDatabaseLease{
+		{Gateway: foundation.Hash{10}, TunnelID: 11, EndDate: 90000},
+		{Gateway: foundation.Hash{20}, TunnelID: 21, EndDate: 90000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw := make([]byte, foundation.NetworkDatabaseMaxLeaseSetBytes)
+	n, err := local.MarshalTo(raw, 1000, remote.Sign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := foundation.I2NPDatabaseStoreMessage{Key: remote.Hash(), Type: foundation.I2NPStoreLeaseSet2, Data: raw[:n]}
+	if err := sender.database.HandleDatabaseStore(store, false, 1000); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := sender.PrepareHandshake(t.Context(), remote.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, ok := sender.execution.RouteReceipt(remote.Hash())
+	if !ok {
+		t.Fatal("missing first route receipt")
+	}
+	first.NoResponse()
+
+	if _, err := sender.PrepareHandshake(t.Context(), remote.Hash()); err != nil {
+		t.Fatal(err)
+	}
+	next, ok := sender.execution.RouteReceipt(remote.Hash())
+	if !ok {
+		t.Fatal("missing second route receipt")
+	}
+	if next.Circuit == initial.Circuit || next.TunnelID == initial.TunnelID {
+		t.Fatalf("second attempt reused failed circuit or lease: initial=%+v next=%+v", initial, next)
+	}
+}

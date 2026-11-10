@@ -117,6 +117,7 @@ type garlicReceiveScratch struct {
 
 type garlicDestinationState struct {
 	GarlicDestination
+	hash       foundation.Hash
 	scratch    sync.Pool
 	inFlightMu sync.Mutex
 	// +checklocks:inFlightMu
@@ -228,7 +229,7 @@ func (r *GarlicReceiver) RegisterDestination(hash foundation.Hash, destination G
 		r.destinationsMu.Unlock()
 		return nil, ErrDataPlaneConfig
 	}
-	state := &garlicDestinationState{GarlicDestination: destination}
+	state := &garlicDestinationState{GarlicDestination: destination, hash: hash}
 	r.destinations[hash] = state
 	r.destinationsMu.Unlock()
 	var once sync.Once
@@ -440,7 +441,7 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 		unlock()
 		if parseErr ==
 			nil {
-			parseErr = r.service.HandleGarlicCloveSet(set, now, false)
+			parseErr = r.service.handleDestinationGarlicCloveSet(destination.hash, set, now, false)
 		}
 
 		clear(scratch.plaintext[:])
@@ -448,6 +449,13 @@ func (r *GarlicReceiver) HandleGarlicFrom(source I2NPSource, message foundation.
 		return parseErr
 	}
 	return ErrGarlicDestination
+}
+
+func destinationCloveDelivery(destination foundation.Hash, clove dataplanegarlic.Clove) dataplanegarlic.Delivery {
+	if clove.Delivery.Type == dataplanegarlic.DeliveryLocal && clove.Message.Header.Type == foundation.I2NPData {
+		return dataplanegarlic.Delivery{Type: dataplanegarlic.DeliveryDestination, To: destination}
+	}
+	return clove.Delivery
 }
 
 func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState, result dataplanegarlic.RatchetResult, replyDst []byte, now uint64) error {
@@ -462,7 +470,7 @@ func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState
 	if result.Candidate == nil {
 		var dispatchErr error
 		for _, clove := range cloves {
-			dispatchErr = appendError(dispatchErr, r.service.dispatchClove(result.Peer, clove.Delivery, clove.Message, now, false))
+			dispatchErr = appendError(dispatchErr, r.service.dispatchClove(result.Peer, destinationCloveDelivery(destination.hash, clove), clove.Message, now, false))
 		}
 		if result.ReplyRequested && !result.Terminated {
 			dispatchErr = appendError(dispatchErr, sendRatchetResponse(destination, result, replyDst, now))
@@ -521,7 +529,7 @@ func (r *GarlicReceiver) handleRatchetResult(destination *garlicDestinationState
 		}
 	}
 	for _, clove := range remaining {
-		dispatchErr = appendError(dispatchErr, r.service.dispatchClove(result.Peer, clove.Delivery, clove.Message, now, false))
+		dispatchErr = appendError(dispatchErr, r.service.dispatchClove(result.Peer, destinationCloveDelivery(destination.hash, clove), clove.Message, now, false))
 	}
 	return dispatchErr
 }

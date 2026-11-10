@@ -757,6 +757,7 @@ func (s *StreamingTunnelSender) resolveRoute(ctx context.Context, remote foundat
 				exhausted = true
 				continue
 			}
+			var outboundFailures int
 			for _, entry := range entries {
 				if entry.Direction != controlplanetunnel.Outbound || entry.Owner != s.owner {
 					continue
@@ -770,15 +771,16 @@ func (s *StreamingTunnelSender) resolveRoute(ctx context.Context, remote foundat
 				}
 				s.remoteMu.RLock()
 				failedUntil := s.failedRoutes[failedRoutePath{remote: remote, circuit: entry.Circuit, gateway: lease.Gateway, tunnelID: lease.TunnelID}]
+				entryFailures := s.activeCircuitFailuresLocked(remote, entry.Circuit, now)
 				s.remoteMu.RUnlock()
 				if failedUntil > now {
 					exhausted = true
 					continue
 				}
-				if found && entry.Expires <= outbound.Expires {
+				if found && !preferOutboundCircuit(entry, entryFailures, outbound, outboundFailures) {
 					continue
 				}
-				outbound, circuit, found = entry, candidate, true
+				outbound, circuit, outboundFailures, found = entry, candidate, entryFailures, true
 			}
 		}
 		if found || pass > 0 || !exhausted || encrypted {
@@ -856,6 +858,24 @@ func (s *StreamingTunnelSender) resolveRoute(ctx context.Context, remote foundat
 	}
 	s.seedLeaseGateway(ctx, outbound, lease.Gateway)
 	return route, nil
+}
+
+func preferOutboundCircuit(candidate controlplanetunnel.Entry, candidateFailures int, current controlplanetunnel.Entry, currentFailures int) bool {
+	if candidateFailures != currentFailures {
+		return candidateFailures < currentFailures
+	}
+	return candidate.Expires > current.Expires
+}
+
+// +checklocksread:s.remoteMu
+func (s *StreamingTunnelSender) activeCircuitFailuresLocked(remote foundation.Hash, circuit dataplane.TunnelCircuitToken, now uint64) int {
+	failures := 0
+	for path, until := range s.failedRoutes {
+		if path.remote == remote && path.circuit == circuit && until > now {
+			failures++
+		}
+	}
+	return failures
 }
 
 func leaseSet2Deadline(set foundation.NetworkDatabaseLeaseSet2) uint64 {
