@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   register-commit:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 10
     env:
       GOPROXY: https://proxy.golang.org
