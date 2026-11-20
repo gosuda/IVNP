@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   live-i2p-roundtrip:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
