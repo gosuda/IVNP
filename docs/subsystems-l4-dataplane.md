@@ -52,8 +52,15 @@ Inbound I2NPGarlic Payload
              │     ├─ Verify leaseSetMatchesRatchetStatic(LS2, candidate.StaticPublic)
              │     ├─ ReserveInboundReply (holds follow-up app traffic until NSR sends)
              │     └─ CommitNew(candidate) (or RetainNew if LS2 arrives separately)
-             └─ c) Legacy ElGamal/AES fallback (ReceiveNew / DecryptExisting)
+             ├─ c) Legacy ElGamal/AES fallback (ReceiveNew / DecryptExisting)
+             └─ d) Confine every clove to the receiving Destination
+                   ├─ DESTINATION(to = self) and Local Data ──► Destination sink
+                   ├─ Local DatabaseStore(LeaseSet, reply token 0) ──► control, PrivateStore
+                   ├─ Local DeliveryStatus ──► dropped
+                   └─ ROUTER, TUNNEL, DESTINATION(other), other Local ──► rejected
 ```
+
+Garlic decrypted with a hosted Destination's keys can be produced by any peer that knows the Destination's public encryption key, so it never acts with router authority (`destinationCloveDelivery` in `router.go`). It cannot forward to routers or tunnels, reach another local Destination, or enter the router `Garlic`, `TunnelData`, `TunnelGateway`, or control sinks. The one exception is the sender's bundled LeaseSet, which control stores as an unpublished entry: it serves the reply route but is never returned in lookup replies, flooded, or acknowledged. Router-key garlic keeps full router dispatch.
 
 ---
 

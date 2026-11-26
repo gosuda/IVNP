@@ -16,6 +16,9 @@ var (
 	ErrFutureExpiration = errors.New("router: I2NP message expiration is too far in the future")
 	ErrDuplicate        = errors.New("router: duplicate I2NP message")
 	ErrUnhandledI2NP    = errors.New("router: unhandled I2NP message")
+
+	errDestinationClove        = errors.New("router: clove not permitted in Destination garlic")
+	errDestinationCloveDropped = errors.New("router: Destination garlic clove has no Destination consumer")
 )
 
 const (
@@ -287,8 +290,13 @@ func (s *Service) handleGarlicCloveSet(destination foundation.Hash, set dataplan
 			continue
 		}
 		delivery := clove.Delivery
-		if destination != (foundation.Hash{}) && delivery.Type == dataplanegarlic.DeliveryLocal && clove.Message.Header.Type == foundation.I2NPData {
-			delivery = dataplanegarlic.Delivery{Type: dataplanegarlic.DeliveryDestination, To: destination}
+		if destination != (foundation.Hash{}) {
+			if delivery, err = destinationCloveDelivery(destination, delivery, clove.Message); err != nil {
+				if !errors.Is(err, errDestinationCloveDropped) {
+					result = appendError(result, err)
+				}
+				continue
+			}
 		}
 		prepared, err := s.prepareClove(delivery, clove.Message, nowMillis)
 		if err != nil {
@@ -303,10 +311,92 @@ func (s *Service) handleGarlicCloveSet(destination foundation.Hash, set dataplan
 			result = appendError(result, ErrDuplicate)
 			continue
 		}
-		if err = s.dispatchPreparedClove(foundation.Hash{}, delivery, clove.Message, prepared, nowMillis, fromFloodfill); err != nil {
+		if destination != (foundation.Hash{}) {
+			err = s.dispatchPreparedDestinationClove(foundation.Hash{}, delivery, clove.Message, nowMillis)
+		} else {
+			err = s.dispatchPreparedClove(foundation.Hash{}, delivery, clove.Message, prepared, nowMillis, fromFloodfill)
+		}
+		if err != nil {
 			result = appendError(result, err)
 		}
 	}
+}
+
+// destinationCloveDelivery confines a clove of Garlic decrypted with local
+// Destination destination's keys to that Destination. Any remote peer that
+// knows the Destination's public encryption key can produce such Garlic, so
+// it must never act with the hosting router's authority: Router and Tunnel
+// forwarding, delivery to another local Destination, and every router-scoped
+// Local message are rejected. Only Data for this Destination and a bundled,
+// reply-free LeaseSet store remain; a Local DeliveryStatus is dropped because
+// no Destination consumer exists and the router-wide status tokens are not
+// the sender's to satisfy.
+func destinationCloveDelivery(destination foundation.Hash, delivery dataplanegarlic.Delivery, message foundation.I2NPMessage) (dataplanegarlic.Delivery, error) {
+	switch delivery.Type {
+	case dataplanegarlic.DeliveryDestination:
+		if delivery.To == destination {
+			return delivery, nil
+		}
+	case dataplanegarlic.DeliveryLocal:
+		switch message.Header.Type {
+		case foundation.I2NPData:
+			return dataplanegarlic.Delivery{Type: dataplanegarlic.DeliveryDestination, To: destination}, nil
+		case foundation.I2NPDeliveryStatus:
+			return delivery, errDestinationCloveDropped
+		case foundation.I2NPDatabaseStore:
+			if bundledLeaseSetStore(message.Payload) {
+				return delivery, nil
+			}
+		}
+	}
+	return delivery, errDestinationClove
+}
+
+// bundledLeaseSetStore accepts the sender LeaseSet that repliable Destination
+// traffic carries. A reply token would make the router acknowledge to a
+// sender-chosen gateway, and a RouterInfo belongs to router-scoped NetDB.
+func bundledLeaseSetStore(payload []byte) bool {
+	store, err := foundation.I2NPParseDatabaseStore(payload)
+	if err != nil || store.ReplyToken != 0 {
+		return false
+	}
+	switch store.Type {
+	case foundation.I2NPStoreLeaseSet, foundation.I2NPStoreLeaseSet2, foundation.I2NPStoreMetaLeaseSet, foundation.I2NPStoreEncryptedLeaseSet:
+		return true
+	}
+	return false
+}
+
+// dispatchDestinationClove confines, admits and dispatches one clove of Garlic
+// decrypted with local Destination destination's keys.
+func (s *Service) dispatchDestinationClove(destination, source foundation.Hash, delivery dataplanegarlic.Delivery, message foundation.I2NPMessage, nowMillis uint64) error {
+	delivery, err := destinationCloveDelivery(destination, delivery, message)
+	if err != nil {
+		if errors.Is(err, errDestinationCloveDropped) {
+			return nil
+		}
+		return err
+	}
+	if _, err = s.prepareClove(delivery, message, nowMillis); err != nil {
+		return err
+	}
+	if s.seen(replayI2NP, message.Header.ID, message.Header.Expiration, nowMillis) {
+		return ErrDuplicate
+	}
+	return s.dispatchPreparedDestinationClove(source, delivery, message, nowMillis)
+}
+
+// dispatchPreparedDestinationClove hands a confined clove to its Destination,
+// or a bundled LeaseSet to control as a private store that is retained for
+// local routing but never published, flooded or acknowledged.
+func (s *Service) dispatchPreparedDestinationClove(source foundation.Hash, delivery dataplanegarlic.Delivery, message foundation.I2NPMessage, nowMillis uint64) error {
+	switch delivery.Type {
+	case dataplanegarlic.DeliveryDestination:
+		return s.sinks.Destination(source, delivery.To, message)
+	case dataplanegarlic.DeliveryLocal:
+		return s.sinks.Control.Enqueue(ControlMessage{Message: message, NowMillis: nowMillis, PrivateStore: true})
+	}
+	return errDestinationClove
 }
 
 func (s *Service) dispatchClove(source foundation.Hash, delivery dataplanegarlic.Delivery, message foundation.I2NPMessage, nowMillis uint64, fromFloodfill bool) error {
