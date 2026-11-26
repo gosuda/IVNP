@@ -80,6 +80,8 @@ type PairedPoolMaintainer struct {
 	ctx              context.Context
 	cancel           context.CancelFunc
 	pairIndex        atomic.Uint64
+	// attempts joins build attempts that outlive the pass that started them.
+	attempts sync.WaitGroup
 	// +checklocks:lifecycleMu
 	closed bool
 }
@@ -115,7 +117,10 @@ func NewPairedPoolMaintainer(config PairedPoolMaintainerConfig) (*PairedPoolMain
 
 // Maintain performs one explicitly scheduled transition. Bootstrap preserves
 // tunnel dependency order; once both directions are usable, independent
-// inbound and outbound renewals may start concurrently.
+// inbound and outbound renewals may start concurrently. A pass does not wait
+// for an attempt that must first establish a new transport session: that
+// attempt continues under the caller's deadline, and the next pass can start
+// other builds meanwhile.
 func (m *PairedPoolMaintainer) Maintain(ctx context.Context) (int, error) {
 	m.lifecycleMu.RLock()
 	defer m.lifecycleMu.RUnlock()
@@ -206,6 +211,20 @@ func (m *PairedPoolMaintainer) maintainActive(ctx context.Context, hooks []Maint
 	if !waiting {
 		m.builder.creatorBudget.cancelWait(m.builder)
 	}
+	if len(attempts) == 0 {
+		return 0, resultErr
+	}
+	base := context.WithoutCancel(ctx)
+	var runCtx context.Context
+	var cancelRun context.CancelFunc
+	if deadline, ok := ctx.Deadline(); ok {
+		runCtx, cancelRun = context.WithDeadline(base, deadline)
+	} else {
+		runCtx, cancelRun = context.WithCancel(base)
+	}
+	stopLifetime := context.AfterFunc(m.ctx, cancelRun)
+	stopPass := context.AfterFunc(ctx, cancelRun)
+	defer stopPass()
 	type buildResult struct {
 		started bool
 		err     error
@@ -218,7 +237,7 @@ func (m *PairedPoolMaintainer) maintainActive(ctx context.Context, hooks []Maint
 				carrierID = outbound.ID
 			}
 			m.inboundSourceMu.Lock()
-			build, sourceErr := m.inboundSource.NextInbound(ctx, now, carrierID)
+			build, sourceErr := m.inboundSource.NextInbound(runCtx, now, carrierID)
 			m.inboundSourceMu.Unlock()
 			err = sourceErr
 			if err == nil && carrierID != 0 && outbound.HopCount == 0 {
@@ -229,16 +248,16 @@ func (m *PairedPoolMaintainer) maintainActive(ctx context.Context, hooks []Maint
 				if carrierID != 0 {
 					build.CarrierEndpoint = outbound.Hops[outbound.HopCount-1]
 				}
-				_, err = m.builder.StartInbound(ctx, build)
+				_, err = m.builder.StartInbound(runCtx, build)
 			}
 		} else {
 			m.outboundSourceMu.Lock()
-			build, sourceErr := m.outboundSource.NextOutboundForReply(ctx, now, ReplyRoute{Gateway: inbound.Gateway, TunnelID: inbound.GatewayTunnelID})
+			build, sourceErr := m.outboundSource.NextOutboundForReply(runCtx, now, ReplyRoute{Gateway: inbound.Gateway, TunnelID: inbound.GatewayTunnelID})
 			m.outboundSourceMu.Unlock()
 			err = sourceErr
 			if err == nil {
 				build.attempt, build.retireID = attempt, attempt.retire.ID
-				_, err = m.builder.StartOutbound(ctx, build)
+				_, err = m.builder.StartOutbound(runCtx, build)
 			}
 		}
 		if err != nil {
@@ -246,19 +265,24 @@ func (m *PairedPoolMaintainer) maintainActive(ctx context.Context, hooks []Maint
 		}
 		return buildResult{started: err == nil, err: err}
 	}
-	if len(attempts) == 1 {
-		result := run(attempts[0])
-		if result.started {
-			return 1, resultErr
-		}
-		if resultErr == nil {
-			return 0, result.err
-		}
-		return 0, errors.Join(resultErr, result.err)
-	}
+	// Each attempt reports once: when it finishes, or earlier when it starts
+	// to wait for a new transport session. The pass waits only for reports.
 	results := make(chan buildResult, len(attempts))
+	var remaining atomic.Int32
+	remaining.Store(int32(len(attempts)))
+	m.attempts.Add(len(attempts))
 	for _, attempt := range attempts {
-		go func() { results <- run(attempt) }()
+		var report sync.Once
+		attempt.sessionSetup = func() { report.Do(func() { results <- buildResult{started: true} }) }
+		go func() {
+			defer m.attempts.Done()
+			result := run(attempt)
+			report.Do(func() { results <- result })
+			if remaining.Add(-1) == 0 {
+				stopLifetime()
+				cancelRun()
+			}
+		}()
 	}
 	started := 0
 	for range attempts {
@@ -266,13 +290,20 @@ func (m *PairedPoolMaintainer) maintainActive(ctx context.Context, hooks []Maint
 		if result.started {
 			started++
 		}
-		resultErr = errors.Join(resultErr, result.err)
+		switch {
+		case result.err == nil:
+		case resultErr == nil:
+			resultErr = result.err
+		default:
+			resultErr = errors.Join(resultErr, result.err)
+		}
 	}
 	return started, resultErr
 }
 
 // Close cancels an active transition, rejects future maintenance, and waits
-// until the current transition has relinquished its build/source references.
+// until the current transition and every attempt it started have relinquished
+// their build/source references.
 func (m *PairedPoolMaintainer) Close() error {
 	if m == nil {
 		return nil
@@ -284,6 +315,7 @@ func (m *PairedPoolMaintainer) Close() error {
 	m.hooks = nil
 	m.builder.creatorBudget.cancelWait(m.builder)
 	m.lifecycleMu.Unlock()
+	m.attempts.Wait()
 	return nil
 }
 

@@ -374,3 +374,84 @@ func TestPairedMaintainerBootstrapParallelLimit(t *testing.T) {
 		t.Fatalf("bootstrap parallel carriers=%v, want [0 0]", got)
 	}
 }
+
+type sessionGateSender struct {
+	buildCaptureSender
+	blocked foundation.Hash
+	entered chan struct{}
+	exited  chan struct{}
+}
+
+func (s *sessionGateSender) HasSession(peer foundation.Hash) bool { return peer != s.blocked }
+
+func (s *sessionGateSender) EnsureSession(ctx context.Context, peer foundation.Hash) error {
+	if peer != s.blocked {
+		return nil
+	}
+	close(s.entered)
+	<-ctx.Done()
+	close(s.exited)
+	return ctx.Err()
+}
+
+func TestPairedMaintainerDoesNotWaitForNewTransportSession(t *testing.T) {
+	const now = uint64(1_700_000_000_000)
+	inboundSource := &pairedInboundSource{builds: []InboundBuild{
+		pairedInboundBuild(t, 101, now+10_000),
+		pairedInboundBuild(t, 102, now+10_000),
+	}}
+	sender := &sessionGateSender{blocked: foundation.Hash{101, 1}, entered: make(chan struct{}), exited: make(chan struct{})}
+	runtime := dataplane.TunnelNewRuntime(dataplane.TunnelRuntimeConfig{Sender: sender, Now: func() uint64 { return now }})
+	pool := NewPool(8)
+	manager, err := NewBuildManager(BuildManagerConfig{
+		Runtime: runtime, Pool: pool, Sender: sender, ReplyKeys: newBuildReplyRegistry(),
+		LocalRouter: foundation.Hash{1}, LocalDelivery: func(foundation.I2NPMessage) error { return nil },
+		Now: func() uint64 { return now }, Random: new(buildCounterReader),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.ReleaseSensitive)
+	maintainer, err := NewPairedPoolMaintainer(PairedPoolMaintainerConfig{
+		Pool: pool, Runtime: runtime, Builder: manager, InboundSource: inboundSource, OutboundSource: new(pairedOutboundSource),
+		Now: func() uint64 { return now }, InboundTarget: 2, OutboundTarget: 1, BootstrapParallelLimit: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = maintainer.Close() })
+	type maintainResult struct {
+		started int
+		err     error
+	}
+	maintained := make(chan maintainResult, 1)
+	go func() {
+		started, maintainErr := maintainer.Maintain(context.Background())
+		maintained <- maintainResult{started: started, err: maintainErr}
+	}()
+	awaitScheduling(t, sender.entered)
+	select {
+	case result := <-maintained:
+		if result.err != nil || result.started != 2 {
+			t.Fatalf("maintenance started=%d err=%v, want 2 nil", result.started, result.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("maintenance waited for a new transport session")
+	}
+	if messages := sender.take(); len(messages) != 1 || messages[0].peer != (foundation.Hash{102, 1}) {
+		t.Fatalf("sent builds = %+v, want one build to the connected first hop", messages)
+	}
+	select {
+	case <-sender.exited:
+		t.Fatal("session setup was canceled when the pass returned")
+	default:
+	}
+	if err = maintainer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-sender.exited:
+	default:
+		t.Fatal("Close did not join the session setup attempt")
+	}
+}
