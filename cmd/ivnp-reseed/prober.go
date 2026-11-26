@@ -4,9 +4,7 @@ import (
 	"cmp"
 	"context"
 	"net"
-	"net/netip"
 	"slices"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -225,22 +223,10 @@ func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Dura
 		tcpPorts = rec.Ports
 	}
 
-	var targets []string
-	addEndpoints := func(ips []netip.Addr, ports []uint16) {
-		for _, ip := range ips {
-			if !ip.IsValid() || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
-				continue
-			}
-			for _, port := range ports {
-				targets = append(targets, net.JoinHostPort(ip.String(), strconv.Itoa(int(port))))
-			}
-		}
-	}
-
 	if len(tcpPorts) > 0 {
-		addEndpoints(rec.IPv4, tcpPorts)
+		targets := probeTargets(rec.IPv4, tcpPorts)
 		if len(targets) == 0 {
-			addEndpoints(rec.IPv6, tcpPorts)
+			targets = probeTargets(rec.IPv6, tcpPorts)
 		}
 		for _, target := range targets {
 			if ctx.Err() != nil {
