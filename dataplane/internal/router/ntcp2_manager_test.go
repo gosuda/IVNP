@@ -295,21 +295,21 @@ func TestNTCP2AddressSelectionDistinguishesPreferenceAndRequirement(t *testing.T
 func TestSelectNTCP2AddressIPv4PreferenceFallsBackToIPv6(t *testing.T) {
 	owner, _, _ := newNTCP2TestLocal(t, "[2001:db8::1]:12345")
 	info := owner.Snapshot()
-	selected, err := selectNTCP2AddressForNetwork(info, ntcp2AddressPreferIPv4)
+	selected, err := selectNTCP2AddressForNetwork(info, ntcp2AddressPreferIPv4, dialAnyAddress)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if selected.host != "2001:db8::1" || selected.port != 12345 {
 		t.Fatalf("IPv6 fallback = %s:%d", selected.host, selected.port)
 	}
-	if _, err = selectNTCP2AddressForNetwork(info, ntcp2AddressRequireIPv4); !errors.Is(err, ErrNTCP2Peer) {
+	if _, err = selectNTCP2AddressForNetwork(info, ntcp2AddressRequireIPv4, dialAnyAddress); !errors.Is(err, ErrNTCP2Peer) {
 		t.Fatalf("strict IPv4 selection error = %v, want %v", err, ErrNTCP2Peer)
 	}
 }
 
 func TestSelectNTCP2AddressIPv4PreferenceSkipsEarlierIPv6(t *testing.T) {
 	owner, _, _ := newNTCP2TestLocalWithEndpoints(t, "[2001:db8::1]:12345", "192.0.2.1:23456")
-	selected, err := selectNTCP2AddressForNetwork(owner.Snapshot(), ntcp2AddressPreferIPv4)
+	selected, err := selectNTCP2AddressForNetwork(owner.Snapshot(), ntcp2AddressPreferIPv4, dialAnyAddress)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -43,22 +43,22 @@ type SessionLivenessRegistry interface {
 }
 
 func InspectSSU2Peer(info foundation.NetworkDatabaseRouterInfo, now uint64) SSU2PeerCapabilities {
-	return inspectSSU2Peer(info, now, true)
+	return inspectSSU2Peer(info, now, true, dialAnyAddress)
 }
 
 func (m *SSU2Manager) InspectPeer(info foundation.NetworkDatabaseRouterInfo, now uint64) SSU2PeerCapabilities {
 	if !routerInfoMatchesNetwork(info, m.networkID) {
 		return SSU2PeerCapabilities{}
 	}
-	return inspectSSU2Peer(info, now, m.ipv6Available.Load())
+	return inspectSSU2Peer(info, now, m.ipv6Available.Load(), m.addressPolicy)
 }
 
-func inspectSSU2Peer(info foundation.NetworkDatabaseRouterInfo, now uint64, allowIPv6 bool) SSU2PeerCapabilities {
+func inspectSSU2Peer(info foundation.NetworkDatabaseRouterInfo, now uint64, allowIPv6 bool, policy dialAddressPolicy) SSU2PeerCapabilities {
 	if _, err := selectSSU2Keys(info); err != nil {
 		return SSU2PeerCapabilities{}
 	}
 	result := SSU2PeerCapabilities{Introduced: len(selectSSU2Introducers(info, now)) != 0}
-	if address, err := selectSSU2AddressForNetwork(info, allowIPv6); err == nil {
+	if address, err := selectSSU2AddressForNetwork(info, allowIPv6, policy); err == nil {
 		result.Direct = hasCurrentTransportAddress(info, now*1000, []byte("SSU"), []byte("SSU2"))
 		ip, _ := netip.ParseAddr(address.host)
 		result.IPv6 = ip.Is6()
@@ -71,7 +71,7 @@ func (m *NTCP2Manager) PeerReachable(info foundation.NetworkDatabaseRouterInfo) 
 	if !routerInfoMatchesNetwork(info, m.networkID) {
 		return false
 	}
-	_, err := selectNTCP2AddressForNetwork(info, ntcp2AddressSelection(m.currentBindings().NTCP2))
+	_, err := selectNTCP2AddressForNetwork(info, ntcp2AddressSelection(m.currentBindings().NTCP2), m.addressPolicy)
 	return err == nil
 }
 

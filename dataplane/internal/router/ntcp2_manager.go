@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -62,6 +63,9 @@ type NTCP2ManagerConfig struct {
 	// AdmitPeer gates transport sessions after the peer RouterInfo is verified
 	// and netId-matched. A non-nil result denies session installation.
 	AdmitPeer PeerAdmissionFunc
+	// RequirePublicPeerAddresses refuses to dial RouterInfo hosts that are not
+	// globally routable unicast IP literals. Hostnames are never dialed.
+	RequirePublicPeerAddresses bool
 }
 
 type ntcp2SessionRequestReader func(io.Reader, []byte, []byte, []byte, uint8, bool) (*dataplanentcp2.Responder, dataplanentcp2.SessionRequestOptions, error)
@@ -118,6 +122,7 @@ type NTCP2Manager struct {
 	readSessionRequest ntcp2SessionRequestReader
 	newInitiator       ntcp2InitiatorFactory
 	admitPeer          PeerAdmissionFunc
+	addressPolicy      dialAddressPolicy
 }
 
 // +checklocksexclude:m.mu
@@ -172,6 +177,7 @@ func NewNTCP2Manager(config NTCP2ManagerConfig) (*NTCP2Manager, error) {
 		metrics:            config.Metrics,
 		logger:             config.Logger,
 		admitPeer:          config.AdmitPeer,
+		addressPolicy:      dialAddressPolicyFor(config.RequirePublicPeerAddresses),
 		readSessionRequest: dataplanentcp2.ReadSessionRequest,
 		newInitiator:       dataplanentcp2.NewInitiator,
 	}
@@ -552,15 +558,12 @@ func (m *NTCP2Manager) openOutbound(ctx context.Context, peer foundation.Hash) e
 	if !routerInfoMatchesNetwork(info, m.networkID) {
 		return ErrNTCP2Peer
 	}
-	remote, err := selectNTCP2AddressForNetwork(info, ntcp2AddressSelection(bindings.NTCP2))
+	remote, err := selectNTCP2AddressForNetwork(info, ntcp2AddressSelection(bindings.NTCP2), m.addressPolicy)
 	if err != nil {
 		return err
 	}
 	if m.admitPeer != nil {
-		var remoteAddr net.Addr
-		if ip := net.ParseIP(remote.host); ip != nil {
-			remoteAddr = &net.TCPAddr{IP: ip, Port: int(remote.port)}
-		}
+		remoteAddr := &net.TCPAddr{IP: net.ParseIP(remote.host), Port: int(remote.port)}
 		request := PeerAdmission{Peer: peer, RouterInfo: info, Transport: PeerTransportNTCP2, RemoteAddr: remoteAddr}
 		if admitErr := runPeerAdmission(ctx, m.admitPeer, m.reporter, ingress.BoundaryNTCP2Handshake, request); admitErr != nil {
 			return errors.Join(ErrNTCP2Peer, admitErr)
@@ -1086,10 +1089,12 @@ const (
 )
 
 func selectNTCP2Address(info foundation.NetworkDatabaseRouterInfo) (ntcp2Address, error) {
-	return selectNTCP2AddressForNetwork(info, ntcp2AddressAny)
+	return selectNTCP2AddressForNetwork(info, ntcp2AddressAny, dialAnyAddress)
 }
 
-func selectNTCP2AddressForNetwork(info foundation.NetworkDatabaseRouterInfo, mode ntcp2AddressMode) (ntcp2Address, error) {
+// selectNTCP2AddressForNetwork picks a dialable NTCP2 address. Only IP literal
+// hosts are eligible, and policy may additionally skip non-public ones.
+func selectNTCP2AddressForNetwork(info foundation.NetworkDatabaseRouterInfo, mode ntcp2AddressMode, policy dialAddressPolicy) (ntcp2Address, error) {
 	var fallback ntcp2Address
 	found := false
 	addresses := info.Addresses()
@@ -1128,7 +1133,8 @@ func selectNTCP2AddressForNetwork(info foundation.NetworkDatabaseRouterInfo, mod
 			}
 		}
 		portNumber, err := strconv.ParseUint(port, 10, 16)
-		if err != nil || host == "" || portNumber == 0 || !supportsNTCP2Version(version) {
+		ip, ipErr := netip.ParseAddr(host)
+		if err != nil || ipErr != nil || portNumber == 0 || !supportsNTCP2Version(version) || !policy.allows(ip) {
 			continue
 		}
 		staticKey, staticErr := foundation.DecodeI2PBase64([]byte(static))
@@ -1143,7 +1149,7 @@ func selectNTCP2AddressForNetwork(info foundation.NetworkDatabaseRouterInfo, mod
 		if !found {
 			fallback, found = selected, true
 		}
-		if mode == ntcp2AddressAny || net.ParseIP(host).To4() != nil {
+		if mode == ntcp2AddressAny || ip.Unmap().Is4() {
 			return selected, nil
 		}
 	}
