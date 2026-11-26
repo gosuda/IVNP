@@ -163,7 +163,11 @@ Usage of ivnp-reseed:
   -no-router
         Disable embedded router (offline replay/test mode)
   -pprof string
-        Optional localhost address for net/http/pprof profiling
+        Optional loopback address (for example 127.0.0.1:6060, [::1]:6060, or
+        localhost:6060) for net/http/pprof profiling. Non-loopback addresses,
+        including :6060 and 0.0.0.0:6060, are rejected at startup with exit code 2.
+        /debug/pprof/cmdline is not served, so process arguments such as
+        -seed-phrase are never exposed through it.
   -healthcheck string
         Query health endpoint URL and exit 0 (healthy) or 1 (unhealthy)
   -once

@@ -18,7 +18,6 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
-	"net/http/pprof"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -93,6 +92,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	}
+	if *pprofAddr != "" {
+		if err := validatePprofAddr(*pprofAddr); err != nil {
+			fmt.Fprintln(stderr, "ivnp-reseed:", err)
+			return 2
+		}
 	}
 
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -383,20 +388,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	var pprofServer *http.Server
 	if *pprofAddr != "" {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/debug/pprof/", pprof.Index)
-		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-		pprofServer = &http.Server{
-			Addr:              *pprofAddr,
-			Handler:           mux,
-			ReadHeaderTimeout: 5 * time.Second,
-		}
+		pprofServer = newPprofServer(*pprofAddr)
 		go func() {
 			logger.Info("starting pprof server", "listen", *pprofAddr)
-			if srvErr := pprofServer.ListenAndServe(); srvErr != nil && srvErr != http.ErrServerClosed {
+			if srvErr := servePprof(pprofServer); srvErr != nil && srvErr != http.ErrServerClosed {
 				logger.Error("pprof server failed", "listen", *pprofAddr, "error", srvErr)
 			}
 		}()
