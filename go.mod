@@ -1,6 +1,6 @@
 module gosuda.org/ivnp
 
-go 1.27.3
+go 1.27.4
 
 require (
 	filippo.io/bigmod v0.1.1-0.20260103110540-f8a47775ebe5
