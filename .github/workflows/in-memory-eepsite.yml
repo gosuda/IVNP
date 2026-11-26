@@ -3,7 +3,6 @@ name: In-memory daemon eepsite access
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
   schedule:
     # Run weekly as healthcheck
