@@ -118,6 +118,12 @@ Building tunnels in I2P has a circular dependency: an outbound tunnel build requ
 - **5s Request Timeout vs. 60s Grace Window**: If a build attempt does not complete within `normalBuildRequestTimeout = 5s` (`10s` on low-core ARM/Android), `Expire` releases the active `CreatorBudget` slot immediately so the maintainer can start a replacement build, but moves the pending build into `m.recent[replyID]` and retains its `GarlicReplyKey` for the full `buildReplyGracePeriod = 60s`. If the slow reply arrives within 60 seconds and the replacement claim has not yet completed, the tunnel is still installed.
 - **Bit-31 `DeliveryStatus` Health Probes**: `Health` sends 12-byte `DeliveryStatus` messages (`msgID = nextID | (1 << 31)`) through `OutboundID -> InboundGateway:InboundID`. Setting bit 31 distinguishes tunnel health probes from 31-bit NetDB publication tokens.
 
+### 3.4 Transit Build Replay Detection & Participation Limits (`build_manager.go`, `legacy_build_manager.go`)
+
+- **Replay Table**: `BuildManager` remembers the SHA-256 of every accepted transit build record (the router's own `ShortTunnelBuild` record, or the whole `VariableTunnelBuild` payload) and rejects a second copy with `ErrBuildTransit`. A `ShortTunnelBuild` record stays in the table until its `RequestMinutes` timestamp falls outside the accepted window (`request time + 8 min + 1 min`), so a future-dated record cannot be replayed after its entry expires. `VariableTunnelBuild` payloads stay for `10` minutes. An undecryptable `VariableTunnelBuild` releases its entry.
+- **Replay Capacity**: The table holds at most `16384` records in total and `256` per previous hop. It is independent of `build_pending_capacity`, which only bounds this router's own concurrent tunnel builds. A previous hop over its share is refused with `ErrBuildTransit` without affecting other peers.
+- **Participating Tunnels**: A separate limit of `2048` concurrently installed transit tunnels per `BuildManager` (`BuildManagerConfig.MaxParticipating`) applies after `[router] transit` admission and bandwidth checks. A build over the limit is not installed; the router still seals a reject reply (code `30`) and forwards the build so the creator learns the outcome.
+
 ---
 
 ## 4. Eclipse-Resistant Reseed & Adaptive NAT Mapping
