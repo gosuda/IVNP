@@ -8,9 +8,17 @@ type receiveTag struct {
 	present bool
 }
 
-func (s *tagSet) recordInbound(tag [ratchetTagLen]byte, index uint16, lookahead int) {
-	if len(s.receiveTags) == 0 {
-		s.receiveTags = make([]receiveTag, 2*lookahead+1)
+// The ring grows with the window so idle sessions keep only a small ring.
+func (s *tagSet) recordInbound(tag [ratchetTagLen]byte, index uint16) {
+	if size := 2*int(s.window) + 1; len(s.receiveTags) < size {
+		grown := make([]receiveTag, size)
+		for _, slot := range s.receiveTags {
+			if slot.present {
+				grown[slot.index%uint32(size)] = slot
+			}
+		}
+		clear(s.receiveTags)
+		s.receiveTags = grown
 	}
 	s.receiveTags[uint32(index)%uint32(len(s.receiveTags))] = receiveTag{tag: tag, index: uint32(index), present: true}
 }
@@ -56,11 +64,11 @@ func (m *RatchetManager) removeTagSetTagsLocked(set *tagSet) {
 // skipped historical packets lose priority to the future receive window.
 //
 // +checklocks:m.mu
-func (m *RatchetManager) inboundPruneFloorLocked(set *tagSet, highWater uint32, needed int) (uint32, error) {
+func (m *RatchetManager) inboundPruneFloorLocked(set *tagSet, highWater, window uint32, needed int) (uint32, error) {
 	floor := set.receiveFloor
 	minimum := uint32(0)
-	if highWater > uint32(m.config.TagLookahead)+1 {
-		minimum = highWater - uint32(m.config.TagLookahead) - 1
+	if highWater > window+1 {
+		minimum = highWater - window - 1
 	}
 	available := m.config.MaxInboundTags - len(m.inbound)
 	for floor < minimum {
@@ -84,12 +92,24 @@ func (m *RatchetManager) inboundPruneFloorLocked(set *tagSet, highWater uint32, 
 // +checklocks:m.mu
 func (m *RatchetManager) advanceInboundWindowLocked(set *tagSet, received uint32) error {
 	highWater := max(set.receivedHighWater, received+1)
-	target := min(uint32(65536), highWater+uint32(m.config.TagLookahead))
-	needed := 0
-	if target > set.next {
-		needed = int(target - set.next)
+	plan := func(window uint32) (uint32, int, uint32, error) {
+		target := min(uint32(65536), highWater+window)
+		needed := 0
+		if target > set.next {
+			needed = int(target - set.next)
+		}
+		floor, err := m.inboundPruneFloorLocked(set, highWater, window, needed)
+		return target, needed, floor, err
 	}
-	floor, err := m.inboundPruneFloorLocked(set, highWater, needed)
+	// The window grows to the indices the peer has used, up to TagLookahead.
+	// Growth only takes free budget; the current window can always slide
+	// because the received and skipped tags are released first.
+	window := min(uint32(m.config.TagLookahead), max(set.window, highWater))
+	target, needed, floor, err := plan(window)
+	if err != nil && window > set.window {
+		window = set.window
+		target, needed, floor, err = plan(window)
+	}
 	if err != nil {
 		return err
 	}
@@ -125,7 +145,7 @@ func (m *RatchetManager) advanceInboundWindowLocked(set *tagSet, received uint32
 	}
 	m.pruneInboundBeforeLocked(set, floor)
 	set.tagChain, set.keyChain, set.next = preview.tagChain, preview.keyChain, preview.next
-	set.receivedHighWater = highWater
+	set.receivedHighWater, set.window = highWater, window
 	for _, entry := range entries {
 		m.addInboundTagLocked(entry)
 	}

@@ -79,7 +79,7 @@ func (o *windowTagObserver) TagRemoved(tag SessionTag) {
 func TestRatchetWindowAdvancesAcrossAlternatingLoss(t *testing.T) {
 	for _, lookahead := range []int{32, 512} {
 		t.Run("lookahead_"+strconv.Itoa(lookahead), func(t *testing.T) {
-			a, b, aPeer, bPeer, now := windowRatchetPair(t, RatchetConfig{TagLookahead: lookahead, MaxInboundTags: 8192}, nil)
+			a, b, aPeer, bPeer, now := windowRatchetPair(t, RatchetConfig{TagLookahead: lookahead, InitialTagWindow: lookahead, MaxInboundTags: 8192}, nil)
 			establishRatchet(t, a, b, aPeer, bPeer, now)
 			var encrypted, plain, received [256]byte
 			for index := range 4 * lookahead {
@@ -332,4 +332,99 @@ func TestRatchetWindowCollisionDoesNotPartiallyAdvance(t *testing.T) {
 	b.mu.Unlock()
 	receiveWindowIndex(t, b, packets[2], 2, now+1)
 	receiveWindowIndex(t, b, packets[4], 4, now+1)
+}
+
+func TestRatchetWindowGrowsFromInitialWindow(t *testing.T) {
+	const lookahead = 64
+	a, b, aPeer, bPeer, now := windowRatchetPair(t, RatchetConfig{TagLookahead: lookahead, InitialTagWindow: 4, MaxInboundTags: 1024}, nil)
+	establishRatchet(t, a, b, aPeer, bPeer, now)
+	if tags := b.Stats().InboundTags; tags != 4 {
+		t.Fatalf("new session registered %d tags, want 4", tags)
+	}
+	packets := windowPackets(t, a, bPeer, lookahead, now+1)
+	if _, err := b.Receive(make([]byte, 256), nil, packets[4], now+1); err == nil {
+		t.Fatal("index beyond the initial window was accepted")
+	}
+	for index, packet := range packets {
+		receiveWindowIndex(t, b, packet, index, now+1)
+	}
+	if tags := b.Stats().InboundTags; tags != lookahead {
+		t.Fatalf("grown window registered %d tags, want %d", tags, lookahead)
+	}
+	packets = windowPackets(t, a, bPeer, lookahead, now+2)
+	receiveWindowIndex(t, b, packets[lookahead-1], lookahead-1, now+2)
+	if tags := b.Stats().InboundTags; tags > 2*lookahead+1 {
+		t.Fatalf("grown window registered %d tags, limit %d", tags, 2*lookahead+1)
+	}
+}
+
+func TestRatchetAdmissionEvictsUnconfirmedThenLeastRecentlyUsed(t *testing.T) {
+	config := RatchetConfig{MaxSessions: 8, TagLookahead: 4, MaxInboundTags: 12}
+	initiators := make([]*RatchetManager, 5)
+	hashes := make([]foundation.Hash, len(initiators))
+	for index := range initiators {
+		local, err := foundation.GenerateLocalDestination()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(local.ReleaseSensitive)
+		initiators[index], err = NewRatchetManager(local, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(initiators[index].ReleaseSensitive)
+		hashes[index] = local.Hash()
+	}
+	responder, err := foundation.GenerateLocalDestination()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(responder.ReleaseSensitive)
+	b, err := NewRatchetManager(responder, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(b.ReleaseSensitive)
+	now := uint64(1_800_000_000_000)
+	peers := make([]foundation.Hash, len(initiators))
+	confirm := func(index int, at uint64) {
+		t.Helper()
+		packet, encryptErr := initiators[index].EncryptExisting(make([]byte, 256), responder.Hash(), clove("x"), RatchetOptions{}, at)
+		if encryptErr != nil {
+			t.Fatal(encryptErr)
+		}
+		if _, receiveErr := b.Receive(make([]byte, 256), nil, packet, at); receiveErr != nil {
+			t.Fatalf("confirm session %d: %v", index, receiveErr)
+		}
+	}
+	live := func(want ...int) {
+		t.Helper()
+		for index, peer := range peers {
+			if peer == (foundation.Hash{}) {
+				continue
+			}
+			wanted := false
+			for _, kept := range want {
+				wanted = wanted || kept == index
+			}
+			if b.HasPeer(peer) != wanted {
+				t.Fatalf("session %d live = %t, want %t", index, !wanted, wanted)
+			}
+		}
+		if stats := b.Stats(); stats.InboundTags > config.MaxInboundTags {
+			t.Fatalf("tags = %d, budget %d", stats.InboundTags, config.MaxInboundTags)
+		}
+	}
+	for index := range 3 {
+		peers[index] = establishRatchet(t, initiators[index], b, hashes[index], responder.Hash(), now+uint64(index))
+	}
+	confirm(0, now+10)
+	confirm(2, now+11)
+	// The tag budget is full: the unconfirmed session goes before older idle ones.
+	peers[3] = establishRatchet(t, initiators[3], b, hashes[3], responder.Hash(), now+20)
+	live(0, 2, 3)
+	confirm(3, now+30)
+	// With every session confirmed, the least recently used one goes.
+	peers[4] = establishRatchet(t, initiators[4], b, hashes[4], responder.Hash(), now+40)
+	live(2, 3, 4)
 }

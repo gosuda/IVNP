@@ -35,7 +35,7 @@ func TestRatchetWindowJavaI2P2130Vectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(local.ReleaseSensitive)
-	manager, err := NewRatchetManager(local, RatchetConfig{})
+	manager, err := NewRatchetManager(local, RatchetConfig{InitialTagWindow: DefaultTagLookahead})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +56,7 @@ func TestRatchetWindowJavaI2P2130Vectors(t *testing.T) {
 	peer := foundation.Hash{1}
 	s := &session{peer: peer, inbound: inbound, outbound: outbound, created: now, expires: now + defaultSessionLife}
 	inbound.owner, outbound.owner = s, s
+	inbound.window = DefaultTagLookahead
 	if err := manager.installSessionLocked(s, now); err != nil {
 		releaseSession(s)
 		t.Fatal(err)

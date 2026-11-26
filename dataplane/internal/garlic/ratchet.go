@@ -112,18 +112,30 @@ func NewRatchetManager(local *foundation.LocalDestination, config RatchetConfig)
 	if maxSessions <= 0 {
 		maxSessions = 256
 	}
-	maxTags := config.MaxInboundTags
-	if maxTags <= 0 {
-		maxTags = 8192
-	}
 	lookahead := config.TagLookahead
 	if lookahead <= 0 {
 		lookahead = dataplanegarlicecies.DefaultTagLookahead
 	}
-	if lookahead > 65536 || lookahead > maxTags {
+	initialWindow := config.InitialTagWindow
+	if initialWindow <= 0 {
+		initialWindow = min(dataplanegarlicecies.DefaultInitialTagWindow, lookahead)
+	}
+	if lookahead > 65536 || initialWindow > lookahead {
 		return nil, ErrRatchet
 	}
-	config.TagLookahead = lookahead
+	maxTags := config.MaxInboundTags
+	if maxTags <= 0 {
+		// Every shard can then hold its share of MaxSessions at the initial window.
+		budget, err := dataplanegarlicecies.InboundTagBudget(maxSessions, lookahead, initialWindow)
+		if err != nil {
+			return nil, err
+		}
+		maxTags = budget
+	}
+	if lookahead > maxTags {
+		return nil, ErrRatchet
+	}
+	config.TagLookahead, config.InitialTagWindow = lookahead, initialWindow
 	// Reserve future and history windows for an active set and its DH replacement.
 	shardCount := min(parallelism.Workers(maxSessions), max(1, maxTags/(4*lookahead)))
 	manager := &RatchetManager{

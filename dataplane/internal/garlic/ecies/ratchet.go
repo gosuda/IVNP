@@ -1,6 +1,7 @@
 package garlicecies
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
@@ -25,8 +26,8 @@ const (
 	ratchetGarlicClove            = 11
 	ratchetPadding                = 254
 	DefaultTagLookahead           = 512
+	DefaultInitialTagWindow       = 24
 	defaultMaxSessions            = 256
-	defaultMaxTags                = 8192
 	defaultSessionLife            = 10 * 60 * 1000
 	defaultReplayLife             = 5 * 60 * 1000
 	previousSetLife               = 3 * 60 * 1000
@@ -52,13 +53,33 @@ type RatchetConfig struct {
 	CryptoTypes []uint16
 	MaxSessions int
 	// MaxInboundTags bounds registered receive tags, including retained history.
+	// Nonpositive selects InboundTagBudget for MaxSessions.
 	MaxInboundTags int
-	// TagLookahead is the forward window; nonpositive selects DefaultTagLookahead.
-	// Up to the same number of earlier indices are retained when the tag budget allows.
-	TagLookahead    int
-	SessionLifetime uint64
-	ReplayLifetime  uint64
-	Metrics         *observability.Registry
+	// TagLookahead is the largest forward window; nonpositive selects
+	// DefaultTagLookahead. Up to the same number of earlier indices are retained
+	// when the tag budget allows.
+	TagLookahead int
+	// InitialTagWindow is the forward window of a new receive tag set. It grows
+	// with the indices the peer uses, up to TagLookahead. Nonpositive selects
+	// DefaultInitialTagWindow, limited to TagLookahead.
+	InitialTagWindow int
+	SessionLifetime  uint64
+	ReplayLifetime   uint64
+	Metrics          *observability.Registry
+}
+
+// InboundTagBudget derives the receive tag budget for maxSessions sessions:
+// each holds an initial window and an equal reordering history, and one
+// session can grow to a full lookahead window while a DH replacement is live.
+func InboundTagBudget(maxSessions, lookahead, initialWindow int) (int, error) {
+	if maxSessions <= 0 || lookahead <= 0 || lookahead > 65536 || initialWindow <= 0 || initialWindow > lookahead {
+		return 0, ErrRatchet
+	}
+	reserve, perSession := 4*lookahead, 2*initialWindow
+	if maxSessions > (int(^uint(0)>>1)-reserve)/perSession {
+		return 0, ErrRatchet
+	}
+	return maxSessions*perSession + reserve, nil
 }
 
 // ACK identifies an Existing Session message acknowledged in-band.
@@ -165,6 +186,7 @@ type tagSet struct {
 	next              uint32
 	receivedHighWater uint32
 	receiveFloor      uint32
+	window            uint32
 	receiveTags       []receiveTag
 	previous          *tagSet
 
@@ -327,13 +349,20 @@ func newRatchetManager(local *foundation.LocalDestination, config RatchetConfig,
 	if config.MaxSessions <= 0 {
 		config.MaxSessions = defaultMaxSessions
 	}
-	if config.MaxInboundTags <= 0 {
-		config.MaxInboundTags = defaultMaxTags
-	}
 	if config.TagLookahead <= 0 {
 		config.TagLookahead = DefaultTagLookahead
 	}
-	if config.TagLookahead > config.MaxInboundTags || config.TagLookahead > 65536 {
+	if config.InitialTagWindow <= 0 {
+		config.InitialTagWindow = min(DefaultInitialTagWindow, config.TagLookahead)
+	}
+	if config.MaxInboundTags <= 0 {
+		budget, err := InboundTagBudget(config.MaxSessions, config.TagLookahead, config.InitialTagWindow)
+		if err != nil {
+			return nil, err
+		}
+		config.MaxInboundTags = budget
+	}
+	if config.TagLookahead > config.MaxInboundTags || config.TagLookahead > 65536 || config.InitialTagWindow > config.TagLookahead {
 		return nil, ErrRatchet
 	}
 	if config.SessionLifetime == 0 {
@@ -361,7 +390,7 @@ func (m *RatchetManager) noteExpiryLocked(expires uint64) {
 // +checklocks:m.mu
 func (m *RatchetManager) addInboundTagLocked(entry tagEntry) {
 	m.inbound[entry.tag] = entry
-	entry.set.recordInbound(entry.tag, entry.n, m.config.TagLookahead)
+	entry.set.recordInbound(entry.tag, entry.n)
 	if m.tagObserver != nil {
 		m.tagObserver.TagAdded(SessionTag(entry.tag))
 	}
@@ -1222,12 +1251,16 @@ func (m *RatchetManager) prepareRatchetDirectionLocked(s *session, outbound bool
 	if outbound {
 		return next, nil, nil
 	}
-	if len(m.inbound)+m.config.TagLookahead > m.config.MaxInboundTags {
+	// The replacement keeps the grown window when the budget allows, and may
+	// evict other sessions only for its initial window.
+	window := min(int(old.window), max(m.config.InitialTagWindow, m.config.MaxInboundTags-len(m.inbound)))
+	if !m.reserveInboundTagsLocked(window, s) {
 		releaseTagSet(next)
 		return nil, nil, ErrRatchetTagExhausted
 	}
-	entries := make([]tagEntry, 0, m.config.TagLookahead)
-	for range m.config.TagLookahead {
+	next.window = uint32(window)
+	entries := make([]tagEntry, 0, window)
+	for range window {
 		entry, entryErr := next.nextEntry()
 		if entryErr != nil {
 			clearTagEntries(entries)
@@ -1307,29 +1340,20 @@ func (m *RatchetManager) sessionFromCiphers(peer foundation.Hash, root [32]byte,
 		reverseDH: dhRatchet{localKeyID: -1, remoteKeyID: -1},
 	}
 	out.owner, in.owner = s, s
+	in.window = uint32(m.config.InitialTagWindow)
 	return s, nil
 }
 
+// Installing never fails for lack of capacity: the session limit and the tag
+// budget evict other sessions, unconfirmed and least recently used first.
+//
 // +checklocks:m.mu
 func (m *RatchetManager) installSessionLocked(s *session, now uint64) error {
 	if s == nil || s.inbound == nil {
 		return ErrRatchet
 	}
 	old := m.sessions[s.peer]
-	var victim *session
-	if old == nil && len(m.sessions) >= m.config.MaxSessions {
-		victim = m.sessionVictimLocked()
-	}
-	removed := 0
-	for _, entry := range m.inbound {
-		if entry.set.owner == old || entry.set.owner == victim {
-			removed++
-		}
-	}
-	needed := m.config.TagLookahead
-	if len(m.inbound)-removed+needed > m.config.MaxInboundTags {
-		return ErrRatchetTagExhausted
-	}
+	needed := int(s.inbound.window)
 	entries := make([]tagEntry, 0, needed)
 	defer func() {
 		for i := range entries {
@@ -1341,7 +1365,7 @@ func (m *RatchetManager) installSessionLocked(s *session, now uint64) error {
 		if err != nil {
 			return err
 		}
-		if current, exists := m.inbound[entry.tag]; exists && current.set.owner != old && current.set.owner != victim {
+		if current, exists := m.inbound[entry.tag]; exists && current.set.owner != old {
 			clear(entry.key[:])
 			return ErrRatchet
 		}
@@ -1354,8 +1378,15 @@ func (m *RatchetManager) installSessionLocked(s *session, now uint64) error {
 	if old != nil {
 		m.discardSessionLocked(s.peer, old)
 	}
-	if victim != nil {
+	for len(m.sessions) >= m.config.MaxSessions {
+		victim := m.sessionVictimLocked(nil)
+		if victim == nil {
+			return ErrRatchet
+		}
 		m.discardSessionLocked(victim.peer, victim)
+	}
+	if !m.reserveInboundTagsLocked(needed, nil) {
+		return ErrRatchetTagExhausted
 	}
 	m.sessions[s.peer] = s
 	m.noteExpiryLocked(s.expires)
@@ -1364,6 +1395,21 @@ func (m *RatchetManager) installSessionLocked(s *session, now uint64) error {
 		m.addInboundTagLocked(entry)
 	}
 	return nil
+}
+
+// reserveInboundTagsLocked evicts sessions other than keep until needed more
+// receive tags fit the budget.
+//
+// +checklocks:m.mu
+func (m *RatchetManager) reserveInboundTagsLocked(needed int, keep *session) bool {
+	for len(m.inbound)+needed > m.config.MaxInboundTags {
+		victim := m.sessionVictimLocked(keep)
+		if victim == nil {
+			return false
+		}
+		m.discardSessionLocked(victim.peer, victim)
+	}
+	return true
 }
 
 // +checklocks:m.mu
@@ -1451,15 +1497,32 @@ func (m *RatchetManager) removeSessionTagsLocked(s *session) {
 	}
 }
 
+// sessionVictimLocked selects the session to evict: terminated first, then
+// unconfirmed, then the least recently used. Expiry tracks the last
+// authenticated send or receive.
+//
 // +checklocks:m.mu
-func (m *RatchetManager) sessionVictimLocked() *session {
+func (m *RatchetManager) sessionVictimLocked(keep *session) *session {
 	var victim *session
 	for _, s := range m.sessions {
-		if victim == nil || s.expires < victim.expires {
+		if s != keep && (victim == nil || evictsBefore(s, victim)) {
 			victim = s
 		}
 	}
 	return victim
+}
+
+func evictsBefore(a, b *session) bool {
+	if a.terminated != b.terminated {
+		return a.terminated
+	}
+	if a.confirmed != b.confirmed {
+		return !a.confirmed
+	}
+	if a.expires != b.expires {
+		return a.expires < b.expires
+	}
+	return bytes.Compare(a.peer[:], b.peer[:]) < 0
 }
 
 // +checklocks:m.mu

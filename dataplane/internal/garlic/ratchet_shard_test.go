@@ -357,11 +357,15 @@ func TestRatchetManagerDividesInboundTagBudgetExactly(t *testing.T) {
 				t.Fatalf("shard %d session %d: %v", index, session, err)
 			}
 		}
-		if err = establishRatchetShard(shard, foundation.Hash{0xff}, remote, 1_000); !errors.Is(err, dataplanegarlicecies.ErrRatchetTagExhausted) {
+		// A full tag budget evicts a session instead of refusing the new one.
+		if err = establishRatchetShard(shard, foundation.Hash{0xff}, remote, 1_000); err != nil {
 			t.Fatalf("shard %d exceeding %d tags: %v", index, capacity, err)
 		}
-		if got := shard.Stats().InboundTags; got != capacity {
-			t.Errorf("shard %d tags = %d, want %d", index, got, capacity)
+		if shard.HasPeer(foundation.Hash{1}) || !shard.HasPeer(foundation.Hash{0xff}) {
+			t.Errorf("shard %d did not replace its first session", index)
+		}
+		if stats := shard.Stats(); stats.InboundTags != capacity || stats.Sessions != capacity {
+			t.Errorf("shard %d tags = %d, sessions = %d, want %d", index, stats.InboundTags, stats.Sessions, capacity)
 		}
 	}
 	if got := manager.Stats().InboundTags; got != 49 {
@@ -443,12 +447,22 @@ func TestRatchetManagerDefaultWindowAdmitsDHReplacement(t *testing.T) {
 	previous := runtime.GOMAXPROCS(64)
 	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
 	manager, remote, peer, remotePeer := ratchetShardPair(t, RatchetConfig{})
-	if got := manager.Stats().InboundTags; got != 512 {
-		t.Fatalf("initial inbound tags = %d, want 512", got)
+	if got := manager.Stats().InboundTags; got != dataplanegarlicecies.DefaultInitialTagWindow {
+		t.Fatalf("initial inbound tags = %d, want %d", got, dataplanegarlicecies.DefaultInitialTagWindow)
 	}
 	var packet []byte
 	var err error
-	for range 512 {
+	// Delivered traffic grows the window to the default lookahead.
+	for index := range dataplanegarlicecies.DefaultTagLookahead {
+		packet, err = remote.EncryptExisting(make([]byte, 256), remotePeer, nil, RatchetOptions{}, 1_001)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result, receiveErr := manager.Receive(make([]byte, 256), nil, packet, 1_001); receiveErr != nil || result.Peer != peer {
+			t.Fatalf("receive %d while growing = %+v, %v", index, result, receiveErr)
+		}
+	}
+	for range dataplanegarlicecies.DefaultTagLookahead {
 		packet, err = remote.EncryptExisting(make([]byte, 256), remotePeer, nil, RatchetOptions{}, 1_001)
 		if err != nil {
 			t.Fatal(err)
@@ -649,5 +663,96 @@ func TestRatchetManagerConsumesIndexedTagOnAuthenticationFailure(t *testing.T) {
 	}
 	if _, err = manager.Receive(make([]byte, 256), nil, packet, 1_001); err == nil {
 		t.Fatal("original packet authenticated after its tag was consumed")
+	}
+}
+
+// A Destination's session capacity is MaxSessions under the production
+// defaults. Idle sessions never block admission: a full Destination evicts the
+// least recently used session for both an inbound New Session and the reply to
+// its own outbound New Session.
+func TestRatchetManagerDefaultConfigAdmitsMaxSessions(t *testing.T) {
+	previous := runtime.GOMAXPROCS(8)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+	local := ratchetShardDestination(t)
+	remote := ratchetShardDestination(t)
+	manager, err := NewRatchetManager(local, RatchetConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.ReleaseSensitive)
+	sender, err := dataplanegarlicecies.NewRatchetManager(remote, dataplanegarlicecies.RatchetConfig{MaxSessions: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sender.ReleaseSensitive)
+	const maxSessions = 256
+	localPublic := local.X25519Public()
+	now := uint64(1_800_000_000_000)
+	admit := func(index int) error {
+		packet, encryptErr := sender.Encrypt(make([]byte, 2048), local.Hash(), localPublic[:], 4, nil, now)
+		if encryptErr != nil {
+			t.Fatal(encryptErr)
+		}
+		result, receiveErr := manager.Receive(make([]byte, 2048), make([]byte, 2048), packet, now)
+		if receiveErr != nil || result.Candidate == nil {
+			t.Fatalf("session %d receive = %+v, %v", index, result, receiveErr)
+		}
+		defer result.Candidate.Discard()
+		// Spread peers evenly over the shards' natural indices.
+		var peer foundation.Hash
+		binary.LittleEndian.PutUint64(peer[:8], uint64(index))
+		peer[8] = 1
+		_, commitErr := manager.CommitNew(result.Candidate, peer, now)
+		return commitErr
+	}
+	for index := range maxSessions {
+		if err = admit(index); err != nil {
+			t.Fatalf("session %d of %d: %v", index+1, maxSessions, err)
+		}
+		now++
+	}
+	if got := manager.Stats().Sessions; got != maxSessions {
+		t.Fatalf("sessions = %d, want %d", got, maxSessions)
+	}
+	if err = admit(maxSessions); err != nil {
+		t.Fatalf("session beyond MaxSessions was refused: %v", err)
+	}
+	if got := manager.Stats().Sessions; got != maxSessions {
+		t.Fatalf("sessions after eviction = %d, want %d", got, maxSessions)
+	}
+	// The extra peer's natural shard evicts its first, least recently used session.
+	var oldest foundation.Hash
+	binary.LittleEndian.PutUint64(oldest[:8], uint64(maxSessions%len(manager.shards)))
+	oldest[8] = 1
+	if _, err = manager.EncryptExisting(make([]byte, 256), oldest, nil, RatchetOptions{}, now); !errors.Is(err, ErrRatchetNoSession) {
+		t.Fatalf("least recently used session survived eviction: %v", err)
+	}
+
+	replier := ratchetShardDestination(t)
+	replierManager, err := dataplanegarlicecies.NewRatchetManager(replier, dataplanegarlicecies.RatchetConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(replierManager.ReleaseSensitive)
+	replierPublic := replier.X25519Public()
+	packet, err := manager.Encrypt(make([]byte, 2048), replier.Hash(), replierPublic[:], 4, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := replierManager.Receive(make([]byte, 2048), make([]byte, 2048), packet, now)
+	if err != nil || result.Candidate == nil {
+		t.Fatalf("outbound New Session = %+v, %v", result, err)
+	}
+	if _, err = replierManager.CommitNewSession(result.Candidate, local.Hash(), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = manager.Receive(make([]byte, 2048), nil, result.Reply, now); err != nil {
+		t.Fatalf("reply to an outbound session was refused: %v", err)
+	}
+	if _, err = manager.EncryptExisting(make([]byte, 256), replier.Hash(), nil, RatchetOptions{}, now); err != nil {
+		t.Fatalf("outbound session missing after reply: %v", err)
+	}
+	if got := manager.Stats().Sessions; got != maxSessions {
+		t.Fatalf("sessions after reply = %d, want %d", got, maxSessions)
 	}
 }

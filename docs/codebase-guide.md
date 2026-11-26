@@ -150,7 +150,7 @@ L0 packages have zero internal dependencies and rely only on the Go standard lib
   - `circuits.go` & `runtime.go`: 64-shard circuit table, generation-scoped `CircuitToken`, reference-counted `circuitLifetime` draining, and self-delivery fast paths.
 - **`dataplane/internal/garlic/` & `dataplane/internal/garlic/ecies/`**:
   - `ecies/handshake.go` & `ecies/hybrid.go`: `Noise_IKelg2+hs2_25519_ChaChaPoly_SHA256` and post-quantum hybrid `Noise_IKhfselg2+hs2_25519+MLKEM768/1024_ChaChaPoly_SHA256` `Initiator`/`Responder`, bound/unbound `NewSession`, and `NewSessionReply`.
-  - `ecies/ratchet.go` & `ecies/ratchet_window.go`: Two-phase `NewSessionCandidate` commit, DH ratchet (`NextKey` block `0x07`, auto-rotate at 4096 messages), symmetric tag/key ratchets, and circular `receiveTags` window (`lookahead = 512`).
+  - `ecies/ratchet.go` & `ecies/ratchet_window.go`: Two-phase `NewSessionCandidate` commit, DH ratchet (`NextKey` block `0x07`, auto-rotate at 4096 messages), symmetric tag/key ratchets, and circular `receiveTags` window (24 initial tags, growing with use to `lookahead = 512`), and LRU session eviction under the session and tag budgets.
   - `ecies/one_time_reply.go` & `ecies/router_message.go`: Single-use 8-byte tag AEAD wrapper for lookup/build replies and `Noise_N` router-to-router garlic encryption.
   - `garlic/ratchet.go`, `reply_keys.go`, `lookup_reply.go`: Sharded `RatchetManager` with 64-shard `tagShards` index, `ReserveInboundReply` ordering gate, and `ReplyKeyRegistry`.
   - `garlic/clove.go`, `serialize.go`, `newsession.go`, `send.go`, `receive.go`, `session.go`, `manager.go`, `tags.go`: Legacy ElGamal/AES+SessionTag compatibility stack and clove codecs.
