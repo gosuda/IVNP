@@ -105,7 +105,7 @@ L0 packages have zero internal dependencies and rely only on the Go standard lib
 - **`observability_subsystem.go`**: Public facade for metrics, health probes, and structured logging.
 - **`observability/internal/registry/`**:
   - `registry.go`: Lock-free `atomic.Uint64` `Registry` covering 13 metric domains (`Lifecycle`, `Reseed`, `Transport`, `NetDB`, `Tunnel`, `Admission`, `Proxy`, `Control`, `Bootstrap`, `Publication`, `SAM`, `Garlic`, `SSU2`) plus Go runtime memory/goroutine snapshots.
-  - `http.go`: Zero-reflection Prometheus `/metrics` formatter, `/healthz`, `/livez`, `/readyz`, `/varz` JSON handler, and constant-time `RequireBearer` middleware.
+  - `http.go`: Zero-reflection Prometheus `/metrics` formatter, `/healthz`, `/livez`, `/readyz`, `/varz` JSON handler, and constant-time `RequireBearer` middleware (only `/healthz`, `/livez`, and `/readyz` bypass the token).
   - `log.go`: `slog.Logger` builder (`text`/`json`) and redaction helpers (`Secret`, `SecretBytes`, `SafeError`).
 
 ---

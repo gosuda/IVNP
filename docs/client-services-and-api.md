@@ -80,7 +80,7 @@ Passing a raw or `datagram3` network string to `ListenPacket` fails with an expl
 | Endpoint | Auth Required | Response Format & Semantics |
 | :--- | :--- | :--- |
 | `GET /metrics` | Bearer token (if configured) | Prometheus text format `0.0.4` (zero-reflection pooled formatter across 13 metric domains + Go runtime stats) |
-| `GET /varz` | Public on allowed listener | Indented JSON snapshot of all atomic counters, gauges, and process memory metrics |
+| `GET /varz` | Bearer token (if configured) | Indented JSON snapshot of all atomic counters, gauges, and process memory metrics; it carries the same counters as `/metrics`, so `RequireBearer` does not exempt it |
 | `GET /healthz`, `GET /livez` | Public on allowed listener | HTTP `200` (`HealthOK` / `HealthDegraded`) or `503` (`HealthUnavailable`) |
 | `GET /readyz` | Public on allowed listener | HTTP `200` when `ManagementStatus.Ready == true`, else `503 Service Unavailable` |
 
