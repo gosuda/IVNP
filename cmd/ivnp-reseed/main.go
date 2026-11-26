@@ -44,6 +44,11 @@ var (
 	errAdvertiseHostnameTooLong = errors.New("hostname longer than 255 characters")
 )
 
+// seedPhraseEnv names the environment variable that carries the signing
+// seed phrase. It is read only after flag parsing and then removed from the
+// process environment, so usage output and child processes never see it.
+const seedPhraseEnv = "RESEED_SEED_PHRASE"
+
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -69,7 +74,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	interval := flags.Duration("interval", 10*time.Minute, "refresh interval for harvesting, probing, and packaging")
 	netID := flags.Uint("netid", 2, "I2P network ID")
 	signerID := flags.String("signer-id", envOr("RESEED_SIGNER_ID", "reseed@ivnp.network"), "SU3 signer common name (env RESEED_SIGNER_ID)")
-	seedPhrase := flags.String("seed-phrase", envOr("RESEED_SEED_PHRASE", ""), "deterministic RSA-4096 signing key seed phrase; prefer env RESEED_SEED_PHRASE so the phrase stays out of process arguments")
+	seedPhraseFlag := flags.String("seed-phrase", "", "deterministic RSA-4096 signing key seed phrase; prefer env "+seedPhraseEnv+" so the phrase stays out of process arguments")
 	routerPort := flags.Int("router-port", 0, "port for embedded router NTCP2/SSU2 transports (default 0 for random/ephemeral)")
 	routerAdvertiseHost := flags.String("router-advertise-host", envOr("RESEED_ROUTER_ADVERTISE_HOST", ""), "public host or IP advertised in the embedded router's info for inbound connections (requires -router-port; empty keeps the router firewalled)")
 	routerAdvertisePort := flags.Int("router-advertise-port", 0, "public port advertised when it differs from -router-port, e.g. NAT port forwarding (default: same as -router-port)")
@@ -82,6 +87,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	seedPhrase := resolveSeedPhrase(*seedPhraseFlag)
 	if *showVersion {
 		fmt.Fprintln(stdout, "ivnp-reseed", version)
 		return 0
@@ -178,7 +184,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	rsaPrivKey, err := initSigningKey(*seedPhrase, logger)
+	rsaPrivKey, err := initSigningKey(seedPhrase, logger)
 	if err != nil {
 		logger.Error("failed to initialize RSA signing key", "error", err)
 		return 1
@@ -560,6 +566,16 @@ func configureActiveClientRouter(baseDir, tempDir string, netID uint8, routerPor
 	cfg.NetDB.LookupCapacity = 48
 
 	return cfg
+}
+
+// resolveSeedPhrase returns the -seed-phrase flag value, or the
+// RESEED_SEED_PHRASE environment value when the flag is empty, and removes
+// the environment variable either way. The phrase is never a flag default, so
+// flag usage and error output cannot print it.
+func resolveSeedPhrase(flagValue string) string {
+	envValue := os.Getenv(seedPhraseEnv)
+	_ = os.Unsetenv(seedPhraseEnv)
+	return cmp.Or(flagValue, envValue)
 }
 
 func normalizeSeedPhrase(phrase string) (string, error) {
