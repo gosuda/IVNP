@@ -59,6 +59,15 @@ const (
 	ssu2MinimumIPv6PacketSize    = ssu2MinimumNetworkMTU - 40 - 8
 	ssu2EstablishRetransmitDelay = 1250 * time.Millisecond
 	ssu2RelayResponseTimeout     = 15 * time.Second
+	// ssu2InboundHalfOpenTimeout bounds how long an inbound handshake may wait
+	// for SessionConfirmed after SessionCreated is sent. The initiator sends
+	// SessionConfirmed as soon as SessionCreated arrives, so this only has to
+	// cover one round trip, not the full handshake timeout.
+	ssu2InboundHalfOpenTimeout = 5 * time.Second
+	// ssu2MaxInboundPendingPerSource caps inbound half-open handshakes from one
+	// IPv4 address or IPv6 /64. One honest router needs one; the headroom
+	// allows a few routers behind a shared NAT address.
+	ssu2MaxInboundPendingPerSource = 4
 
 	ssu2ReceiveBatchCount = 4
 	ssu2ReceiveBatchSize  = 32
@@ -232,7 +241,9 @@ type SSU2Manager struct {
 	// +checklocks:mu
 	outboundAddr map[netip.AddrPort]*ssu2OutboundPending
 	// +checklocks:mu
-	inbound          map[uint64]*ssu2InboundPending
+	inbound map[uint64]*ssu2InboundPending
+	// +checklocks:mu
+	inboundSequence  uint64
 	introducers      map[uint32]foundation.Hash
 	relayGrants      map[foundation.Hash]ssu2RelayTagLease
 	advertisedRelays map[foundation.Hash]ssu2RelayTagLease
@@ -774,7 +785,10 @@ type ssu2StagedPacket struct {
 type ssu2InboundPending struct {
 	reassemblyMu sync.Mutex
 	remote       net.Addr
+	source       netip.Prefix
 	sendID       uint64
+	// sequence orders entries by admission for oldest-first eviction.
+	sequence uint64
 	// +checklocks:reassemblyMu
 	responder *dataplanessu2.Responder
 	// +checklocks:reassemblyMu
@@ -2019,7 +2033,9 @@ func (m *SSU2Manager) newIntroducedOutboundLocked(peer foundation.Hash, address 
 
 // +checklocks:m.mu
 func (m *SSU2Manager) newOutboundToLocked(peer foundation.Hash, address ssu2PeerAddress, remote *net.UDPAddr, destinationID, sourceID uint64) (*ssu2OutboundPending, error) {
-	if len(m.outbound)+len(m.inbound) >= m.maxPending || m.outbound[peer] != nil || remote == nil || remote.Port <= 0 {
+	// Outbound setup has its own budget so remote half-open handshakes can
+	// never block a handshake this router initiates.
+	if len(m.outbound) >= m.maxPending || m.outbound[peer] != nil || remote == nil || remote.Port <= 0 {
 		return nil, ErrSSU2Session
 	}
 	pending := &ssu2OutboundPending{
@@ -3159,10 +3175,10 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 		}
 		return
 	}
-	// A request with a new SourceID for an already-pending DestinationID will
-	// supersede that inbound entry; replacement does not increase pending usage.
-	replacing := m.inbound[header.DestinationID] != nil
-	if !replacing && len(m.inbound)+len(m.outbound) >= m.maxPending {
+	// Reject over-quota sources before the X25519 work. The decision is
+	// repeated under the second lock, where it is authoritative.
+	source, _ := ssu2InboundSourceKey(remote)
+	if _, ok := m.admitInboundLocked(header.DestinationID, source); !ok {
 		m.mu.Unlock()
 		return
 	}
@@ -3191,11 +3207,12 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 	}
 	pending := &ssu2InboundPending{
 		remote:     cloneUDPAddress(remote),
+		source:     source,
 		sendID:     header.SourceID,
 		responder:  responder,
 		reassembly: dataplanessu2.NewConfirmedReassembler(responder),
 	}
-	pending.timer = time.AfterFunc(m.timeout, func() {
+	pending.timer = time.AfterFunc(min(m.timeout, ssu2InboundHalfOpenTimeout), func() {
 		m.mu.Lock()
 		if m.inbound[header.DestinationID] != pending {
 			m.mu.Unlock()
@@ -3206,11 +3223,13 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 		pending.releaseSensitive()
 	})
 	var evicted *ssu2TransportSession
-	var stale *ssu2InboundPending
+	var stale, displaced *ssu2InboundPending
 	defer func() {
-		if stale != nil {
-			stale.timer.Stop()
-			stale.releaseSensitive()
+		for _, old := range [...]*ssu2InboundPending{stale, displaced} {
+			if old != nil {
+				old.timer.Stop()
+				old.releaseSensitive()
+			}
 		}
 		if evicted != nil {
 			evicted.ReleaseSensitive()
@@ -3223,13 +3242,26 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 		pending.releaseSensitive()
 		return
 	}
-	if current := m.inbound[header.DestinationID]; current != nil {
-		if current.sendID == header.SourceID {
-			m.mu.Unlock()
-			pending.timer.Stop()
-			pending.releaseSensitive()
-			return
-		}
+	current := m.inbound[header.DestinationID]
+	if current != nil && current.sendID == header.SourceID {
+		m.mu.Unlock()
+		pending.timer.Stop()
+		pending.releaseSensitive()
+		return
+	}
+	victimID, ok := m.admitInboundLocked(header.DestinationID, source)
+	if !ok {
+		m.mu.Unlock()
+		pending.timer.Stop()
+		pending.releaseSensitive()
+		return
+	}
+	if victim := m.inbound[victimID]; victimID != 0 && victim != nil {
+		delete(m.inbound, victimID)
+		displaced = victim
+	}
+	if current != nil {
+		// A new SourceID for a pending DestinationID supersedes that entry.
 		delete(m.inbound, header.DestinationID)
 		stale = current
 	}
@@ -3247,12 +3279,63 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 		m.removeSessionLocked(current)
 		evicted = current
 	}
+	m.inboundSequence++
+	pending.sequence = m.inboundSequence
 	m.inbound[header.DestinationID] = pending
 	retained = true
 	m.mu.Unlock()
 	if err = m.writeTo(created, remote); err != nil {
 		m.removeInbound(header.DestinationID, pending)
 	}
+}
+
+// admitInboundLocked decides whether an inbound half-open handshake from
+// source may occupy destinationID. Entries from one source, other than the
+// one the request would supersede, are capped at
+// ssu2MaxInboundPendingPerSource, so reusing another endpoint's pending
+// DestinationID cannot exceed the cap. When the table is full and nothing is
+// superseded, it names the oldest entry to evict, so pressure delays honest
+// handshakes by at most one table turnover instead of refusing all of them.
+// A zero victim means no eviction is needed.
+//
+// +checklocks:m.mu
+func (m *SSU2Manager) admitInboundLocked(destinationID uint64, source netip.Prefix) (victim uint64, ok bool) {
+	replaced := m.inbound[destinationID]
+	fromSource := 0
+	var oldest *ssu2InboundPending
+	for id, pending := range m.inbound {
+		if pending == replaced {
+			continue
+		}
+		if pending.source == source {
+			fromSource++
+		}
+		if oldest == nil || pending.sequence < oldest.sequence {
+			oldest, victim = pending, id
+		}
+	}
+	if fromSource >= ssu2MaxInboundPendingPerSource {
+		return 0, false
+	}
+	if replaced != nil || len(m.inbound) < m.maxPending {
+		return 0, true
+	}
+	return victim, true
+}
+
+// ssu2InboundSourceKey groups inbound handshakes by IPv4 address or IPv6 /64,
+// the smallest IPv6 allocation one host normally controls.
+func ssu2InboundSourceKey(remote net.Addr) (netip.Prefix, bool) {
+	endpoint, ok := addrPortKey(remote)
+	if !ok {
+		return netip.Prefix{}, false
+	}
+	bits := 32
+	if endpoint.Addr().Is6() {
+		bits = 64
+	}
+	prefix, err := endpoint.Addr().Prefix(bits)
+	return prefix, err == nil
 }
 
 // +checklocksexclude:m.mu
