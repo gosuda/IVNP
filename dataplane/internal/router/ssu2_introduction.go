@@ -25,6 +25,12 @@ const (
 	ssu2RelayRejectGeneralFailure = 64
 )
 
+// ssu2MaxRelayForwardsPerSource caps the relay forwards one IPv4 address or
+// IPv6 /64 may hold as Alice. Each forward makes this router send Alice's
+// RouterInfo and a RelayIntro to Charlie, so the cap keeps one source from
+// using the whole MaxPending table to amplify traffic toward introducees.
+const ssu2MaxRelayForwardsPerSource = 4
+
 // +checklocks:m.mu
 func (m *SSU2Manager) finishRelayRequestLocked(nonce uint32, relay *ssu2RelayRequest, err error) {
 	if relay == nil || relay.completed || m.relayRequests[nonce] != relay {
@@ -209,12 +215,13 @@ func (m *SSU2Manager) handleRelayRequest(alice *ssu2TransportSession, request da
 		m.sendRelayResponse(alice, localHash, dataplanessu2.RelayResponse{Code: ssu2RelayRejectSignature, Nonce: request.Nonce, Timestamp: uint32(m.now().Unix())})
 		return
 	}
+	source, _ := ssu2InboundSourceKey(alice.remoteAddr())
 	m.mu.Lock()
 	if _, exists := m.relayForwards[request.Nonce]; exists {
 		m.mu.Unlock()
 		return
 	}
-	if len(m.relayForwards) >= m.maxPending {
+	if len(m.relayForwards) >= m.maxPending || m.relayForwardsFromLocked(source) >= ssu2MaxRelayForwardsPerSource {
 		m.mu.Unlock()
 		m.sendRelayResponse(alice, localHash, dataplanessu2.RelayResponse{Code: ssu2RelayRejectLimit, Nonce: request.Nonce, Timestamp: uint32(m.now().Unix())})
 		return
@@ -225,7 +232,7 @@ func (m *SSU2Manager) handleRelayRequest(alice *ssu2TransportSession, request da
 		m.sendRelayResponse(alice, localHash, dataplanessu2.RelayResponse{Code: ssu2RelayRejectGeneralFailure, Nonce: request.Nonce, Timestamp: uint32(m.now().Unix())})
 		return
 	}
-	m.relayForwards[request.Nonce] = ssu2RelayForward{alice: alice, charlie: charlie, expires: m.nowLocked().Add(m.timeout)}
+	m.relayForwards[request.Nonce] = ssu2RelayForward{alice: alice, charlie: charlie, source: source, expires: m.nowLocked().Add(m.timeout)}
 	m.mu.Unlock()
 
 	job := ssu2RelayStoreJob{nonce: request.Nonce, request: request, alice: alice, charlie: charlie, aliceInfo: aliceInfo, localHash: localHash}
@@ -236,6 +243,20 @@ func (m *SSU2Manager) handleRelayRequest(alice *ssu2TransportSession, request da
 	default:
 		m.failRelayForward(job)
 	}
+}
+
+// relayForwardsFromLocked counts the pending relay forwards whose Alice
+// arrived from source.
+//
+// +checklocks:m.mu
+func (m *SSU2Manager) relayForwardsFromLocked(source netip.Prefix) int {
+	count := 0
+	for _, forward := range m.relayForwards {
+		if forward.source == source {
+			count++
+		}
+	}
+	return count
 }
 
 // relayStoreLoop drains bounded relay jobs. Multiple workers may compress
