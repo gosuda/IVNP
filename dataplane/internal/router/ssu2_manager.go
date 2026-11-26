@@ -840,6 +840,8 @@ type ssu2RelayRequest struct {
 type ssu2RelayForward struct {
 	alice   *ssu2TransportSession
 	charlie *ssu2TransportSession
+	// source is Alice's ssu2InboundSourceKey when the request arrived.
+	source  netip.Prefix
 	expires time.Time
 }
 
