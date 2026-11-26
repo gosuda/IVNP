@@ -129,7 +129,7 @@ func New(cfg state.ConfigurationOperating, options Options) (*Daemon, error) {
 			RefreshInterval: cfg.AddressBook.RefreshInterval, RetryInterval: cfg.AddressBook.RetryInterval,
 			RequestTimeout: cfg.AddressBook.RequestTimeout, MaxEntries: cfg.AddressBook.MaxEntries,
 			MaxFileBytes: cfg.AddressBook.MaxFileBytes, MaxResponseBytes: cfg.AddressBook.MaxResponseBytes,
-			MaxRedirects: cfg.AddressBook.MaxRedirects, HTTPClient: addressBookHTTPClient,
+			MaxRedirects: cfg.AddressBook.MaxRedirects, HTTPClient: addressBookHTTPClient, Logger: logger,
 		})
 		if err != nil {
 			return nil, err
