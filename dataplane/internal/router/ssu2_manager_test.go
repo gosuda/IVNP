@@ -360,6 +360,41 @@ func TestSSU2RelayRouterInfoStoreCacheReusesAndRefreshesLocalSnapshot(t *testing
 	}
 }
 
+// +checklocksignore
+func TestSSU2RelayRouterInfoStoreCacheIsBounded(t *testing.T) {
+	local, _, _ := newSSU2TestLocal(t, "127.0.0.1:23456")
+	now := time.UnixMilli(1_700_000_000_000)
+	manager, _ := newSSU2ConfiguredManager(t, nil)
+	limit := manager.maxSessions
+	if limit <= 0 {
+		t.Fatalf("maxSessions = %d", limit)
+	}
+	for index := range limit {
+		var hash foundation.Hash
+		binary.BigEndian.PutUint32(hash[:4], uint32(index)+1)
+		manager.routerInfoStores[hash] = ssu2RouterInfoStoreSnapshot{
+			raw:        []byte{1},
+			compressed: []byte{1},
+			hash:       hash,
+		}
+	}
+	if _, err := manager.cachedSSU2RouterInfoStore(local.Snapshot(), now); err != nil {
+		t.Fatalf("prepare RouterInfo store: %v", err)
+	}
+	if got := len(manager.routerInfoStores); got > limit {
+		t.Fatalf("RouterInfo store cache holds %d entries, limit %d", got, limit)
+	}
+	if _, ok := manager.routerInfoStores[local.Hash()]; !ok {
+		t.Fatal("RouterInfo store cache dropped the entry it just prepared")
+	}
+	if _, err := manager.cachedSSU2RouterInfoStore(local.Snapshot(), now.Add(time.Second)); err != nil {
+		t.Fatalf("reuse RouterInfo store: %v", err)
+	}
+	if got := len(manager.routerInfoStores); got > limit {
+		t.Fatalf("RouterInfo store cache holds %d entries after reuse, limit %d", got, limit)
+	}
+}
+
 func TestSSU2DispatchI2NPUsesClockAndRejectsExpired(t *testing.T) {
 	now := time.UnixMilli(1_700_000_000_000)
 	var deliveredAt uint64

@@ -551,17 +551,46 @@ func (m *SSU2Manager) cachedSSU2RouterInfoStore(info foundation.NetworkDatabaseR
 	if err != nil {
 		return foundation.I2NPMessage{}, err
 	}
+	snapshot.stored = now
 	m.routerInfoStoresMu.Lock()
 	if m.routerInfoStores == nil {
 		m.routerInfoStores = make(map[foundation.Hash]ssu2RouterInfoStoreSnapshot)
 	}
-	if current, exists := m.routerInfoStores[hash]; exists && bytes.Equal(current.raw, raw) {
+	current, exists := m.routerInfoStores[hash]
+	switch {
+	case exists && bytes.Equal(current.raw, raw):
 		snapshot = current
-	} else {
+	case exists:
+		m.routerInfoStores[hash] = snapshot
+	default:
+		m.evictSSU2RouterInfoStoresLocked()
 		m.routerInfoStores[hash] = snapshot
 	}
 	m.routerInfoStoresMu.Unlock()
 	return snapshot.message(now)
+}
+
+// evictSSU2RouterInfoStoresLocked makes room for one new entry by dropping
+// the oldest stored snapshots. A relay only forwards stores for established
+// sessions, so the cache never needs more entries than the session limit.
+//
+// +checklocks:m.routerInfoStoresMu
+func (m *SSU2Manager) evictSSU2RouterInfoStoresLocked() {
+	limit := m.maxSessions
+	if limit <= 0 {
+		limit = defaultSSU2MaxSessions
+	}
+	for len(m.routerInfoStores) >= limit {
+		var oldest foundation.Hash
+		var oldestStored time.Time
+		first := true
+		for hash, cached := range m.routerInfoStores {
+			if first || cached.stored.Before(oldestStored) {
+				oldest, oldestStored, first = hash, cached.stored, false
+			}
+		}
+		delete(m.routerInfoStores, oldest)
+	}
 }
 
 func newSSU2RouterInfoStoreSnapshot(info foundation.NetworkDatabaseRouterInfo) (ssu2RouterInfoStoreSnapshot, error) {

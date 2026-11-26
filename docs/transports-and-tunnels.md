@@ -120,7 +120,7 @@ On the transmit side, `egressLoop` drains `egressQueue` (`32` slots), applies a 
 - **7-Message PeerTest**: Alice, Bob, and Charlie exchange signed `PeerTestBlock` messages (`"PeerTestValidate" || bobHash [|| aliceHash]`). `SSU2Manager` classifies the local node's UDP reachability into `PeerTestOK`, `PeerTestFirewalled`, or `PeerTestSymmetricNAT` (requiring at least two consistent port-translated external observations in `symmetricEvidence`).
 - **Introducer Relay & Hole Punching**: Firewalled routers maintain up to `ssu2RelayTarget = 3` introducer sessions (`RelayTagRequest` / `RelayTag`) and publish `iexp0..2`, `ihost0..2`, `ikey0..2`, `iport0..2`, `itag0..2` options in their `RouterInfo`. When Alice wants to reach firewalled Charlie through Bob:
   1. Alice sends a signed `RelayRequest` (`"RelayRequestData" || bobHash || charlieHash`) to Bob.
-  2. Bob forwards Alice's compressed `RouterInfo` `DatabaseStore` and a `RelayIntro` block to Charlie.
+  2. Bob forwards Alice's compressed `RouterInfo` `DatabaseStore` and a `RelayIntro` block to Charlie. Bob caches the compressed store per Alice hash; the cache holds at most `MaxSessions` entries (default `256`) and evicts the oldest stored snapshot when a new Alice needs a slot.
   3. Charlie transmits an out-of-session `HolePunch (11)` datagram to Alice's apparent IP:port and sends a signed `RelayResponse` (`"RelayAgreementOK" || bobHash`) back through Bob.
   4. Alice receives `RelayResponse` (or `HolePunch`) and immediately initiates `SessionRequest` using the token embedded in `RelayResponse`.
 
