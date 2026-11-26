@@ -104,7 +104,7 @@ Passing a raw or `datagram3` network string to `ListenPacket` fails with an expl
 `HTTPProxy` (`127.0.0.1:4444`) handles both `.i2p` eepsite requests and clearnet outproxy forwarding:
 
 - **Direct `.i2p` Requests**: Resolves `.b32.i2p`, raw base64, or named `.i2p` hosts (via `AddressBook`), strips hop-by-hop and `X-Forwarded-*` headers, normalizes `User-Agent` to `"MYOB/6.66 (AN/ON)"`, and relays HTTP or `CONNECT` streams over `Network.DialI2P`.
-- **Clearnet Outproxy Forwarding**: Non-`.i2p` hosts passing `validClearnetHost` round-robin across configured `Outproxies` (default `exit.stormycloud.i2p`), normalize `User-Agent` to `"Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"`, and tunnel HTTP or `CONNECT` requests through port `80` of the outproxy. A background loop (`warmOutproxyLoop`) warms outproxy LeaseSets and tunnels every `5m`.
+- **Clearnet Outproxy Forwarding**: Non-`.i2p` hosts passing `validClearnetHost` round-robin across configured `Outproxies` (default `exit.stormycloud.i2p`), normalize `User-Agent` to `"Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"`, and tunnel HTTP or `CONNECT` requests through port `80` of the outproxy. Both HTTP paths apply the Java I2P client tunnel defaults to request headers: `Accept-Language`, `Accept-Charset`, and every other `Accept-*` header except `Accept-Encoding` are removed, and a `Referer` is forwarded only when its scheme, host, and port match the request target, reduced to its path and query (any other `Referer` is dropped). A background loop (`warmOutproxyLoop`) warms outproxy LeaseSets and tunnels every `5m`.
 
 ### 3.3 SOCKS5 Proxy & Lock-Free AddressBook
 
