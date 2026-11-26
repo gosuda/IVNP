@@ -88,7 +88,7 @@ Common CLI flags:
 - `-memory`: Run in-memory without reading or writing persistent state on disk.
 - `-data-dir <dir>`: Override `[paths] data_dir`.
 - `-webui=false` / `-webui-listen <addr:port>`: Disable or rebind the embedded WebUI server.
-- `-webui-auth` / `-webui-token <secret>`: Require Bearer authentication on `/api/*` endpoints (or set `IVNPD_WEBUI_TOKEN`).
+- `-webui-auth` / `-webui-token <secret>`: Require Bearer authentication on `/api/*` endpoints (or set `IVNPD_WEBUI_TOKEN`). `-webui-auth=false` drops only the token: a loopback listener still serves only loopback clients and loopback `Host` names, and a non-loopback listener then accepts only `localhost` or IP-literal `Host` headers.
 - `-webui-remote-write`: Permit WebUI configuration writes, rollbacks, and router restarts from non-loopback clients.
 - `-webui-show-peers`: Expose peer router `.b32.i2p` identities in `/api/tunnels` and `/api/peers` when the WebUI listener is not loopback-bound.
 - `-http-proxy` / `-socks5`: Enable or disable proxy listeners from the command line.

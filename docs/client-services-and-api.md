@@ -134,6 +134,14 @@ Passing a raw or `datagram3` network string to `ListenPacket` fails with an expl
 | `GET /api/actions/log` | Most recent `50` administrative actions (`reseed`, `probe`, `restart`, `config`, `rollback`), newest first |
 | `GET /api/events` | 1-second Server-Sent Events (`text/event-stream`) telemetry stream |
 
+Every request passes the listener's access policy before any handler runs. The policy follows the bind address, not `-webui-auth`:
+
+- **Loopback bind** (`127.0.0.0/8`, `::1`, `localhost`): only loopback clients are served, and the `Host` header must name a loopback address or `localhost`. This DNS-rebinding check stays in force with `-webui-auth=false`.
+- **Non-loopback bind with a token**: `/api/*` requires `Authorization: Bearer <token>` (or `?token=` on `/api/events`); the `Host` header is not restricted.
+- **Non-loopback bind with `-webui-auth=false`**: the `Host` header must be `localhost` or an IP literal, so a page served from a rebound DNS name is rejected. Use a token to reach the console through a DNS name.
+
+State-changing requests must also carry an `Origin` that matches `Host`, when an `Origin` is present.
+
 ---
 
 ## 5. Deterministic Simulation Testing (`internal/simnet`, `tools/dstoverlay`, `sim_*.go`)

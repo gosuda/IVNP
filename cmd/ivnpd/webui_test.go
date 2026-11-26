@@ -90,6 +90,8 @@ func TestWebUIAccessPolicy(t *testing.T) {
 		{name: "localhost", address: "localhost:7070", wantLoopback: true},
 		{name: "127 slash 8", address: "127.44.2.9:7070", wantLoopback: true},
 		{name: "IPv6 loopback", address: "[::1]:7070", wantLoopback: true},
+		{name: "loopback with disableAuth", address: "127.0.0.1:7070", disableAuth: true, wantLoopback: true},
+		{name: "localhost with disableAuth", address: "localhost:7070", disableAuth: true, wantLoopback: true},
 		{name: "explicit wildcard with token", address: "0.0.0.0:7070", token: "0123456789abcdef", wantLoopback: false},
 		{name: "wildcard without token", address: "0.0.0.0:7070", wantError: true},
 		{name: "wildcard with disableAuth", address: "0.0.0.0:7070", disableAuth: true, wantLoopback: false},
@@ -181,6 +183,48 @@ func TestWebUILoopbackMiddlewareRejectsRemoteHostAndOrigin(t *testing.T) {
 			if test.origin != "" {
 				request.Header.Set("Origin", test.origin)
 			}
+			handler.ServeHTTP(record, request)
+			if record.Code != test.wantStatus {
+				t.Fatalf("middleware status = %d, want %d; body %q", record.Code, test.wantStatus, record.Body.String())
+			}
+		})
+	}
+}
+
+func TestWebUIDisabledAuthKeepsHostAllowlist(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		listen     string
+		remoteAddr string
+		host       string
+		method     string
+		origin     string
+		wantStatus int
+	}{
+		{name: "loopback bind localhost", listen: "127.0.0.1:7070", remoteAddr: "127.0.0.1:42000", host: "localhost:7070", method: http.MethodGet, wantStatus: http.StatusNoContent},
+		{name: "loopback bind rebinding read", listen: "127.0.0.1:7070", remoteAddr: "127.0.0.1:42000", host: "attacker.example:7070", method: http.MethodGet, wantStatus: http.StatusForbidden},
+		{name: "loopback bind rebinding write", listen: "127.0.0.1:7070", remoteAddr: "127.0.0.1:42000", host: "attacker.example:7070", method: http.MethodPatch, origin: "http://attacker.example:7070", wantStatus: http.StatusForbidden},
+		{name: "loopback bind remote client", listen: "127.0.0.1:7070", remoteAddr: "192.168.1.9:42000", host: "127.0.0.1:7070", method: http.MethodGet, wantStatus: http.StatusForbidden},
+		{name: "wildcard bind IP literal", listen: "0.0.0.0:7070", remoteAddr: "192.168.1.9:42000", host: "192.168.1.20:7070", method: http.MethodGet, wantStatus: http.StatusNoContent},
+		{name: "wildcard bind localhost", listen: "0.0.0.0:7070", remoteAddr: "127.0.0.1:42000", host: "localhost:7070", method: http.MethodPatch, origin: "http://localhost:7070", wantStatus: http.StatusNoContent},
+		{name: "wildcard bind rebinding to loopback", listen: "0.0.0.0:7070", remoteAddr: "127.0.0.1:42000", host: "attacker.example:7070", method: http.MethodPatch, origin: "http://attacker.example:7070", wantStatus: http.StatusForbidden},
+		{name: "wildcard bind rebinding to LAN", listen: "0.0.0.0:7070", remoteAddr: "192.168.1.9:42000", host: "attacker.example:7070", method: http.MethodGet, wantStatus: http.StatusForbidden},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server := newTestWebUIServer(t, WebUIConfig{ListenAddress: test.listen, DisableAuth: true})
+			handler := server.wrapMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			request := httptest.NewRequest(test.method, "http://"+test.host+"/api/config", nil)
+			request.RemoteAddr = test.remoteAddr
+			request.Host = test.host
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			record := httptest.NewRecorder()
 			handler.ServeHTTP(record, request)
 			if record.Code != test.wantStatus {
 				t.Fatalf("middleware status = %d, want %d; body %q", record.Code, test.wantStatus, record.Body.String())
