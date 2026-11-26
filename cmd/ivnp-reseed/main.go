@@ -300,7 +300,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		activeCrawlPass(refreshCtx)
 
 		if evicted := store.PruneRedundant(); evicted > 0 {
-			logger.Info("evicted redundant peers dominated in subnet/family contests",
+			logger.Info("evicted redundant peers dominated in subnet contests",
 				"evicted", evicted,
 				"store_total", store.Len(),
 			)

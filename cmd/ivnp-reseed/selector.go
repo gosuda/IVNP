@@ -14,8 +14,7 @@ import (
 
 type SelectorConfig struct {
 	TargetCount          int
-	MaxPerSubnet         int // per IPv4 /16 or IPv6 /48 prefix
-	MaxPerFamily         int
+	MaxPerSubnet         int     // per IPv4 /16 or IPv6 /48 prefix
 	PreferFloodfillRatio float64 // target ratio for floodfills, e.g. 0.5 (50%)
 	ExcludeIPv6Only      bool
 	MinBundlePeers       int
@@ -33,7 +32,6 @@ func DefaultSelectorConfig() SelectorConfig {
 	return SelectorConfig{
 		TargetCount:          1024,
 		MaxPerSubnet:         1,
-		MaxPerFamily:         1,
 		PreferFloodfillRatio: 0.5,
 		ExcludeIPv6Only:      true,
 		MinBundlePeers:       10,
@@ -97,9 +95,6 @@ func SelectDiversePeersWithStats(peers []PeerRecord, cfg SelectorConfig) ([]Peer
 	if cfg.MaxPerSubnet <= 0 {
 		cfg.MaxPerSubnet = 1
 	}
-	if cfg.MaxPerFamily <= 0 {
-		cfg.MaxPerFamily = 1
-	}
 	if cfg.PreferFloodfillRatio <= 0 {
 		cfg.PreferFloodfillRatio = 0.5
 	}
@@ -140,7 +135,8 @@ func SelectDiversePeersWithStats(peers []PeerRecord, cfg SelectorConfig) ([]Peer
 	}
 
 	// Stage 2: subnet diversity gate. Highest-quality candidate per IPv4 /16
-	// or IPv6 /48 claims the prefix; family caps are retained.
+	// or IPv6 /48 claims the prefix. The RouterInfo "family" option is
+	// self-declared and unverified, so it neither groups nor excludes peers.
 	slices.SortFunc(qualified, func(a, b PeerRecord) int {
 		if c := cmp.Compare(qualityScore(&b, now), qualityScore(&a, now)); c != 0 {
 			return c
@@ -148,7 +144,6 @@ func SelectDiversePeersWithStats(peers []PeerRecord, cfg SelectorConfig) ([]Peer
 		return bytes.Compare(a.Hash[:], b.Hash[:])
 	})
 	seenSubnets := make(map[subnetKey]struct{})
-	seenFamilies := make(map[string]int)
 	pool := make([]PeerRecord, 0, min(len(qualified), cfg.TargetCount*2))
 	for _, p := range qualified {
 		keys := subnetKeys(p)
@@ -162,14 +157,8 @@ func SelectDiversePeersWithStats(peers []PeerRecord, cfg SelectorConfig) ([]Peer
 		if blocked {
 			continue
 		}
-		if p.Family != "" && seenFamilies[p.Family] >= cfg.MaxPerFamily {
-			continue
-		}
 		for _, k := range keys {
 			seenSubnets[k] = struct{}{}
-		}
-		if p.Family != "" {
-			seenFamilies[p.Family]++
 		}
 		pool = append(pool, p)
 	}

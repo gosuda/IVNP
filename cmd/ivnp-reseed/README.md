@@ -20,7 +20,7 @@ Autonomous I2P network indexer and SU3 reseed server (`gosuda.org/ivnp/cmd/ivnp-
                                 ▼
 ┌───────────────────────────────────────────────────────────────────┐
 │ Bounded PeerStore (Cap: 2,500 routers, atomic peers.gob snapshot) │
-│ - Subnet (/16 IPv4, /48 IPv6) and router family contention bounds │
+│ - /16 IPv4 contention; unchecked peers never evict verified ones  │
 │ - EWMA RTT, rolling 3h probe window, and composite quality score  │
 └───────────────────────────────┬───────────────────────────────────┘
                                 │ Prober (8.0 probes/s, burst 16, 1.5s timeout)
@@ -29,7 +29,7 @@ Autonomous I2P network indexer and SU3 reseed server (`gosuda.org/ivnp/cmd/ivnp-
 │ 4-Stage Diverse Peer Selector (75 peers per SU3 bundle)           │
 │ 1. Hard qualification gate (v2 transport, >=85% probe rate,       │
 │    >=1h uptime, <24h RouterInfo age) with 4-step relaxation       │
-│ 2. Subnet (/16 IPv4, /48 IPv6) and family uniqueness filter       │
+│ 2. Subnet (/16 IPv4, /48 IPv6) uniqueness filter                  │
 │ 3. Max-Min XOR Farthest-Point Sampling (50% floodfill quota first)│
 │ 4. 256-bucket stratification for partial bundle readers           │
 └───────────────────────────────┬───────────────────────────────────┘
@@ -53,9 +53,10 @@ Autonomous I2P network indexer and SU3 reseed server (`gosuda.org/ivnp/cmd/ivnp-
    - **Expansion Mode** (`Reachable < 1024`): Launches `24` concurrent exploration queries per pass and prioritizes newcomer and sparse-bucket probing.
    - **Maintenance Mode** (`Reachable >= 1024`): Launches `8` repair queries per pass and applies exponential probe backoff (`5m * 2^(fails-1)`, capped at `2h`) to unresponsive peers.
 4. **Max-Min XOR Farthest-Point Sampling (`selector.go`)**: Rather than drawing fixed counts per prefix, `farthestPointSample` runs greedy farthest-point sampling across the full 256-bit XOR keyspace ($O(K \cdot N)$). Each pick maximizes the minimum XOR distance to all already-selected peers, filling the 50% floodfill quota first and then drawing from the full qualified pool to produce a 75-peer bundle (`bundleSize = 75`).
-5. **Hard Qualification Gate & Relaxation Ladder**: Candidates must advertise a dialable NTCP2 or SSU2 address, publish a `RouterInfo` within the client's 24-hour reseed window (`±2m` clock skew), and pass the qualification ladder (`gateStrict`: $\ge 85\%$ probe success and $\ge 1\text{h}$ uptime -> `gateNoUptime` -> `gateCumulativeRate` -> `gateReachable`). If fewer than `-min-bundle-peers` qualify, the server retains the previous epoch's bundle pool.
-6. **Sybil & Eclipse Contention Bounds (`store.go`)**: `PeerStore` maintains incremental `bySubnet16` (`/16` IPv4, `/48` IPv6) and `byFamily` contention group indices (`MaxPeersPerIPv4_16 = 3`, `MaxPeersPerFamily = 15`), while bundle selection enforces at most one router per `/16` IPv4 subnet, `/48` IPv6 prefix, and declared router `family`. A newly admitted peer that outranks the weakest member in its contention group evicts the dominated entry (`evictDominatedLocked`, `PruneRedundant`).
-7. **16-Bundle Epoch Pool (`packager.go`, `server.go`)**: Every refresh interval (`10m` default), `ivnp-reseed` builds a pool of `16` distinct 75-peer SU3 archives (`bundlePoolSize = 16`) and rotates across them on incoming download requests so concurrent bootstrap clients do not hammer identical peer subsets.
+5. **Hard Qualification Gate & Relaxation Ladder**: Candidates must advertise a dialable NTCP2 or SSU2 address, publish a `RouterInfo` within the client's 24-hour reseed window (`±2m` clock skew), and pass the qualification ladder (`gateStrict`: $\ge 85\%$ probe success and $\ge 1\text{h}$ uptime -> `gateNoUptime` -> `gateCumulativeRate` -> `gateReachable`). Every level requires probe-verified reachability, so peers that advertise only SSU2 endpoints never qualify. If fewer than `-min-bundle-peers` qualify, the server retains the previous epoch's bundle pool.
+6. **Probe-Verified Reachability (`prober.go`)**: A peer counts as reachable only after the prober completes a TCP connection to one of its advertised NTCP2 (or unclassified) addresses. Appearing in the NetDB, admission to the store, and re-publication never mark a peer reachable, and a re-published `RouterInfo` with different addresses must be probed again. `ivnp-reseed` has no SSU2 handshake probe, so peers that advertise only SSU2 endpoints stay unchecked: they are never probed, never reachable, and never selected for a bundle.
+7. **Sybil & Eclipse Contention Bounds (`store.go`)**: `PeerStore` maintains an incremental `bySubnet16` (`/16` IPv4) contention index. Within a group, probe-verified peers outrank unchecked peers, unchecked peers the prober can verify outrank SSU2-only peers, and peers with repeated probe failures rank last; floodfill status, tunnel participation, and score only break ties inside a tier (`compareRetention`). A newly admitted peer evicts group members that no longer top any group they belong to (`evictDominatedLocked`, `PruneRedundant`). Capacity eviction removes only peers that are not probe-verified; when none qualify, the newcomer is refused. Bundle selection enforces at most one router per `/16` IPv4 subnet and `/48` IPv6 prefix. The `RouterInfo` `family` option is self-declared and unverified, so it forms no contention group and does not limit selection; it appears only in dashboard and package statistics.
+8. **16-Bundle Epoch Pool (`packager.go`, `server.go`)**: Every refresh interval (`10m` default), `ivnp-reseed` builds a pool of `16` distinct 75-peer SU3 archives (`bundlePoolSize = 16`) and rotates across them on incoming download requests so concurrent bootstrap clients do not hammer identical peer subsets.
 
 ---
 

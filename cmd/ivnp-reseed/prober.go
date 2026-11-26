@@ -16,7 +16,10 @@ import (
 
 const maxProbesPerPass = 256
 
-func isPassiveUDPOnly(rec PeerRecord) bool {
+// isUDPOnly reports whether rec advertises only SSU2/UDP endpoints. The prober
+// verifies reachability with TCP connections and has no SSU2 handshake probe,
+// so such peers stay unchecked: they are never probed and never reachable.
+func isUDPOnly(rec *PeerRecord) bool {
 	return len(rec.TCPPorts) == 0 && len(rec.UDPPorts) > 0
 }
 
@@ -126,6 +129,9 @@ func (p *Prober) ProbeBatch(ctx context.Context, limit int) int {
 	now := time.Now()
 	var candidates []PeerRecord
 	for _, rec := range peers {
+		if isUDPOnly(&rec) {
+			continue
+		}
 		cooldown := CalculateProbeCooldown(rec, reachableCount)
 		if now.Sub(rec.Stats.LastProbed) >= cooldown {
 			candidates = append(candidates, rec)
@@ -194,18 +200,13 @@ func (p *Prober) ProbeBatch(ctx context.Context, limit int) int {
 				if ctx.Err() != nil {
 					return
 				}
-				passiveUDP := isPassiveUDPOnly(rec)
-				if !passiveUDP && p.limiter != nil {
+				if p.limiter != nil {
 					if err := p.limiter.Wait(ctx); err != nil {
 						return
 					}
 				}
 				success, rtt := p.probePeer(ctx, rec)
-				if passiveUDP {
-					p.store.RecordPassiveProbeResult(rec.Hash, success, rtt)
-				} else {
-					p.store.RecordProbeResult(rec.Hash, success, rtt)
-				}
+				p.store.RecordProbeResult(rec.Hash, success, rtt)
 				if success {
 					successCount.Add(1)
 				}
@@ -256,31 +257,20 @@ func (p *Prober) probePeer(ctx context.Context, rec PeerRecord) (bool, time.Dura
 		}
 	}
 
-	// For peers with only UDP (SSU2) endpoints: do not fail them with TCP.
-	// If the router recently received or admitted them, they are reachable.
-	if len(rec.TCPPorts) == 0 && len(rec.UDPPorts) > 0 {
-		if time.Since(rec.Stats.LastSeen) < 2*time.Hour {
-			rtt := rec.Stats.EWMARTT
-			if rtt <= 0 {
-				rtt = 50 * time.Millisecond
-			}
-			return true, rtt
-		}
-	}
-
 	return false, 0
 }
 
+// ProbeSingle probes one peer and records the result. Peers that advertise only
+// SSU2/UDP endpoints are left unchecked and report failure without a record.
 func (p *Prober) ProbeSingle(ctx context.Context, hash foundation.Hash) (bool, time.Duration) {
 	peers := p.store.Snapshot()
 	for _, rec := range peers {
 		if rec.Hash == hash {
-			success, rtt := p.probePeer(ctx, rec)
-			if isPassiveUDPOnly(rec) {
-				p.store.RecordPassiveProbeResult(hash, success, rtt)
-			} else {
-				p.store.RecordProbeResult(hash, success, rtt)
+			if isUDPOnly(&rec) {
+				return false, 0
 			}
+			success, rtt := p.probePeer(ctx, rec)
+			p.store.RecordProbeResult(hash, success, rtt)
 			return success, rtt
 		}
 	}

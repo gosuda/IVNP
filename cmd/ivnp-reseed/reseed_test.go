@@ -662,6 +662,10 @@ func TestTreeExplorationTargets(t *testing.T) {
 	if dist[info1.Hash()[0]] != 1 {
 		t.Fatalf("dist[%d] = %d, want 1", info1.Hash()[0], dist[info1.Hash()[0]])
 	}
+	if store.ReachableCount() != 0 {
+		t.Fatalf("ReachableCount = %d, want 0 before any probe", store.ReachableCount())
+	}
+	store.RecordProbeResult(info1.Hash(), true, 40*time.Millisecond)
 	if store.ReachableCount() != 1 {
 		t.Fatalf("ReachableCount = %d, want 1", store.ReachableCount())
 	}
@@ -1452,9 +1456,10 @@ func TestPeerStoreSubnetDisplacement(t *testing.T) {
 	if _, isNew := store.AddOrUpdate(info1, raw1); !isNew {
 		t.Fatal("incumbent peer should be admitted")
 	}
-	store.RecordProbeResult(info1.Hash(), true, 40*time.Millisecond)
 
-	// A floodfill in the same /16 outranks the incumbent and displaces it.
+	// Among unchecked peers, a floodfill in the same /16 outranks the
+	// incumbent and displaces it. A probe-verified incumbent is never
+	// displaced by an unchecked newcomer (see TestUncheckedUDPOnlyPeerCannotDisplaceCheckedPeer).
 	info2, raw2 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{2}, 32), "f", "198.51.100.9", "1234", "", 1000)
 	rec2, isNew2 := store.AddOrUpdate(info2, raw2)
 	if !isNew2 || rec2 == nil {
@@ -1492,7 +1497,7 @@ func TestPeerStoreSubnetReadmissionAfterIncumbentFails(t *testing.T) {
 	}
 }
 
-func TestPeerStoreFamilyContention(t *testing.T) {
+func TestPeerStoreSharedFamilyContention(t *testing.T) {
 	store := NewPeerStore()
 
 	info1, raw1 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{1}, 32), "f", "198.51.100.1", "1234", "acme", 1000)
@@ -1501,14 +1506,14 @@ func TestPeerStoreFamilyContention(t *testing.T) {
 	}
 	store.RecordProbeResult(info1.Hash(), true, 40*time.Millisecond)
 
-	// Same family and same /16: loses every contention group.
+	// Same /16 as a verified peer: loses its only contention group.
 	info2, raw2 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{2}, 32), "LR", "198.51.100.2", "1234", "acme", 1000)
 	if rec2, isNew2 := store.AddOrUpdate(info2, raw2); isNew2 || rec2 != nil {
-		t.Fatal("family member losing all contention groups should be rejected")
+		t.Fatal("peer losing its /16 should be rejected")
 	}
 
-	// Same family but sole occupant of another /16: loses the family claim
-	// yet tops its subnet group, so it is retained.
+	// The unverified family declaration forms no group: the sole occupant
+	// of another /16 is retained alongside the incumbent.
 	info3, raw3 := createTestRouterInfoWithEndpoint(t, bytes.Repeat([]byte{3}, 32), "LR", "203.0.113.9", "1234", "acme", 1000)
 	if rec3, isNew3 := store.AddOrUpdate(info3, raw3); !isNew3 || rec3 == nil {
 		t.Fatal("family member topping its own /16 should be admitted")

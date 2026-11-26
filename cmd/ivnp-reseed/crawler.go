@@ -93,7 +93,7 @@ func (c *ActiveCrawler) Harvest(subsystem *node.Subsystem) int {
 	return admitted
 }
 
-// HarvestRefs admits a slice of RouterRefs into the store with observed reachability.
+// HarvestRefs admits a slice of RouterRefs into the store as unchecked peers.
 func (c *ActiveCrawler) HarvestRefs(refs []controlplane.NetworkDatabaseRouterRef) int {
 	admitted := 0
 	for _, ref := range refs {

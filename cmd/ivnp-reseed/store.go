@@ -24,8 +24,6 @@ type PeerStore struct {
 	// +checklocks:mu
 	bySubnet16 map[[2]byte]map[foundation.Hash]struct{}
 	// +checklocks:mu
-	byFamily map[string]map[foundation.Hash]struct{}
-	// +checklocks:mu
 	maxPeers int
 	// +checklocks:mu
 	localHash foundation.Hash
@@ -37,7 +35,6 @@ func NewPeerStore() *PeerStore {
 	return &PeerStore{
 		peers:      make(map[foundation.Hash]*PeerRecord),
 		bySubnet16: make(map[[2]byte]map[foundation.Hash]struct{}),
-		byFamily:   make(map[string]map[foundation.Hash]struct{}),
 		maxPeers:   MaxStorePeers,
 	}
 }
@@ -110,23 +107,26 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 				LastSeen:  lastSeen,
 			},
 		}
-		if now.Sub(lastSeen) < 2*time.Hour {
-			rec.Stats.IsReachable = true
-		}
+		// A sighting is not a reachability check: the peer stays unchecked
+		// until the prober completes a connection to an advertised address.
 		rec.Score = calculateScore(rec)
 
-		// Reject peers that lose every /16 subnet and family contest they enter:
+		// Reject peers that lose every /16 subnet contest they enter:
 		// a strictly better retained peer claims the group, so they can never be selected.
 		if hasGroup, tops := s.topsAnyContentionLocked(rec); hasGroup && !tops {
 			return nil, false
 		}
 		rec.Raw = bytes.Clone(raw)
 
-		// Enforce bounded memory: evict a batch of lowest-utility peers when reaching capacity
-		// to allow continuous turnover and admission of newly discovered DHT peers.
+		// Enforce bounded memory: evict a batch of lowest-utility unchecked peers
+		// when reaching capacity so newly discovered DHT peers keep turning over.
+		// A newcomer is itself unchecked, so it never displaces a verified peer.
 		if len(s.peers) >= s.maxPeers {
 			batch := min(25, max(2, s.maxPeers/100))
 			s.evictBatchLocked(batch)
+			if len(s.peers) >= s.maxPeers {
+				return nil, false
+			}
 		}
 
 		s.peers[hash] = rec
@@ -137,9 +137,6 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 
 	if lastSeen.After(existing.Stats.LastSeen) {
 		existing.Stats.LastSeen = lastSeen
-		if now.Sub(lastSeen) < 2*time.Hour && existing.Stats.ConsecutiveFails == 0 {
-			existing.Stats.IsReachable = true
-		}
 	}
 
 	// Update existing record if newer published date
@@ -148,6 +145,12 @@ func (s *PeerStore) AddOrUpdateWithSeen(info foundation.NetworkDatabaseRouterInf
 		existing.Raw = bytes.Clone(raw)
 		s.deindexPeerLocked(existing)
 		contact := extractRouterAddresses(info)
+		if !sameEndpoints(existing, contact) {
+			// Reachability was verified against the previous addresses;
+			// the new ones must be probed before the peer counts again.
+			existing.Stats.IsReachable = false
+			existing.Stats.LastProbed = time.Time{}
+		}
 		existing.Family = contact.family
 		existing.IPv4 = contact.ipv4
 		existing.IPv6 = contact.ipv6
@@ -224,7 +227,9 @@ func (s *PeerStore) evictWorstLocked() {
 }
 
 // evictBatchLocked evicts up to count lowest-utility peers to free up capacity for newly discovered nodes.
-// Candidates in sparse buckets (<= 4 peers) are protected to preserve K-Bucket diversity.
+// Candidates in sparse buckets (<= 4 peers) are protected to preserve K-Bucket diversity, and
+// probe-verified peers are never candidates: capacity pressure from unchecked newcomers must not
+// displace a peer whose reachability was confirmed.
 //
 // +checklocks:s.mu
 func (s *PeerStore) evictBatchLocked(count int) int {
@@ -251,6 +256,9 @@ func (s *PeerStore) evictBatchLocked(count int) int {
 		}
 		var candidates []scoredPeer
 		for h, p := range s.peers {
+			if probeVerified(p) {
+				continue
+			}
 			if bucketCounts[p.Hash[0]] > minBucketCount && (filter == nil || filter(p)) {
 				candidates = append(candidates, scoredPeer{hash: h, score: p.Score})
 			}
@@ -328,15 +336,15 @@ func (s *PeerStore) pruneStaleLocked(maxAge time.Duration) int {
 }
 
 // PruneRedundant removes peers that can never win selection: every contention
-// group they join (each shared IPv4 /16 subnet and their router family)
-// already retains a strictly better member. Admission-time rejection keeps
-// redundant peers out; this sweep corrects ranking drift as probe and tunnel
-// results change member scores.
+// group they join (each shared IPv4 /16 subnet) already retains a strictly
+// better member. Admission-time rejection keeps redundant peers out; this
+// sweep corrects ranking drift as probe and tunnel results change member
+// scores.
 func (s *PeerStore) PruneRedundant() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if len(s.bySubnet16) == 0 && len(s.byFamily) == 0 {
+	if len(s.bySubnet16) == 0 {
 		for _, rec := range s.peers {
 			s.indexPeerLocked(rec)
 		}
@@ -368,14 +376,6 @@ func (s *PeerStore) indexPeerLocked(rec *PeerRecord) {
 		}
 		members[rec.Hash] = struct{}{}
 	}
-	if rec.Family != "" {
-		members, ok := s.byFamily[rec.Family]
-		if !ok {
-			members = make(map[foundation.Hash]struct{}, 1)
-			s.byFamily[rec.Family] = members
-		}
-		members[rec.Hash] = struct{}{}
-	}
 }
 
 // +checklocks:s.mu
@@ -389,14 +389,6 @@ func (s *PeerStore) deindexPeerLocked(rec *PeerRecord) {
 			delete(members, rec.Hash)
 			if len(members) == 0 {
 				delete(s.bySubnet16, subnet)
-			}
-		}
-	}
-	if rec.Family != "" {
-		if members, ok := s.byFamily[rec.Family]; ok {
-			delete(members, rec.Hash)
-			if len(members) == 0 {
-				delete(s.byFamily, rec.Family)
 			}
 		}
 	}
@@ -414,7 +406,8 @@ func (s *PeerStore) deletePeerLocked(hash foundation.Hash) {
 }
 
 // eachContentionGroupLocked invokes fn on every member set rec competes in:
-// one per IPv4 /16 subnet it occupies, plus its declared router family.
+// one per IPv4 /16 subnet it occupies. The RouterInfo "family" option is
+// self-declared and unverified, so it does not form a contention group.
 //
 // +checklocks:s.mu
 func (s *PeerStore) eachContentionGroupLocked(rec *PeerRecord, fn func(members map[foundation.Hash]struct{})) {
@@ -422,9 +415,6 @@ func (s *PeerStore) eachContentionGroupLocked(rec *PeerRecord, fn func(members m
 		if ip.Is4() {
 			fn(s.bySubnet16[IPv4Subnet16(ip)])
 		}
-	}
-	if rec.Family != "" {
-		fn(s.byFamily[rec.Family])
 	}
 }
 
@@ -488,10 +478,34 @@ func (s *PeerStore) evictDominatedLocked(rec *PeerRecord) {
 	}
 }
 
+// probeVerified reports whether a real probe to one of rec's advertised
+// addresses succeeded and has not since failed twice in a row.
+func probeVerified(rec *PeerRecord) bool {
+	return rec.Stats.IsReachable && rec.Stats.ConsecutiveFails < 2
+}
+
+// retentionTier ranks the evidence behind a peer's reachability: 0 for a
+// successful probe, 1 for an unchecked peer the prober can still verify, 2 for
+// a UDP-only peer it cannot verify, and 3 for a peer whose probes keep failing.
+func retentionTier(rec *PeerRecord) int {
+	switch {
+	case probeVerified(rec):
+		return 0
+	case rec.Stats.ConsecutiveFails >= 2:
+		return 3
+	case isUDPOnly(rec):
+		return 2
+	default:
+		return 1
+	}
+}
+
 // compareRetention orders peers by retention priority within a contention
 // group, mirroring SelectDiversePeers: unconditionally selectable peers
-// (stored descriptor and IPv4 presence) outrank unselectable ones, reachable
-// peers outrank failing ones, then floodfill status, confirmed tunnel builds,
+// (stored descriptor and IPv4 presence) outrank unselectable ones, then
+// retentionTier puts probe-verified peers ahead of unchecked, unverifiable,
+// and failing ones, so no amount of self-declared metadata lets an unchecked
+// peer displace a verified one. Floodfill status, confirmed tunnel builds,
 // composite score, latency, and hash break ties.
 func compareRetention(a, b *PeerRecord) int {
 	aViable := len(a.Raw) > 0 && len(a.IPv4) > 0
@@ -502,13 +516,8 @@ func compareRetention(a, b *PeerRecord) int {
 		}
 		return 1
 	}
-	aReady := a.Stats.IsReachable && a.Stats.ConsecutiveFails < 2
-	bReady := b.Stats.IsReachable && b.Stats.ConsecutiveFails < 2
-	if aReady != bReady {
-		if aReady {
-			return -1
-		}
-		return 1
+	if c := cmp.Compare(retentionTier(a), retentionTier(b)); c != 0 {
+		return c
 	}
 	if a.IsFloodfill != b.IsFloodfill {
 		if a.IsFloodfill {
@@ -531,15 +540,10 @@ func compareRetention(a, b *PeerRecord) int {
 	return bytes.Compare(a.Hash[:], b.Hash[:])
 }
 
+// RecordProbeResult records the outcome of a real connection attempt to one of
+// the peer's advertised addresses. A success is the only way a peer becomes
+// reachable.
 func (s *PeerStore) RecordProbeResult(hash foundation.Hash, success bool, rtt time.Duration) {
-	s.recordProbeResult(hash, success, rtt, true)
-}
-
-func (s *PeerStore) RecordPassiveProbeResult(hash foundation.Hash, success bool, rtt time.Duration) {
-	s.recordProbeResult(hash, success, rtt, false)
-}
-
-func (s *PeerStore) recordProbeResult(hash foundation.Hash, success bool, rtt time.Duration, updateLastSeen bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -561,9 +565,7 @@ func (s *PeerStore) recordProbeResult(hash foundation.Hash, success bool, rtt ti
 		rec.Stats.WinSuccess++
 		rec.Stats.ConsecutiveFails = 0
 		rec.Stats.IsReachable = true
-		if updateLastSeen {
-			rec.Stats.LastSeen = now
-		}
+		rec.Stats.LastSeen = now
 		rec.Stats.LastRTT = rtt
 		if rec.Stats.EWMARTT == 0 {
 			rec.Stats.EWMARTT = rtt
@@ -635,6 +637,7 @@ func (s *PeerStore) LoadFromFile(filePath string) error {
 				rec.HasSSU2 = contact.ssu2
 			}
 		}
+		dropUnverifiedReachability(rec)
 		if prev, found := s.peers[rec.Hash]; found {
 			s.deindexPeerLocked(prev)
 		}
@@ -642,6 +645,34 @@ func (s *PeerStore) LoadFromFile(filePath string) error {
 		s.indexPeerLocked(rec)
 	}
 	return nil
+}
+
+// dropUnverifiedReachability clears reachability that earlier versions granted
+// without a successful probe: UDP-only peers were credited passive probe
+// successes, and fresh sightings were marked reachable on admission.
+func dropUnverifiedReachability(rec *PeerRecord) {
+	if isUDPOnly(rec) {
+		rec.Stats.TotalProbes, rec.Stats.SuccessProbes = 0, 0
+		rec.Stats.WinProbes, rec.Stats.WinSuccess = 0, 0
+		rec.Stats.ConsecutiveFails = 0
+		rec.Stats.EWMARTT, rec.Stats.LastRTT = 0, 0
+		rec.Stats.LastProbed = time.Time{}
+		rec.Stats.IsReachable = false
+	}
+	if rec.Stats.SuccessProbes == 0 {
+		rec.Stats.IsReachable = false
+	}
+	rec.Score = calculateScore(rec)
+}
+
+// sameEndpoints reports whether contact advertises exactly the addresses and
+// ports already recorded for rec.
+func sameEndpoints(rec *PeerRecord, contact routerContactInfo) bool {
+	return slices.Equal(rec.IPv4, contact.ipv4) &&
+		slices.Equal(rec.IPv6, contact.ipv6) &&
+		slices.Equal(rec.Ports, contact.ports) &&
+		slices.Equal(rec.TCPPorts, contact.tcpPorts) &&
+		slices.Equal(rec.UDPPorts, contact.udpPorts)
 }
 
 func calculateScore(rec *PeerRecord) float64 {

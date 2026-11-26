@@ -77,8 +77,8 @@ All root package files reside in `/Users/user/work/work3/IVNP`:
 
 ### 4.2 `cmd/ivnp-reseed` (Autonomous Indexer & SU3 Server)
 - **`crawler.go`**: Runs an embedded floodfill `node.Subsystem`, harvests verified `RouterInfo`s every `4s`, records tunnel participation, and executes deficit-weighted prefix-tree exploration (`TreeExplore`).
-- **`prober.go`**: Token-bucket rate-limited (`8.0/s`, burst `16`) TCP reachability prober (`1500ms` timeout, exponential failure backoff up to `2h`).
-- **`store.go` & `selector.go`**: `PeerStore` (`MaxStorePeers = 2500`, persisted to `peers.gob`) with incremental `bySubnet16` (`/16` IPv4, `/48` IPv6) and `byFamily` contention group indices, plus 4-stage `SelectPeers` (relaxation gate -> subnet/family filter -> $O(K \cdot N)$ Max-Min XOR `farthestPointSample` -> 256-bucket stratification).
+- **`prober.go`**: Token-bucket rate-limited (`8.0/s`, burst `16`) TCP reachability prober (`1500ms` timeout, exponential failure backoff up to `2h`). Only a completed TCP connection to an advertised address marks a peer reachable; SSU2-only peers are never probed and stay unchecked.
+- **`store.go` & `selector.go`**: `PeerStore` (`MaxStorePeers = 2500`, persisted to `peers.gob`) with an incremental `bySubnet16` (`/16` IPv4) contention index in which probe-verified peers outrank unchecked ones and capacity eviction never removes a probe-verified peer, plus 4-stage `SelectPeers` (relaxation gate -> subnet filter -> $O(K \cdot N)$ Max-Min XOR `farthestPointSample` -> 256-bucket stratification).
 - **`packager.go` & `server.go`**: Derives deterministic RSA-4096 keys via `HKDF-SHA512` and `filippo.io/keygen.RSA`, builds a rotating pool of `16` distinct 75-peer SU3 archives every `10m`, and serves `/i2pseeds.su3`, `/reseed-rsa.crt`, `/stats`, `/health`, and the live HTML dashboard (`dashboard.go`).
 
 ### 4.3 `tools/` & Root Simulation Suite (`sim_*.go`)
