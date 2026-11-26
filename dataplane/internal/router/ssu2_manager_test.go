@@ -1391,7 +1391,7 @@ func TestSSU2OutboundInitiatorCannotBeSupersededOrReleasedDuringParse(t *testing
 	})
 }
 
-func TestSSU2SessionRequestSupersedesStaleSessionOnNewSourceID(t *testing.T) {
+func TestSSU2SessionRequestKeepsStaleSessionUntilSessionConfirmed(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		net_ := newSSU2SimNetwork(t)
 		aliceConn := newSSU2SimConn(t, net_, "alice")
@@ -1430,6 +1430,9 @@ func TestSSU2SessionRequestSupersedesStaleSessionOnNewSourceID(t *testing.T) {
 
 		// A superseded session still occupies its connection-ID slot while it
 		// drains; a cached NewToken lets a new initiator reuse that destination.
+		// SessionRequest is unauthenticated, so the occupant must survive it;
+		// only an authenticated SessionConfirmed from the same peer reclaims
+		// the slot (TestSSU2SessionConfirmedFromSamePeerSupersedesConnectionID).
 		stale := &ssu2TransportSession{
 			peer: alice.Hash(), sendID: 200, receiveID: 100,
 			remote:    aliceConn.LocalAddr(),
@@ -1479,8 +1482,11 @@ func TestSSU2SessionRequestSupersedesStaleSessionOnNewSourceID(t *testing.T) {
 			t.Fatalf("parse SessionCreated: %v", err)
 		}
 
-		if bobManager.HasSession(alice.Hash()) {
-			t.Fatal("stale session kept its peer slot before SessionConfirmed")
+		bobManager.mu.RLock()
+		byPeer, byID := bobManager.sessionsByPeer[alice.Hash()], bobManager.sessionsByID[stale.receiveID]
+		bobManager.mu.RUnlock()
+		if byPeer != stale || byID != stale {
+			t.Fatal("SessionRequest evicted the established session before SessionConfirmed")
 		}
 	})
 }

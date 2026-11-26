@@ -2417,7 +2417,9 @@ func (m *SSU2Manager) handlePacket(packet []byte, remote netip.AddrPort) {
 		pending := m.inbound[destinationID]
 		session := m.sessionsByID[destinationID]
 		m.mu.RUnlock()
-		if pending != nil {
+		// A pending handshake on an established session's connection ID only
+		// receives packets from its own endpoint; the session keeps the rest.
+		if pending != nil && (session == nil || sameUDPAddress(pending.remote, ssu2PacketAddr{value: remote})) {
 			m.handleInboundPacket(packet, pending, destinationID, remote)
 			return
 		}
@@ -3222,7 +3224,6 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 		m.mu.Unlock()
 		pending.releaseSensitive()
 	})
-	var evicted *ssu2TransportSession
 	var stale, displaced *ssu2InboundPending
 	defer func() {
 		for _, old := range [...]*ssu2InboundPending{stale, displaced} {
@@ -3230,9 +3231,6 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 				old.timer.Stop()
 				old.releaseSensitive()
 			}
-		}
-		if evicted != nil {
-			evicted.ReleaseSensitive()
 		}
 	}()
 	m.mu.Lock()
@@ -3244,6 +3242,16 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 	}
 	current := m.inbound[header.DestinationID]
 	if current != nil && current.sendID == header.SourceID {
+		m.mu.Unlock()
+		pending.timer.Stop()
+		pending.releaseSensitive()
+		return
+	}
+	// A cached NewToken lets an initiator reuse the destination ID of its
+	// superseded session, so an established occupant stays in place until
+	// SessionConfirmed authenticates the same peer. The retransmission that
+	// built the occupying session carries the same SourceID.
+	if occupant := m.sessionsByID[header.DestinationID]; occupant != nil && occupant.sendID == header.SourceID {
 		m.mu.Unlock()
 		pending.timer.Stop()
 		pending.releaseSensitive()
@@ -3264,20 +3272,6 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 		// A new SourceID for a pending DestinationID supersedes that entry.
 		delete(m.inbound, header.DestinationID)
 		stale = current
-	}
-	if current := m.sessionsByID[header.DestinationID]; current != nil {
-		if current.sendID == header.SourceID {
-			m.mu.Unlock()
-			pending.timer.Stop()
-			pending.releaseSensitive()
-			return
-		}
-		// A cached NewToken lets an initiator reuse the destination ID of its
-		// superseded session. The retransmission that built the occupying
-		// session carries the same SourceID; a different SourceID is a new
-		// request and supersedes the stale occupant.
-		m.removeSessionLocked(current)
-		evicted = current
 	}
 	m.inboundSequence++
 	pending.sequence = m.inboundSequence
@@ -3401,10 +3395,21 @@ func (m *SSU2Manager) processSessionConfirmedLocked(packet []byte, pending *ssu2
 	session.touch(m.now())
 	session.initReliability(m.ssu2LargeMTU(remoteAddr, ssu2AdvertisedMTU(peer, remoteAddr)))
 	m.mu.Lock()
-	var displaced *ssu2TransportSession
+	var displaced, superseded *ssu2TransportSession
 	ok := m.inbound[destinationID] == pending
+	if occupant := m.sessionsByID[destinationID]; ok && occupant != nil {
+		// Only the authenticated owner of a connection ID may reclaim it.
+		ok = occupant.peer == session.peer
+		if ok {
+			m.removeSessionLocked(occupant)
+			superseded = occupant
+		}
+	}
 	if ok {
 		displaced, ok = m.installSessionLocked(session)
+	}
+	if superseded != nil {
+		defer superseded.ReleaseSensitive()
 	}
 	if !ok {
 		m.mu.Unlock()
