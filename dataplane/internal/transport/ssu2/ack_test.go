@@ -53,3 +53,36 @@ func TestACKRangesEncodeLongRunAndRejectMalformed(t *testing.T) {
 		t.Fatal("zero ACK range was accepted")
 	}
 }
+
+func TestACKTrackerRejectsReplayBelowEvictedWindow(t *testing.T) {
+	var tracker ACKTracker
+	if !tracker.ObserveNew(1) {
+		t.Fatal("first delivery of packet 1 was rejected")
+	}
+	for packet := uint32(3); packet <= 129; packet += 2 {
+		if !tracker.ObserveNew(packet) {
+			t.Fatalf("first delivery of packet %d was rejected", packet)
+		}
+	}
+	if tracker.ObserveNew(1) {
+		t.Fatal("replay of evicted packet 1 was accepted with a full window")
+	}
+	if !tracker.ObserveNew(4) {
+		t.Fatal("first delivery of gap packet 4 was rejected")
+	}
+	if tracker.ObserveNew(1) {
+		t.Fatal("replay of evicted packet 1 was accepted after a merge freed a range")
+	}
+	if tracker.ObserveNew(0) {
+		t.Fatal("packet 0 below the evicted range was accepted")
+	}
+	if !tracker.ObserveNew(2) || tracker.ObserveNew(2) {
+		t.Fatal("never-seen packet 2 above the evicted range was not accepted exactly once")
+	}
+	if !tracker.ObserveNew(6) {
+		t.Fatal("first delivery of in-window gap packet 6 was rejected")
+	}
+	if tracker.ObserveNew(6) {
+		t.Fatal("replay of in-window packet 6 was accepted")
+	}
+}
