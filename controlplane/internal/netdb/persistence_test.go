@@ -83,3 +83,38 @@ func TestRouterInfoStoreRestoresVerifiedSnapshotAndRejectsCorruption(t *testing.
 		t.Fatalf("corrupt Load() = %#v, %v; routers = %d", result, err, corrupt.Routers().Len())
 	}
 }
+
+func TestRouterInfoStoreDoesNotPersistUnsolicitedRouterInfos(t *testing.T) {
+	const now = uint64(1_000_000)
+	path := filepath.Join(t.TempDir(), "netdb.routers")
+	first := NewDatabase(foundation.Hash{}, 2)
+	trusted := signedPersistenceRouter(t, now)
+	if err := first.AdmitRouterInfo(trusted, false, now); err != nil {
+		t.Fatal(err)
+	}
+	pushed := signedPersistenceRouter(t, now)
+	if err := first.AdmitUnsolicitedRouterInfo(pushed, now); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := NewRouterInfoStore(RouterInfoStoreConfig{Path: path, Database: first, NetworkID: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Save(); err != nil {
+		t.Fatal(err)
+	}
+	restored := NewDatabase(foundation.Hash{}, 2)
+	reader, err := NewRouterInfoStore(RouterInfoStoreConfig{Path: path, Database: restored, NetworkID: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := reader.Load(now); err != nil || result.Loaded != 1 {
+		t.Fatalf("Load() = %#v, %v", result, err)
+	}
+	if _, ok := restored.Routers().Get(trusted.Hash()); !ok {
+		t.Fatal("trusted RouterInfo was not persisted")
+	}
+	if _, ok := restored.Routers().Get(pushed.Hash()); ok {
+		t.Fatal("unsolicited RouterInfo survived a snapshot round trip")
+	}
+}

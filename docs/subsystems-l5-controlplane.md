@@ -104,7 +104,7 @@ When a local outbound tunnel endpoint (OBEP) is asked to forward a message to a 
 | `requests.go`, `explorer.go` | `RequestManager`, `lookupCandidate`, `Explorer` | Coalesced iterative Kademlia lookups (`20s` budget, `3s` step) over contiguous `[]lookupCandidate` state and 256-bucket deficit exploration (`BootstrapDelay` and `SteadyDelay`) |
 | `lookup_responder.go`, `store_flooder.go` | `LookupResponder`, `StoreFlooder` | Bounded 64-slot floodfill query responder (with coalesced enqueue copies and pooled `searchReply` referral generation) and 3-target `DatabaseStore` flooder with UTC midnight rollover |
 | `confirmation.go`, `publication.go`, `router_publication.go` | `PublicationTokenRegistry`, `LeaseSetPublisher`, `RouterInfoPublisher` | 31-bit `DeliveryStatus` token correlation, per-generation `confirmedTargets` retry deduplication, and multi-wave floodfill publication (default `K=4` for LeaseSets, `K=5` for RouterInfo) |
-| `persistence.go`, `responder_persistence.go` | `RouterInfoStore`, `ResponderProfileStore` | Atomic `0600` disk snapshots (`netdb.routers` magic `"IVNPNDB\x00"`, `netdb.responders` magic `"IVNPRSP\x00"`) with SHA-256 digests |
+| `persistence.go`, `responder_persistence.go` | `RouterInfoStore`, `ResponderProfileStore` | Atomic `0600` disk snapshots (`netdb.routers` magic `"IVNPNDB\x00"`, `netdb.responders` magic `"IVNPRSP\x00"`) with SHA-256 digests; `netdb.routers` holds trusted RouterInfos only |
 
 ---
 

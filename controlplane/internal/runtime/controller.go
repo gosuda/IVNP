@@ -765,10 +765,10 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 	} else if cfg.NetDB.BucketSubnetQuota > 0 {
 		database.Routers().SetBucketSubnetQuota(cfg.NetDB.BucketSubnetQuota)
 	}
+	// A nonpositive limit keeps the table's BucketCount * BucketCapacity
+	// default, so daemon and embedded modes are both bounded.
 	if options.RouterLimit > 0 {
 		database.Routers().SetRouterLimit(options.RouterLimit)
-	} else if options.Embedded {
-		database.Routers().SetRouterLimit(netdb.BucketCount * cfg.NetDB.BucketCapacity)
 	}
 	database.SetMetrics(registry)
 	registry.SetNetDBRouters(uint64(database.Routers().Len()))

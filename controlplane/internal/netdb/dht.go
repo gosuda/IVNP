@@ -23,8 +23,14 @@ var ErrInvalidSignature = errors.New("netdb: signature verification failed")
 type routingSubnet [8]byte
 
 type routerEntry struct {
-	info        foundation.NetworkDatabaseRouterInfo
-	floodfill   bool
+	info      foundation.NetworkDatabaseRouterInfo
+	floodfill bool
+	// trusted marks a RouterInfo this router obtained through a path it
+	// initiated or vouches for (reseed, bootstrap, import, snapshot, or a reply
+	// to its own lookup), or whose router answered one of its lookups. Records
+	// pushed by peers (unsolicited DatabaseStore, transport handshakes) stay
+	// untrusted, so they are evicted first and never persisted.
+	trusted     bool
 	lastSeen    uint64
 	subnets     [4]routingSubnet
 	subnetCount uint8
@@ -36,8 +42,14 @@ type RouterRef struct {
 	Hash      foundation.Hash
 	Info      foundation.NetworkDatabaseRouterInfo
 	Floodfill bool
+	Trusted   bool
 	LastSeen  uint64
 }
+
+func (e routerEntry) ref(hash foundation.Hash) RouterRef {
+	return RouterRef{Hash: hash, Info: e.info, Floodfill: e.floodfill, Trusted: e.trusted, LastSeen: e.lastSeen}
+}
+
 type routerSelectionBuffer struct {
 	peers []RouterRef
 }
@@ -67,11 +79,13 @@ func NewTable(local foundation.Hash, bucketCapacity int) *Table {
 		bucketCapacity = DefaultBucketCapacity
 	}
 	selectionWorkers := parallelism.CPUs()
+	routing := newKBucketSet(bucketCapacity)
 	table := &Table{
 		local: local, routers: make(map[foundation.Hash]routerEntry),
 		floodfills:    make(map[foundation.Hash]struct{}),
-		routing:       newKBucketSet(bucketCapacity),
+		routing:       routing,
 		selectionPool: make(chan *routerSelectionBuffer, selectionWorkers),
+		routerLimit:   BucketCount * routing.capacity,
 		subnetQuota:   DefaultBucketSubnetQuota,
 	}
 	for range selectionWorkers {
@@ -90,36 +104,95 @@ func (t *Table) SetBucketSubnetQuota(quota int) {
 }
 
 // SetRouterLimit bounds retained RouterInfos independently of the routing index.
-// A nonpositive limit preserves the daemon's unbounded retention policy.
+// A nonpositive limit restores the default BucketCount * BucketCapacity bound;
+// retention is never unbounded because any peer can push RouterInfos.
 func (t *Table) SetRouterLimit(limit int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if limit <= 0 {
+		limit = t.defaultRouterLimitLocked()
+	}
 	t.routerLimit = limit
-	for limit > 0 && len(t.routers) > limit {
-		t.evictOldestLocked()
+	for len(t.routers) > limit {
+		t.evictLeastUsefulLocked()
 	}
 }
 
+// defaultRouterLimitLocked matches the KBucketSet's full capacity and the
+// durable snapshot bound.
+//
+// +checklocksread:t.mu
+func (t *Table) defaultRouterLimitLocked() int {
+	return BucketCount * t.routing.capacity
+}
+
+// routerTrust says whether a RouterInfo reached this router through a path it
+// initiated or vouches for, rather than being pushed by a peer.
+type routerTrust bool
+
+const (
+	routerUntrusted routerTrust = false
+	routerTrusted   routerTrust = true
+)
+
+// retentionRank orders RouterInfos by how much they are worth keeping.
+type retentionRank struct {
+	trusted   bool
+	floodfill bool
+	lastSeen  uint64
+}
+
+// below reports whether r is less useful than other: untrusted before
+// trusted, then non-floodfill before floodfill, then older lastSeen first.
+func (r retentionRank) below(other retentionRank) bool {
+	if r.trusted != other.trusted {
+		return !r.trusted
+	}
+	if r.floodfill != other.floodfill {
+		return !r.floodfill
+	}
+	return r.lastSeen < other.lastSeen
+}
+
+// evictLeastUsefulLocked removes the lowest-ranked RouterInfo, breaking rank
+// ties by the farthest XOR distance from the local hash. Because untrusted
+// records rank lowest, a flood of unsolicited RouterInfos can only displace
+// other untrusted records while any remain.
+//
 // +checklocks:t.mu
-func (t *Table) evictOldestLocked() {
-	var oldest foundation.Hash
-	var oldestSeen uint64
+func (t *Table) evictLeastUsefulLocked() {
+	var victim foundation.Hash
+	var victimRank retentionRank
 	found := false
 	for hash, entry := range t.routers {
-		replace := !found || entry.lastSeen < oldestSeen
-		if !replace && entry.lastSeen == oldestSeen {
-			replace = distanceLess(t.local, oldest, hash)
+		rank := retentionRank{trusted: entry.trusted, floodfill: entry.floodfill, lastSeen: entry.lastSeen}
+		replace := !found || rank.below(victimRank)
+		if !replace && rank == victimRank {
+			replace = distanceLess(t.local, victim, hash)
 		}
 		if replace {
-			oldest, oldestSeen, found = hash, entry.lastSeen, true
+			victim, victimRank, found = hash, rank, true
 		}
 	}
 	if found {
-		delete(t.routers, oldest)
-		delete(t.floodfills, oldest)
-		t.routing.remove(t.local, oldest)
+		delete(t.routers, victim)
+		delete(t.floodfills, victim)
+		t.routing.remove(t.local, victim)
 		t.generation++
 	}
+}
+
+// markTrusted records that hash answered one of this router's lookups.
+func (t *Table) markTrusted(hash foundation.Hash) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entry, ok := t.routers[hash]
+	if !ok || entry.trusted {
+		return
+	}
+	entry.trusted = true
+	t.routers[hash] = entry
+	t.generation++
 }
 
 func (t *Table) Len() int {
@@ -170,13 +243,13 @@ func (t *Table) borrowSelection(routing bool) *routerSelectionBuffer {
 		for _, bucket := range t.routing.buckets {
 			for _, hash := range bucket.members {
 				if entry, ok := t.routers[hash]; ok {
-					buffer.peers = append(buffer.peers, RouterRef{Hash: hash, Info: entry.info, Floodfill: entry.floodfill, LastSeen: entry.lastSeen})
+					buffer.peers = append(buffer.peers, entry.ref(hash))
 				}
 			}
 		}
 	} else {
 		for hash, entry := range t.routers {
-			buffer.peers = append(buffer.peers, RouterRef{Hash: hash, Info: entry.info, Floodfill: entry.floodfill, LastSeen: entry.lastSeen})
+			buffer.peers = append(buffer.peers, entry.ref(hash))
 		}
 	}
 	t.mu.RUnlock()
@@ -190,13 +263,13 @@ func (t *Table) borrowSelectionFloodfills() *routerSelectionBuffer {
 	if len(t.floodfills) > 0 {
 		for hash := range t.floodfills {
 			if entry, ok := t.routers[hash]; ok && entry.floodfill {
-				buffer.peers = append(buffer.peers, RouterRef{Hash: hash, Info: entry.info, Floodfill: true, LastSeen: entry.lastSeen})
+				buffer.peers = append(buffer.peers, entry.ref(hash))
 			}
 		}
 	} else {
 		for hash, entry := range t.routers {
 			if entry.floodfill {
-				buffer.peers = append(buffer.peers, RouterRef{Hash: hash, Info: entry.info, Floodfill: true, LastSeen: entry.lastSeen})
+				buffer.peers = append(buffer.peers, entry.ref(hash))
 			}
 		}
 	}
@@ -231,7 +304,7 @@ func (t *Table) Snapshot() (uint64, []RouterRef) {
 	t.mu.RLock()
 	peers := make([]RouterRef, 0, len(t.routers))
 	for hash, entry := range t.routers {
-		peers = append(peers, RouterRef{Hash: hash, Info: entry.info, Floodfill: entry.floodfill, LastSeen: entry.lastSeen})
+		peers = append(peers, entry.ref(hash))
 	}
 	generation := t.generation
 	t.mu.RUnlock()
@@ -291,7 +364,7 @@ func (t *Table) Get(hash foundation.Hash) (RouterRef, bool) {
 	if !ok {
 		return RouterRef{}, false
 	}
-	return RouterRef{Hash: hash, Info: entry.info, Floodfill: entry.floodfill, LastSeen: entry.lastSeen}, true
+	return entry.ref(hash), true
 }
 
 // Store verifies then inserts or refreshes an entry. Verification occurs
@@ -308,10 +381,19 @@ func (t *Table) Store(info foundation.NetworkDatabaseRouterInfo, floodfill bool,
 	return nil
 }
 
-// StoreVerified admits a previously verified RouterInfo. As in Java I2P, the
-// DataStore retains it independently even when the RejectTrimmer or per-bucket
-// subnet quota declines to add its hash to the KBucketSet routing index.
+// StoreVerified admits a previously verified RouterInfo as trusted. As in Java
+// I2P, the DataStore retains it independently even when the RejectTrimmer or
+// per-bucket subnet quota declines to add its hash to the KBucketSet routing
+// index.
 func (t *Table) StoreVerified(info foundation.NetworkDatabaseRouterInfo, floodfill bool, seenAt uint64) {
+	t.storeVerified(info, floodfill, seenAt, routerTrusted)
+}
+
+// storeVerified admits a signature-verified RouterInfo. At the retention bound
+// it evicts the least useful entry, so an untrusted admission displaces a
+// trusted entry only when no untrusted entry remains.
+func (t *Table) storeVerified(info foundation.NetworkDatabaseRouterInfo, floodfill bool, seenAt uint64, trust routerTrust) {
+	trusted := bool(trust)
 	hash := info.Hash()
 	if subtle.ConstantTimeCompare(hash[:], t.local[:]) == 1 {
 		return
@@ -324,9 +406,15 @@ func (t *Table) StoreVerified(info foundation.NetworkDatabaseRouterInfo, floodfi
 		// advertisement must neither replace a newer static transport key nor
 		// refresh its liveness.
 		if old.info.Published >= info.Published {
+			if trusted && !old.trusted {
+				old.trusted = true
+				t.routers[hash] = old
+				t.generation++
+			}
 			return
 		}
 		old.info, old.floodfill = info, floodfill
+		old.trusted = old.trusted || trusted
 		old.subnets, old.subnetCount = subnets, subnetCount
 		if seenAt > old.lastSeen {
 			old.lastSeen = seenAt
@@ -343,8 +431,8 @@ func (t *Table) StoreVerified(info foundation.NetworkDatabaseRouterInfo, floodfi
 		t.generation++
 		return
 	}
-	if t.routerLimit > 0 && len(t.routers) >= t.routerLimit {
-		t.evictOldestLocked()
+	if len(t.routers) >= t.routerLimit {
+		t.evictLeastUsefulLocked()
 	}
 	if t.routingAllowsSubnetsLocked(hash, subnets[:subnetCount]) {
 		t.routing.add(t.local, hash, seenAt)
@@ -352,6 +440,7 @@ func (t *Table) StoreVerified(info foundation.NetworkDatabaseRouterInfo, floodfi
 	t.routers[hash] = routerEntry{
 		info:        info,
 		floodfill:   floodfill,
+		trusted:     trusted,
 		lastSeen:    seenAt,
 		subnets:     subnets,
 		subnetCount: subnetCount,

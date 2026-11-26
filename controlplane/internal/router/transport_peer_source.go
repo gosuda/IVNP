@@ -35,7 +35,7 @@ func (s transportPeerSource) DialRouterInfo(peer foundation.Hash, now uint64) (f
 	return info, nil
 }
 func (s transportPeerSource) AdmitRouterInfo(info foundation.NetworkDatabaseRouterInfo, now uint64) error {
-	return s.database.AdmitRouterInfo(info, false, now)
+	return s.database.AdmitUnsolicitedRouterInfo(info, now)
 }
 
 func (s transportPeerSource) PeerAtEndpoint(source netip.AddrPort) (foundation.Hash, bool) {

@@ -253,6 +253,12 @@ func TestRequestManagerCoalescesFollowsSearchReplyAndCompletesStore(t *testing.T
 	if err != nil || followUp.ExcludedCount() != 2 {
 		t.Fatalf("follow-up lookup = %#v, %v", followUp, err)
 	}
+	if ref, _ := database.Routers().Get(first); !ref.Trusted {
+		t.Fatal("queried floodfill that answered was not marked trusted")
+	}
+	if ref, _ := database.Routers().Get(second); ref.Trusted {
+		t.Fatal("referred floodfill was marked trusted before answering")
+	}
 
 	manager.HandleDatabaseStore(context.Background(), foundation.I2NPDatabaseStoreMessage{Key: key, Type: foundation.I2NPStoreRouterInfo})
 	for _, waiter := range []<-chan LookupResult{firstWaiter, secondWaiter} {

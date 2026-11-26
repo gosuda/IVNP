@@ -436,6 +436,8 @@ func (m *RequestManager) HandleDatabaseSearchReply(ctx context.Context, reply fo
 	if m.responders != nil && req.deadline > m.now() && responderEligible(m.database, reply.From, m.now()) {
 		m.responders.Record(reply.From)
 	}
+	// An authenticated answer from a queried peer proves it is reachable.
+	m.database.routers.markTrusted(reply.From)
 	req.markSettled(reply.From)
 	if !req.hasUnsettledSent() {
 		req.responseDeadline = 0

@@ -161,25 +161,34 @@ func routerInfoFresh(info foundation.NetworkDatabaseRouterInfo, nowMillis, maxAg
 	return nil
 }
 
-// AdmitRouterInfo verifies and stores a RouterInfo.
+// AdmitRouterInfo verifies and stores a RouterInfo that this router obtained
+// itself (bootstrap, import, snapshot, or its own lookup), retaining it as
+// trusted.
 func (d *Database) AdmitRouterInfo(info foundation.NetworkDatabaseRouterInfo, _ bool, seenAt uint64) error {
-	return d.admitRouterInfo(info, seenAt, RouterInfoMaxAgeMillis, true)
+	return d.admitRouterInfo(info, seenAt, RouterInfoMaxAgeMillis, true, routerTrusted)
+}
+
+// AdmitUnsolicitedRouterInfo verifies and stores a RouterInfo pushed by a
+// peer, such as one carried in a transport handshake. It is retained as
+// untrusted: evicted before trusted records and never persisted.
+func (d *Database) AdmitUnsolicitedRouterInfo(info foundation.NetworkDatabaseRouterInfo, seenAt uint64) error {
+	return d.admitRouterInfo(info, seenAt, RouterInfoMaxAgeMillis, true, routerUntrusted)
 }
 
 // AdmitReseedRouterInfo verifies and stores a reseed RouterInfo.
 func (d *Database) AdmitReseedRouterInfo(info foundation.NetworkDatabaseRouterInfo, seenAt uint64) error {
-	return d.admitRouterInfo(info, seenAt, ReseedRouterInfoMaxAgeMillis, true)
+	return d.admitRouterInfo(info, seenAt, ReseedRouterInfoMaxAgeMillis, true, routerTrusted)
 }
 
 // AdmitVerifiedReseedRouterInfo stores a reseed RouterInfo whose signature was
 // already verified by the ingestion pipeline. Network and freshness checks
 // still apply.
 func (d *Database) AdmitVerifiedReseedRouterInfo(info foundation.NetworkDatabaseRouterInfo, seenAt uint64) error {
-	return d.admitRouterInfo(info, seenAt, ReseedRouterInfoMaxAgeMillis, false)
+	return d.admitRouterInfo(info, seenAt, ReseedRouterInfoMaxAgeMillis, false, routerTrusted)
 }
 
 // +checklocksexclude:d.leasesMu
-func (d *Database) admitRouterInfo(info foundation.NetworkDatabaseRouterInfo, seenAt, maxAgeMillis uint64, verify bool) error {
+func (d *Database) admitRouterInfo(info foundation.NetworkDatabaseRouterInfo, seenAt, maxAgeMillis uint64, verify bool, trust routerTrust) error {
 	if d.networkID != 0 {
 		id, err := foundation.NetworkDatabaseNetID(info)
 		if err != nil {
@@ -208,7 +217,7 @@ func (d *Database) admitRouterInfo(info foundation.NetworkDatabaseRouterInfo, se
 	if err != nil {
 		return err
 	}
-	d.routers.StoreVerified(ownedInfo, floodfill, seenAt)
+	d.routers.storeVerified(ownedInfo, floodfill, seenAt, trust)
 	if metrics := d.Metrics(); metrics != nil {
 		metrics.SetNetDBRouters(uint64(d.routers.Len()))
 	}
@@ -220,12 +229,15 @@ func (d *Database) HandleDatabaseStore(store foundation.I2NPDatabaseStoreMessage
 	return d.HandleDatabaseStoreAsPublished(store, floodfill, seenAt, true)
 }
 
-// HandleDatabaseStoreAsPublished stores a DatabaseStore message with the given published state.
-func (d *Database) HandleDatabaseStoreAsPublished(store foundation.I2NPDatabaseStoreMessage, floodfill bool, seenAt uint64, published bool) error {
+// HandleDatabaseStoreAsPublished stores a DatabaseStore message with the given
+// published state. An unpublished (private) store answers this router's own
+// lookup, so a RouterInfo in it is retained as trusted; a published store was
+// pushed by a peer and its RouterInfo is retained as untrusted.
+func (d *Database) HandleDatabaseStoreAsPublished(store foundation.I2NPDatabaseStoreMessage, _ bool, seenAt uint64, published bool) error {
 	var err error
 	switch store.Type {
 	case foundation.I2NPStoreRouterInfo:
-		err = d.storeRouterInfo(store, floodfill, seenAt)
+		err = d.storeRouterInfo(store, seenAt, routerTrust(!published))
 	case foundation.I2NPStoreLeaseSet:
 		err = d.storeLeaseSet(store, seenAt, published)
 	case foundation.I2NPStoreLeaseSet2:
@@ -284,7 +296,7 @@ func (d *Database) StoreMatchesCurrent(store foundation.I2NPDatabaseStoreMessage
 	return matches
 }
 
-func (d *Database) storeRouterInfo(store foundation.I2NPDatabaseStoreMessage, floodfill bool, seenAt uint64) error {
+func (d *Database) storeRouterInfo(store foundation.I2NPDatabaseStoreMessage, seenAt uint64, trust routerTrust) error {
 	inflated, lease, err := d.inflateRouterInfo(store.Data)
 	if err != nil {
 		return err
@@ -297,7 +309,7 @@ func (d *Database) storeRouterInfo(store foundation.I2NPDatabaseStoreMessage, fl
 	if parsed.Hash() != store.Key {
 		return ErrStoreKeyMismatch
 	}
-	return d.AdmitRouterInfo(parsed, floodfill, seenAt)
+	return d.admitRouterInfo(parsed, seenAt, RouterInfoMaxAgeMillis, true, trust)
 }
 
 func (d *Database) storeLeaseSet(store foundation.I2NPDatabaseStoreMessage, seenAt uint64, published bool) error {

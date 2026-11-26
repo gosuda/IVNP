@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"slices"
 	"sync"
 
 	"gosuda.org/ivnp/foundation"
@@ -175,6 +176,9 @@ func (s *RouterInfoStore) Save() error {
 	if generation == s.savedGeneration {
 		return nil
 	}
+	// Untrusted RouterInfos were pushed by peers; persisting them would let a
+	// flood survive a restart as trusted records.
+	peers = slices.DeleteFunc(peers, func(peer RouterRef) bool { return !peer.Trusted })
 	if len(peers) > s.max {
 		return ErrRouterSnapshotOverflow
 	}
