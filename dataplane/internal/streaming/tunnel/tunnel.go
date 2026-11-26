@@ -54,6 +54,10 @@ const (
 	minPeerMaxPayloadSize     = 512
 	tunnelRetryUpdateIdle     = false
 	tunnelRetryUpdatePending  = true
+	// maxInboundStreamsPerPeer bounds the live inbound streams one remote
+	// destination can hold. Each stream may buffer about 580 KB (read queue
+	// plus reorder window), so the cap also bounds per-peer buffered bytes.
+	maxInboundStreamsPerPeer = 32
 	// silentHandshakeEvidenceRetries counts the initial SYN send, so 2 means
 	// at least one retransmit also went unanswered when the caller leaves.
 	silentHandshakeEvidenceRetries = 2
@@ -150,6 +154,9 @@ type TunnelNetwork struct {
 	outboundPorts map[uint16]int
 	// +checklocks:mu
 	inboundPorts map[uint16]int
+	// inboundPeers counts registered inbound streams per remote destination.
+	// +checklocks:mu
+	inboundPeers map[foundation.Hash]int
 	// +checklocks:mu
 	inbound map[inboundKey]*tunnelConn
 	// +checklocks:mu
@@ -245,6 +252,7 @@ func NewTunnelNetwork(config TunnelNetworkConfig) (*TunnelNetwork, error) {
 		byID:                 make(map[uint32]*tunnelConn),
 		outboundPorts:        make(map[uint16]int),
 		inboundPorts:         make(map[uint16]int),
+		inboundPeers:         make(map[foundation.Hash]int),
 		inbound:              make(map[inboundKey]*tunnelConn),
 		synPending:           make(map[inboundKey]struct{}),
 		synTokens:            make(chan struct{}, maxInboundSYNPrep),
@@ -588,11 +596,14 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 	if listener == nil {
 		listener = n.listeners[0]
 	}
-
+	peerFull := n.inboundPeers[key.from] >= maxInboundStreamsPerPeer
 	n.mu.RUnlock()
 	if existing != nil {
 		existing.setPeerMaxPayloadSize(peerMaxPayloadSize)
 		return existing.sendSynchronize(ctx, false)
+	}
+	if peerFull {
+		return ErrTunnelBackpressure
 	}
 	if listener == nil {
 		return ErrTunnelAddress
@@ -782,8 +793,12 @@ func (n *TunnelNetwork) registerInbound(key inboundKey, connection *tunnelConn) 
 	if _, exists := n.inbound[key]; exists {
 		return ErrTunnelPacket
 	}
+	if n.inboundPeers[key.from] >= maxInboundStreamsPerPeer {
+		return ErrTunnelBackpressure
+	}
 	n.byID[connection.localID] = connection
 	n.inbound[key] = connection
+	n.inboundPeers[key.from]++
 	connection.inboundKey = &key
 	n.inboundPorts[connection.localPort]++
 	connection.portReserved = true
@@ -802,6 +817,11 @@ func (n *TunnelNetwork) unregister(connection *tunnelConn) {
 	}
 	if connection.inboundKey != nil && n.inbound[*connection.inboundKey] == connection {
 		delete(n.inbound, *connection.inboundKey)
+		if from := connection.inboundKey.from; n.inboundPeers[from] <= 1 {
+			delete(n.inboundPeers, from)
+		} else {
+			n.inboundPeers[from]--
+		}
 	}
 	n.mu.Unlock()
 }
