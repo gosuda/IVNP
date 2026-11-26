@@ -80,7 +80,7 @@ L0 packages have zero internal dependencies and rely only on the Go standard lib
 - **`elgamal.go`**: Legacy I2P 2048-bit MODP Group 14 `EncryptElGamal` and `DecryptElGamal` (514-byte wire ciphertext with `0xFF || SHA256(222B plaintext) || plaintext` framing).
 - **`mlkem.go`**: Post-quantum FIPS-203 `MLKEMPublicKey` and `MLKEMPrivateKey` (64-byte seed retention) for `MLKEM768X25519` (type 6, 1184B pubkey, 1088B ciphertext) and `MLKEM1024X25519` (type 7, 1568B pubkey, 1568B ciphertext).
 - **`streebog.go` & `streebog_tables.go`**: GOST R 34.11-2012 256-bit (`Sum256`) and 512-bit (`Sum512`) hash functions using 8 precomputed 64-bit lookup tables.
-- **`curve.go`**: GOST R 34.10-2012 256-bit (`Verify256`) and 512-bit (`Verify512`) elliptic curve signature verification.
+- **`curve.go`**: GOST R 34.10-2012 256-bit (`Verify256`) and 512-bit (`Verify512`) elliptic curve signature verification. The foundation verifier does not call these primitives for network identities.
 
 ---
 
@@ -90,7 +90,7 @@ L0 packages have zero internal dependencies and rely only on the Go standard lib
 - **`foundation_subsystem.go`, `identity.go`, `network_wire.go`, `random_dst.go`**: Subsystem facade re-exporting all identity, I2NP, and NetDB wire primitives.
 - **`foundation/internal/identity/`**:
   - `types.go`: `Hash` (`[32]byte`), `Certificate`, `SigningKeyType` (0..11), `CryptoKeyType` (0..7), 384-byte base `Identity` (`KeysAndCert` with left-aligned crypto key and right-aligned signing key), and canonical `Mapping` / `MappingIterator`.
-  - `signature.go`: `VerifySignature` and `VerifySignaturePrefixed` supporting DSA-SHA1, ECDSA (P256/P384/P521), RSA (2048/3072/4096), Ed25519, Ed25519ph, RedDSA (`Red25519`), and GOST R 34.10 (256/512).
+  - `signature.go`: `VerifySignature` and `VerifySignaturePrefixed` supporting DSA-SHA1, ECDSA (P256/P384/P521), RSA (2048/3072/4096), Ed25519, Ed25519ph, and RedDSA (`Red25519`). GOST R 34.10 (types 9 and 10) is parsed but refused with `ErrUnsupportedSignature` before any curve arithmetic.
   - `encrypted_signing.go`: `GenerateRed25519Key`, `Red25519Sign`, `EncryptedLeaseSetAlpha` (`HKDF-SHA256` with `"I2PGenerateAlpha"` and `"i2pblinding1"`), `BlindEncryptedLeaseSetPublic`, `BlindEncryptedLeaseSetPrivate`, and `EncryptedLeaseSetSubcredential`.
   - `offline_signature.go`: `OfflineSignature` parser, serializer, and transient key verifier.
   - `address_generator.go`: I2P Base64 (`-~`) and `.b32.i2p` codecs, `LocalDestination` (managing Ed25519/Red25519/X25519/ElGamal/offline keys and capability mask `0x07`), `LocalAddress`, and `LocalRouterAddress`.

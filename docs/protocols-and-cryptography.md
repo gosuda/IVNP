@@ -48,7 +48,7 @@ IVNP implements I2P's post-quantum hybrid LeaseSet2 encryption types using FIPS-
 ### 1.5 Legacy ElGamal-2048 & GOST R 34.10 / Streebog
 
 - **ElGamal-2048 (`cryptography/elgamal.go`)**: Uses the 2048-bit MODP Group 14 prime $p$ and generator $g = 2$. `EncryptElGamal` formats a 222-byte plaintext into a 255-byte block (`0xFF || SHA256(plaintext)[32] || plaintext[222]`) and outputs a 514-byte wire ciphertext (`0x00 || a[256] || 0x00 || b[256]`).
-- **GOST R 34.11-2012 Streebog & GOST R 34.10-2012 (`streebog.go`, `curve.go`)**: Implements 256-bit (`Sum256`) and 512-bit (`Sum512`) Streebog hashing and Weierstrass curve signature verification (`Verify256`, `Verify512`) so the router can verify all valid network `RouterInfo` and `Destination` identities.
+- **GOST R 34.11-2012 Streebog & GOST R 34.10-2012 (`streebog.go`, `curve.go`)**: Implements 256-bit (`Sum256`) and 512-bit (`Sum512`) Streebog hashing and Weierstrass curve signature verification (`Verify256`, `Verify512`) as stateless L1 primitives. The foundation verifier does not dispatch to them: the I2P specification reserves signing types `9` and `10`, Java I2P cannot verify them, and one variable-time `big.Int` verification costs several milliseconds. `VerifySignature` therefore refuses both types with `ErrUnsupportedSignature` before any curve arithmetic, so a remote `RouterInfo`, `LeaseSet`, streaming `FROM` identity, or offline transient key that claims GOST is rejected at constant cost.
 
 ---
 
@@ -69,8 +69,8 @@ IVNP implements I2P's post-quantum hybrid LeaseSet2 encryption types using FIPS-
 | `6` | `SigningRSASHA512_4096` | `512` | `512` | RSA-4096 (`E=65537`) PKCS#1 v1.5 with SHA-512 |
 | `7` | `SigningEdDSASHA512Ed25519` | `32` | `64` | Ed25519 (RFC 8032 / SHA-512) |
 | `8` | `SigningEdDSASHA512Ed25519ph` | `32` | `64` | Ed25519ph (pre-hashed SHA-512) |
-| `9` | `SigningGOSTR3410_256` | `64` | `64` | GOST R 34.10-2012 (256-bit) with Streebog-256 |
-| `10` | `SigningGOSTR3410_512` | `128` | `128` | GOST R 34.10-2012 (512-bit) with Streebog-512 |
+| `9` | `SigningGOSTR3410_256` | `64` | `64` | GOST R 34.10-2012 (256-bit) with Streebog-256; parsed but refused by `VerifySignature` |
+| `10` | `SigningGOSTR3410_512` | `128` | `128` | GOST R 34.10-2012 (512-bit) with Streebog-512; parsed but refused by `VerifySignature` |
 | `11` | `SigningRedDSASHA512Ed25519` | `32` | `64` | RedDSA (`Red25519`) over Ed25519 curve |
 
 #### Encryption Key Types (`CryptoKeyType`)

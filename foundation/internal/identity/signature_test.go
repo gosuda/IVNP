@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/dsa"
 	"crypto/ecdsa"
@@ -11,6 +12,8 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
+	"encoding/hex"
+	"errors"
 	"testing"
 )
 
@@ -126,8 +129,36 @@ func TestVerifySignatureRejectsMalformedWireData(t *testing.T) {
 	if valid, err := VerifySignature(SigningEdDSASHA512Ed25519, make([]byte, 32), nil, nil, nil); err != ErrMalformedSignature || valid {
 		t.Fatalf("signature validation = %t, %v", valid, err)
 	}
-	if valid, err := VerifySignature(SigningGOSTR3410_256, make([]byte, 64), nil, nil, make([]byte, 64)); err != nil || valid {
-		t.Fatalf("invalid GOST signature = %t, %v", valid, err)
+}
+
+func TestVerifySignatureRefusesReservedGOSTTypes(t *testing.T) {
+	// GOST R 34.10 verification costs milliseconds per call and the types are
+	// reserved in the I2P specification, so remote identities that claim them
+	// must be refused before any curve arithmetic runs.
+	gost512Y, err := hex.DecodeString("7503CFE87A836AE3A61B8816E25450E6CE5E1C93ACF1ABC1778064FDCBEFA921DF1626BE4FD036E93D75E6A50E3A41E98028FE5FC235F5B889A589CB5215F2A4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gost512Public := make([]byte, 128)
+	gost512Public[63] = 3
+	copy(gost512Public[64:], gost512Y)
+	signature := bytes.Repeat([]byte{0x11}, 128)
+	for _, tc := range []struct {
+		kind      SigningKeyType
+		public    []byte
+		signature []byte
+	}{
+		{SigningGOSTR3410_256, make([]byte, 64), signature[:64]},
+		{SigningGOSTR3410_512, gost512Public, signature},
+	} {
+		valid, err := VerifySignature(tc.kind, tc.public, nil, []byte("message"), tc.signature)
+		if valid || !errors.Is(err, ErrUnsupportedSignature) {
+			t.Fatalf("VerifySignature(type %d) = %t, %v; want false, %v", tc.kind, valid, err, ErrUnsupportedSignature)
+		}
+		valid, err = VerifySignaturePrefixed(3, tc.kind, tc.public, nil, []byte("message"), tc.signature)
+		if valid || !errors.Is(err, ErrUnsupportedSignature) {
+			t.Fatalf("VerifySignaturePrefixed(type %d) = %t, %v; want false, %v", tc.kind, valid, err, ErrUnsupportedSignature)
+		}
 	}
 }
 
