@@ -40,6 +40,7 @@ var (
 	ErrRatchet             = errors.New("garlic/ecies: invalid ratchet packet")
 	ErrRatchetClosed       = errors.New("garlic/ecies: ratchet manager is closed")
 	ErrRatchetReplay       = errors.New("garlic/ecies: replayed new session")
+	ErrRatchetReplayFull   = errors.New("garlic/ecies: new session replay cache full")
 	ErrRatchetExpired      = errors.New("garlic/ecies: ratchet session expired")
 	ErrRatchetNoSession    = errors.New("garlic/ecies: no ratchet session")
 	ErrRatchetTagExhausted = errors.New("garlic/ecies: ratchet tag set exhausted")
@@ -68,7 +69,12 @@ type RatchetConfig struct {
 	// stays reserved. A reservation also lasts until the message's DateTime
 	// block stops passing validation (up to 421 s after receipt).
 	ReplayLifetime uint64
-	Metrics        *observability.Registry
+	// MaxReplays bounds the New Session ephemeral keys held in the replay
+	// cache. When it is full, further New Sessions are refused with
+	// ErrRatchetReplayFull until reservations expire; nonpositive selects
+	// 16384.
+	MaxReplays int
+	Metrics    *observability.Registry
 }
 
 // InboundTagBudget derives the receive tag budget for maxSessions sessions:
@@ -290,7 +296,7 @@ type RatchetManager struct {
 	// +checklocks:mu
 	pending map[[ratchetTagLen]byte]pendingInitiator
 	// +checklocks:mu
-	replays map[[32]byte]uint64
+	replays replayFilter
 	// +checklocks:mu
 	metrics *observability.Registry
 	// +checklocks:mu
@@ -374,13 +380,16 @@ func newRatchetManager(local *foundation.LocalDestination, config RatchetConfig,
 	if config.ReplayLifetime == 0 {
 		config.ReplayLifetime = defaultReplayLife
 	}
+	if config.MaxReplays <= 0 {
+		config.MaxReplays = defaultMaxReplays
+	}
 	var private [32]byte
 	if err := local.CopyCryptoPrivate(foundation.CryptoX25519, private[:]); err != nil {
 		return nil, err
 	}
 	cryptoCount := len(config.CryptoTypes)
 	config.CryptoTypes = nil
-	return &RatchetManager{owner: local.Hash(), private: private, cryptoTypes: cryptoTypes, cryptoCount: cryptoCount, config: config, metrics: config.Metrics, tagObserver: observer, sessions: make(map[foundation.Hash]*session), inbound: make(map[[ratchetTagLen]byte]tagEntry), pending: make(map[[ratchetTagLen]byte]pendingInitiator), replays: make(map[[32]byte]uint64), windowScratch: make([]tagEntry, config.TagLookahead), windowTags: make(map[[ratchetTagLen]byte]struct{}, config.TagLookahead), nextExpiry: ^uint64(0)}, nil
+	return &RatchetManager{owner: local.Hash(), private: private, cryptoTypes: cryptoTypes, cryptoCount: cryptoCount, config: config, metrics: config.Metrics, tagObserver: observer, sessions: make(map[foundation.Hash]*session), inbound: make(map[[ratchetTagLen]byte]tagEntry), pending: make(map[[ratchetTagLen]byte]pendingInitiator), replays: newReplayFilter(config.ReplayLifetime, config.MaxReplays), windowScratch: make([]tagEntry, config.TagLookahead), windowTags: make(map[[ratchetTagLen]byte]struct{}, config.TagLookahead), nextExpiry: ^uint64(0)}, nil
 }
 
 // +checklocks:m.mu
@@ -924,8 +933,14 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 	if !ok {
 		return RatchetResult{}, ErrRatchet
 	}
-	if until, duplicate := m.replays[ephemeral]; duplicate && until >= now {
+	m.replays.expire(now)
+	if m.replays.contains(ephemeral, now) {
 		return RatchetResult{}, ErrRatchetReplay
+	}
+	// Refuse before any DH work: a reservation that cannot be recorded
+	// would leave the New Session open to replay.
+	if m.replays.full() {
+		return RatchetResult{}, ErrRatchetReplayFull
 	}
 
 	var responder *Responder
@@ -963,8 +978,7 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 	// still pass validation, whatever ReplayLifetime is configured.
 	replayExpiry := max(now+m.config.ReplayLifetime, acceptUntil)
 	if !responder.bound {
-		m.replays[ephemeral] = replayExpiry
-		m.noteExpiryLocked(replayExpiry)
+		m.replays.add(ephemeral, replayExpiry)
 		return RatchetResult{Payload: application, NewSession: true}, nil
 	}
 	tag, err := responder.ReplyTag()
@@ -989,8 +1003,7 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 	// Authentication and replay reservation complete together, while session
 	// and tag admission remain deferred until the authenticated Destination is
 	// known to the caller.
-	m.replays[ephemeral] = replayExpiry
-	m.noteExpiryLocked(replayExpiry)
+	m.replays.add(ephemeral, replayExpiry)
 	return RatchetResult{Payload: application, Reply: replyDst[:n], Peer: peer, Candidate: candidate, NewSession: true}, nil
 }
 
@@ -1449,15 +1462,6 @@ func (m *RatchetManager) checkLocked(now uint64) error {
 			nextExpiry = pending.expires
 		}
 	}
-	for eph, expiry := range m.replays {
-		if expiry < now {
-			delete(m.replays, eph)
-			continue
-		}
-		if expiry < nextExpiry {
-			nextExpiry = expiry
-		}
-	}
 	for peer, s := range m.sessions {
 		if s.expires < now || s.terminated {
 			m.discardSessionLocked(peer, s)
@@ -1588,6 +1592,7 @@ func (m *RatchetManager) ReleaseSensitive() {
 	}
 	clear(m.windowScratch)
 	clear(m.windowTags)
+	m.replays.reset()
 	clear(m.private[:])
 	m.closed = true
 }

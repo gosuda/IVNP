@@ -93,7 +93,9 @@ func TestRatchetNewSessionReplayCoversTimestampWindow(t *testing.T) {
 			t.Fatalf("replay at +%d ms: err = %v, want %v", later-now, err, ErrRatchetReplay)
 		}
 	}
-	if _, err = b.Receive(make([]byte, 2048), make([]byte, 2048), ns, now+421_000); !errors.Is(err, ErrRatchetExpired) {
-		t.Fatalf("replay after timestamp window: err = %v, want %v", err, ErrRatchetExpired)
+	// The reservation may outlast the window by one bucket span; either
+	// rejection is correct once the timestamp itself has expired.
+	if _, err = b.Receive(make([]byte, 2048), make([]byte, 2048), ns, now+421_000); !errors.Is(err, ErrRatchetExpired) && !errors.Is(err, ErrRatchetReplay) {
+		t.Fatalf("replay after timestamp window: err = %v, want %v or %v", err, ErrRatchetExpired, ErrRatchetReplay)
 	}
 }
