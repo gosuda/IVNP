@@ -46,15 +46,20 @@ const (
 	// utilized before its most recently grown chunk is released. This is a
 	// plain idle watermark, not a forecast: it only ever undoes the most
 	// recent doubling step, and only once every slot in that chunk is free.
-	ssu2SentSlotIdleShrinkTicks  = 30
-	ssu2MaximumSendWindow        = 1024 * 1024
-	ssu2InitialSlowStart         = ssu2MaximumSendWindow / 2
-	ssu2MinimumNetworkMTU        = 1280
-	ssu2MaximumNetworkMTU        = 1500
-	ssu2MTUStep                  = 64
-	ssu2DefaultIdleTimeout       = 10 * time.Minute
-	ssu2MaxFragmentedMessages    = 64
-	ssu2FragmentLifetime         = 30 * time.Second
+	ssu2SentSlotIdleShrinkTicks = 30
+	ssu2MaximumSendWindow       = 1024 * 1024
+	ssu2InitialSlowStart        = ssu2MaximumSendWindow / 2
+	ssu2MinimumNetworkMTU       = 1280
+	ssu2MaximumNetworkMTU       = 1500
+	ssu2MTUStep                 = 64
+	ssu2DefaultIdleTimeout      = 10 * time.Minute
+	ssu2MaxFragmentedMessages   = 64
+	ssu2FragmentLifetime        = 30 * time.Second
+	// ssu2MaxFragmentBytesPerSession bounds the bytes one session may hold in
+	// incomplete reassembly: four maximum-size I2NP messages.
+	ssu2MaxFragmentBytesPerSession = 4 * foundation.I2NPI2PDMaxPayload
+	// ssu2MaxFragmentBytes bounds incomplete reassembly across all sessions.
+	ssu2MaxFragmentBytes         = 16 << 20
 	ssu2MinimumIPv4PacketSize    = ssu2MinimumNetworkMTU - 20 - 8
 	ssu2MinimumIPv6PacketSize    = ssu2MinimumNetworkMTU - 40 - 8
 	ssu2EstablishRetransmitDelay = 1250 * time.Millisecond
@@ -233,6 +238,8 @@ type SSU2Manager struct {
 	metrics       *observability.Registry
 	logger        *slog.Logger
 	kernelDrops   atomic.Uint64
+	// fragmentBytes is the reassembly memory held by all sessions.
+	fragmentBytes atomic.Int64
 
 	sessionsByPeer map[foundation.Hash]*ssu2TransportSession
 	sessionsByID   map[uint64]*ssu2TransportSession
@@ -476,6 +483,10 @@ type ssu2TransportSession struct {
 	ackPayload [3 + 5 + 2*dataplanessu2.MaxACKRanges]byte
 	// +checklocks:fragmentMu
 	fragments map[uint32]*ssu2FragmentAssembly
+	// +checklocks:fragmentMu
+	fragmentBytes int
+	// fragmentPool is the manager-wide reassembly budget; nil disables it.
+	fragmentPool *atomic.Int64
 
 	lastActivityNano atomic.Int64
 	pathMu           sync.Mutex
@@ -551,6 +562,7 @@ func (s *ssu2TransportSession) ReleaseSensitive() {
 			clear(fragment.following)
 		}
 		clear(s.fragments)
+		s.releaseFragmentBytesLocked(s.fragmentBytes)
 		s.fragmentMu.Unlock()
 		s.pathMu.Lock()
 		if s.candidate != nil {
@@ -752,7 +764,7 @@ type ssu2FragmentAssembly struct {
 	following map[uint8][]byte
 	last      uint8
 	size      int
-	updated   time.Time
+	created   time.Time
 }
 type ssu2OutboundPending struct {
 	peer          foundation.Hash
@@ -3087,7 +3099,7 @@ func (m *SSU2Manager) sendSessionConfirmed(pending *ssu2OutboundPending) {
 		m.markOutboundFailed(pending, err)
 		return
 	}
-	session := &ssu2TransportSession{peer: pending.peer, sendID: pending.destinationID, receiveID: pending.sourceID, remote: pending.remote, send: send, receive: receive, nextPacket: 1, fragments: make(map[uint32]*ssu2FragmentAssembly)}
+	session := &ssu2TransportSession{peer: pending.peer, sendID: pending.destinationID, receiveID: pending.sourceID, remote: pending.remote, send: send, receive: receive, nextPacket: 1, fragments: make(map[uint32]*ssu2FragmentAssembly), fragmentPool: &m.fragmentBytes}
 	session.touch(m.now())
 	session.initReliability(m.ssu2LargeMTU(pending.remote, pending.address.mtu))
 	installed := false
@@ -3388,15 +3400,16 @@ func (m *SSU2Manager) processSessionConfirmedLocked(packet []byte, pending *ssu2
 		return
 	}
 	session := &ssu2TransportSession{
-		peer:       peer.Hash(),
-		sendID:     pending.sendID,
-		receiveID:  destinationID,
-		inbound:    true,
-		remote:     cloneUDPAddress(remoteAddr),
-		send:       send,
-		receive:    receive,
-		nextPacket: 1,
-		fragments:  make(map[uint32]*ssu2FragmentAssembly),
+		peer:         peer.Hash(),
+		sendID:       pending.sendID,
+		receiveID:    destinationID,
+		inbound:      true,
+		remote:       cloneUDPAddress(remoteAddr),
+		send:         send,
+		receive:      receive,
+		nextPacket:   1,
+		fragments:    make(map[uint32]*ssu2FragmentAssembly),
+		fragmentPool: &m.fragmentBytes,
 	}
 	session.touch(m.now())
 	session.initReliability(m.ssu2LargeMTU(remoteAddr, ssu2AdvertisedMTU(peer, remoteAddr)))
@@ -5555,16 +5568,18 @@ func (s *ssu2TransportSession) addFragment(kind uint8, data []byte, now time.Tim
 			if len(s.fragments) >= ssu2MaxFragmentedMessages {
 				return foundation.I2NPMessage{}, false, ErrSSU2Session
 			}
-			assembly = &ssu2FragmentAssembly{header: header, following: make(map[uint8][]byte)}
+			assembly = &ssu2FragmentAssembly{header: header, following: make(map[uint8][]byte), created: now}
 			s.fragments[id] = assembly
 		} else if assembly.first != nil && (assembly.header != header || !bytes.Equal(assembly.first, data[foundation.I2NPTransportHeaderLen:])) {
-			delete(s.fragments, id)
+			s.dropFragmentLocked(id, assembly)
 			return foundation.I2NPMessage{}, false, ErrSSU2Peer
 		}
 		if assembly.first == nil {
+			if err = s.chargeFragmentLocked(id, assembly, len(data)-foundation.I2NPTransportHeaderLen); err != nil {
+				return foundation.I2NPMessage{}, false, err
+			}
 			assembly.first = append([]byte(nil), data[foundation.I2NPTransportHeaderLen:]...)
 			assembly.header = header
-			assembly.size += len(assembly.first)
 		}
 	case dataplanessu2.BlockFollowOnFragment:
 		if len(data) <= 5 {
@@ -5580,21 +5595,23 @@ func (s *ssu2TransportSession) addFragment(kind uint8, data []byte, now time.Tim
 			if len(s.fragments) >= ssu2MaxFragmentedMessages {
 				return foundation.I2NPMessage{}, false, ErrSSU2Session
 			}
-			assembly = &ssu2FragmentAssembly{following: make(map[uint8][]byte)}
+			assembly = &ssu2FragmentAssembly{following: make(map[uint8][]byte), created: now}
 			s.fragments[id] = assembly
 		}
 		if existing := assembly.following[number]; existing != nil {
 			if !bytes.Equal(existing, data[5:]) {
-				delete(s.fragments, id)
+				s.dropFragmentLocked(id, assembly)
 				return foundation.I2NPMessage{}, false, ErrSSU2Peer
 			}
 		} else {
+			if err := s.chargeFragmentLocked(id, assembly, len(data)-5); err != nil {
+				return foundation.I2NPMessage{}, false, err
+			}
 			assembly.following[number] = append([]byte(nil), data[5:]...)
-			assembly.size += len(data) - 5
 		}
 		if data[0]&1 != 0 {
 			if assembly.last != 0 && assembly.last != number {
-				delete(s.fragments, id)
+				s.dropFragmentLocked(id, assembly)
 				return foundation.I2NPMessage{}, false, ErrSSU2Peer
 			}
 			assembly.last = number
@@ -5602,12 +5619,7 @@ func (s *ssu2TransportSession) addFragment(kind uint8, data []byte, now time.Tim
 	default:
 		return foundation.I2NPMessage{}, false, ErrSSU2Peer
 	}
-	assembly.updated = now
-	if assembly.size > foundation.I2NPI2PDMaxPayload || assembly.first == nil || assembly.last == 0 {
-		if assembly.size > foundation.I2NPI2PDMaxPayload {
-			delete(s.fragments, id)
-			return foundation.I2NPMessage{}, false, ErrSSU2Peer
-		}
+	if assembly.first == nil || assembly.last == 0 {
 		return foundation.I2NPMessage{}, false, nil
 	}
 	payload := make([]byte, 0, assembly.size)
@@ -5620,23 +5632,68 @@ func (s *ssu2TransportSession) addFragment(kind uint8, data []byte, now time.Tim
 		payload = append(payload, part...)
 	}
 	if len(payload) != assembly.size {
-		delete(s.fragments, id)
+		s.dropFragmentLocked(id, assembly)
 		return foundation.I2NPMessage{}, false, ErrSSU2Peer
 	}
 	message := foundation.I2NPMessage{
 		Header:  foundation.I2NPHeader{Type: assembly.header.Type, ID: assembly.header.ID, Expiration: assembly.header.Expiration},
 		Payload: payload,
 	}
-	delete(s.fragments, id)
+	s.dropFragmentLocked(id, assembly)
 	return message, true, nil
 }
 
+// chargeFragmentLocked accounts n more bytes to assembly. A message larger
+// than the I2NP maximum is a peer error; exceeding the session or global
+// reassembly budget refuses the message. Either way the assembly is dropped,
+// because a message missing a fragment can never complete.
+//
+// +checklocks:s.fragmentMu
+func (s *ssu2TransportSession) chargeFragmentLocked(id uint32, assembly *ssu2FragmentAssembly, n int) error {
+	if assembly.size+n > foundation.I2NPI2PDMaxPayload {
+		s.dropFragmentLocked(id, assembly)
+		return ErrSSU2Peer
+	}
+	if s.fragmentBytes+n > ssu2MaxFragmentBytesPerSession {
+		s.dropFragmentLocked(id, assembly)
+		return ErrSSU2Session
+	}
+	if s.fragmentPool != nil && s.fragmentPool.Add(int64(n)) > ssu2MaxFragmentBytes {
+		s.fragmentPool.Add(-int64(n))
+		s.dropFragmentLocked(id, assembly)
+		return ErrSSU2Session
+	}
+	s.fragmentBytes += n
+	assembly.size += n
+	return nil
+}
+
+// +checklocks:s.fragmentMu
+func (s *ssu2TransportSession) dropFragmentLocked(id uint32, assembly *ssu2FragmentAssembly) {
+	if s.fragments[id] == assembly {
+		delete(s.fragments, id)
+	}
+	s.releaseFragmentBytesLocked(assembly.size)
+	assembly.size = 0
+}
+
+// +checklocks:s.fragmentMu
+func (s *ssu2TransportSession) releaseFragmentBytesLocked(n int) {
+	s.fragmentBytes -= n
+	if s.fragmentPool != nil {
+		s.fragmentPool.Add(-int64(n))
+	}
+}
+
+// expireFragments drops messages first seen ssu2FragmentLifetime ago. The
+// lifetime is not extended by later fragments, so a peer cannot pin an
+// incomplete message by resending pieces of it.
 func (s *ssu2TransportSession) expireFragments(now time.Time) {
 	s.fragmentMu.Lock()
 	defer s.fragmentMu.Unlock()
 	for id, assembly := range s.fragments {
-		if now.Sub(assembly.updated) >= ssu2FragmentLifetime {
-			delete(s.fragments, id)
+		if now.Sub(assembly.created) >= ssu2FragmentLifetime {
+			s.dropFragmentLocked(id, assembly)
 		}
 	}
 }

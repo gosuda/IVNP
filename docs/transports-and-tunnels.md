@@ -115,6 +115,8 @@ UDP Socket (recvmmsg on linux/amd64 and linux/arm64, SO_RXQ_OVFL drop tracking)
 
 On the transmit side, `egressLoop` drains `egressQueue` (`32` slots), applies a CSPRNG Fisher-Yates shuffle (`shuffleRelaySlots`) across consecutive independent relay/peer-test packets to prevent timing correlation, and writes vector batches via `sendmmsg` (`WriteBatchPrefix`).
 
+On the receive side, each session reassembles `FirstFragment` and `FollowOnFragment` blocks for at most `ssu2MaxFragmentedMessages = 64` concurrent I2NP messages. Incomplete reassembly is bounded to `ssu2MaxFragmentBytesPerSession` (four maximum-size I2NP messages) per session and `ssu2MaxFragmentBytes = 16 MiB` across all sessions; a fragment that would exceed either budget drops its whole message. An incomplete message expires `ssu2FragmentLifetime = 30s` after its first fragment arrived, and later or duplicate fragments do not extend that deadline.
+
 ### 3.4 NAT Traversal: PeerTest & Introducer Relay (`peertest.go`, `introduction.go`, `ssu2_introduction.go`)
 
 - **7-Message PeerTest**: Alice, Bob, and Charlie exchange signed `PeerTestBlock` messages (`"PeerTestValidate" || bobHash [|| aliceHash]`). `SSU2Manager` classifies the local node's UDP reachability into `PeerTestOK`, `PeerTestFirewalled`, or `PeerTestSymmetricNAT` (requiring at least two consistent port-translated external observations in `symmetricEvidence`).
