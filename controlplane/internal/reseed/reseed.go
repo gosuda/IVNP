@@ -269,18 +269,18 @@ func (c Client) fetchCandidates(ctx context.Context, endpoint string, seenAt uin
 	}
 	payload := archive
 	if len(archive) >= 7 && bytes.Equal(archive[:7], []byte{'I', '2', 'P', 's', 'u', '3', 0}) {
+		now := time.Now()
+		if c.Now != nil {
+			now = c.Now()
+		}
 		signers := c.SU3Signers
 		if signers == nil {
-			now := time.Now()
-			if c.Now != nil {
-				now = c.Now()
-			}
 			signers, err = DefaultSU3SignersAt(now)
 			if err != nil {
 				return nil, err
 			}
 		}
-		payload, err = VerifySU3(archive, signers, maxArchive)
+		payload, err = VerifySU3At(archive, signers, maxArchive, now)
 		if err != nil {
 			return nil, err
 		}

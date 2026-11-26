@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math/big"
+	"time"
 
 	"gosuda.org/ivnp/foundation"
 )
@@ -28,9 +29,17 @@ var (
 )
 
 // SU3Signer represents a trusted public key used to verify SU3 containers.
+// NotBefore and NotAfter bound when the signer is trusted; a zero value leaves
+// that side of the window open.
 type SU3Signer struct {
 	SigningType foundation.SigningKeyType
 	PublicKey   []byte
+	NotBefore   time.Time
+	NotAfter    time.Time
+}
+
+func (s SU3Signer) activeAt(now time.Time) bool {
+	return (s.NotBefore.IsZero() || !now.Before(s.NotBefore)) && (s.NotAfter.IsZero() || !now.After(s.NotAfter))
 }
 
 // ExtractSU3Payload parses and validates the SU3 container framing and bounds,
@@ -69,14 +78,21 @@ func ExtractSU3Payload(container []byte, maxContent int64) (payload []byte, sign
 	return container[contentStart:contentEnd], sID, container[:contentEnd], container[contentEnd:], st, nil
 }
 
-// VerifySU3 checks the SU3 container signature and returns the extracted payload.
+// VerifySU3 checks the SU3 container signature at the current time and returns
+// the extracted payload.
 func VerifySU3(container []byte, signers map[string]SU3Signer, maxContent int64) ([]byte, error) {
+	return VerifySU3At(container, signers, maxContent, time.Now())
+}
+
+// VerifySU3At checks the SU3 container signature and returns the extracted
+// payload. A signer outside its validity window at now is untrusted.
+func VerifySU3At(container []byte, signers map[string]SU3Signer, maxContent int64, now time.Time) ([]byte, error) {
 	payload, signerID, signed, signature, signingType, err := ExtractSU3Payload(container, maxContent)
 	if err != nil {
 		return nil, err
 	}
 	signer, found := signers[signerID]
-	if !found || signer.SigningType != signingType {
+	if !found || signer.SigningType != signingType || !signer.activeAt(now) {
 		return nil, ErrSU3Signer
 	}
 	if !verifySU3Signature(signer, signed, signature) {

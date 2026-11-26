@@ -950,7 +950,10 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			return nil, fmt.Errorf("daemon: load trusted reseed certificate files: %w", certErr)
 		}
 		customCerts := append(fileCerts, options.ReseedTrustedCerts...)
-		signers, signerErr := reseed.DefaultSU3SignersAt(clock.Now())
+		signers, skippedCerts, signerErr := reseed.LoadDefaultSU3Signers(clock.Now())
+		for _, skipped := range skippedCerts {
+			logger.Warn("skipping embedded reseed signer certificate", "error", skipped)
+		}
 		if signerErr != nil && len(customCerts) == 0 {
 			return nil, fmt.Errorf("daemon: load pinned reseed signers: %w", signerErr)
 		}
@@ -961,7 +964,7 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 			}
 		}
 		client := &reseed.Client{
-			HTTPClient: httpClient, SU3Signers: signers,
+			HTTPClient: httpClient, SU3Signers: signers, Now: clock.Now,
 			NetworkID:                uint8(cfg.Network.ID),
 			MaxArchiveBytes:          cfg.Reseed.MaxArchiveBytes,
 			MaxRouterInfos:           cfg.Reseed.MaxRouterInfos,

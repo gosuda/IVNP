@@ -8,9 +8,13 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha512"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -313,6 +317,11 @@ func buildSU3Container(t *testing.T, signerID string, content []byte) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return buildSU3ContainerWithKey(t, priv, signerID, content)
+}
+
+func buildSU3ContainerWithKey(t *testing.T, priv *rsa.PrivateKey, signerID string, content []byte) []byte {
+	t.Helper()
 	version := bytes.Repeat([]byte{'1'}, su3MinimumVersion)
 	header := make([]byte, su3HeaderLen)
 	copy(header[:7], []byte{'I', '2', 'P', 's', 'u', '3', 0})
@@ -390,6 +399,74 @@ func TestUntrustedSU3SignerRejectedOnAnyHost(t *testing.T) {
 		if database.Routers().Len() != 0 {
 			t.Fatalf("FetchInto(%s) admitted %d routers, want 0", host, database.Routers().Len())
 		}
+	}
+}
+
+// A signer admitted while its certificate was valid must stop being trusted
+// once the certificate expires, without restarting the client.
+func TestClientRejectsSignerExpiredAtFetchTime(t *testing.T) {
+	private, err := rsa.GenerateKey(rand.Reader, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "expiring-reseed@internal.example"},
+		NotBefore:    start.Add(-time.Hour),
+		NotAfter:     start.Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &private.PublicKey, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signers, err := MergeSU3Signers(nil, [][]byte{pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	su3Bytes := buildSU3ContainerWithKey(t, private, template.Subject.CommonName,
+		zipArchiveBytes(t, "routerInfo-test.dat", testRouterInfoWithHost(t, "198.51.100.20")))
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(su3Bytes)
+	}))
+	defer srv.Close()
+	srvURL, _ := url.Parse(srv.URL)
+	var clock struct {
+		sync.Mutex
+		now time.Time
+	}
+	clock.now = start
+	client := Client{
+		NetworkID: 2,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			clone := req.Clone(req.Context())
+			clone.URL.Scheme, clone.URL.Host = srvURL.Scheme, srvURL.Host
+			return srv.Client().Transport.RoundTrip(clone)
+		})},
+		SU3Signers: signers,
+		Now: func() time.Time {
+			clock.Lock()
+			defer clock.Unlock()
+			return clock.now
+		},
+	}
+	const endpoint = "https://reseed.example.org/i2pseeds.su3?netid=2"
+
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	if admitted, err := client.FetchInto(context.Background(), endpoint, database, 1000); err != nil || admitted != 1 {
+		t.Fatalf("FetchInto(valid signer) = %d, %v; want 1, nil", admitted, err)
+	}
+
+	clock.Lock()
+	clock.now = template.NotAfter.Add(time.Second)
+	clock.Unlock()
+	database = controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	if _, err := client.FetchInto(context.Background(), endpoint, database, 1000); !errors.Is(err, ErrSU3Signer) {
+		t.Fatalf("FetchInto(expired signer) error = %v, want ErrSU3Signer", err)
+	}
+	if database.Routers().Len() != 0 {
+		t.Fatalf("FetchInto(expired signer) admitted %d routers, want 0", database.Routers().Len())
 	}
 }
 

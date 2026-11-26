@@ -28,7 +28,16 @@ func DefaultSU3Signers() (map[string]SU3Signer, error) {
 }
 
 // DefaultSU3SignersAt returns the trusted reseed signers valid at the given time.
+// Embedded certificates that are invalid or outside their validity window are
+// skipped; it fails only when no embedded signer is valid.
 func DefaultSU3SignersAt(now time.Time) (map[string]SU3Signer, error) {
+	signers, _, err := LoadDefaultSU3Signers(now)
+	return signers, err
+}
+
+// LoadDefaultSU3Signers is DefaultSU3SignersAt that also reports each skipped
+// embedded certificate so callers can log it.
+func LoadDefaultSU3Signers(now time.Time) (signers map[string]SU3Signer, skipped []error, err error) {
 	return loadSU3Signers(certificates, now)
 }
 
@@ -57,6 +66,8 @@ func ParseSU3SignerCertificate(pemBytes []byte, now time.Time) (string, SU3Signe
 	return certificate.Subject.CommonName, SU3Signer{
 		SigningType: foundation.SigningRSASHA512_4096,
 		PublicKey:   publicKey.N.FillBytes(make([]byte, 512)),
+		NotBefore:   certificate.NotBefore,
+		NotAfter:    certificate.NotAfter,
 	}, nil
 }
 
@@ -77,25 +88,30 @@ func MergeSU3Signers(base map[string]SU3Signer, pemCerts [][]byte, now time.Time
 	return merged, nil
 }
 
-func loadSU3Signers(source fs.FS, now time.Time) (map[string]SU3Signer, error) {
+func loadSU3Signers(source fs.FS, now time.Time) (map[string]SU3Signer, []error, error) {
 	entries, err := fs.ReadDir(source, "certs")
 	if err != nil {
-		return nil, fmt.Errorf("%w: read embedded certificates: %v", ErrDefaultSigners, err)
+		return nil, nil, fmt.Errorf("%w: read embedded certificates: %v", ErrDefaultSigners, err)
 	}
 	signers := make(map[string]SU3Signer, len(entries))
+	var skipped []error
 	for _, entry := range entries {
 		contents, err := fs.ReadFile(source, "certs/"+entry.Name())
 		if err != nil {
-			return nil, fmt.Errorf("%w: read embedded certificate %q: %v", ErrDefaultSigners, entry.Name(), err)
+			return nil, nil, fmt.Errorf("%w: read embedded certificate %q: %v", ErrDefaultSigners, entry.Name(), err)
 		}
 		name, signer, err := ParseSU3SignerCertificate(contents, now)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %q: %v", ErrDefaultSigners, entry.Name(), err)
+			skipped = append(skipped, fmt.Errorf("embedded certificate %q: %w", entry.Name(), err))
+			continue
 		}
 		if _, exists := signers[name]; exists {
-			return nil, fmt.Errorf("%w: duplicate embedded signer %q", ErrDefaultSigners, name)
+			return nil, nil, fmt.Errorf("%w: duplicate embedded signer %q", ErrDefaultSigners, name)
 		}
 		signers[name] = signer
 	}
-	return signers, nil
+	if len(signers) == 0 {
+		return nil, skipped, fmt.Errorf("%w: no embedded certificate is valid: %w", ErrDefaultSigners, errors.Join(skipped...))
+	}
+	return signers, skipped, nil
 }

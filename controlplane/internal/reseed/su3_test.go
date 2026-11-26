@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
+	"io/fs"
 	"math/big"
 	"testing"
 	"time"
@@ -97,7 +98,9 @@ func TestVerifySU3JavaNONEwithRSAPKCS1v15(t *testing.T) {
 }
 
 func TestDefaultSU3SignersLoadExactCertificateNames(t *testing.T) {
-	signers, err := DefaultSU3Signers()
+	// Pinned inside every embedded certificate's validity window so the count
+	// does not change as certificates expire.
+	signers, err := DefaultSU3SignersAt(time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +123,58 @@ func TestDefaultSU3SignersLoadExactCertificateNames(t *testing.T) {
 func TestDefaultSU3SignersRejectCertificatesOutsideInjectedTime(t *testing.T) {
 	if _, err := DefaultSU3SignersAt(time.Unix(0, 0)); !errors.Is(err, ErrDefaultSigners) {
 		t.Fatalf("DefaultSU3SignersAt() error = %v, want ErrDefaultSigners", err)
+	}
+}
+
+// The embedded set must survive the expiry of any single certificate: the
+// expired signer is dropped and every other valid signer is still returned.
+func TestDefaultSU3SignersSkipExpiredEmbeddedCertificate(t *testing.T) {
+	entries, err := fs.ReadDir(certificates, "certs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := make([]*x509.Certificate, 0, len(entries))
+	for _, entry := range entries {
+		contents, err := fs.ReadFile(certificates, "certs/"+entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, _ := pem.Decode(contents)
+		if block == nil {
+			t.Fatalf("%s: no PEM block", entry.Name())
+		}
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatalf("%s: %v", entry.Name(), err)
+		}
+		parsed = append(parsed, certificate)
+	}
+	earliest := parsed[0]
+	for _, certificate := range parsed[1:] {
+		if certificate.NotAfter.Before(earliest.NotAfter) {
+			earliest = certificate
+		}
+	}
+	at := earliest.NotAfter.Add(time.Second)
+	want := 0
+	for _, certificate := range parsed {
+		if !at.Before(certificate.NotBefore) && !at.After(certificate.NotAfter) {
+			want++
+		}
+	}
+	if want == 0 || want == len(parsed) {
+		t.Fatalf("fixture: %d of %d embedded certificates valid at %s", want, len(parsed), at)
+	}
+
+	signers, err := DefaultSU3SignersAt(at)
+	if err != nil {
+		t.Fatalf("DefaultSU3SignersAt(%s) error = %v, want remaining signers", at, err)
+	}
+	if len(signers) != want {
+		t.Fatalf("DefaultSU3SignersAt(%s) returned %d signers, want %d", at, len(signers), want)
+	}
+	if _, found := signers[earliest.Subject.CommonName]; found {
+		t.Fatalf("expired signer %q still trusted at %s", earliest.Subject.CommonName, at)
 	}
 }
 

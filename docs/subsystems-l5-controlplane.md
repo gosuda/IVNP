@@ -124,7 +124,7 @@ When a local outbound tunnel endpoint (OBEP) is asked to forward a message to a 
 ## 5. Reseed & NAT Discovery (`controlplane/internal/reseed`, `controlplane/internal/nat`)
 
 - **`controlplane/internal/reseed/`**:
-  - `su3.go` & `certificates.go`: Verifies 40-byte `I2Psu3\x00` headers and raw PKCS#1 v1.5 RSA-4096 SHA-512 signatures against 18 embedded X.509 certificates (`certs/*.crt`) and any custom PEM/DER certificates merged via `MergeSU3Signers`.
+  - `su3.go` & `certificates.go`: Verifies 40-byte `I2Psu3\x00` headers and raw PKCS#1 v1.5 RSA-4096 SHA-512 signatures against 18 embedded X.509 certificates (`certs/*.crt`) and any custom PEM/DER certificates merged via `MergeSU3Signers`. An embedded certificate that is invalid or outside its validity window is skipped and logged; loading fails only when no embedded signer is valid. Each signer keeps its certificate's `NotBefore`/`NotAfter` window, and `VerifySU3At` rejects a signer outside that window at verification time, so a long-running node stops trusting a certificate once it expires.
   - `reseed.go`: Executes parallel fetches (prioritizing `*.hotseed.gosuda.org`), retains `best` and `fallback` candidates per hash in `dedupSlot`, orders each local K-bucket via Max-Min XOR farthest-point sampling (`fpsOrderBucket`), enforces `/16` and `/48` per-bucket subnet quotas (unless `DisableBucketSubnetQuota` is set), and returns 16 floodfill anchors for active transport probing.
 - **`controlplane/internal/nat/`**:
   - `natpmp/natpmp.go`: Mutex-serialized UDP client (`port 5351`) for public IP discovery and TCP/UDP port mapping with exponential retry (`250ms` to `64s`).
