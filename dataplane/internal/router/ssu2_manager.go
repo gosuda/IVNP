@@ -68,6 +68,13 @@ const (
 	// IPv4 address or IPv6 /64. One honest router needs one; the headroom
 	// allows a few routers behind a shared NAT address.
 	ssu2MaxInboundPendingPerSource = 4
+	// ssu2MaxRetriesPerSource caps the Retry packets sent to one IPv4 address
+	// or IPv6 /64 per ssu2RetryWindow. One handshake needs one Retry, so the
+	// cap leaves room for retransmits and several routers behind one NAT.
+	ssu2MaxRetriesPerSource = 16
+	ssu2RetryWindow         = time.Second
+	// ssu2RetryLimiterSlots is the fixed number of per-source Retry counters.
+	ssu2RetryLimiterSlots = 1024
 
 	ssu2ReceiveBatchCount = 4
 	ssu2ReceiveBatchSize  = 32
@@ -242,6 +249,10 @@ type SSU2Manager struct {
 	outboundAddr map[netip.AddrPort]*ssu2OutboundPending
 	// +checklocks:mu
 	inbound map[uint64]*ssu2InboundPending
+	// retryLimits bounds Retry packets per source; see allowRetryLocked.
+	//
+	// +checklocks:mu
+	retryLimits ssu2RetryLimiter
 	// +checklocks:mu
 	inboundSequence  uint64
 	introducers      map[uint32]foundation.Hash
@@ -3140,7 +3151,7 @@ func (m *SSU2Manager) handleTokenRequest(header dataplanessu2.LongHeader, remote
 		return
 	}
 	m.mu.Lock()
-	if !m.runningLocked() {
+	if !m.runningLocked() || !m.allowRetryLocked(remote) {
 		m.mu.Unlock()
 		return
 	}
@@ -3168,6 +3179,10 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 	}
 	if !m.consumeTokenLocked(header.Token, remote, header.DestinationID, header.SourceID) &&
 		!m.consumeNewTokenLocked(header.Token, remote) {
+		if !m.allowRetryLocked(remote) {
+			m.mu.Unlock()
+			return
+		}
 		token, err := m.newTokenLocked(remote, header.DestinationID, header.SourceID)
 		m.mu.Unlock()
 		if err == nil {
