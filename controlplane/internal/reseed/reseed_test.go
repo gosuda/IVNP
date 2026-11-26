@@ -969,3 +969,95 @@ func TestFpsOrderBucketHonorsPickLimit(t *testing.T) {
 		}
 	}
 }
+
+// forgedRouterInfo returns a copy of genuine with its Published field moved
+// forward. The router hash is unchanged and the signature no longer verifies.
+func forgedRouterInfo(t *testing.T, genuine []byte, delta uint64) foundation.NetworkDatabaseRouterInfo {
+	t.Helper()
+	info, err := foundation.NetworkDatabaseParseRouterInfo(genuine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published [8]byte
+	binary.BigEndian.PutUint64(published[:], info.Published)
+	index := bytes.Index(genuine[384:], published[:])
+	if index < 0 {
+		t.Fatal("published field not found")
+	}
+	forged := bytes.Clone(genuine)
+	binary.BigEndian.PutUint64(forged[384+index:], info.Published+delta)
+	out, err := foundation.NetworkDatabaseParseRouterInfo(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Hash() != info.Hash() {
+		t.Fatal("forged copy must keep the router hash")
+	}
+	if ok, _ := out.Verify(); ok {
+		t.Fatal("forged copy must not verify")
+	}
+	return out
+}
+
+func TestIngestForgedDuplicatesDoNotSuppressHonestRouter(t *testing.T) {
+	raw := testRouterInfoWithHost(t, "198.51.100.10")
+	genuine, err := foundation.NetworkDatabaseParseRouterInfo(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedA := forgedRouterInfo(t, raw, 10)
+	forgedB := forgedRouterInfo(t, raw, 20)
+	forgedC := forgedRouterInfo(t, raw, 30)
+	cases := map[string][]reseedCandidate{
+		"two forged copies from one source": {
+			{info: genuine, source: 1},
+			{info: forgedA, source: 0},
+			{info: forgedB, source: 0},
+		},
+		"honest copy arrives last": {
+			{info: forgedA, source: 0},
+			{info: forgedB, source: 0},
+			{info: genuine, source: 1},
+		},
+		"forged copies from several sources": {
+			{info: forgedA, source: 0},
+			{info: genuine, source: 1},
+			{info: forgedB, source: 2},
+			{info: forgedC, source: 3},
+		},
+	}
+	for name, candidates := range cases {
+		t.Run(name, func(t *testing.T) {
+			slots := make(map[foundation.Hash]*dedupSlot)
+			for _, candidate := range candidates {
+				addCandidate(slots, candidate)
+			}
+			database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+			result := (Client{NetworkID: 2}).ingestCandidates(slots, database, 1000)
+			if result.Admitted != 1 {
+				t.Fatalf("admitted = %d, want the honest RouterInfo", result.Admitted)
+			}
+			stored, ok := database.Routers().Get(genuine.Hash())
+			if !ok || stored.Info.Published != genuine.Published {
+				t.Fatalf("stored RouterInfo = %v/%v, want the honest copy", ok, stored.Info.Published)
+			}
+		})
+	}
+}
+
+func TestFetchIntoRejectsDuplicateRouterHashes(t *testing.T) {
+	raw := testRouterInfoWithHost(t, "198.51.100.10")
+	forged := forgedRouterInfo(t, raw, 10)
+	archive := zipMultiArchiveBytes(t, [][]byte{raw, forged.Bytes()})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	client := Client{NetworkID: 2, HTTPClient: srv.Client(), AllowHTTP: true, allowUnsignedZIP: true}
+	count, err := client.FetchInto(context.Background(), srv.URL+"/i2pseeds.su3?netid=2", database, 1000)
+	if !errors.Is(err, ErrDuplicateRouterInfo) || count != 0 || database.Routers().Len() != 0 {
+		t.Fatalf("FetchInto() = %d, %v (routers %d), want ErrDuplicateRouterInfo and no admissions", count, err, database.Routers().Len())
+	}
+}

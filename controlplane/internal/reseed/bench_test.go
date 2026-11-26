@@ -13,7 +13,7 @@ func BenchmarkOrderByLocalBuckets10K(b *testing.B) {
 	for i := 0; i < 10000; i++ {
 		var h foundation.Hash
 		_, _ = rand.Read(h[:])
-		slots[h] = &dedupSlot{best: reseedCandidate{}}
+		slots[h] = &dedupSlot{candidates: []reseedCandidate{{}}}
 	}
 	var local foundation.Hash
 	b.ResetTimer()
