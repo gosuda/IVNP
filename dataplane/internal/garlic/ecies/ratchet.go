@@ -64,8 +64,11 @@ type RatchetConfig struct {
 	// DefaultInitialTagWindow, limited to TagLookahead.
 	InitialTagWindow int
 	SessionLifetime  uint64
-	ReplayLifetime   uint64
-	Metrics          *observability.Registry
+	// ReplayLifetime is the minimum time a received New Session ephemeral key
+	// stays reserved. A reservation also lasts until the message's DateTime
+	// block stops passing validation (up to 421 s after receipt).
+	ReplayLifetime uint64
+	Metrics        *observability.Registry
 }
 
 // InboundTagBudget derives the receive tag budget for maxSessions sessions:
@@ -900,13 +903,27 @@ func (m *RatchetManager) receiveReplyLocked(dst, packet []byte, tag [ratchetTagL
 	return RatchetResult{Payload: payload, Peer: pending.peer, NewSession: true, ReplyRequested: true}, nil
 }
 
+// NewSessionKey returns the decoded X25519 ephemeral key of a New Session
+// packet. All eight Elligator2 encodings of one key (two representatives,
+// each with four values of the unused high bits) yield the same result, so it
+// identifies a New Session for replay detection and shard routing.
+func NewSessionKey(packet []byte) ([32]byte, bool) {
+	var key [32]byte
+	if len(packet) < newSessionEphemeralLen || cryptography.DecodeElligator2(key[:], packet[:newSessionEphemeralLen]) != nil {
+		return [32]byte{}, false
+	}
+	return key, true
+}
+
 // +checklocks:m.mu
 func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint64) (RatchetResult, error) {
 	if len(packet) < 32 {
 		return RatchetResult{}, ErrRatchet
 	}
-	var ephemeral [32]byte
-	copy(ephemeral[:], packet[:32])
+	ephemeral, ok := NewSessionKey(packet)
+	if !ok {
+		return RatchetResult{}, ErrRatchet
+	}
 	if until, duplicate := m.replays[ephemeral]; duplicate && until >= now {
 		return RatchetResult{}, ErrRatchetReplay
 	}
@@ -938,12 +955,14 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 	}
 	defer responder.ReleaseSensitive()
 
-	application, err := validateNewPayload(payload, now)
+	application, acceptUntil, err := validateNewPayload(payload, now)
 	if err != nil {
 		return RatchetResult{}, err
 	}
+	// The reservation outlives every instant at which the DateTime block can
+	// still pass validation, whatever ReplayLifetime is configured.
+	replayExpiry := max(now+m.config.ReplayLifetime, acceptUntil)
 	if !responder.bound {
-		replayExpiry := now + m.config.ReplayLifetime
 		m.replays[ephemeral] = replayExpiry
 		m.noteExpiryLocked(replayExpiry)
 		return RatchetResult{Payload: application, NewSession: true}, nil
@@ -970,7 +989,6 @@ func (m *RatchetManager) receiveNewLocked(dst, replyDst, packet []byte, now uint
 	// Authentication and replay reservation complete together, while session
 	// and tag admission remain deferred until the authenticated Destination is
 	// known to the caller.
-	replayExpiry := now + m.config.ReplayLifetime
 	m.replays[ephemeral] = replayExpiry
 	m.noteExpiryLocked(replayExpiry)
 	return RatchetResult{Payload: application, Reply: replyDst[:n], Peer: peer, Candidate: candidate, NewSession: true}, nil
@@ -1606,16 +1624,18 @@ func releaseTagSet(s *tagSet) {
 	s.previous = nil
 }
 
-func validateNewPayload(payload []byte, now uint64) ([]byte, error) {
+// validateNewPayload checks the leading DateTime block. acceptUntil is the
+// last Unix millisecond at which the same block still passes this check.
+func validateNewPayload(payload []byte, now uint64) (application []byte, acceptUntil uint64, err error) {
 	if len(payload) < 7 || payload[0] != ratchetDateTime || binary.BigEndian.Uint16(payload[1:3]) != 4 {
-		return nil, ErrRatchet
+		return nil, 0, ErrRatchet
 	}
 	timestamp := uint64(binary.BigEndian.Uint32(payload[3:7]))
 	seconds := now / 1000
 	if timestamp+300 < seconds || timestamp > seconds+120 {
-		return nil, ErrRatchetExpired
+		return nil, 0, ErrRatchetExpired
 	}
-	return payload[7:], nil
+	return payload[7:], (timestamp+300)*1000 + 999, nil
 }
 
 func newTagSet(id uint16, root [32]byte, input []byte, expires uint64) (*tagSet, error) {

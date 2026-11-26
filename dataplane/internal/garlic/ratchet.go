@@ -215,8 +215,12 @@ func (m *RatchetManager) packetShard(packet []byte) (int, *dataplanegarlicecies.
 			return owner, m.shards[owner]
 		}
 	}
+	// Unindexed packets are New Sessions or noise. Every encoding of one New
+	// Session ephemeral key reaches the same shard and its replay cache.
 	index := uint64(0)
-	if len(packet) >= 8 {
+	if key, ok := dataplanegarlicecies.NewSessionKey(packet); ok {
+		index = binary.LittleEndian.Uint64(key[:8])
+	} else if len(packet) >= 8 {
 		index = binary.LittleEndian.Uint64(packet[:8])
 	}
 	shardIndex := int(index % uint64(len(m.shards)))
