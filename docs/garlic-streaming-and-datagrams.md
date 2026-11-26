@@ -44,13 +44,16 @@ sequenceDiagram
 
 ### 1.3 Two-Phase Inbound `NewSession` Commit & Reply Ordering Gate
 
-A subtle vulnerability in naive ECIES implementations occurs if an unauthenticated or replayed `NewSession` packet immediately overwrites an active peer session or pollutes the global tag table before the sender's identity is verified. IVNP prevents this with two mechanisms in `dataplane/internal/garlic/ecies/ratchet.go` and `dataplane/internal/router/data_plane.go`:
+A subtle vulnerability in naive ECIES implementations occurs if an unauthenticated or replayed `NewSession` packet immediately overwrites an active peer session or pollutes the global tag table before the sender's identity is verified. IVNP prevents this with three mechanisms in `dataplane/internal/garlic/ecies/ratchet.go` and `dataplane/internal/router/data_plane.go`:
 
 1. **Two-Phase `NewSessionCandidate`**:
    - `ReceiveNewSessionCandidate` decrypts the inbound `NewSession` and verifies its `DateTime` block **without mutating any session or tag table state**.
    - `GarlicReceiver` inspects the decrypted garlic cloves (`pendingCloves`, up to 16) for a bundled `DatabaseStore` carrying the peer's `LeaseSet2`.
    - Only after `leaseSetMatchesRatchetStatic` confirms that the signed `LeaseSet2` advertises the exact X25519 static key from the NS handshake does `GarlicReceiver` invoke `CommitNew(candidate)` (or `RetainNew(candidate)` when an existing session is still within its retention window: `unconfirmedNewSessionBurstAge = 1s` before the session is confirmed by a `NewSessionReply` or `ExistingSession` packet, and `newSessionRestartAge = 2m` once confirmed).
-2. **Inbound Reply Ordering Gate (`ReserveInboundReply` / `ReserveRatchetReply`)**:
+2. **New Session Replay Cache**:
+   - Each authenticated `NewSession` reserves its ephemeral key, decoded from the Elligator2 representative (`garlicecies.NewSessionKey`). The two unused high bits and the second representative `1/(2r)` give every key eight byte-distinct encodings; all of them map to one reservation and are rejected with `ErrRatchetReplay`.
+   - A reservation lasts for `max(ReplayLifetime, DateTime acceptance)`, where the `DateTime` block is accepted from 300 s before to 120 s after local time. A replay is therefore rejected for as long as its timestamp would still validate.
+3. **Inbound Reply Ordering Gate (`ReserveInboundReply` / `ReserveRatchetReply`)**:
    - When an inbound NS commits and requires a `NewSessionReply`, `ReserveInboundReply` installs a reservation gate (`ratchetReplyHoldTimeout = 5s`).
    - Any concurrent outbound application packets for that peer wait on `gate.done` until the NSR frame has been dispatched (`ReleaseRatchetReply: true`), guaranteeing that the remote initiator receives the NSR handshake completion before receiving `ExistingSession` tags derived from it.
 
