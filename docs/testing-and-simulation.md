@@ -105,10 +105,12 @@ IVNP_EEPSITE_PROXY=http://127.0.0.1:4444 IVNP_SAM_ADDRESS=127.0.0.1:7656 \
   -count=1 -timeout=12m ./tests/integration
 ```
 
-## CI frequency
+## 4. CI Workflows and Triggers
 
-Pull requests, pushes to `main`, and merge groups run the full Go tests, vet, checklocks, gojgp,
-and deterministic simulation with seed 42. The Monday run and manual
-dispatch also cover all ten simulation seeds and the platform build matrix.
-The live I2P and in-memory eepsite workflows run weekly or on demand.
-All jobs use Depot runners; macOS uses `depot-macos-latest`.
+No workflow runs on a cron schedule. Routine verification executes on every pull request, push to `main`, and merge group across three Depot jobs:
+
+- **`Test, vet, lint` (`depot-ubuntu-24.04`)**: Runs `tools/importformatter`, `go vet ./...`, `checklocks`, `gojgp lint ./...`, `go test -count=1 ./...`, `CGO_ENABLED=0` cross-compilation (`linux/arm64`, `darwin/arm64`, `windows/amd64`, `windows/arm64`), `linux/arm64` SSU2 test compilation, and `-tags integration` compile verification.
+- **`DST (10 seeds)` (`depot-ubuntu-24.04`)**: Generates the durable-sync overlay once and executes all ten simulation seeds (`1, 16, 42, 67, 1982, 1992, 2002, 2012, 2022, 2026`) in a single job.
+- **`Windows / amd64` (`depot-windows-2025`)**: Builds all packages natively on Windows and runs the Windows state security regressions alongside portable SSU2 transport tests.
+
+Native macOS verification (`depot-macos-latest`), live I2P round-trip tests (`live-i2p-roundtrip.yml`), in-memory eepsite fetches (`in-memory-eepsite.yml`), and pinned-router SSU2 interop (`ssu2-interop.yml`) run on demand via `workflow_dispatch`. Every workflow resolves its Go toolchain version from `go.mod`.
