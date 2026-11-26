@@ -91,6 +91,18 @@ func (t *embeddedMemoryTransport) Send(ctx context.Context, target foundation.Ha
 	return t.network.route(t.localHash(), target, message)
 }
 
+// HasSession models the memory network as fully connected: every started
+// endpoint, and the simulated floodfill, is reachable without a dial.
+func (t *embeddedMemoryTransport) HasSession(peer foundation.Hash) bool {
+	if peer == t.network.flood {
+		return true
+	}
+	t.network.mu.RLock()
+	_, ok := t.network.endpoints[peer]
+	t.network.mu.RUnlock()
+	return ok
+}
+
 func (t *embeddedMemoryTransport) Close() error {
 	t.once.Do(func() {
 		t.network.mu.Lock()

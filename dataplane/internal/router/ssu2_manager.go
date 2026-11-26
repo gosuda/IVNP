@@ -159,6 +159,9 @@ type SSU2ManagerConfig struct {
 	// AdmitPeer gates transport sessions after the peer RouterInfo is verified
 	// and netId-matched. A non-nil result denies session installation.
 	AdmitPeer PeerAdmissionFunc
+	// RequirePublicPeerAddresses refuses to send handshakes to RouterInfo or
+	// relay-introduced endpoints that are not globally routable unicast.
+	RequirePublicPeerAddresses bool
 }
 
 type ssu2BatchConnection interface {
@@ -272,6 +275,7 @@ type SSU2Manager struct {
 	routerInfoStores map[foundation.Hash]ssu2RouterInfoStoreSnapshot
 	reporter         ingress.Reporter
 	admitPeer        PeerAdmissionFunc
+	addressPolicy    dialAddressPolicy
 }
 
 // IOStats is the single atomic source for SSU2 socket accounting.
@@ -969,6 +973,7 @@ func NewSSU2Manager(config SSU2ManagerConfig) (*SSU2Manager, error) {
 		onPeerTest:            config.OnPeerTest,
 		reporter:              config.PanicReporter,
 		admitPeer:             config.AdmitPeer,
+		addressPolicy:         dialAddressPolicyFor(config.RequirePublicPeerAddresses),
 		metrics:               config.Metrics,
 		logger:                config.Logger,
 		done:                  make(chan struct{}),
@@ -2024,7 +2029,7 @@ func (m *SSU2Manager) newOutboundLocked(peer foundation.Hash, address ssu2PeerAd
 
 // +checklocks:m.mu
 func (m *SSU2Manager) newIntroducedOutboundLocked(peer foundation.Hash, address ssu2PeerAddress, endpoint netip.AddrPort, destinationID, sourceID uint64) (*ssu2OutboundPending, error) {
-	if !validSSU2Endpoint(endpoint) {
+	if !validSSU2Endpoint(endpoint) || !m.addressPolicy.allows(endpoint.Addr()) {
 		return nil, ErrSSU2Introduction
 	}
 	remote := &net.UDPAddr{IP: endpoint.Addr().AsSlice(), Port: int(endpoint.Port())}
@@ -5746,7 +5751,7 @@ func ssu2IntroForStatic(info foundation.NetworkDatabaseRouterInfo, static []byte
 func (m *SSU2Manager) selectSSU2Address(info foundation.NetworkDatabaseRouterInfo) (ssu2PeerAddress, error) {
 	available := ssu2IPv6Available(m.conn)
 	m.ipv6Available.Store(available)
-	return selectSSU2AddressForNetwork(info, available)
+	return selectSSU2AddressForNetwork(info, available, m.addressPolicy)
 }
 
 func ssu2IPv6Available(conn UDPSocket) bool {
@@ -5881,10 +5886,12 @@ func ssu2AdvertisedMTU(info foundation.NetworkDatabaseRouterInfo, remote net.Add
 }
 
 func selectSSU2Address(info foundation.NetworkDatabaseRouterInfo) (ssu2PeerAddress, error) {
-	return selectSSU2AddressForNetwork(info, true)
+	return selectSSU2AddressForNetwork(info, true, dialAnyAddress)
 }
 
-func selectSSU2AddressForNetwork(info foundation.NetworkDatabaseRouterInfo, allowIPv6 bool) (ssu2PeerAddress, error) {
+// selectSSU2AddressForNetwork picks a direct SSU2 address whose host policy
+// admits.
+func selectSSU2AddressForNetwork(info foundation.NetworkDatabaseRouterInfo, allowIPv6 bool, policy dialAddressPolicy) (ssu2PeerAddress, error) {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -5923,7 +5930,7 @@ func selectSSU2AddressForNetwork(info foundation.NetworkDatabaseRouterInfo, allo
 		}
 		portNumber, err := strconv.ParseUint(port, 10, 16)
 		ip, ipErr := netip.ParseAddr(host)
-		invalidEndpoint := err != nil || ipErr != nil || portNumber == 0
+		invalidEndpoint := err != nil || ipErr != nil || portNumber == 0 || !policy.allows(ip)
 		if invalidEndpoint || !supportsSSU2Version(version) {
 			continue
 		}

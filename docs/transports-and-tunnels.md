@@ -58,6 +58,8 @@ After Message 3 completes, `newDataSession` splits the chaining key into directi
 
 `NTCP2Manager` deduplicates concurrent outbound dials to the same peer hash (`dialing` map) and enforces `defaultNTCP2MaxSessions = 256` and `defaultNTCP2MaxPending = 64`. If two routers dial each other simultaneously, `preferInboundSession(local, peer)` compares the 32-byte router hashes lexicographically so both peers deterministically retain the same connection and close the duplicate.
 
+Outbound address selection (`selectNTCP2AddressForNetwork` in `ntcp2_manager.go`, `selectSSU2AddressForNetwork` in `ssu2_manager.go`, policy in `dial_address_policy.go`) accepts only IP literal hosts, so a `RouterInfo` hostname is never resolved. When the control plane sets `RequirePublicPeerAddresses` (the `public` network profile), both managers also skip addresses that are not globally routable unicast (private, loopback, link-local, CGNAT `100.64.0.0/10`, `0.0.0.0/8`, ULA `fc00::/7`, multicast, unspecified, and IPv4-mapped forms), and SSU2 applies the same check to relay-introduced endpoints. `PeerReachable` and `InspectPeer` use the same policy, so peer selection does not pick routers whose only addresses would be refused at dial time. The `dedicated` and `direct` profiles leave the flag unset.
+
 ---
 
 ## 3. SSU2 Transport (`dataplane/internal/transport/ssu2`)
