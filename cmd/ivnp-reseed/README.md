@@ -219,7 +219,7 @@ The phrase length floor is not an entropy measurement. Generate the phrase from 
 
 New deployments should start with `RESEED_SEED_KDF=argon2id-v2`.
 
-Persistent artifacts in `-data-dir` (`peers.gob`, `i2pseeds.su3`, `reseed-rsa.crt`, `reseed-rsa.pub.pem`) are written through an atomic `.tmp` write-and-rename sequence, and any stale `.tmp` files are cleaned up on startup.
+Persistent artifacts in `-data-dir` (`peers.gob`, `i2pseeds.su3`, `reseed-rsa.crt`, `reseed-rsa.pub.pem`) are written through `state.FilesystemStoreWriteAtomic`: each write goes to an exclusively created, randomly named `.ivnp-<hex>` file in the same directory (opened with `O_EXCL|O_NOFOLLOW`), is `fsync`ed, and is renamed over the target, so a symlink planted in `-data-dir` is never followed. Stale `<name>.tmp` files left by earlier releases are removed on startup.
 
 > [!WARNING]
 > **Back Up `RESEED_SEED_PHRASE` Securely**:

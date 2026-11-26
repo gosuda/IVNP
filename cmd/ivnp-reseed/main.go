@@ -774,18 +774,15 @@ func initReseedMaterial(certPath string, pubKeyPath string, signerID string, pri
 	return certPEM, pubKeyPEM, nil
 }
 
-// writeFileAtomic stages data under "<path>.tmp" then renames it over path so
-// readers never observe a partially written state file.
+// writeFileAtomic stages data in an exclusively created, randomly named file
+// in the same directory, then renames it over path so readers never observe a
+// partially written state file and a planted symlink is never followed.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, perm); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return state.FilesystemStoreWriteAtomic(path, data, perm, -1)
 }
 
-// removeStaleTempFile deletes a leftover "<statePath>.tmp" from a write
-// interrupted before its rename completed.
+// removeStaleTempFile deletes a leftover "<statePath>.tmp" written by earlier
+// releases, which staged atomic writes under that predictable name.
 func removeStaleTempFile(statePath string, logger *slog.Logger) {
 	tmpPath := statePath + ".tmp"
 	if err := os.Remove(tmpPath); err == nil {
