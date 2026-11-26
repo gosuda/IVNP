@@ -266,8 +266,10 @@ type SSU2Manager struct {
 	relayForwards map[uint32]ssu2RelayForward
 	// +checklocks:mu
 	deferredRelayIntros map[uint32]ssu2DeferredRelayIntro
-	relayStoreJobs      chan ssu2RelayStoreJob
-	routerInfoStoresMu  sync.RWMutex
+	// +checklocks:mu
+	relayIntros        map[uint32]ssu2RelayIntroClaim
+	relayStoreJobs     chan ssu2RelayStoreJob
+	routerInfoStoresMu sync.RWMutex
 	// +checklocks:routerInfoStoresMu
 	routerInfoStores map[foundation.Hash]ssu2RouterInfoStoreSnapshot
 	reporter         ingress.Reporter
@@ -884,6 +886,14 @@ type ssu2PeerTestEvidence struct {
 	observed netip.AddrPort
 	count    uint8
 }
+
+// ssu2RelayIntroClaim records a RelayIntro nonce this router acted on as
+// Charlie, for replay suppression and the per-introducer rate limit.
+type ssu2RelayIntroClaim struct {
+	bob  foundation.Hash
+	seen time.Time
+}
+
 type ssu2DeferredRelayIntro struct {
 	bob     *ssu2TransportSession
 	intro   dataplanessu2.RelayIntro
@@ -988,6 +998,7 @@ func NewSSU2Manager(config SSU2ManagerConfig) (*SSU2Manager, error) {
 		relayRequests:         make(map[uint32]*ssu2RelayRequest),
 		relayForwards:         make(map[uint32]ssu2RelayForward),
 		deferredRelayIntros:   make(map[uint32]ssu2DeferredRelayIntro),
+		relayIntros:           make(map[uint32]ssu2RelayIntroClaim),
 		routerInfoStores:      make(map[foundation.Hash]ssu2RouterInfoStoreSnapshot),
 	}, nil
 }
@@ -1132,6 +1143,7 @@ func (m *SSU2Manager) Close() error {
 		}
 		clear(m.relayForwards)
 		clear(m.deferredRelayIntros)
+		clear(m.relayIntros)
 		clear(m.introducers)
 		clear(m.relayGrants)
 		clear(m.advertisedRelays)

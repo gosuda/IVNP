@@ -123,6 +123,7 @@ On the transmit side, `egressLoop` drains `egressQueue` (`32` slots), applies a 
   2. Bob forwards Alice's compressed `RouterInfo` `DatabaseStore` and a `RelayIntro` block to Charlie.
   3. Charlie transmits an out-of-session `HolePunch (11)` datagram to Alice's apparent IP:port and sends a signed `RelayResponse` (`"RelayAgreementOK" || bobHash`) back through Bob.
   4. Alice receives `RelayResponse` (or `HolePunch`) and immediately initiates `SessionRequest` using the token embedded in `RelayResponse`.
+- **Charlie's `RelayIntro` Admission**: Charlie acts on a `RelayIntro` only when the forwarding session belongs to an introducer that granted Charlie an unexpired relay tag (an entry in `advertisedRelays`) and the block carries that tag; any other peer gets reject code `64`. After Alice's signature verifies, Charlie rejects a multicast or IPv4 broadcast endpoint with code `65`, silently drops a nonce it has already acted on within `2 × MaxClockSkew`, and answers code `66` once one introducer has forwarded `MaxPending` introductions within one `HandshakeTimeout`. Only then does Charlie mint the address token and send the `HolePunch`.
 
 ---
 

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -908,7 +909,18 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("establish Bob-Charlie session: %v", err)
 		}
-		const relayTag = 0x10203040
+		// Charlie only accepts RelayIntro from an introducer whose relay tag
+		// it requested, so take the tag through the RelayTagRequest exchange.
+		if err = charlieManager.RequestRelayTag(ctx, bob.Hash()); err != nil {
+			t.Fatalf("request Charlie relay tag from Bob: %v", err)
+		}
+		net_.Advance(20 * time.Millisecond)
+		charlieManager.mu.RLock()
+		relayLease, granted := charlieManager.advertisedRelays[bob.Hash()]
+		charlieManager.mu.RUnlock()
+		if !granted {
+			t.Fatal("Bob did not grant Charlie a relay tag")
+		}
 		bobHash := bob.Hash()
 		net_.Advance(20 * time.Millisecond)
 		if err = alice.ReplaceAddresses([]transportTestAddress{{
@@ -936,7 +948,7 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 			Options: []transportTestOption{
 				{Key: "i", Value: foundation.EncodeI2PBase64(charlieIntro)},
 				{Key: "ih0", Value: foundation.EncodeI2PBase64(bobHash[:])},
-				{Key: "itag0", Value: "270544960"},
+				{Key: "itag0", Value: strconv.FormatUint(uint64(relayLease.tag), 10)},
 				{Key: "s", Value: foundation.EncodeI2PBase64(testECDHPublic(t, charlieStatic))},
 				{Key: "v", Value: "2"},
 			},
@@ -954,9 +966,6 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 			t.Fatal("firewalled Charlie RouterInfo was not admitted")
 		} else if _, err = selectSSU2Address(ref.Info); err == nil {
 			t.Fatal("firewalled Charlie RouterInfo retained a direct endpoint")
-		}
-		if err = bobManager.RegisterIntroducer(relayTag, charlie.Hash()); err != nil {
-			t.Fatal(err)
 		}
 		message := foundation.I2NPMessage{
 			Header:  foundation.I2NPHeader{Type: foundation.I2NPData, ID: 71, Expiration: uint64(time.Now().Add(time.Minute).UnixMilli())},
