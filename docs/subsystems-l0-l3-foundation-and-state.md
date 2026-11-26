@@ -88,7 +88,7 @@ All L1 files reside directly in `/Users/user/work/work3/IVNP/cryptography`:
 | `x25519.go` | `X25519PrivateKey`, `GenerateX25519PrivateKey` | Stores `[32]byte` `scalar` and precomputed `[32]byte` `public`; executes zero-allocation `PublicKey` and `ECDH` via `x25519ScalarMult` and zeroes both arrays on `ReleaseSensitive()` |
 | `field25519.go` | `field25519 [4]uint64`, `fieldSqrtRatio`, `x25519ScalarMult` | Unrolled constant-time $\mathbb{F}_{2^{255}-19}$ limb arithmetic (`add`, `sub`, `mul`, `square`, `mulA24`, `invert`, `pow22523`) and RFC 7748 Montgomery ladder |
 | `elligator.go` | `EncodeElligator2`, `DecodeElligator2`, `GenerateElligator2X25519` | Checks quadratic residue eligibility before drawing entropy; masks top 2 bits (`0xc0`) of byte 31 |
-| `elgamal.go` | `ElGamalPublicKey`, `ElGamalPrivateKey`, `EncryptElGamal`, `DecryptElGamal` | 2048-bit MODP Group 14; 222B plaintext -> 514B ciphertext (`0x00 \|\| a[256] \|\| 0x00 \|\| b[256]`) |
+| `elgamal.go` | `ElGamalPublicKey`, `ElGamalPrivateKey`, `EncryptElGamal`, `DecryptElGamal` | 2048-bit MODP Group 14; 222B plaintext -> 514B ciphertext (`0x00 \|\| a[256] \|\| 0x00 \|\| b[256]`); `DecryptElGamal` uses constant-time `filippo.io/bigmod` exponentiation so its timing does not depend on the private exponent |
 | `mlkem.go` | `MLKEMPublicKey`, `MLKEMPrivateKey`, `GenerateMLKEM`, `Encapsulate` | FIPS-203 ML-KEM-768 (type 6) and ML-KEM-1024 (type 7); stores 64-byte seed in `MLKEMPrivateKey` |
 | `streebog.go`, `curve.go` | `Sum256`, `Sum512`, `Verify256`, `Verify512` | Table-driven GOST R 34.11-2012 hash and GOST R 34.10-2012 Weierstrass curve verification |
 
