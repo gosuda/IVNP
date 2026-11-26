@@ -133,14 +133,16 @@ Passing a raw or `datagram3` network string to `ListenPacket` fails with an expl
 | `POST /api/actions/restart` | Schedule an in-process router restart supervised by `main.go` while keeping the WebUI listener online |
 | `GET /api/actions/log` | Most recent `50` administrative actions (`reseed`, `probe`, `restart`, `config`, `rollback`), newest first |
 | `GET /api/events` | 1-second Server-Sent Events (`text/event-stream`) telemetry stream |
+| `GET /healthz`, `GET /livez`, `GET /readyz` | Router liveness and client readiness probes; exempt from the bearer token |
+| `GET /varz` | The `/api/metrics` JSON document; requires the bearer token whenever `/api/*` does |
 
 Every request passes the listener's access policy before any handler runs. The policy follows the bind address, not `-webui-auth`:
 
-- **Loopback bind** (`127.0.0.0/8`, `::1`, `localhost`): only loopback clients are served, and the `Host` header must name a loopback address or `localhost`. This DNS-rebinding check stays in force with `-webui-auth=false`.
-- **Non-loopback bind with a token**: `/api/*` requires `Authorization: Bearer <token>` (or `?token=` on `/api/events`); the `Host` header is not restricted.
+- **Loopback bind** (`127.0.0.0/8`, `::1`, `localhost`): only loopback clients are served, and the `Host` header must name a loopback address or `localhost`. This DNS-rebinding check stays in force with `-webui-auth=false`. When a token is set, `/api/*` and `/varz` also require it.
+- **Non-loopback bind with a token**: `/api/*` and `/varz` require `Authorization: Bearer <token>` (or `?token=` on `/api/events`); the `Host` header is not restricted.
 - **Non-loopback bind with `-webui-auth=false`**: the `Host` header must be `localhost` or an IP literal, so a page served from a rebound DNS name is rejected. Use a token to reach the console through a DNS name.
 
-State-changing requests must also carry an `Origin` that matches `Host`, when an `Origin` is present.
+The `/healthz`, `/livez`, and `/readyz` probes skip only the token check; the client and `Host` checks above apply to them as well. State-changing requests must also carry an `Origin` that matches `Host`, when an `Origin` is present.
 
 ---
 

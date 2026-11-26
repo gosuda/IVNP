@@ -441,8 +441,11 @@ func (s *WebUIServer) Close() error {
 	return result
 }
 
-func isPublicProbePath(path string) bool {
-	return path == "/healthz" || path == "/livez" || path == "/readyz" || path == "/varz"
+// requiresWebUIToken reports whether path needs the bearer token when the
+// listener requires one. Only the /healthz, /livez, and /readyz probes skip
+// the token; /varz carries the same telemetry as /api/metrics.
+func requiresWebUIToken(path string) bool {
+	return strings.HasPrefix(path, "/api/") || path == "/varz"
 }
 
 func (s *WebUIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -493,10 +496,6 @@ func (s *WebUIServer) handleVarz(w http.ResponseWriter, r *http.Request) {
 func (s *WebUIServer) wrapMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.setSecurityHeaders(w)
-		if isPublicProbePath(r.URL.Path) {
-			next.ServeHTTP(w, r)
-			return
-		}
 		if s.policy.loopback && !remoteIsLoopback(r.RemoteAddr) {
 			http.Error(w, "loopback clients only", http.StatusForbidden)
 			return
@@ -509,12 +508,13 @@ func (s *WebUIServer) wrapMiddleware(next http.Handler) http.Handler {
 			http.Error(w, "origin mismatch", http.StatusForbidden)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/") && s.policy.requireAuth && !s.isAuthorized(r) {
+		protected := requiresWebUIToken(r.URL.Path)
+		if protected && s.policy.requireAuth && !s.isAuthorized(r) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="ivnp-webui"`)
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		if protected {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		next.ServeHTTP(w, r)

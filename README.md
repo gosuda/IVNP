@@ -51,7 +51,7 @@ ivnpd -memory
 | **SOCKS5 Proxy** | `127.0.0.1:4447` | SOCKS5 `CONNECT` proxy for `.b32.i2p` and base64 destinations (enable with `-socks5`) |
 | **SAM v3.3 Bridge** | `127.0.0.1:7656` (TCP) / `7655` (UDP) | Simple Anonymous Messaging v3.1-v3.3 control and datagram sockets |
 | **Control API** | `127.0.0.1:7650` | Bearer-authenticated JSON status and readiness endpoints (`/readyz`, `/status`, `/destinations`; opt-in) |
-| **Metrics & Probes** | `127.0.0.1:9090` | Dedicated Prometheus `/metrics` and `/healthz`, `/livez`, `/readyz` listener (opt-in; `/healthz`, `/livez`, `/readyz`, `/varz` are also served on `:7070`) |
+| **Metrics & Probes** | `127.0.0.1:9090` | Dedicated Prometheus `/metrics` and `/healthz`, `/livez`, `/readyz` listener (opt-in; `/healthz`, `/livez`, `/readyz`, `/varz` are also served on `:7070`, where `/varz` requires the WebUI token when one is set) |
 
 ### Daemon Configuration & Flags
 
@@ -88,7 +88,7 @@ Common CLI flags:
 - `-memory`: Run in-memory without reading or writing persistent state on disk.
 - `-data-dir <dir>`: Override `[paths] data_dir`.
 - `-webui=false` / `-webui-listen <addr:port>`: Disable or rebind the embedded WebUI server.
-- `-webui-auth` / `-webui-token <secret>`: Require Bearer authentication on `/api/*` endpoints (or set `IVNPD_WEBUI_TOKEN`). `-webui-auth=false` drops only the token: a loopback listener still serves only loopback clients and loopback `Host` names, and a non-loopback listener then accepts only `localhost` or IP-literal `Host` headers.
+- `-webui-auth` / `-webui-token <secret>`: Require Bearer authentication on `/api/*` and `/varz` (or set `IVNPD_WEBUI_TOKEN`). `-webui-auth=false` drops only the token: a loopback listener still serves only loopback clients and loopback `Host` names, and a non-loopback listener then accepts only `localhost` or IP-literal `Host` headers.
 - `-webui-remote-write`: Permit WebUI configuration writes, rollbacks, and router restarts from non-loopback clients.
 - `-webui-show-peers`: Expose peer router `.b32.i2p` identities in `/api/tunnels` and `/api/peers` when the WebUI listener is not loopback-bound.
 - `-http-proxy` / `-socks5`: Enable or disable proxy listeners from the command line.
