@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -134,11 +133,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		restartRequests chan struct{}
 	)
 	if *webUIEnabled {
-		webUIHost, _, _ := net.SplitHostPort(*webUIListen)
-		token := *webUIToken
-		if token == "" && !isLoopbackHost(webUIHost) {
-			token = os.Getenv("IVNPD_WEBUI_TOKEN")
-		}
+		token := webUIBearerToken(*webUIToken, os.Getenv)
 		webUIConfigPath := *configPath
 		if *memoryMode {
 			webUIConfigPath = ""
@@ -289,4 +284,14 @@ func newLogger(cfg state.ConfigurationLog, output io.Writer) (*slog.Logger, *slo
 		logger = slog.New(slog.NewTextHandler(output, options))
 	}
 	return logger, level
+}
+
+// webUIBearerToken returns the -webui-token flag value, or IVNPD_WEBUI_TOKEN
+// when the flag is empty. The environment token applies to every bind
+// address, including loopback, so an operator can require it locally too.
+func webUIBearerToken(flagToken string, getenv func(string) string) string {
+	if flagToken != "" {
+		return flagToken
+	}
+	return getenv("IVNPD_WEBUI_TOKEN")
 }

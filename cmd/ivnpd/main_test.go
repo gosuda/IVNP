@@ -134,3 +134,29 @@ func TestClearStoragePaths(t *testing.T) {
 		t.Errorf("clearStoragePaths did not clear bootstrap router info paths: %+v", cfg.NetDB.BootstrapRouterInfoPaths)
 	}
 }
+
+func TestWebUIBearerTokenHonorsEnvironment(t *testing.T) {
+	t.Parallel()
+	const envToken, flagToken = "environment-token-123", "flag-token-1234567"
+	getenv := func(name string) string {
+		if name == "IVNPD_WEBUI_TOKEN" {
+			return envToken
+		}
+		return ""
+	}
+	if got := webUIBearerToken("", getenv); got != envToken {
+		t.Fatalf("webUIBearerToken without flag = %q, want the environment token", got)
+	}
+	if got := webUIBearerToken(flagToken, getenv); got != flagToken {
+		t.Fatalf("webUIBearerToken with flag = %q, want the flag token", got)
+	}
+	for _, listen := range []string{"127.0.0.1:7070", "localhost:7070", "[::1]:7070", "0.0.0.0:7070"} {
+		t.Run(listen, func(t *testing.T) {
+			t.Parallel()
+			server := newTestWebUIServer(t, WebUIConfig{ListenAddress: listen, BearerToken: webUIBearerToken("", getenv)})
+			if !server.policy.requireAuth || server.config.BearerToken != envToken {
+				t.Fatalf("listener %s ignored IVNPD_WEBUI_TOKEN: requireAuth=%v", listen, server.policy.requireAuth)
+			}
+		})
+	}
+}
