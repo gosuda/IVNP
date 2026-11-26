@@ -555,6 +555,7 @@ func (m *BuildManager) StartOutbound(ctx context.Context, build OutboundBuild) (
 			}
 		}
 	}
+	m.noteSessionSetup(build.attempt, build.Hops[0].Router)
 	if err := m.ensureBuildSession(ctx, build.Hops[0].Router, build.Hops, "outbound", "first_hop"); err != nil {
 		return 0, err
 	}
@@ -765,11 +766,13 @@ func (m *BuildManager) StartInbound(ctx context.Context, build InboundBuild) (ui
 		if m.pool != nil && carrier.Owner != m.pool.Owner() {
 			return 0, ErrPoolOwner
 		}
+		m.noteSessionSetup(build.attempt, carrier.FirstHop)
 		if err := m.ensureBuildSession(ctx, carrier.FirstHop, build.Hops, "inbound", "carrier"); err != nil {
 			return 0, err
 		}
 	}
 	if build.OutboundTunnelID == 0 {
+		m.noteSessionSetup(build.attempt, build.Hops[0].Router, build.Hops[len(build.Hops)-1].Router)
 		if err := m.ensureBootstrapSessions(ctx, build.Hops); err != nil {
 			return 0, err
 		}
@@ -953,6 +956,28 @@ func (m *BuildManager) HandleInboundReply(message foundation.I2NPMessage) error 
 // SessionEnsurer ensures an authenticated session with a peer router.
 type SessionEnsurer interface {
 	EnsureSession(context.Context, foundation.Hash) error
+}
+
+type sessionReporter interface {
+	HasSession(foundation.Hash) bool
+}
+
+// noteSessionSetup tells the maintenance pass that owns attempt that the
+// attempt must wait for a new transport session to one of peers.
+func (m *BuildManager) noteSessionSetup(attempt *creatorAttempt, peers ...foundation.Hash) {
+	if attempt == nil || attempt.sessionSetup == nil {
+		return
+	}
+	sessions, ok := m.sender.(sessionReporter)
+	if !ok {
+		return
+	}
+	for _, peer := range peers {
+		if !sessions.HasSession(peer) {
+			attempt.sessionSetup()
+			return
+		}
+	}
 }
 
 // HandleBuildContext processes a creator reply or an authenticated transit

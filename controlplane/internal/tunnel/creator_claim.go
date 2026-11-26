@@ -18,6 +18,9 @@ type creatorAttempt struct {
 	finished   bool
 	maintained bool
 	retire     Entry
+	// sessionSetup, when set, is called once the attempt must wait for a new
+	// transport session. It is set before the attempt starts.
+	sessionSetup func()
 }
 
 // reserveCreator reserves a logical target before source selection or preflight.
