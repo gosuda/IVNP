@@ -97,7 +97,10 @@ jobs:
 
   cross-platform:
     name: ${{ matrix.os }} / ${{ matrix.arch }}
-    runs-on: ${{ matrix.os }}
+    # GitHub-hosted macOS queue wait sets no wall today, but the Depot macOS
+    # runner removes it as a variable all the same. The matrix value — and
+    # so the check name — stays unchanged; Windows keeps windows-latest.
+    runs-on: ${{ matrix.os == 'macos-latest' && 'depot-macos-latest' || matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
