@@ -4,10 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+  schedule:
+    - cron: '11 4 * * 1'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -15,14 +22,24 @@ jobs:
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        id: go
         with:
           go-version: '1.27.3'
           cache: true
+      - name: Cache Go tool binaries
+        id: tools-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/go/bin/gojgp
+            ~/go/bin/checklocks
+          key: gotools-${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-gojgp-v1.2.0-checklocks-20261024223036-c3e0783a533c
       - name: Install gojgp
+        if: steps.tools-cache.outputs.cache-hit != 'true'
         run: |
           tmp=$(mktemp -d)
           trap 'rm -rf -- "$tmp"' EXIT
@@ -31,16 +48,16 @@ jobs:
           go get github.com/gosuda/JustGoodPractices/cmd/gojgp@v1.2.0 golang.org/x/tools@v0.51.0
           go install github.com/gosuda/JustGoodPractices/cmd/gojgp
       - name: Install checklocks
+        if: steps.tools-cache.outputs.cache-hit != 'true'
         run: go install gvisor.dev/gvisor/tools/checklocks/cmd/checklocks@v0.0.0-20261024223036-c3e0783a533c
-      - name: Run all tests
-        run: go test -count=1 ./...
       - name: Run go vet
         run: go vet ./...
       - name: Run checklocks
         run: go vet -vettool="$(go env GOPATH)/bin/checklocks" -inferred=false ./...
       - name: Run gojgp
         run: gojgp lint ./...
-
+      - name: Run all tests
+        run: go test -count=1 ./...
   dst:
     name: DST seed ${{ matrix.seed }}
     runs-on: depot-ubuntu-24.04
@@ -48,7 +65,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        seed: [1, 16, 42, 67, 1982, 1992, 2002, 2012, 2022, 2026]
+        seed: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '[1,16,42,67,1982,1992,2002,2012,2022,2026]' || '[42]') }}
     env:
       DST_SEED: ${{ matrix.seed }}
       # go test surfaces captured stderr only on failure, so per-node debug
@@ -65,10 +82,11 @@ jobs:
       # randomness and neutralizes sysmon P retakes).
       GOGC: 'off'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        id: go
         with:
           go-version: '1.27.3'
           cache: true
@@ -80,8 +98,8 @@ jobs:
         run: go test -count=1 -tags dst -overlay="$RUNNER_TEMP/dst_overlay.json" -run 'TestSim|TestDeterministic' .
       - name: Run simulation-tagged unit tests
         run: go test -count=1 -tags dst -overlay="$RUNNER_TEMP/dst_overlay.json" ./internal/simnet ./dataplane/internal/streaming/tunnel ./dataplane/internal/router ./controlplane/internal/router
-
   cross-platform:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: ${{ matrix.os }} / ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
@@ -93,18 +111,19 @@ jobs:
             arch: amd64
           - os: depot-macos-latest
             arch: arm64
-          - os: windows-latest
+          - os: depot-windows-2025
             arch: amd64
-          - os: windows-latest
+          - os: depot-windows-2025
             arch: arm64
     env:
       GOARCH: ${{ matrix.arch }}
       CGO_ENABLED: '0'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        id: go
         with:
           go-version: '1.27.3'
           cache: true

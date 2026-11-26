@@ -104,3 +104,11 @@ IVNP_EEPSITE_PROXY=http://127.0.0.1:4444 IVNP_SAM_ADDRESS=127.0.0.1:7656 \
   go test -tags=integration -run '^TestHTTPProxyCompletesI2PChallengeRoundTrip$' \
   -count=1 -timeout=12m ./tests/integration
 ```
+
+## CI frequency
+
+Pull requests and merge groups run the full Go tests, vet, checklocks, gojgp,
+and deterministic simulation with seed 42. The Monday run and manual
+dispatch also cover all ten simulation seeds and the platform build matrix.
+The live I2P and in-memory eepsite workflows run weekly or on demand.
+All jobs use Depot runners; macOS uses `depot-macos-latest`.
