@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -336,6 +337,7 @@ func (p *HTTPProxy) exchangeHTTP(w http.ResponseWriter, request *http.Request, o
 	removeHopByHopHeaders(request.Header)
 	request.Header.Del("Proxy-Authorization")
 	removeForwardingHeaders(request.Header)
+	scrubIdentifyingHeaders(request)
 	if outproxy {
 		request.Header.Set("User-Agent", outproxyHTTPUserAgent)
 	} else {
@@ -535,6 +537,51 @@ func removeForwardingHeaders(header http.Header) {
 	for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Server"} {
 		header.Del(name)
 	}
+}
+
+// scrubIdentifyingHeaders applies the Java I2P HTTP client tunnel defaults
+// (sendReferer and sendAccept off) to a request bound for an eepsite or an
+// outproxy. Accept-Language, Accept-Charset, and every other Accept-* header
+// except Accept-Encoding are dropped, because they reveal the user's locale.
+// A Referer survives only when it names the request's own scheme, host, and
+// port, and then only as its path and query, so a page on one site never
+// learns which site or eepsite linked to it.
+func scrubIdentifyingHeaders(request *http.Request) {
+	for name := range request.Header {
+		if strings.HasPrefix(name, "Accept-") && name != "Accept-Encoding" {
+			delete(request.Header, name)
+		}
+	}
+	referers := request.Header.Values("Referer")
+	request.Header.Del("Referer")
+	if len(referers) != 1 {
+		return
+	}
+	referer, err := url.Parse(strings.TrimSpace(referers[0]))
+	if err != nil || !referer.IsAbs() || referer.User != nil || !sameHTTPOrigin(referer, request.URL) {
+		return
+	}
+	relative := url.URL{Path: referer.Path, RawPath: referer.RawPath, RawQuery: referer.RawQuery}
+	if relative.Path == "" {
+		relative.Path = "/"
+	}
+	request.Header.Set("Referer", relative.RequestURI())
+}
+
+func sameHTTPOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		normalizeProxyHost(a.Hostname()) == normalizeProxyHost(b.Hostname()) &&
+		effectiveHTTPPort(a) == effectiveHTTPPort(b)
+}
+
+func effectiveHTTPPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	return "80"
 }
 
 func rejectHTTP(w http.ResponseWriter, request *http.Request, message string, status int) {

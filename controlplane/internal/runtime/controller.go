@@ -93,6 +93,10 @@ func loadTrustedCertFiles(paths []string) ([][]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open %q: %w", path, err)
 		}
+		if err := state.FilesystemStoreValidateNoSharedWrite(file); err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("%q is group- or world-writable: %w", path, err)
+		}
 		contents, readErr := state.FilesystemStoreReadBoundedFile(file, 64<<10)
 		_ = file.Close()
 		if readErr != nil {
@@ -875,8 +879,9 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		ntcp, err = dataplane.RouterNewNTCP2Manager(dataplane.RouterNTCP2ManagerConfig{
 			Peers: router.NewTransportPeerSource(database), StaticPrivate: bundle.NTCP2StaticPrivate, StaticIV: bundle.NTCP2StaticIV,
 			NetworkID: uint8(cfg.Network.ID), MaxSessions: cfg.NTCP2.MaxSessions, PanicReporter: reporter, Metrics: registry, Logger: logger,
-			IdleTimeout: cfg.NTCP2.IdleTimeout,
-			AdmitPeer:   options.PeerAdmission,
+			IdleTimeout:                cfg.NTCP2.IdleTimeout,
+			AdmitPeer:                  options.PeerAdmission,
+			RequirePublicPeerAddresses: requirePublicPeerAddresses(cfg.Network.Profile),
 		})
 		if err != nil {
 			return nil, err
@@ -886,8 +891,9 @@ func NewController(cfg state.ConfigurationOperating, options ControllerOptions) 
 		ssu, err = dataplane.RouterNewSSU2Manager(dataplane.RouterSSU2ManagerConfig{
 			Peers: router.NewTransportPeerSource(database), StaticPrivate: bundle.SSU2StaticPrivate, IntroKey: bundle.SSU2IntroKey,
 			NetworkID: uint8(cfg.Network.ID), IdleTimeout: cfg.SSU2.IdleTimeout, MaxSessions: cfg.SSU2.MaxSessions, PanicReporter: reporter, Metrics: registry, Logger: logger,
-			AdmitPeer:   options.PeerAdmission,
-			SignControl: func(message []byte) ([]byte, error) { return ed25519.Sign(bundle.Router.SigningPrivate, message), nil },
+			AdmitPeer:                  options.PeerAdmission,
+			RequirePublicPeerAddresses: requirePublicPeerAddresses(cfg.Network.Profile),
+			SignControl:                func(message []byte) ([]byte, error) { return ed25519.Sign(bundle.Router.SigningPrivate, message), nil },
 			PublishPeerTestResult: func(ctx context.Context, result dataplane.RouterPeerTestResult) {
 				if err := router.PublishPeerTestResult(ctx, localInfo, result); err != nil && ctx.Err() == nil {
 					logger.Warn("publish peer test result", "error", err)
@@ -2917,9 +2923,19 @@ func (s inboundLeaseSource) CurrentInboundLeases(now uint64) []foundation.Networ
 	return leases
 }
 
+// requirePublicPeerAddresses reports whether transports must refuse to dial
+// RouterInfo addresses outside global unicast space. Only the dedicated and
+// direct presets, which exist for LAN, VPC, and loopback meshes, relax it.
+func requirePublicPeerAddresses(profile state.ConfigurationNetworkProfile) bool {
+	return profile != state.ConfigurationNetworkProfileDedicated && profile != state.ConfigurationNetworkProfileDirect
+}
+
 // daemonReplySender is the single production reply route for NetDB control
 // messages. It sends direct replies synchronously and encapsulates tunneled
 // replies through a live outbound circuit; it never downgrades a tunnel route.
+// A direct reply goes out only over an already-established session: the
+// gateway hash comes from the requester, so dialing it would let any peer
+// force connections to routers of its choosing.
 type daemonReplySender struct {
 	sender  dataplane.TunnelSender
 	tunnels *dataplane.TunnelRuntime
@@ -2936,6 +2952,10 @@ func (s daemonReplySender) SendNetDBReply(ctx context.Context, gateway foundatio
 		ctx = context.Background()
 	}
 	if tunnelID == 0 {
+		sessions, ok := s.sender.(interface{ HasSession(foundation.Hash) bool })
+		if !ok || !sessions.HasSession(gateway) {
+			return fmt.Errorf("%w: direct NetDB reply to %s", dataplane.RouterErrSessionUnavailable, foundation.EncodeI2PBase64(gateway[:]))
+		}
 		return s.sender.Send(ctx, gateway, message)
 	}
 	if s.tunnels == nil || s.pool == nil {

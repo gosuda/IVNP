@@ -63,7 +63,8 @@ func NewHandler(registry *Registry, status StatusFunc, configs ...HandlerConfig)
 }
 
 // RequireBearer wraps an http.Handler with constant-time Bearer token authentication,
-// while whitelisting public probe endpoints (/healthz, /livez, /readyz, /varz).
+// while whitelisting the public probe endpoints (/healthz, /livez, /readyz).
+// /varz exposes the same counters as /metrics, so it requires the token.
 func RequireBearer(next http.Handler, token string) http.Handler {
 	expected := sha256.Sum256([]byte(token))
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -85,7 +86,7 @@ func RequireBearer(next http.Handler, token string) http.Handler {
 }
 
 func isPublicProbePath(path string) bool {
-	return path == HealthPath || path == LivePath || path == ReadyPath || path == VarzPath
+	return path == HealthPath || path == LivePath || path == ReadyPath
 }
 
 type handler struct {

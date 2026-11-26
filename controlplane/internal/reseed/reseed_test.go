@@ -569,37 +569,37 @@ func TestFetchIntoDedupesIPv4Subnet16(t *testing.T) {
 }
 
 func TestIngressGuardBucketSubnetQuota(t *testing.T) {
-	guard := newIngressGuard(2, 20)
+	guard := newIngressGuard(2, 20, 0)
 	subnetA := ingressSubnet{1, 10, 1}
 	subnetB := ingressSubnet{2, 0x20, 0x01, 0x0d, 0xb8, 0, 0}
-	if !guard.claim(0, []ingressSubnet{subnetA}) || !guard.claim(0, []ingressSubnet{subnetA}) {
+	if !guard.claim(0, 0, []ingressSubnet{subnetA}) || !guard.claim(0, 0, []ingressSubnet{subnetA}) {
 		t.Fatal("first two claims on the same subnet must pass (quota=2)")
 	}
-	if guard.claim(0, []ingressSubnet{subnetA}) {
+	if guard.claim(0, 0, []ingressSubnet{subnetA}) {
 		t.Fatal("third claim on the same subnet in the same bucket must fail")
 	}
-	if !guard.claim(1, []ingressSubnet{subnetA}) {
+	if !guard.claim(1, 0, []ingressSubnet{subnetA}) {
 		t.Fatal("same subnet in a different bucket has its own quota")
 	}
-	if !guard.claim(0, []ingressSubnet{subnetB}) || !guard.claim(0, []ingressSubnet{subnetB}) {
+	if !guard.claim(0, 0, []ingressSubnet{subnetB}) || !guard.claim(0, 0, []ingressSubnet{subnetB}) {
 		t.Fatal("IPv6 /48 claims follow the same quota")
 	}
-	if guard.claim(0, []ingressSubnet{subnetB}) {
+	if guard.claim(0, 0, []ingressSubnet{subnetB}) {
 		t.Fatal("third IPv6 /48 claim must fail")
 	}
 }
 
 func TestIngressGuardBucketCapacity(t *testing.T) {
-	guard := newIngressGuard(2, 3)
+	guard := newIngressGuard(2, 3, 0)
 	for i := 0; i < 3; i++ {
-		if !guard.claim(5, []ingressSubnet{{1, byte(i), 0}}) {
+		if !guard.claim(5, 0, []ingressSubnet{{1, byte(i), 0}}) {
 			t.Fatalf("claim %d under bucket capacity must pass", i)
 		}
 	}
-	if guard.claim(5, []ingressSubnet{{1, 9, 9}}) {
+	if guard.claim(5, 0, []ingressSubnet{{1, 9, 9}}) {
 		t.Fatal("bucket capacity reached: further claims must fail")
 	}
-	if !guard.claim(6, []ingressSubnet{{1, 9, 9}}) {
+	if !guard.claim(6, 0, []ingressSubnet{{1, 9, 9}}) {
 		t.Fatal("other buckets keep their own capacity")
 	}
 }
@@ -673,8 +673,8 @@ func TestFetchAnyPrioritizesHotseedWithHeadStart(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(requestOrder) != 1 || requestOrder[0] != "hotseed" {
-		t.Fatalf("requestOrder = %v, want only [hotseed] (fallback should not be queried when hotseed succeeds)", requestOrder)
+	if len(requestOrder) != 3 || requestOrder[0] != "hotseed" {
+		t.Fatalf("requestOrder = %v, want hotseed first, then the fallbacks for a second independent source", requestOrder)
 	}
 }
 
@@ -966,6 +966,229 @@ func TestFpsOrderBucketHonorsPickLimit(t *testing.T) {
 	for i := 2; i < len(out); i++ {
 		if seen[out[i].source] {
 			t.Fatalf("unordered tail contains a picked candidate: %v", out)
+		}
+	}
+}
+
+// forgedRouterInfo returns a copy of genuine with its Published field moved
+// forward. The router hash is unchanged and the signature no longer verifies.
+func forgedRouterInfo(t *testing.T, genuine []byte, delta uint64) foundation.NetworkDatabaseRouterInfo {
+	t.Helper()
+	info, err := foundation.NetworkDatabaseParseRouterInfo(genuine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published [8]byte
+	binary.BigEndian.PutUint64(published[:], info.Published)
+	index := bytes.Index(genuine[384:], published[:])
+	if index < 0 {
+		t.Fatal("published field not found")
+	}
+	forged := bytes.Clone(genuine)
+	binary.BigEndian.PutUint64(forged[384+index:], info.Published+delta)
+	out, err := foundation.NetworkDatabaseParseRouterInfo(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Hash() != info.Hash() {
+		t.Fatal("forged copy must keep the router hash")
+	}
+	if ok, _ := out.Verify(); ok {
+		t.Fatal("forged copy must not verify")
+	}
+	return out
+}
+
+func TestIngestForgedDuplicatesDoNotSuppressHonestRouter(t *testing.T) {
+	raw := testRouterInfoWithHost(t, "198.51.100.10")
+	genuine, err := foundation.NetworkDatabaseParseRouterInfo(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedA := forgedRouterInfo(t, raw, 10)
+	forgedB := forgedRouterInfo(t, raw, 20)
+	forgedC := forgedRouterInfo(t, raw, 30)
+	cases := map[string][]reseedCandidate{
+		"two forged copies from one source": {
+			{info: genuine, source: 1},
+			{info: forgedA, source: 0},
+			{info: forgedB, source: 0},
+		},
+		"honest copy arrives last": {
+			{info: forgedA, source: 0},
+			{info: forgedB, source: 0},
+			{info: genuine, source: 1},
+		},
+		"forged copies from several sources": {
+			{info: forgedA, source: 0},
+			{info: genuine, source: 1},
+			{info: forgedB, source: 2},
+			{info: forgedC, source: 3},
+		},
+	}
+	for name, candidates := range cases {
+		t.Run(name, func(t *testing.T) {
+			slots := make(map[foundation.Hash]*dedupSlot)
+			for _, candidate := range candidates {
+				addCandidate(slots, candidate)
+			}
+			database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+			result := (Client{NetworkID: 2}).ingestCandidates(slots, database, 1000)
+			if result.Admitted != 1 {
+				t.Fatalf("admitted = %d, want the honest RouterInfo", result.Admitted)
+			}
+			stored, ok := database.Routers().Get(genuine.Hash())
+			if !ok || stored.Info.Published != genuine.Published {
+				t.Fatalf("stored RouterInfo = %v/%v, want the honest copy", ok, stored.Info.Published)
+			}
+		})
+	}
+}
+
+func TestFetchIntoRejectsDuplicateRouterHashes(t *testing.T) {
+	raw := testRouterInfoWithHost(t, "198.51.100.10")
+	forged := forgedRouterInfo(t, raw, 10)
+	archive := zipMultiArchiveBytes(t, [][]byte{raw, forged.Bytes()})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	client := Client{NetworkID: 2, HTTPClient: srv.Client(), AllowHTTP: true, allowUnsignedZIP: true}
+	count, err := client.FetchInto(context.Background(), srv.URL+"/i2pseeds.su3?netid=2", database, 1000)
+	if !errors.Is(err, ErrDuplicateRouterInfo) || count != 0 || database.Routers().Len() != 0 {
+		t.Fatalf("FetchInto() = %d, %v (routers %d), want ErrDuplicateRouterInfo and no admissions", count, err, database.Routers().Len())
+	}
+}
+
+func TestIngestHostlessRouterInfosShareSubnetQuota(t *testing.T) {
+	slots := make(map[foundation.Hash]*dedupSlot)
+	for range 6 {
+		info, err := foundation.NetworkDatabaseParseRouterInfo(testRouterInfoInBucket(t, "", 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		addCandidate(slots, reseedCandidate{info: info})
+	}
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	result := (Client{NetworkID: 2, BucketSubnetQuota: 1}).ingestCandidates(slots, database, 1000)
+	if result.Admitted != 1 {
+		t.Fatalf("admitted = %d hostless RouterInfos, want 1 under a shared quota of 1", result.Admitted)
+	}
+}
+
+func TestIngressSubnetsOfHostlessAndHostnameShareKey(t *testing.T) {
+	for _, host := range []string{"", "reseed.example"} {
+		info, err := foundation.NetworkDatabaseParseRouterInfo(testRouterInfoWithHost(t, host))
+		if err != nil {
+			t.Fatal(err)
+		}
+		subnets := ingressSubnetsOf(info)
+		if len(subnets) != 1 || subnets[0] != hostlessIngressSubnet {
+			t.Fatalf("host %q subnets = %v, want the shared hostless key", host, subnets)
+		}
+	}
+}
+
+func TestIngestCapsPerSourceShareOfBucket(t *testing.T) {
+	slots := make(map[foundation.Hash]*dedupSlot)
+	var flooded, honest []foundation.Hash
+	for i := range 20 {
+		info, err := foundation.NetworkDatabaseParseRouterInfo(testRouterInfoInBucket(t, fmt.Sprintf("10.%d.0.1", i), 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		addCandidate(slots, reseedCandidate{info: info, source: 0})
+		flooded = append(flooded, info.Hash())
+	}
+	for i := range 5 {
+		info, err := foundation.NetworkDatabaseParseRouterInfo(testRouterInfoInBucket(t, fmt.Sprintf("172.%d.0.1", i), 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		addCandidate(slots, reseedCandidate{info: info, source: 1})
+		honest = append(honest, info.Hash())
+	}
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	result := (Client{NetworkID: 2, BucketAdmitLimit: 20}).ingestCandidates(slots, database, 1000)
+	count := func(hashes []foundation.Hash) int {
+		n := 0
+		for _, hash := range hashes {
+			if _, ok := database.Routers().Get(hash); ok {
+				n++
+			}
+		}
+		return n
+	}
+	if got := count(flooded); got != 10 {
+		t.Fatalf("flooding source admitted %d of bucket limit 20, want its 10-entry share", got)
+	}
+	if got := count(honest); got != 5 {
+		t.Fatalf("second source admitted %d, want all 5", got)
+	}
+	if result.Admitted != 15 {
+		t.Fatalf("admitted = %d, want 15", result.Admitted)
+	}
+}
+
+func TestIngestSingleSourceKeepsFullBucket(t *testing.T) {
+	slots := make(map[foundation.Hash]*dedupSlot)
+	for i := range 6 {
+		info, err := foundation.NetworkDatabaseParseRouterInfo(testRouterInfoInBucket(t, fmt.Sprintf("10.%d.0.1", i), 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		addCandidate(slots, reseedCandidate{info: info, source: 3})
+	}
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	result := (Client{NetworkID: 2, BucketAdmitLimit: 6}).ingestCandidates(slots, database, 1000)
+	if result.Admitted != 6 {
+		t.Fatalf("admitted = %d, want 6 when only one source answered", result.Admitted)
+	}
+}
+
+func TestFetchAnyWaitsForSecondSource(t *testing.T) {
+	var hashes []foundation.Hash
+	archive := func(hosts ...string) []byte {
+		var payloads [][]byte
+		for _, host := range hosts {
+			raw := testRouterInfoWithHost(t, host)
+			info, err := foundation.NetworkDatabaseParseRouterInfo(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hashes = append(hashes, info.Hash())
+			payloads = append(payloads, raw)
+		}
+		return zipMultiArchiveBytes(t, payloads)
+	}
+	first := archive("10.1.0.1", "10.2.0.1")
+	second := archive("10.3.0.1", "10.4.0.1")
+	newServer := func(body []byte) *httptest.Server {
+		return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write(body)
+		}))
+	}
+	firstSrv := newServer(first)
+	defer firstSrv.Close()
+	secondSrv := newServer(second)
+	defer secondSrv.Close()
+
+	database := controlplanenetdb.NewDatabase(foundation.Hash{}, controlplanenetdb.DefaultBucketCapacity)
+	client := Client{
+		NetworkID:         2,
+		HTTPClient:        firstSrv.Client(),
+		allowUnsignedZIP:  true,
+		TargetRouterInfos: 2,
+	}
+	result, err := client.FetchAny(context.Background(), []string{firstSrv.URL + "?netid=2", secondSrv.URL + "?netid=2"}, database, 1000)
+	if err != nil {
+		t.Fatalf("FetchAny() error = %v", err)
+	}
+	for _, hash := range hashes {
+		if _, ok := database.Routers().Get(hash); !ok {
+			t.Fatalf("admitted = %d, router %x missing; want both sources merged before ingest", result.Admitted, hash[:4])
 		}
 	}
 }

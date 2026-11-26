@@ -52,7 +52,7 @@ func TestStableRouterSSU2Interop(t *testing.T) {
 	if actualHash != expectedHash {
 		t.Fatalf("stable SSU2 RouterInfo hash = %s, want %s", foundation.EncodeI2PBase64(actualHash[:]), stableSSU2RouterHash)
 	}
-	address, err := selectSSU2AddressForNetwork(peer, false)
+	address, err := selectSSU2AddressForNetwork(peer, false, dialAnyAddress)
 	if err != nil {
 		t.Fatalf("select stable router SSU2 address: %v", err)
 	}

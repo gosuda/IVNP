@@ -183,6 +183,8 @@ func TestFullProtocolQueueRetiresConnectionAndWire(t *testing.T) {
 	}
 }
 
+var errTestTransientTransportStall = errors.New("transient transport stall")
+
 func TestTransientACKDeliveryFailureDoesNotCloseConnection(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fabric := &streamFabric{networks: make(map[foundation.Hash]*TunnelNetwork)}
@@ -207,7 +209,7 @@ func TestTransientACKDeliveryFailureDoesNotCloseConnection(t *testing.T) {
 			if !failedOnce {
 				failedOnce = true
 				close(ackFailed)
-				return errors.New("transient transport stall")
+				return errTestTransientTransportStall
 			}
 			return fabric.SendTunnel(ctx, delivery)
 		})

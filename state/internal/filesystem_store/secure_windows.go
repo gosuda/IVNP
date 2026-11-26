@@ -170,6 +170,11 @@ func ValidateOwnedFile(file *os.File) error {
 	return err
 }
 
+// ValidateNoSharedWrite accepts every file on Windows, where Unix mode bits do not describe write access.
+func ValidateNoSharedWrite(*os.File) error {
+	return nil
+}
+
 // ValidatePrivateFile requires a DACL granting access only to the owner, SYSTEM or administrators.
 func ValidatePrivateFile(file *os.File) error {
 	if err := ValidateOwnedFile(file); err != nil {

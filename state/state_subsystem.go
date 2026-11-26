@@ -48,6 +48,7 @@ var (
 	ConfigurationParseOperating             = configuration.ParseOperating
 	FilesystemStoreOpenRegular              = filesystemstore.OpenRegular
 	FilesystemStoreReadBoundedFile          = filesystemstore.ReadBoundedFile
+	FilesystemStoreValidateNoSharedWrite    = filesystemstore.ValidateNoSharedWrite
 	FilesystemStoreWriteAtomic              = filesystemstore.WriteAtomic
 	SecureStateErrStateLocked               = securestore.ErrStateLocked
 	SecureStateNewStore                     = securestore.NewStore

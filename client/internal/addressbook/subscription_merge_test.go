@@ -1,12 +1,16 @@
 package addressbook
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,8 +18,8 @@ import (
 
 func TestMultiSubscription304PreservesPerSourceSnapshot(t *testing.T) {
 	firstDestination := newDestinationString(t)
-	secondV1 := newDestinationString(t)
-	secondV2 := newDestinationString(t)
+	secondDestination := newDestinationString(t)
+	addedDestination := newDestinationString(t)
 	var phase atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
@@ -29,11 +33,11 @@ func TestMultiSubscription304PreservesPerSourceSnapshot(t *testing.T) {
 		case "/second":
 			if phase.Load() == 0 {
 				writer.Header().Set("ETag", "second-v1")
-				_, _ = fmt.Fprintf(writer, "second.i2p=%s\n", secondV1)
+				_, _ = fmt.Fprintf(writer, "second.i2p=%s\n", secondDestination)
 				return
 			}
 			writer.Header().Set("ETag", "second-v2")
-			_, _ = fmt.Fprintf(writer, "second.i2p=%s\n", secondV2)
+			_, _ = fmt.Fprintf(writer, "second.i2p=%s\nadded.i2p=%s\n", secondDestination, addedDestination)
 		default:
 			http.NotFound(writer, request)
 		}
@@ -56,7 +60,7 @@ func TestMultiSubscription304PreservesPerSourceSnapshot(t *testing.T) {
 	if got, lookupErr := service.ResolveDestination(context.Background(), "first.i2p"); lookupErr != nil || got != firstDestination {
 		t.Fatalf("304 source = %q, %v", got, lookupErr)
 	}
-	if got, lookupErr := service.ResolveDestination(context.Background(), "second.i2p"); lookupErr != nil || got != secondV2 {
+	if got, lookupErr := service.ResolveDestination(context.Background(), "added.i2p"); lookupErr != nil || got != addedDestination {
 		t.Fatalf("updated source = %q, %v", got, lookupErr)
 	}
 }
@@ -73,7 +77,7 @@ func TestPersistedSourcesAreFilteredToCurrentHTTPSSubscriptions(t *testing.T) {
 		removed: {"stale.i2p": staleDestination},
 	}
 	entries := map[string]string{"current.i2p": currentDestination, "stale.i2p": staleDestination}
-	if err := saveState(statePath, entries, sources, map[string]string{current: "current-tag", removed: "stale-tag"}, map[string]string{removed: "yesterday"}, 1<<20); err != nil {
+	if err := saveState(statePath, persistedState{Entries: entries, Sources: sources, ETag: map[string]string{current: "current-tag", removed: "stale-tag"}, Modified: map[string]string{removed: "yesterday"}}, 1<<20); err != nil {
 		t.Fatal(err)
 	}
 	service, err := NewService(Config{StatePath: statePath, Subscriptions: []string{current}, MaxEntries: 100, MaxFileBytes: 1 << 20})
@@ -114,14 +118,11 @@ func TestPersistedNonHTTPSSourceIsNeverAuthoritative(t *testing.T) {
 	destination := newDestinationString(t)
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	insecure := "http://removed.example/hosts.txt"
-	if err := saveState(
-		statePath,
-		map[string]string{"stale.i2p": destination},
-		map[string]map[string]string{insecure: {"stale.i2p": destination}},
-		map[string]string{insecure: "stale-tag"},
-		nil,
-		1<<20,
-	); err != nil {
+	if err := saveState(statePath, persistedState{
+		Entries: map[string]string{"stale.i2p": destination},
+		Sources: map[string]map[string]string{insecure: {"stale.i2p": destination}},
+		ETag:    map[string]string{insecure: "stale-tag"},
+	}, 1<<20); err != nil {
 		t.Fatal(err)
 	}
 	service, err := NewService(Config{
@@ -138,5 +139,70 @@ func TestPersistedNonHTTPSSourceIsNeverAuthoritative(t *testing.T) {
 	}
 	if len(service.sources) != 0 || len(service.remote) != 0 || len(service.etag) != 0 {
 		t.Fatalf("insecure persisted state loaded: sources=%#v remote=%#v etag=%#v", service.sources, service.remote, service.etag)
+	}
+}
+
+func TestSubscriptionKeepsFirstSeenBinding(t *testing.T) {
+	legit, attacker, added := newDestinationString(t), newDestinationString(t), newDestinationString(t)
+	feed := "https://feed.example/hosts.txt"
+	var body atomic.Pointer[string]
+	serve := func(value string) { body.Store(&value) }
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(*body.Load())), Request: request}, nil
+	})}
+	var logs bytes.Buffer
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	config := Config{
+		StatePath: statePath, Subscriptions: []string{feed}, HTTPClient: client, Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+		RequestTimeout: time.Second, MaxEntries: 100, MaxFileBytes: 1 << 20, MaxResponseBytes: 1 << 20,
+	}
+	service, err := NewService(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolve := func(service *Service, name, want, step string) {
+		t.Helper()
+		if got, lookupErr := service.ResolveDestination(context.Background(), name); lookupErr != nil || got != want {
+			t.Fatalf("%s: %s resolved to the wrong destination (err %v)", step, name, lookupErr)
+		}
+	}
+	refresh := func(step string) {
+		t.Helper()
+		if refreshErr := service.refresh(context.Background()); refreshErr != nil {
+			t.Fatalf("%s: refresh: %v", step, refreshErr)
+		}
+	}
+
+	serve("bank.i2p=" + legit + "\n")
+	refresh("first fetch")
+	resolve(service, "bank.i2p", legit, "first fetch")
+
+	serve("bank.i2p=" + attacker + "\nadded.i2p=" + added + "\n")
+	refresh("re-pointed fetch")
+	resolve(service, "bank.i2p", legit, "re-pointed fetch")
+	resolve(service, "added.i2p", added, "re-pointed fetch")
+	if report := logs.String(); !strings.Contains(report, "conflicts=1") || !strings.Contains(report, "bank.i2p") {
+		t.Fatalf("re-pointed fetch: conflict not logged: %q", report)
+	}
+
+	serve("added.i2p=" + added + "\n")
+	refresh("omitted fetch")
+	serve("bank.i2p=" + attacker + "\n")
+	refresh("re-added fetch")
+	resolve(service, "bank.i2p", legit, "re-added fetch")
+
+	restarted, err := NewService(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolve(restarted, "bank.i2p", legit, "restart")
+
+	config.Subscriptions = []string{"https://other.example/hosts.txt"}
+	unsubscribed, err := NewService(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, lookupErr := unsubscribed.ResolveDestination(context.Background(), "bank.i2p"); !errors.Is(lookupErr, ErrNotFound) {
+		t.Fatalf("binding outlived its subscription: %v", lookupErr)
 	}
 }

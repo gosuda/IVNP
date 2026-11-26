@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -357,6 +358,41 @@ func TestSSU2RelayRouterInfoStoreCacheReusesAndRefreshesLocalSnapshot(t *testing
 	}
 	if bytes.Equal(manager.routerInfoStores[local.Hash()].raw, info.Bytes()) {
 		t.Fatal("RouterInfo cache was not refreshed after local publication")
+	}
+}
+
+// +checklocksignore
+func TestSSU2RelayRouterInfoStoreCacheIsBounded(t *testing.T) {
+	local, _, _ := newSSU2TestLocal(t, "127.0.0.1:23456")
+	now := time.UnixMilli(1_700_000_000_000)
+	manager, _ := newSSU2ConfiguredManager(t, nil)
+	limit := manager.maxSessions
+	if limit <= 0 {
+		t.Fatalf("maxSessions = %d", limit)
+	}
+	for index := range limit {
+		var hash foundation.Hash
+		binary.BigEndian.PutUint32(hash[:4], uint32(index)+1)
+		manager.routerInfoStores[hash] = ssu2RouterInfoStoreSnapshot{
+			raw:        []byte{1},
+			compressed: []byte{1},
+			hash:       hash,
+		}
+	}
+	if _, err := manager.cachedSSU2RouterInfoStore(local.Snapshot(), now); err != nil {
+		t.Fatalf("prepare RouterInfo store: %v", err)
+	}
+	if got := len(manager.routerInfoStores); got > limit {
+		t.Fatalf("RouterInfo store cache holds %d entries, limit %d", got, limit)
+	}
+	if _, ok := manager.routerInfoStores[local.Hash()]; !ok {
+		t.Fatal("RouterInfo store cache dropped the entry it just prepared")
+	}
+	if _, err := manager.cachedSSU2RouterInfoStore(local.Snapshot(), now.Add(time.Second)); err != nil {
+		t.Fatalf("reuse RouterInfo store: %v", err)
+	}
+	if got := len(manager.routerInfoStores); got > limit {
+		t.Fatalf("RouterInfo store cache holds %d entries after reuse, limit %d", got, limit)
 	}
 }
 
@@ -908,7 +944,18 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("establish Bob-Charlie session: %v", err)
 		}
-		const relayTag = 0x10203040
+		// Charlie only accepts RelayIntro from an introducer whose relay tag
+		// it requested, so take the tag through the RelayTagRequest exchange.
+		if err = charlieManager.RequestRelayTag(ctx, bob.Hash()); err != nil {
+			t.Fatalf("request Charlie relay tag from Bob: %v", err)
+		}
+		net_.Advance(20 * time.Millisecond)
+		charlieManager.mu.RLock()
+		relayLease, granted := charlieManager.advertisedRelays[bob.Hash()]
+		charlieManager.mu.RUnlock()
+		if !granted {
+			t.Fatal("Bob did not grant Charlie a relay tag")
+		}
 		bobHash := bob.Hash()
 		net_.Advance(20 * time.Millisecond)
 		if err = alice.ReplaceAddresses([]transportTestAddress{{
@@ -936,7 +983,7 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 			Options: []transportTestOption{
 				{Key: "i", Value: foundation.EncodeI2PBase64(charlieIntro)},
 				{Key: "ih0", Value: foundation.EncodeI2PBase64(bobHash[:])},
-				{Key: "itag0", Value: "270544960"},
+				{Key: "itag0", Value: strconv.FormatUint(uint64(relayLease.tag), 10)},
 				{Key: "s", Value: foundation.EncodeI2PBase64(testECDHPublic(t, charlieStatic))},
 				{Key: "v", Value: "2"},
 			},
@@ -954,9 +1001,6 @@ func TestSSU2ManagerRelaysIntroductionAndHolePunch(t *testing.T) {
 			t.Fatal("firewalled Charlie RouterInfo was not admitted")
 		} else if _, err = selectSSU2Address(ref.Info); err == nil {
 			t.Fatal("firewalled Charlie RouterInfo retained a direct endpoint")
-		}
-		if err = bobManager.RegisterIntroducer(relayTag, charlie.Hash()); err != nil {
-			t.Fatal(err)
 		}
 		message := foundation.I2NPMessage{
 			Header:  foundation.I2NPHeader{Type: foundation.I2NPData, ID: 71, Expiration: uint64(time.Now().Add(time.Minute).UnixMilli())},
@@ -1391,7 +1435,7 @@ func TestSSU2OutboundInitiatorCannotBeSupersededOrReleasedDuringParse(t *testing
 	})
 }
 
-func TestSSU2SessionRequestSupersedesStaleSessionOnNewSourceID(t *testing.T) {
+func TestSSU2SessionRequestKeepsStaleSessionUntilSessionConfirmed(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		net_ := newSSU2SimNetwork(t)
 		aliceConn := newSSU2SimConn(t, net_, "alice")
@@ -1430,6 +1474,9 @@ func TestSSU2SessionRequestSupersedesStaleSessionOnNewSourceID(t *testing.T) {
 
 		// A superseded session still occupies its connection-ID slot while it
 		// drains; a cached NewToken lets a new initiator reuse that destination.
+		// SessionRequest is unauthenticated, so the occupant must survive it;
+		// only an authenticated SessionConfirmed from the same peer reclaims
+		// the slot (TestSSU2SessionConfirmedFromSamePeerSupersedesConnectionID).
 		stale := &ssu2TransportSession{
 			peer: alice.Hash(), sendID: 200, receiveID: 100,
 			remote:    aliceConn.LocalAddr(),
@@ -1479,8 +1526,11 @@ func TestSSU2SessionRequestSupersedesStaleSessionOnNewSourceID(t *testing.T) {
 			t.Fatalf("parse SessionCreated: %v", err)
 		}
 
-		if bobManager.HasSession(alice.Hash()) {
-			t.Fatal("stale session kept its peer slot before SessionConfirmed")
+		bobManager.mu.RLock()
+		byPeer, byID := bobManager.sessionsByPeer[alice.Hash()], bobManager.sessionsByID[stale.receiveID]
+		bobManager.mu.RUnlock()
+		if byPeer != stale || byID != stale {
+			t.Fatal("SessionRequest evicted the established session before SessionConfirmed")
 		}
 	})
 }

@@ -28,6 +28,7 @@ var (
 	ErrRatchet                = dataplanegarlicecies.ErrRatchet
 	ErrRatchetClosed          = dataplanegarlicecies.ErrRatchetClosed
 	ErrRatchetReplay          = dataplanegarlicecies.ErrRatchetReplay
+	ErrRatchetReplayFull      = dataplanegarlicecies.ErrRatchetReplayFull
 	ErrRatchetExpired         = dataplanegarlicecies.ErrRatchetExpired
 	ErrRatchetNoSession       = dataplanegarlicecies.ErrRatchetNoSession
 	RatchetEncryptBufferSizes = dataplanegarlicecies.RatchetEncryptBufferSizes
@@ -112,6 +113,10 @@ func NewRatchetManager(local *foundation.LocalDestination, config RatchetConfig)
 	if maxSessions <= 0 {
 		maxSessions = 256
 	}
+	maxReplays := config.MaxReplays
+	if maxReplays <= 0 {
+		maxReplays = 16384
+	}
 	lookahead := config.TagLookahead
 	if lookahead <= 0 {
 		lookahead = dataplanegarlicecies.DefaultTagLookahead
@@ -151,6 +156,13 @@ func NewRatchetManager(local *foundation.LocalDestination, config RatchetConfig)
 		if index < maxTags%shardCount {
 			config.MaxInboundTags++
 		}
+		// New Sessions route by decoded ephemeral key, so each shard holds an
+		// even share of the replay cache, and at least one reservation.
+		config.MaxReplays = maxReplays / shardCount
+		if index < maxReplays%shardCount {
+			config.MaxReplays++
+		}
+		config.MaxReplays = max(1, config.MaxReplays)
 		observer := ratchetTagObserver{manager: manager, shard: index}
 		shard, err := dataplanegarlicecies.NewRatchetManagerWithTagObserver(local, config, observer)
 		if err != nil {
@@ -215,8 +227,12 @@ func (m *RatchetManager) packetShard(packet []byte) (int, *dataplanegarlicecies.
 			return owner, m.shards[owner]
 		}
 	}
+	// Unindexed packets are New Sessions or noise. Every encoding of one New
+	// Session ephemeral key reaches the same shard and its replay cache.
 	index := uint64(0)
-	if len(packet) >= 8 {
+	if key, ok := dataplanegarlicecies.NewSessionKey(packet); ok {
+		index = binary.LittleEndian.Uint64(key[:8])
+	} else if len(packet) >= 8 {
 		index = binary.LittleEndian.Uint64(packet[:8])
 	}
 	shardIndex := int(index % uint64(len(m.shards)))

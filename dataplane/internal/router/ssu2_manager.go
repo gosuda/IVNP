@@ -46,15 +46,20 @@ const (
 	// utilized before its most recently grown chunk is released. This is a
 	// plain idle watermark, not a forecast: it only ever undoes the most
 	// recent doubling step, and only once every slot in that chunk is free.
-	ssu2SentSlotIdleShrinkTicks  = 30
-	ssu2MaximumSendWindow        = 1024 * 1024
-	ssu2InitialSlowStart         = ssu2MaximumSendWindow / 2
-	ssu2MinimumNetworkMTU        = 1280
-	ssu2MaximumNetworkMTU        = 1500
-	ssu2MTUStep                  = 64
-	ssu2DefaultIdleTimeout       = 10 * time.Minute
-	ssu2MaxFragmentedMessages    = 64
-	ssu2FragmentLifetime         = 30 * time.Second
+	ssu2SentSlotIdleShrinkTicks = 30
+	ssu2MaximumSendWindow       = 1024 * 1024
+	ssu2InitialSlowStart        = ssu2MaximumSendWindow / 2
+	ssu2MinimumNetworkMTU       = 1280
+	ssu2MaximumNetworkMTU       = 1500
+	ssu2MTUStep                 = 64
+	ssu2DefaultIdleTimeout      = 10 * time.Minute
+	ssu2MaxFragmentedMessages   = 64
+	ssu2FragmentLifetime        = 30 * time.Second
+	// ssu2MaxFragmentBytesPerSession bounds the bytes one session may hold in
+	// incomplete reassembly: four maximum-size I2NP messages.
+	ssu2MaxFragmentBytesPerSession = 4 * foundation.I2NPI2PDMaxPayload
+	// ssu2MaxFragmentBytes bounds incomplete reassembly across all sessions.
+	ssu2MaxFragmentBytes         = 16 << 20
 	ssu2MinimumIPv4PacketSize    = ssu2MinimumNetworkMTU - 20 - 8
 	ssu2MinimumIPv6PacketSize    = ssu2MinimumNetworkMTU - 40 - 8
 	ssu2EstablishRetransmitDelay = 1250 * time.Millisecond
@@ -68,6 +73,13 @@ const (
 	// IPv4 address or IPv6 /64. One honest router needs one; the headroom
 	// allows a few routers behind a shared NAT address.
 	ssu2MaxInboundPendingPerSource = 4
+	// ssu2MaxRetriesPerSource caps the Retry packets sent to one IPv4 address
+	// or IPv6 /64 per ssu2RetryWindow. One handshake needs one Retry, so the
+	// cap leaves room for retransmits and several routers behind one NAT.
+	ssu2MaxRetriesPerSource = 16
+	ssu2RetryWindow         = time.Second
+	// ssu2RetryLimiterSlots is the fixed number of per-source Retry counters.
+	ssu2RetryLimiterSlots = 1024
 
 	ssu2ReceiveBatchCount = 4
 	ssu2ReceiveBatchSize  = 32
@@ -159,6 +171,9 @@ type SSU2ManagerConfig struct {
 	// AdmitPeer gates transport sessions after the peer RouterInfo is verified
 	// and netId-matched. A non-nil result denies session installation.
 	AdmitPeer PeerAdmissionFunc
+	// RequirePublicPeerAddresses refuses to send handshakes to RouterInfo or
+	// relay-introduced endpoints that are not globally routable unicast.
+	RequirePublicPeerAddresses bool
 }
 
 type ssu2BatchConnection interface {
@@ -233,6 +248,8 @@ type SSU2Manager struct {
 	metrics       *observability.Registry
 	logger        *slog.Logger
 	kernelDrops   atomic.Uint64
+	// fragmentBytes is the reassembly memory held by all sessions.
+	fragmentBytes atomic.Int64
 
 	sessionsByPeer map[foundation.Hash]*ssu2TransportSession
 	sessionsByID   map[uint64]*ssu2TransportSession
@@ -242,6 +259,10 @@ type SSU2Manager struct {
 	outboundAddr map[netip.AddrPort]*ssu2OutboundPending
 	// +checklocks:mu
 	inbound map[uint64]*ssu2InboundPending
+	// retryLimits bounds Retry packets per source; see allowRetryLocked.
+	//
+	// +checklocks:mu
+	retryLimits ssu2RetryLimiter
 	// +checklocks:mu
 	inboundSequence  uint64
 	introducers      map[uint32]foundation.Hash
@@ -266,12 +287,15 @@ type SSU2Manager struct {
 	relayForwards map[uint32]ssu2RelayForward
 	// +checklocks:mu
 	deferredRelayIntros map[uint32]ssu2DeferredRelayIntro
-	relayStoreJobs      chan ssu2RelayStoreJob
-	routerInfoStoresMu  sync.RWMutex
+	// +checklocks:mu
+	relayIntros        map[uint32]ssu2RelayIntroClaim
+	relayStoreJobs     chan ssu2RelayStoreJob
+	routerInfoStoresMu sync.RWMutex
 	// +checklocks:routerInfoStoresMu
 	routerInfoStores map[foundation.Hash]ssu2RouterInfoStoreSnapshot
 	reporter         ingress.Reporter
 	admitPeer        PeerAdmissionFunc
+	addressPolicy    dialAddressPolicy
 }
 
 // IOStats is the single atomic source for SSU2 socket accounting.
@@ -476,6 +500,10 @@ type ssu2TransportSession struct {
 	ackPayload [3 + 5 + 2*dataplanessu2.MaxACKRanges]byte
 	// +checklocks:fragmentMu
 	fragments map[uint32]*ssu2FragmentAssembly
+	// +checklocks:fragmentMu
+	fragmentBytes int
+	// fragmentPool is the manager-wide reassembly budget; nil disables it.
+	fragmentPool *atomic.Int64
 
 	lastActivityNano atomic.Int64
 	pathMu           sync.Mutex
@@ -551,6 +579,7 @@ func (s *ssu2TransportSession) ReleaseSensitive() {
 			clear(fragment.following)
 		}
 		clear(s.fragments)
+		s.releaseFragmentBytesLocked(s.fragmentBytes)
 		s.fragmentMu.Unlock()
 		s.pathMu.Lock()
 		if s.candidate != nil {
@@ -752,7 +781,7 @@ type ssu2FragmentAssembly struct {
 	following map[uint8][]byte
 	last      uint8
 	size      int
-	updated   time.Time
+	created   time.Time
 }
 type ssu2OutboundPending struct {
 	peer          foundation.Hash
@@ -840,6 +869,8 @@ type ssu2RelayRequest struct {
 type ssu2RelayForward struct {
 	alice   *ssu2TransportSession
 	charlie *ssu2TransportSession
+	// source is Alice's ssu2InboundSourceKey when the request arrived.
+	source  netip.Prefix
 	expires time.Time
 }
 
@@ -884,6 +915,14 @@ type ssu2PeerTestEvidence struct {
 	observed netip.AddrPort
 	count    uint8
 }
+
+// ssu2RelayIntroClaim records a RelayIntro nonce this router acted on as
+// Charlie, for replay suppression and the per-introducer rate limit.
+type ssu2RelayIntroClaim struct {
+	bob  foundation.Hash
+	seen time.Time
+}
+
 type ssu2DeferredRelayIntro struct {
 	bob     *ssu2TransportSession
 	intro   dataplanessu2.RelayIntro
@@ -904,11 +943,13 @@ type ssu2RelayStoreJob struct {
 }
 
 // ssu2RouterInfoStoreSnapshot holds immutable RouterInfo-store bytes shared
-// through SSU2Manager.routerInfoStores.
+// through SSU2Manager.routerInfoStores. stored orders eviction once the cache
+// reaches the session limit.
 type ssu2RouterInfoStoreSnapshot struct {
 	raw        []byte
 	compressed []byte
 	hash       foundation.Hash
+	stored     time.Time
 }
 
 type ssu2PeerAddress struct {
@@ -969,6 +1010,7 @@ func NewSSU2Manager(config SSU2ManagerConfig) (*SSU2Manager, error) {
 		onPeerTest:            config.OnPeerTest,
 		reporter:              config.PanicReporter,
 		admitPeer:             config.AdmitPeer,
+		addressPolicy:         dialAddressPolicyFor(config.RequirePublicPeerAddresses),
 		metrics:               config.Metrics,
 		logger:                config.Logger,
 		done:                  make(chan struct{}),
@@ -988,6 +1030,7 @@ func NewSSU2Manager(config SSU2ManagerConfig) (*SSU2Manager, error) {
 		relayRequests:         make(map[uint32]*ssu2RelayRequest),
 		relayForwards:         make(map[uint32]ssu2RelayForward),
 		deferredRelayIntros:   make(map[uint32]ssu2DeferredRelayIntro),
+		relayIntros:           make(map[uint32]ssu2RelayIntroClaim),
 		routerInfoStores:      make(map[foundation.Hash]ssu2RouterInfoStoreSnapshot),
 	}, nil
 }
@@ -1132,6 +1175,7 @@ func (m *SSU2Manager) Close() error {
 		}
 		clear(m.relayForwards)
 		clear(m.deferredRelayIntros)
+		clear(m.relayIntros)
 		clear(m.introducers)
 		clear(m.relayGrants)
 		clear(m.advertisedRelays)
@@ -2024,7 +2068,7 @@ func (m *SSU2Manager) newOutboundLocked(peer foundation.Hash, address ssu2PeerAd
 
 // +checklocks:m.mu
 func (m *SSU2Manager) newIntroducedOutboundLocked(peer foundation.Hash, address ssu2PeerAddress, endpoint netip.AddrPort, destinationID, sourceID uint64) (*ssu2OutboundPending, error) {
-	if !validSSU2Endpoint(endpoint) {
+	if !validSSU2Endpoint(endpoint) || !m.addressPolicy.allows(endpoint.Addr()) {
 		return nil, ErrSSU2Introduction
 	}
 	remote := &net.UDPAddr{IP: endpoint.Addr().AsSlice(), Port: int(endpoint.Port())}
@@ -2417,7 +2461,9 @@ func (m *SSU2Manager) handlePacket(packet []byte, remote netip.AddrPort) {
 		pending := m.inbound[destinationID]
 		session := m.sessionsByID[destinationID]
 		m.mu.RUnlock()
-		if pending != nil {
+		// A pending handshake on an established session's connection ID only
+		// receives packets from its own endpoint; the session keeps the rest.
+		if pending != nil && (session == nil || sameUDPAddress(pending.remote, ssu2PacketAddr{value: remote})) {
 			m.handleInboundPacket(packet, pending, destinationID, remote)
 			return
 		}
@@ -3087,7 +3133,7 @@ func (m *SSU2Manager) sendSessionConfirmed(pending *ssu2OutboundPending) {
 		m.markOutboundFailed(pending, err)
 		return
 	}
-	session := &ssu2TransportSession{peer: pending.peer, sendID: pending.destinationID, receiveID: pending.sourceID, remote: pending.remote, send: send, receive: receive, nextPacket: 1, fragments: make(map[uint32]*ssu2FragmentAssembly)}
+	session := &ssu2TransportSession{peer: pending.peer, sendID: pending.destinationID, receiveID: pending.sourceID, remote: pending.remote, send: send, receive: receive, nextPacket: 1, fragments: make(map[uint32]*ssu2FragmentAssembly), fragmentPool: &m.fragmentBytes}
 	session.touch(m.now())
 	session.initReliability(m.ssu2LargeMTU(pending.remote, pending.address.mtu))
 	installed := false
@@ -3140,7 +3186,7 @@ func (m *SSU2Manager) handleTokenRequest(header dataplanessu2.LongHeader, remote
 		return
 	}
 	m.mu.Lock()
-	if !m.runningLocked() {
+	if !m.runningLocked() || !m.allowRetryLocked(remote) {
 		m.mu.Unlock()
 		return
 	}
@@ -3168,6 +3214,10 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 	}
 	if !m.consumeTokenLocked(header.Token, remote, header.DestinationID, header.SourceID) &&
 		!m.consumeNewTokenLocked(header.Token, remote) {
+		if !m.allowRetryLocked(remote) {
+			m.mu.Unlock()
+			return
+		}
 		token, err := m.newTokenLocked(remote, header.DestinationID, header.SourceID)
 		m.mu.Unlock()
 		if err == nil {
@@ -3222,7 +3272,6 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 		m.mu.Unlock()
 		pending.releaseSensitive()
 	})
-	var evicted *ssu2TransportSession
 	var stale, displaced *ssu2InboundPending
 	defer func() {
 		for _, old := range [...]*ssu2InboundPending{stale, displaced} {
@@ -3230,9 +3279,6 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 				old.timer.Stop()
 				old.releaseSensitive()
 			}
-		}
-		if evicted != nil {
-			evicted.ReleaseSensitive()
 		}
 	}()
 	m.mu.Lock()
@@ -3244,6 +3290,16 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 	}
 	current := m.inbound[header.DestinationID]
 	if current != nil && current.sendID == header.SourceID {
+		m.mu.Unlock()
+		pending.timer.Stop()
+		pending.releaseSensitive()
+		return
+	}
+	// A cached NewToken lets an initiator reuse the destination ID of its
+	// superseded session, so an established occupant stays in place until
+	// SessionConfirmed authenticates the same peer. The retransmission that
+	// built the occupying session carries the same SourceID.
+	if occupant := m.sessionsByID[header.DestinationID]; occupant != nil && occupant.sendID == header.SourceID {
 		m.mu.Unlock()
 		pending.timer.Stop()
 		pending.releaseSensitive()
@@ -3264,20 +3320,6 @@ func (m *SSU2Manager) handleSessionRequest(packet []byte, remote net.Addr, heade
 		// A new SourceID for a pending DestinationID supersedes that entry.
 		delete(m.inbound, header.DestinationID)
 		stale = current
-	}
-	if current := m.sessionsByID[header.DestinationID]; current != nil {
-		if current.sendID == header.SourceID {
-			m.mu.Unlock()
-			pending.timer.Stop()
-			pending.releaseSensitive()
-			return
-		}
-		// A cached NewToken lets an initiator reuse the destination ID of its
-		// superseded session. The retransmission that built the occupying
-		// session carries the same SourceID; a different SourceID is a new
-		// request and supersedes the stale occupant.
-		m.removeSessionLocked(current)
-		evicted = current
 	}
 	m.inboundSequence++
 	pending.sequence = m.inboundSequence
@@ -3388,23 +3430,35 @@ func (m *SSU2Manager) processSessionConfirmedLocked(packet []byte, pending *ssu2
 		return
 	}
 	session := &ssu2TransportSession{
-		peer:       peer.Hash(),
-		sendID:     pending.sendID,
-		receiveID:  destinationID,
-		inbound:    true,
-		remote:     cloneUDPAddress(remoteAddr),
-		send:       send,
-		receive:    receive,
-		nextPacket: 1,
-		fragments:  make(map[uint32]*ssu2FragmentAssembly),
+		peer:         peer.Hash(),
+		sendID:       pending.sendID,
+		receiveID:    destinationID,
+		inbound:      true,
+		remote:       cloneUDPAddress(remoteAddr),
+		send:         send,
+		receive:      receive,
+		nextPacket:   1,
+		fragments:    make(map[uint32]*ssu2FragmentAssembly),
+		fragmentPool: &m.fragmentBytes,
 	}
 	session.touch(m.now())
 	session.initReliability(m.ssu2LargeMTU(remoteAddr, ssu2AdvertisedMTU(peer, remoteAddr)))
 	m.mu.Lock()
-	var displaced *ssu2TransportSession
+	var displaced, superseded *ssu2TransportSession
 	ok := m.inbound[destinationID] == pending
+	if occupant := m.sessionsByID[destinationID]; ok && occupant != nil {
+		// Only the authenticated owner of a connection ID may reclaim it.
+		ok = occupant.peer == session.peer
+		if ok {
+			m.removeSessionLocked(occupant)
+			superseded = occupant
+		}
+	}
 	if ok {
 		displaced, ok = m.installSessionLocked(session)
+	}
+	if superseded != nil {
+		defer superseded.ReleaseSensitive()
 	}
 	if !ok {
 		m.mu.Unlock()
@@ -5555,16 +5609,18 @@ func (s *ssu2TransportSession) addFragment(kind uint8, data []byte, now time.Tim
 			if len(s.fragments) >= ssu2MaxFragmentedMessages {
 				return foundation.I2NPMessage{}, false, ErrSSU2Session
 			}
-			assembly = &ssu2FragmentAssembly{header: header, following: make(map[uint8][]byte)}
+			assembly = &ssu2FragmentAssembly{header: header, following: make(map[uint8][]byte), created: now}
 			s.fragments[id] = assembly
 		} else if assembly.first != nil && (assembly.header != header || !bytes.Equal(assembly.first, data[foundation.I2NPTransportHeaderLen:])) {
-			delete(s.fragments, id)
+			s.dropFragmentLocked(id, assembly)
 			return foundation.I2NPMessage{}, false, ErrSSU2Peer
 		}
 		if assembly.first == nil {
+			if err = s.chargeFragmentLocked(id, assembly, len(data)-foundation.I2NPTransportHeaderLen); err != nil {
+				return foundation.I2NPMessage{}, false, err
+			}
 			assembly.first = append([]byte(nil), data[foundation.I2NPTransportHeaderLen:]...)
 			assembly.header = header
-			assembly.size += len(assembly.first)
 		}
 	case dataplanessu2.BlockFollowOnFragment:
 		if len(data) <= 5 {
@@ -5580,21 +5636,23 @@ func (s *ssu2TransportSession) addFragment(kind uint8, data []byte, now time.Tim
 			if len(s.fragments) >= ssu2MaxFragmentedMessages {
 				return foundation.I2NPMessage{}, false, ErrSSU2Session
 			}
-			assembly = &ssu2FragmentAssembly{following: make(map[uint8][]byte)}
+			assembly = &ssu2FragmentAssembly{following: make(map[uint8][]byte), created: now}
 			s.fragments[id] = assembly
 		}
 		if existing := assembly.following[number]; existing != nil {
 			if !bytes.Equal(existing, data[5:]) {
-				delete(s.fragments, id)
+				s.dropFragmentLocked(id, assembly)
 				return foundation.I2NPMessage{}, false, ErrSSU2Peer
 			}
 		} else {
+			if err := s.chargeFragmentLocked(id, assembly, len(data)-5); err != nil {
+				return foundation.I2NPMessage{}, false, err
+			}
 			assembly.following[number] = append([]byte(nil), data[5:]...)
-			assembly.size += len(data) - 5
 		}
 		if data[0]&1 != 0 {
 			if assembly.last != 0 && assembly.last != number {
-				delete(s.fragments, id)
+				s.dropFragmentLocked(id, assembly)
 				return foundation.I2NPMessage{}, false, ErrSSU2Peer
 			}
 			assembly.last = number
@@ -5602,12 +5660,7 @@ func (s *ssu2TransportSession) addFragment(kind uint8, data []byte, now time.Tim
 	default:
 		return foundation.I2NPMessage{}, false, ErrSSU2Peer
 	}
-	assembly.updated = now
-	if assembly.size > foundation.I2NPI2PDMaxPayload || assembly.first == nil || assembly.last == 0 {
-		if assembly.size > foundation.I2NPI2PDMaxPayload {
-			delete(s.fragments, id)
-			return foundation.I2NPMessage{}, false, ErrSSU2Peer
-		}
+	if assembly.first == nil || assembly.last == 0 {
 		return foundation.I2NPMessage{}, false, nil
 	}
 	payload := make([]byte, 0, assembly.size)
@@ -5620,23 +5673,68 @@ func (s *ssu2TransportSession) addFragment(kind uint8, data []byte, now time.Tim
 		payload = append(payload, part...)
 	}
 	if len(payload) != assembly.size {
-		delete(s.fragments, id)
+		s.dropFragmentLocked(id, assembly)
 		return foundation.I2NPMessage{}, false, ErrSSU2Peer
 	}
 	message := foundation.I2NPMessage{
 		Header:  foundation.I2NPHeader{Type: assembly.header.Type, ID: assembly.header.ID, Expiration: assembly.header.Expiration},
 		Payload: payload,
 	}
-	delete(s.fragments, id)
+	s.dropFragmentLocked(id, assembly)
 	return message, true, nil
 }
 
+// chargeFragmentLocked accounts n more bytes to assembly. A message larger
+// than the I2NP maximum is a peer error; exceeding the session or global
+// reassembly budget refuses the message. Either way the assembly is dropped,
+// because a message missing a fragment can never complete.
+//
+// +checklocks:s.fragmentMu
+func (s *ssu2TransportSession) chargeFragmentLocked(id uint32, assembly *ssu2FragmentAssembly, n int) error {
+	if assembly.size+n > foundation.I2NPI2PDMaxPayload {
+		s.dropFragmentLocked(id, assembly)
+		return ErrSSU2Peer
+	}
+	if s.fragmentBytes+n > ssu2MaxFragmentBytesPerSession {
+		s.dropFragmentLocked(id, assembly)
+		return ErrSSU2Session
+	}
+	if s.fragmentPool != nil && s.fragmentPool.Add(int64(n)) > ssu2MaxFragmentBytes {
+		s.fragmentPool.Add(-int64(n))
+		s.dropFragmentLocked(id, assembly)
+		return ErrSSU2Session
+	}
+	s.fragmentBytes += n
+	assembly.size += n
+	return nil
+}
+
+// +checklocks:s.fragmentMu
+func (s *ssu2TransportSession) dropFragmentLocked(id uint32, assembly *ssu2FragmentAssembly) {
+	if s.fragments[id] == assembly {
+		delete(s.fragments, id)
+	}
+	s.releaseFragmentBytesLocked(assembly.size)
+	assembly.size = 0
+}
+
+// +checklocks:s.fragmentMu
+func (s *ssu2TransportSession) releaseFragmentBytesLocked(n int) {
+	s.fragmentBytes -= n
+	if s.fragmentPool != nil {
+		s.fragmentPool.Add(-int64(n))
+	}
+}
+
+// expireFragments drops messages first seen ssu2FragmentLifetime ago. The
+// lifetime is not extended by later fragments, so a peer cannot pin an
+// incomplete message by resending pieces of it.
 func (s *ssu2TransportSession) expireFragments(now time.Time) {
 	s.fragmentMu.Lock()
 	defer s.fragmentMu.Unlock()
 	for id, assembly := range s.fragments {
-		if now.Sub(assembly.updated) >= ssu2FragmentLifetime {
-			delete(s.fragments, id)
+		if now.Sub(assembly.created) >= ssu2FragmentLifetime {
+			s.dropFragmentLocked(id, assembly)
 		}
 	}
 }
@@ -5746,7 +5844,7 @@ func ssu2IntroForStatic(info foundation.NetworkDatabaseRouterInfo, static []byte
 func (m *SSU2Manager) selectSSU2Address(info foundation.NetworkDatabaseRouterInfo) (ssu2PeerAddress, error) {
 	available := ssu2IPv6Available(m.conn)
 	m.ipv6Available.Store(available)
-	return selectSSU2AddressForNetwork(info, available)
+	return selectSSU2AddressForNetwork(info, available, m.addressPolicy)
 }
 
 func ssu2IPv6Available(conn UDPSocket) bool {
@@ -5881,10 +5979,12 @@ func ssu2AdvertisedMTU(info foundation.NetworkDatabaseRouterInfo, remote net.Add
 }
 
 func selectSSU2Address(info foundation.NetworkDatabaseRouterInfo) (ssu2PeerAddress, error) {
-	return selectSSU2AddressForNetwork(info, true)
+	return selectSSU2AddressForNetwork(info, true, dialAnyAddress)
 }
 
-func selectSSU2AddressForNetwork(info foundation.NetworkDatabaseRouterInfo, allowIPv6 bool) (ssu2PeerAddress, error) {
+// selectSSU2AddressForNetwork picks a direct SSU2 address whose host policy
+// admits.
+func selectSSU2AddressForNetwork(info foundation.NetworkDatabaseRouterInfo, allowIPv6 bool, policy dialAddressPolicy) (ssu2PeerAddress, error) {
 	addresses := info.Addresses()
 	for {
 		address, ok, err := addresses.Next()
@@ -5923,7 +6023,7 @@ func selectSSU2AddressForNetwork(info foundation.NetworkDatabaseRouterInfo, allo
 		}
 		portNumber, err := strconv.ParseUint(port, 10, 16)
 		ip, ipErr := netip.ParseAddr(host)
-		invalidEndpoint := err != nil || ipErr != nil || portNumber == 0
+		invalidEndpoint := err != nil || ipErr != nil || portNumber == 0 || !policy.allows(ip)
 		if invalidEndpoint || !supportsSSU2Version(version) {
 			continue
 		}

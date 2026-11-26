@@ -1,8 +1,10 @@
-name: Register commit in Go checksum database
+name: Register commit or tag in Go checksum database
 
 on:
   push:
     branches: [main]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -24,16 +26,20 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Fetch module at commit SHA
+      - name: Fetch module at commit or tag
         shell: bash
         run: |
           set -euo pipefail
+          target="${GITHUB_SHA}"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            target="${GITHUB_REF_NAME}"
+          fi
           temp_dir=$(mktemp -d)
           trap 'rm -rf -- "$temp_dir"' EXIT
           cd "$temp_dir"
           go mod init sumdb-registration
           for attempt in 1 2 3; do
-            if go get "gosuda.org/ivnp@${GITHUB_SHA}"; then
+            if go get "gosuda.org/ivnp@${target}"; then
               exit 0
             fi
             if [ "$attempt" -eq 3 ]; then

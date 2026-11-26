@@ -99,7 +99,7 @@ func TestLivePriorityReseedDiagnostic(t *testing.T) {
 
 	outcomes := map[string]int{}
 	sigFailures, floodfills, v2Only, noV2 := 0, 0, 0, 0
-	guard := newIngressGuard(client.bucketSubnetQuota(), client.bucketAdmitLimit())
+	guard := newIngressGuard(client.bucketSubnetQuota(), client.bucketAdmitLimit(), sourceShare(slots, client.bucketAdmitLimit()))
 	for _, slot := range slots {
 		category, sigFailed, isFF, hasV2 := classifySlotAdmission(slot, guard, database, local, seenAt)
 		outcomes[category]++
@@ -168,22 +168,18 @@ func collectZipCandidate(file *zip.File, netID uint8, seenAt uint64) (reseedCand
 // whether any signature verification failed, and the admitted candidate's
 // floodfill and v2-transport flags.
 func classifySlotAdmission(slot *dedupSlot, guard *ingressGuard, database *controlplanenetdb.Database, local foundation.Hash, seenAt uint64) (string, bool, bool, bool) {
-	candidate := slot.best
-	sigFailed := false
-	if ok, _ := candidate.info.Verify(); !ok {
-		sigFailed = true
-		if slot.count < 2 {
+	candidate, ok := slot.verified()
+	if !ok {
+		if len(slot.candidates) < 2 {
 			return "sig-failed-no-fallback", true, false, false
 		}
-		candidate = slot.fallback
-		if ok, _ := candidate.info.Verify(); !ok {
-			return "sig-failed", true, false, false
-		}
+		return "sig-failed", true, false, false
 	}
+	sigFailed := candidate.source != slot.candidates[0].source
 	isFF := foundation.NetworkDatabaseIsFloodfill(candidate.info)
 	hasV2 := hasV2Transport(candidate.info)
 	bucket := leadingZerosXOR(local, candidate.info.Hash())
-	if !guard.claim(bucket, ingressSubnetsOf(candidate.info)) {
+	if !guard.claim(bucket, candidate.source, ingressSubnetsOf(candidate.info)) {
 		if guard.bucketUse[bucket] >= guard.bucketLimit {
 			return "bucket-full", sigFailed, isFF, hasV2
 		}

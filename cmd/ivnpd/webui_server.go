@@ -245,15 +245,15 @@ func parseWebUIAccessPolicy(listenAddress, bearerToken string, disableAuth ...bo
 	if err != nil {
 		return webUIAccessPolicy{}, fmt.Errorf("webui: listen address must include host and port: %w", err)
 	}
-	if noAuth {
-		return webUIAccessPolicy{loopback: false, listenHost: host, requireAuth: false}, nil
-	}
 	if strings.EqualFold(host, "localhost") {
-		return webUIAccessPolicy{loopback: true, listenHost: "localhost", requireAuth: bearerToken != ""}, nil
+		return webUIAccessPolicy{loopback: true, listenHost: "localhost", requireAuth: !noAuth && bearerToken != ""}, nil
 	}
 	ip := net.ParseIP(host)
 	if ip != nil && ip.IsLoopback() {
-		return webUIAccessPolicy{loopback: true, listenHost: host, requireAuth: bearerToken != ""}, nil
+		return webUIAccessPolicy{loopback: true, listenHost: host, requireAuth: !noAuth && bearerToken != ""}, nil
+	}
+	if noAuth {
+		return webUIAccessPolicy{loopback: false, listenHost: host, requireAuth: false}, nil
 	}
 	if ip == nil && host != "0.0.0.0" {
 		return webUIAccessPolicy{}, fmt.Errorf("webui: listen host %q is not a valid IP or hostname", host)
@@ -441,8 +441,11 @@ func (s *WebUIServer) Close() error {
 	return result
 }
 
-func isPublicProbePath(path string) bool {
-	return path == "/healthz" || path == "/livez" || path == "/readyz" || path == "/varz"
+// requiresWebUIToken reports whether path needs the bearer token when the
+// listener requires one. Only the /healthz, /livez, and /readyz probes skip
+// the token; /varz carries the same telemetry as /api/metrics.
+func requiresWebUIToken(path string) bool {
+	return strings.HasPrefix(path, "/api/") || path == "/varz"
 }
 
 func (s *WebUIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -493,15 +496,11 @@ func (s *WebUIServer) handleVarz(w http.ResponseWriter, r *http.Request) {
 func (s *WebUIServer) wrapMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.setSecurityHeaders(w)
-		if isPublicProbePath(r.URL.Path) {
-			next.ServeHTTP(w, r)
-			return
-		}
 		if s.policy.loopback && !remoteIsLoopback(r.RemoteAddr) {
 			http.Error(w, "loopback clients only", http.StatusForbidden)
 			return
 		}
-		if s.policy.loopback && !allowedLoopbackHost(r.Host) {
+		if !s.policy.allowsHost(r.Host) {
 			http.Error(w, "host mismatch", http.StatusForbidden)
 			return
 		}
@@ -509,12 +508,13 @@ func (s *WebUIServer) wrapMiddleware(next http.Handler) http.Handler {
 			http.Error(w, "origin mismatch", http.StatusForbidden)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/") && s.policy.requireAuth && !s.isAuthorized(r) {
+		protected := requiresWebUIToken(r.URL.Path)
+		if protected && s.policy.requireAuth && !s.isAuthorized(r) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="ivnp-webui"`)
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		if protected {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		next.ServeHTTP(w, r)
@@ -572,7 +572,12 @@ func remoteIsLoopback(remoteAddress string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func allowedLoopbackHost(hostPort string) bool {
+// allowsHost applies the DNS-rebinding Host allowlist. A loopback-bound
+// listener accepts only loopback names. An unauthenticated listener on another
+// address accepts loopback names and IP literals, because a rebinding page
+// always presents its own DNS name. Only a bearer token, which a rebinding
+// page cannot present, lifts the allowlist on a non-loopback listener.
+func (p webUIAccessPolicy) allowsHost(hostPort string) bool {
 	host := hostPort
 	if parsedHost, _, err := net.SplitHostPort(hostPort); err == nil {
 		host = parsedHost
@@ -581,7 +586,14 @@ func allowedLoopbackHost(hostPort string) bool {
 		return true
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	switch {
+	case p.loopback:
+		return ip != nil && ip.IsLoopback()
+	case p.requireAuth:
+		return true
+	default:
+		return ip != nil
+	}
 }
 
 func requestChangesState(method string) bool {

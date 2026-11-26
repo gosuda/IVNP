@@ -229,6 +229,18 @@ func (t *daemonMemoryTransport) Send(ctx context.Context, target foundation.Hash
 	return t.network.route(t.local, target, message)
 }
 
+// HasSession models the memory network as fully connected: every started
+// endpoint, and the simulated floodfill, is reachable without a dial.
+func (t *daemonMemoryTransport) HasSession(peer foundation.Hash) bool {
+	if peer == t.network.flood {
+		return true
+	}
+	t.network.mu.RLock()
+	_, ok := t.network.endpoints[peer]
+	t.network.mu.RUnlock()
+	return ok
+}
+
 func (t *daemonMemoryTransport) Close() error {
 	t.once.Do(func() {
 		t.network.mu.Lock()

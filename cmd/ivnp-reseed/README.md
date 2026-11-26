@@ -54,7 +54,7 @@ Autonomous I2P network indexer and SU3 reseed server (`gosuda.org/ivnp/cmd/ivnp-
    - **Maintenance Mode** (`Reachable >= 1024`): Launches `8` repair queries per pass and applies exponential probe backoff (`5m * 2^(fails-1)`, capped at `2h`) to unresponsive peers.
 4. **Max-Min XOR Farthest-Point Sampling (`selector.go`)**: Rather than drawing fixed counts per prefix, `farthestPointSample` runs greedy farthest-point sampling across the full 256-bit XOR keyspace ($O(K \cdot N)$). Each pick maximizes the minimum XOR distance to all already-selected peers, filling the 50% floodfill quota first and then drawing from the full qualified pool to produce a 75-peer bundle (`bundleSize = 75`).
 5. **Hard Qualification Gate & Relaxation Ladder**: Candidates must advertise a dialable NTCP2 or SSU2 address, publish a `RouterInfo` within the client's 24-hour reseed window (`±2m` clock skew), and pass the qualification ladder (`gateStrict`: $\ge 85\%$ probe success and $\ge 1\text{h}$ uptime -> `gateNoUptime` -> `gateCumulativeRate` -> `gateReachable`). Every level requires probe-verified reachability, so peers that advertise only SSU2 endpoints never qualify. If fewer than `-min-bundle-peers` qualify, the server retains the previous epoch's bundle pool.
-6. **Probe-Verified Reachability (`prober.go`)**: A peer counts as reachable only after the prober completes a TCP connection to one of its advertised NTCP2 (or unclassified) addresses. Appearing in the NetDB, admission to the store, and re-publication never mark a peer reachable, and a re-published `RouterInfo` with different addresses must be probed again. `ivnp-reseed` has no SSU2 handshake probe, so peers that advertise only SSU2 endpoints stay unchecked: they are never probed, never reachable, and never selected for a bundle.
+6. **Probe-Verified Reachability (`prober.go`)**: A peer counts as reachable only after the prober completes a TCP connection to one of its advertised NTCP2 (or unclassified) addresses. Appearing in the NetDB, admission to the store, and re-publication never mark a peer reachable, and a re-published `RouterInfo` with different addresses must be probed again. `ivnp-reseed` has no SSU2 handshake probe, so peers that advertise only SSU2 endpoints stay unchecked: they are never probed, never reachable, and never selected for a bundle. Advertised addresses are untrusted, so the prober dials only public global unicast addresses: private (RFC 1918), loopback, link-local, carrier-grade NAT (`100.64.0.0/10`), ULA (`fc00::/7`), multicast, reserved, NAT64, and IPv4-mapped forms of these are never dialed. Each probe dials at most `4` distinct `ip:port` targets per peer (`maxProbeDialsPerPeer`), however many addresses the `RouterInfo` lists.
 7. **Sybil & Eclipse Contention Bounds (`store.go`)**: `PeerStore` maintains an incremental `bySubnet16` (`/16` IPv4) contention index. Within a group, probe-verified peers outrank unchecked peers, unchecked peers the prober can verify outrank SSU2-only peers, and peers with repeated probe failures rank last; floodfill status, tunnel participation, and score only break ties inside a tier (`compareRetention`). A newly admitted peer evicts group members that no longer top any group they belong to (`evictDominatedLocked`, `PruneRedundant`). Capacity eviction removes only peers that are not probe-verified; when none qualify, the newcomer is refused. Bundle selection enforces at most one router per `/16` IPv4 subnet and `/48` IPv6 prefix. The `RouterInfo` `family` option is self-declared and unverified, so it forms no contention group and does not limit selection; it appears only in dashboard and package statistics.
 8. **16-Bundle Epoch Pool (`packager.go`, `server.go`)**: Every refresh interval (`10m` default), `ivnp-reseed` builds a pool of `16` distinct 75-peer SU3 archives (`bundlePoolSize = 16`) and rotates across them on incoming download requests so concurrent bootstrap clients do not hammer identical peer subsets.
 
@@ -72,6 +72,8 @@ Autonomous I2P network indexer and SU3 reseed server (`gosuda.org/ivnp/cmd/ivnp-
 | `GET` | `/health` | `text/plain` | Container liveness probe (returns `OK\n`, HTTP `200`) |
 
 All `/i2pseeds.su3` responses include `Cache-Control: public, max-age=600` and an `ETag` header; conditional requests with a matching `If-None-Match` receive `304 Not Modified`. Certificate and public key endpoints set `Cache-Control: public, max-age=86400`.
+
+Every `-listen` server bounds slow and oversized clients: request headers must arrive within `10s` and the full request within `30s`, each response must finish within `60s`, idle keep-alive connections close after `120s`, and request headers are limited to `16 KiB` (larger requests receive `431 Request Header Fields Too Large`). The listeners have no concurrent connection cap; deploy behind a reverse proxy or firewall rule when one is needed.
 
 ---
 
@@ -150,7 +152,12 @@ Usage of ivnp-reseed:
   -signer-id string
         SU3 signer common name (default "reseed@ivnp.network", env RESEED_SIGNER_ID)
   -seed-phrase string
-        Deterministic RSA-4096 signing key seed phrase (env RESEED_SEED_PHRASE preferred)
+        Deterministic RSA-4096 signing key seed phrase (env RESEED_SEED_PHRASE preferred;
+        the flag has no default, so usage output never prints the phrase)
+  -seed-kdf string
+        Seed phrase key derivation: hkdf-sha512 (legacy, unstretched) or argon2id-v2
+        (stretched, salted with -signer-id); changing it changes the signing key
+        (default "hkdf-sha512", env RESEED_SEED_KDF)
   -router-port int
         Port for embedded router NTCP2/SSU2 transports (default 0 for random/ephemeral)
   -router-advertise-host string
@@ -163,7 +170,11 @@ Usage of ivnp-reseed:
   -no-router
         Disable embedded router (offline replay/test mode)
   -pprof string
-        Optional localhost address for net/http/pprof profiling
+        Optional loopback address (for example 127.0.0.1:6060, [::1]:6060, or
+        localhost:6060) for net/http/pprof profiling. Non-loopback addresses,
+        including :6060 and 0.0.0.0:6060, are rejected at startup with exit code 2.
+        /debug/pprof/cmdline is not served, so process arguments such as
+        -seed-phrase are never exposed through it.
   -healthcheck string
         Query health endpoint URL and exit 0 (healthy) or 1 (unhealthy)
   -once
@@ -179,11 +190,36 @@ Usage of ivnp-reseed:
 | Environment Variable | CLI Flag | Purpose |
 | :--- | :--- | :--- |
 | `RESEED_SIGNER_ID` | `-signer-id` | SU3 signer Common Name (for example, `reseed@ivnp.network`) |
-| `RESEED_SEED_PHRASE` | `-seed-phrase` | Seed phrase used to derive the RSA-4096 signing key deterministically via `HKDF-SHA512` (`"ivnp-reseed"`, `"reseed-rsa-4096"`) and `filippo.io/keygen.RSA(4096, secret)`. Pass via environment variable so the phrase does not appear in process argument tables. |
+| `RESEED_SEED_PHRASE` | `-seed-phrase` | Seed phrase used to derive the RSA-4096 signing key deterministically: the `-seed-kdf` derivation turns it into a 64-byte secret for `filippo.io/keygen.RSA(4096, secret)`. Pass via environment variable so the phrase does not appear in process argument tables. A non-empty `-seed-phrase` takes precedence over the variable. |
+| `RESEED_SEED_KDF` | `-seed-kdf` | Versioned seed phrase derivation, `hkdf-sha512` (default) or `argon2id-v2`. See [Seed Phrase Derivation Versions](#seed-phrase-derivation-versions). |
 
 When `RESEED_SEED_PHRASE` is set, `ivnp-reseed` reproduces the exact same RSA-4096 private key and X.509 certificate in memory on every restart; no private key file is ever written to disk. If no seed phrase is provided, `ivnp-reseed` generates an ephemeral keypair at startup.
 
-Persistent artifacts in `-data-dir` (`peers.gob`, `i2pseeds.su3`, `reseed-rsa.crt`, `reseed-rsa.pub.pem`) are written through an atomic `.tmp` write-and-rename sequence, and any stale `.tmp` files are cleaned up on startup.
+`ivnp-reseed` reads `RESEED_SEED_PHRASE` only after flag parsing and then removes it from its own process environment, so the phrase never appears in flag usage or error output and is not inherited through the environment by anything the process starts later.
+
+### Seed Phrase Derivation Versions
+
+The signing certificate is public, so anyone can test seed phrase guesses offline by deriving a key and comparing it to the published public key. The derivation therefore determines how expensive each guess is.
+
+| `-seed-kdf` | Derivation | Guess cost | Phrase requirement |
+| :--- | :--- | :--- | :--- |
+| `hkdf-sha512` (default) | `HKDF-SHA512` with the global salt `"ivnp-reseed"` and info `"reseed-rsa-4096"` | One RSA-4096 key generation (well under one second per core); no salt separates deployments | None enforced; a warning is logged at startup |
+| `argon2id-v2` | `Argon2id` (`t=3`, `m=64 MiB`, `p=4`) salted with `"ivnp-reseed/argon2id-v2/signer:" + signer ID` | One Argon2id evaluation plus one RSA-4096 key generation per guess and per signer ID | At least `32` characters after whitespace normalization |
+
+`hkdf-sha512` remains the default because changing the derivation changes the signing key, and every client that pins the existing certificate would reject the new one. Each version's algorithm and parameters are fixed; a stronger derivation will be added as a new version rather than by changing an existing one.
+
+The phrase length floor is not an entropy measurement. Generate the phrase from a cryptographic random source, for example `openssl rand -base64 32` (256 bits), rather than choosing words by hand. With `argon2id-v2`, the signer ID is part of the salt, so changing `-signer-id` also changes the signing key; choose a signer ID unique to your deployment.
+
+**Migrating an existing deployment to `argon2id-v2`:**
+
+1. Generate a new random phrase of at least `32` characters.
+2. Derive the new certificate offline, for example `RESEED_SEED_KDF=argon2id-v2 RESEED_SEED_PHRASE="<new phrase>" ivnp-reseed -once -no-router -data-dir <scratch dir> -signer-id <your signer id>`, and take `reseed-rsa.crt` from the scratch directory.
+3. Distribute the new certificate to client reseed certificate stores (Java I2P, `i2pd`, IVNP) under your signer ID and wait until clients carry it. A client trusts one certificate per signer ID, so coordinate the cutover or publish the new key under a new signer ID.
+4. Restart the production server with `RESEED_SEED_KDF=argon2id-v2` and the new phrase. Keep the old phrase until no client depends on the old certificate.
+
+New deployments should start with `RESEED_SEED_KDF=argon2id-v2`.
+
+Persistent artifacts in `-data-dir` (`peers.gob`, `i2pseeds.su3`, `reseed-rsa.crt`, `reseed-rsa.pub.pem`) are written through `state.FilesystemStoreWriteAtomic`: each write goes to an exclusively created, randomly named `.ivnp-<hex>` file in the same directory (opened with `O_EXCL|O_NOFOLLOW`), is `fsync`ed, and is renamed over the target, so a symlink planted in `-data-dir` is never followed. Stale `<name>.tmp` files left by earlier releases are removed on startup.
 
 > [!WARNING]
 > **Back Up `RESEED_SEED_PHRASE` Securely**:
@@ -200,7 +236,8 @@ go build -trimpath -o /usr/local/bin/ivnp-reseed ./cmd/ivnp-reseed
 
 # Run behind NAT with port forwarding configured on port 39898:
 RESEED_SIGNER_ID="reseed@example.org" \
-RESEED_SEED_PHRASE="your secret recovery phrase here" \
+RESEED_SEED_KDF="argon2id-v2" \
+RESEED_SEED_PHRASE="<output of: openssl rand -base64 32>" \
   ivnp-reseed -listen ":8080,:8443" -data-dir /var/lib/ivnp-reseed \
   -router-port 39898 -router-advertise-host reseed.example.org
 ```
@@ -216,7 +253,8 @@ docker run -d \
   -p 8080:8080 \
   -v ivnp_reseed_data:/data \
   -e RESEED_SIGNER_ID="reseed@ivnp.network" \
-  -e RESEED_SEED_PHRASE="twelve word seed phrase goes here ..." \
+  -e RESEED_SEED_KDF="argon2id-v2" \
+  -e RESEED_SEED_PHRASE="<saved output of: openssl rand -base64 32>" \
   ivnp-reseed
 ```
 

@@ -54,12 +54,24 @@ const (
 	minPeerMaxPayloadSize     = 512
 	tunnelRetryUpdateIdle     = false
 	tunnelRetryUpdatePending  = true
+	// maxInboundStreamsPerPeer bounds the live inbound streams one remote
+	// destination can hold. Each stream may buffer about 580 KB (read queue
+	// plus reorder window), so the cap also bounds per-peer buffered bytes.
+	maxInboundStreamsPerPeer = 32
 	// silentHandshakeEvidenceRetries counts the initial SYN send, so 2 means
 	// at least one retransmit also went unanswered when the caller leaves.
 	silentHandshakeEvidenceRetries = 2
 	// maxInboundSYNPrep bounds concurrent PrepareHandshake calls so inbound
-	// SYN bursts cannot stall the authenticated delivery worker.
+	// SYN bursts cannot stall the authenticated delivery worker. When every
+	// slot is held, a new SYN evicts the oldest pending preparation, so peers
+	// whose route preparation stalls cannot keep the slots for the whole
+	// handshake timeout.
 	maxInboundSYNPrep = 8
+	// maxInboundSYNPrepPerPeer bounds the slots one remote destination can hold.
+	maxInboundSYNPrepPerPeer = 2
+	// maxInboundSYNPrepRunning bounds preparation goroutines, including evicted
+	// ones that have not yet observed cancellation.
+	maxInboundSYNPrepRunning = 2 * maxInboundSYNPrep
 )
 
 const (
@@ -150,12 +162,20 @@ type TunnelNetwork struct {
 	outboundPorts map[uint16]int
 	// +checklocks:mu
 	inboundPorts map[uint16]int
+	// inboundPeers counts registered inbound streams per remote destination.
+	// +checklocks:mu
+	inboundPeers map[foundation.Hash]int
 	// +checklocks:mu
 	inbound map[inboundKey]*tunnelConn
 	// +checklocks:mu
-	synPending map[inboundKey]struct{}
-	synTokens  chan struct{}
-	idSeq      atomic.Uint32
+	synPending map[inboundKey]*inboundSYNPrep
+	// +checklocks:mu
+	synPeerPending map[foundation.Hash]int
+	// +checklocks:mu
+	synRunning int
+	// +checklocks:mu
+	synOrder uint64
+	idSeq    atomic.Uint32
 	// +checklocks:mu
 	closed         bool
 	ctx            context.Context
@@ -182,6 +202,13 @@ type NetworkStats struct {
 type inboundKey struct {
 	from foundation.Hash
 	id   uint32
+}
+
+// inboundSYNPrep is one admitted inbound SYN whose route preparation runs off
+// the delivery worker. order records admission order for eviction.
+type inboundSYNPrep struct {
+	order  uint64
+	cancel context.CancelFunc
 }
 
 // NewTunnelNetwork creates a TunnelNetwork with the given configuration.
@@ -245,9 +272,10 @@ func NewTunnelNetwork(config TunnelNetworkConfig) (*TunnelNetwork, error) {
 		byID:                 make(map[uint32]*tunnelConn),
 		outboundPorts:        make(map[uint16]int),
 		inboundPorts:         make(map[uint16]int),
+		inboundPeers:         make(map[foundation.Hash]int),
 		inbound:              make(map[inboundKey]*tunnelConn),
-		synPending:           make(map[inboundKey]struct{}),
-		synTokens:            make(chan struct{}, maxInboundSYNPrep),
+		synPending:           make(map[inboundKey]*inboundSYNPrep),
+		synPeerPending:       make(map[foundation.Hash]int),
 		ctx:                  lifetime,
 		cancel:               cancel,
 		done:                 make(chan struct{}),
@@ -588,11 +616,14 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 	if listener == nil {
 		listener = n.listeners[0]
 	}
-
+	peerFull := n.inboundPeers[key.from] >= maxInboundStreamsPerPeer
 	n.mu.RUnlock()
 	if existing != nil {
 		existing.setPeerMaxPayloadSize(peerMaxPayloadSize)
 		return existing.sendSynchronize(ctx, false)
+	}
+	if peerFull {
+		return ErrTunnelBackpressure
 	}
 	if listener == nil {
 		return ErrTunnelAddress
@@ -602,7 +633,9 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 	}
 	// Route preparation can block for the whole handshake timeout, so it runs
 	// off the delivery worker under a bounded permit. synPending dedups SYN
-	// retransmits that arrive while preparation is still in flight.
+	// retransmits that arrive while preparation is still in flight. One peer
+	// holds at most maxInboundSYNPrepPerPeer permits, and a full table evicts
+	// its oldest preparation so stalled peers cannot block new streams.
 	n.mu.Lock()
 	if n.closed {
 		n.mu.Unlock()
@@ -612,34 +645,74 @@ func (n *TunnelNetwork) handleSynchronize(ctx context.Context, delivery Delivery
 		n.mu.Unlock()
 		return nil
 	}
-	select {
-	case n.synTokens <- struct{}{}:
-	default:
+	if n.synPeerPending[key.from] >= maxInboundSYNPrepPerPeer || n.synRunning >= maxInboundSYNPrepRunning {
 		n.mu.Unlock()
 		return ErrTunnelBackpressure
 	}
-	n.synPending[key] = struct{}{}
+	if len(n.synPending) >= maxInboundSYNPrep {
+		n.evictOldestInboundSYNLocked()
+	}
+	ctx, cancel := context.WithTimeout(n.ctx, n.handshakeTimeout)
+	n.synOrder++
+	prep := &inboundSYNPrep{order: n.synOrder, cancel: cancel}
+	n.synPending[key] = prep
+	n.synPeerPending[key.from]++
+	n.synRunning++
 	n.wg.Add(1)
 	n.mu.Unlock()
 	owned := delivery
 	owned.Payload = append([]byte(nil), delivery.Payload...)
-	go n.runInboundSYN(key, owned, listener)
+	go n.runInboundSYN(ctx, key, prep, owned, listener)
 	return nil
+}
+
+// evictOldestInboundSYNLocked cancels the longest-pending inbound SYN
+// preparation and releases its permit. The evicted goroutine keeps counting
+// against maxInboundSYNPrepRunning until it observes cancellation and exits.
+//
+// +checklocks:n.mu
+func (n *TunnelNetwork) evictOldestInboundSYNLocked() {
+	var oldestKey inboundKey
+	var oldest *inboundSYNPrep
+	for key, prep := range n.synPending {
+		if oldest == nil || prep.order < oldest.order {
+			oldestKey, oldest = key, prep
+		}
+	}
+	if oldest == nil {
+		return
+	}
+	n.releaseInboundSYNLocked(oldestKey, oldest)
+	oldest.cancel()
+}
+
+// releaseInboundSYNLocked drops prep's permit if it still owns key.
+//
+// +checklocks:n.mu
+func (n *TunnelNetwork) releaseInboundSYNLocked(key inboundKey, prep *inboundSYNPrep) {
+	if n.synPending[key] != prep {
+		return
+	}
+	delete(n.synPending, key)
+	if n.synPeerPending[key.from] <= 1 {
+		delete(n.synPeerPending, key.from)
+	} else {
+		n.synPeerPending[key.from]--
+	}
 }
 
 // runInboundSYN completes an admitted SYN off the delivery worker: it
 // re-parses the owned payload, prepares the handshake route, then registers
 // the connection exactly as the synchronous path did.
-func (n *TunnelNetwork) runInboundSYN(key inboundKey, delivery Delivery, listener *tunnelListener) {
+func (n *TunnelNetwork) runInboundSYN(ctx context.Context, key inboundKey, prep *inboundSYNPrep, delivery Delivery, listener *tunnelListener) {
 	defer n.wg.Done()
-	defer func() { <-n.synTokens }()
 	defer func() {
+		prep.cancel()
 		n.mu.Lock()
-		delete(n.synPending, key)
+		n.releaseInboundSYNLocked(key, prep)
+		n.synRunning--
 		n.mu.Unlock()
 	}()
-	ctx, cancel := context.WithTimeout(n.ctx, n.handshakeTimeout)
-	defer cancel()
 	packet, err := dataplanestreaming.Parse(delivery.Payload)
 	if err != nil {
 		return
@@ -782,8 +855,12 @@ func (n *TunnelNetwork) registerInbound(key inboundKey, connection *tunnelConn) 
 	if _, exists := n.inbound[key]; exists {
 		return ErrTunnelPacket
 	}
+	if n.inboundPeers[key.from] >= maxInboundStreamsPerPeer {
+		return ErrTunnelBackpressure
+	}
 	n.byID[connection.localID] = connection
 	n.inbound[key] = connection
+	n.inboundPeers[key.from]++
 	connection.inboundKey = &key
 	n.inboundPorts[connection.localPort]++
 	connection.portReserved = true
@@ -802,6 +879,11 @@ func (n *TunnelNetwork) unregister(connection *tunnelConn) {
 	}
 	if connection.inboundKey != nil && n.inbound[*connection.inboundKey] == connection {
 		delete(n.inbound, *connection.inboundKey)
+		if from := connection.inboundKey.from; n.inboundPeers[from] <= 1 {
+			delete(n.inboundPeers, from)
+		} else {
+			n.inboundPeers[from]--
+		}
 	}
 	n.mu.Unlock()
 }

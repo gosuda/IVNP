@@ -44,13 +44,17 @@ sequenceDiagram
 
 ### 1.3 Two-Phase Inbound `NewSession` Commit & Reply Ordering Gate
 
-A subtle vulnerability in naive ECIES implementations occurs if an unauthenticated or replayed `NewSession` packet immediately overwrites an active peer session or pollutes the global tag table before the sender's identity is verified. IVNP prevents this with two mechanisms in `dataplane/internal/garlic/ecies/ratchet.go` and `dataplane/internal/router/data_plane.go`:
+A subtle vulnerability in naive ECIES implementations occurs if an unauthenticated or replayed `NewSession` packet immediately overwrites an active peer session or pollutes the global tag table before the sender's identity is verified. IVNP prevents this with three mechanisms in `dataplane/internal/garlic/ecies/ratchet.go` and `dataplane/internal/router/data_plane.go`:
 
 1. **Two-Phase `NewSessionCandidate`**:
    - `ReceiveNewSessionCandidate` decrypts the inbound `NewSession` and verifies its `DateTime` block **without mutating any session or tag table state**.
    - `GarlicReceiver` inspects the decrypted garlic cloves (`pendingCloves`, up to 16) for a bundled `DatabaseStore` carrying the peer's `LeaseSet2`.
    - Only after `leaseSetMatchesRatchetStatic` confirms that the signed `LeaseSet2` advertises the exact X25519 static key from the NS handshake does `GarlicReceiver` invoke `CommitNew(candidate)` (or `RetainNew(candidate)` when an existing session is still within its retention window: `unconfirmedNewSessionBurstAge = 1s` before the session is confirmed by a `NewSessionReply` or `ExistingSession` packet, and `newSessionRestartAge = 2m` once confirmed).
-2. **Inbound Reply Ordering Gate (`ReserveInboundReply` / `ReserveRatchetReply`)**:
+2. **New Session Replay Cache**:
+   - Each authenticated `NewSession` reserves its ephemeral key, decoded from the Elligator2 representative (`garlicecies.NewSessionKey`). The two unused high bits and the second representative `1/(2r)` give every key eight byte-distinct encodings; all of them map to one reservation and are rejected with `ErrRatchetReplay`.
+   - A reservation lasts for `max(ReplayLifetime, DateTime acceptance)`, where the `DateTime` block is accepted from 300 s before to 120 s after local time. A replay is therefore rejected for as long as its timestamp would still validate.
+   - Reservations sit in eight expiry buckets (`replay_filter.go`), each covering one sixth of the longest reservation, so expiry releases whole buckets without scanning live keys and a key may stay reserved up to one bucket span past its deadline. The cache holds at most `MaxReplays` keys per Destination (default `16384`, split evenly across ratchet shards). When it is full, further `NewSession` packets are refused with `ErrRatchetReplayFull` before any DH work until reservations expire; live reservations are never evicted.
+3. **Inbound Reply Ordering Gate (`ReserveInboundReply` / `ReserveRatchetReply`)**:
    - When an inbound NS commits and requires a `NewSessionReply`, `ReserveInboundReply` installs a reservation gate (`ratchetReplyHoldTimeout = 5s`).
    - Any concurrent outbound application packets for that peer wait on `gate.done` until the NSR frame has been dispatched (`ReleaseRatchetReply: true`), guaranteeing that the remote initiator receives the NSR handshake completion before receiving `ExistingSession` tags derived from it.
 
@@ -111,7 +115,8 @@ Because a `SYN` packet carries the initiator's `From` identity and signature, a 
 
 - When building an outbound `SYN` (`SendStreamID == 0`), `hashToNACKs(targetHash)` packs the 32-byte `foundation.Hash` of the remote destination into **8 four-byte NACK words** (`NACKCount = 8`) before signing the packet.
 - On the responder, `nacksMatchHash(pkt.NACKs, localHash)` verifies that an inbound `SYN` contains the local destination's exact 32-byte hash in its NACK list and verifies the control signature (`verifyControl`, supporting `OfflineSignature` via `verifyTransient`) before allocating a stream.
-- Inbound `SYN` processing acquires a bounded concurrency token (`synTokens`, `maxInboundSYNPrep = 8`) and notifies `HandshakeObserver` (`BeginSessionHandshake` / `EndSessionHandshake`) so the control plane holds tunnel rotation steady while the handshake completes.
+- Inbound `SYN` processing acquires one of `maxInboundSYNPrep = 8` preparation permits and runs `HandshakeObserver.PrepareHandshake` off the delivery worker, so the control plane prepares the reply route while the handshake completes. A retransmitted `SYN` for a pending `(From, ReceiveStreamID)` pair is deduplicated against the pending preparation.
+- Permits are bounded per remote destination and evictable, because route preparation for a peer without a resolvable LeaseSet can block for the whole handshake timeout. One `From` destination holds at most `maxInboundSYNPrepPerPeer = 2` permits; further `SYN`s from it return `ErrTunnelBackpressure` and rely on the initiator's retransmission. When all permits are held, a new `SYN` cancels the oldest pending preparation and takes its permit, so stalled peers cannot block new inbound streams. Evicted preparations count against `maxInboundSYNPrepRunning = 16` until they observe cancellation; beyond that bound new `SYN`s are refused with `ErrTunnelBackpressure`.
 
 ### 2.3 TCB State Machine, RTO, Congestion Control & Pacing (`state.go`, `reliability.go`, `tunnel.go`)
 
@@ -135,6 +140,7 @@ stateDiagram-v2
 - **`CongestionWindow`**: `InitialWindow = 3` packets, `MinWindow = 1`, `MaxWindow = 128`, `MaxResends = 8`. Grows by `1` packet per ACK during slow start (`cwnd < ssthresh`) and by `1/cwnd` during congestion avoidance; on 3-NACK fast retransmit (`FastRecovery()`), sets `ssthresh = max(cwnd/2, 1)` and `cwnd = ssthresh`, whereas RTO timeout expiration (`Loss()`) sets `ssthresh = max(cwnd/2, 1)` and resets `cwnd = 1`.
 - **Selective NACKs & Fast Retransmit**: Out-of-order packets within `MaxWindow = 128` of `recvNext` are buffered in `reordered`. Outbound ACKs list all missing sequence numbers between `recvNext` and the highest buffered packet in the `NACKs` array. When an unacknowledged outbound packet accumulates `3` NACK reports (`pending.nacks == 3`), `maintain()` triggers an immediate fast retransmit and enters `FastRecovery()` without waiting for the RTO timer.
 - **Min-Heap Send Pacing**: Rather than bursting a full window into a tunnel at once, `maintain()` schedules outbound packets on a min-heap (`sendSchedule`) spaced by `clamp(RTO / (cwnd * 8), 250µs, 10ms)` and coalesces pure ACKs for `ackHoldInterval = 50ms`.
+- **Per-Peer Inbound Stream Cap**: Each inbound stream can buffer up to `ReadQueue` (default `64`) delivered chunks plus `MaxWindow = 128` reordered packets of up to `MaxPacketSize = 3072` bytes, about 580 KB. One remote `From` destination holds at most `maxInboundStreamsPerPeer = 32` registered inbound streams, which bounds that peer's buffered data to about 19 MB at the default read queue. A `SYN` for a new stream beyond the cap returns `ErrTunnelBackpressure` before route preparation and allocates no stream; the initiator's retransmission succeeds once one of its streams closes. A retransmitted `SYN` for an already registered stream is still answered. Streams in graceful half-close count until they are released.
 
 ---
 

@@ -102,6 +102,7 @@ The table below lists every parameter affected by `NetworkProfile` (`state/inter
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Network** | `Network.ID` | `[network] id` | `NetworkConfig.NetworkID` | `2` | Caller-supplied (`1..255`) | Caller-supplied (`1..255`) | `1..255` |
 | **Network** | `Network.Profile` | `[network] profile` | `WithNetworkProfile(p)` | `"public"` | `"dedicated"` | `"direct"` | `"public"`, `"dedicated"`, `"direct"` |
+| **Transport** | Peer dial address policy | `(follows [network] profile)` | `(follows WithNetworkProfile)` | Global unicast IP literals only | Any unicast IP literal (private and loopback allowed) | Any unicast IP literal (private and loopback allowed) | Not separately configurable |
 | **Router Role** | `Router.Floodfill` | `[router] floodfill` | `WithPublicParticipation(...)` | `false` (`ParticipationWarm`) | `true` (`ParticipationContributor`) | `true` (`ParticipationContributor`) | `bool` |
 | **Router Role** | `Router.Transit` | `[router] transit` | `WithPublicParticipation(...)` | `true` (`ParticipationWarm`) | `true` (`ParticipationContributor`) | `true` (`ParticipationContributor`) | `bool` |
 | **NetDB** | `NetDB.BucketCapacity` | `[netdb] bucket_capacity` | `(fixed at 24 in embedded)` | `24` | `24` | `24` | `5..1024` (INI) |
@@ -170,6 +171,8 @@ Every preset applies its baseline values first (`DefaultOperatingForProfile`), a
   - `ivnp.RejectPeers(blockedHashes...)`: Denies specific router identity hashes.
   - `ivnp.ChainAdmission(fn1, fn2, ...)`: Evaluates admission checks in order until one returns an error.
   - Custom `PeerAdmissionFunc`: Inspects `PeerAdmission{Network, NetworkID, Transport, Direction, Remote, Peer, RouterInfo}` synchronously before a session is installed.
+- **Peer Dial Address Policy (follows `[network] profile`)**:
+  NTCP2 and SSU2 dial only IP literal hosts from a peer's `RouterInfo`; hostnames are never resolved. Under the `public` profile they also skip any address that is not globally routable unicast: RFC 1918 private, loopback, link-local, CGNAT (`100.64.0.0/10`), `0.0.0.0/8`, unique local (`fc00::/7`), multicast, unspecified, and the IPv4-mapped forms of these. The same check applies to the endpoint an SSU2 relay introduction returns. This stops a peer from publishing a `RouterInfo` that points the router at internal hosts. The `dedicated` and `direct` profiles allow private and loopback addresses so LAN, VPC, and single-host meshes keep working. A private network that keeps the `public` profile must advertise globally routable addresses.
 - **Destination-Layer Access Control (`DestinationEncryptedLS2`)**:
   Even inside a shared `dedicated` network, a sensitive service destination can hide its `LeaseSet2` behind blinded `Red25519` keys and two-layer ChaCha20 encryption (`DestinationPolicy{Kind: DestinationEncryptedLS2, ClientAuth: ClientAuthDH}` or `ClientAuthPSK`), so only authorized client destinations can decrypt its inbound tunnel gateways.
 

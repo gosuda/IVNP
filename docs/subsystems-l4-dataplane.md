@@ -155,6 +155,7 @@ To prevent lock contention when a destination communicates with many concurrent 
 
 - Outbound encryption (`Seal`, `HasSession`, `NeedsBundledLeaseSet`) hashes the target peer's first byte (`peer[0] % len(shards)`) and locks only that shard.
 - Inbound `ExistingSession` decryption (`Open`) must look up the 8-byte session tag before the sender's identity is known. Each shard notifies the parent `garlic.RatchetManager` of newly derived and retired tags through the `garlicecies.TagObserver` interface (`TagAdded`, `TagRemoved`), maintaining a 64-way sharded `tagShards [64]ratchetTagShard` (`map[[8]byte]uint16`, indexed by `tag[0] & 63`) that routes 8-byte tags directly to their owning shard.
+- Packets without an indexed tag are New Session candidates. They route by the decoded X25519 ephemeral key (`garlicecies.NewSessionKey`), not by raw bytes, so every Elligator2 encoding of one key reaches the same shard and its replay cache.
 
 ### 5.2 Tunnel-Backed Streaming Engine (`dataplane/internal/streaming/tunnel/tunnel.go`)
 

@@ -20,9 +20,16 @@ const (
 	ssu2RelayRejectLimit          = 3
 	ssu2RelayRejectSignature      = 67
 	ssu2RelayRejectUnsupported    = 65
+	ssu2RelayRejectCharlieLimit   = 66
 	ssu2RelayRejectAliceUnknown   = 70
 	ssu2RelayRejectGeneralFailure = 64
 )
+
+// ssu2MaxRelayForwardsPerSource caps the relay forwards one IPv4 address or
+// IPv6 /64 may hold as Alice. Each forward makes this router send Alice's
+// RouterInfo and a RelayIntro to Charlie, so the cap keeps one source from
+// using the whole MaxPending table to amplify traffic toward introducees.
+const ssu2MaxRelayForwardsPerSource = 4
 
 // +checklocks:m.mu
 func (m *SSU2Manager) finishRelayRequestLocked(nonce uint32, relay *ssu2RelayRequest, err error) {
@@ -55,7 +62,59 @@ func (m *SSU2Manager) expireIntroductions(now time.Time) {
 			delete(m.deferredRelayIntros, nonce)
 		}
 	}
+	retention := m.relayIntroRetention()
+	for nonce, claim := range m.relayIntros {
+		if now.Sub(claim.seen) >= retention {
+			delete(m.relayIntros, nonce)
+		}
+	}
 	m.mu.Unlock()
+}
+
+// relayIntroRetention covers the whole interval in which relayTimestampValid
+// accepts one RelayIntro, so a replay always finds its claim.
+func (m *SSU2Manager) relayIntroRetention() time.Duration {
+	return 2 * m.maxClockSkew
+}
+
+// grantedRelayTag reports whether this router, as Charlie, holds an unexpired
+// relay tag from bob equal to tag. Only an introducer this router asked for a
+// tag may forward RelayIntro blocks to it.
+func (m *SSU2Manager) grantedRelayTag(bob foundation.Hash, tag uint32) bool {
+	m.mu.RLock()
+	lease, granted := m.advertisedRelays[bob]
+	now := m.nowLocked()
+	m.mu.RUnlock()
+	return granted && tag != 0 && lease.tag == tag && lease.expires.After(now)
+}
+
+// claimRelayIntro records nonce for bob. It reports duplicate for a nonce
+// already acted on, and limited when bob has used its budget of maxPending
+// introductions within one handshake timeout.
+func (m *SSU2Manager) claimRelayIntro(bob foundation.Hash, nonce uint32) (duplicate, limited bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.nowLocked()
+	if _, exists := m.relayIntros[nonce]; exists {
+		return true, false
+	}
+	recent := 0
+	retention := m.relayIntroRetention()
+	for claimed, claim := range m.relayIntros {
+		age := now.Sub(claim.seen)
+		if age >= retention {
+			delete(m.relayIntros, claimed)
+			continue
+		}
+		if claim.bob == bob && age < m.timeout {
+			recent++
+		}
+	}
+	if recent >= m.maxPending {
+		return false, true
+	}
+	m.relayIntros[nonce] = ssu2RelayIntroClaim{bob: bob, seen: now}
+	return false, false
 }
 
 func (m *SSU2Manager) ssu2KeysForPeer(peer foundation.Hash) (ssu2PeerAddress, error) {
@@ -156,12 +215,13 @@ func (m *SSU2Manager) handleRelayRequest(alice *ssu2TransportSession, request da
 		m.sendRelayResponse(alice, localHash, dataplanessu2.RelayResponse{Code: ssu2RelayRejectSignature, Nonce: request.Nonce, Timestamp: uint32(m.now().Unix())})
 		return
 	}
+	source, _ := ssu2InboundSourceKey(alice.remoteAddr())
 	m.mu.Lock()
 	if _, exists := m.relayForwards[request.Nonce]; exists {
 		m.mu.Unlock()
 		return
 	}
-	if len(m.relayForwards) >= m.maxPending {
+	if len(m.relayForwards) >= m.maxPending || m.relayForwardsFromLocked(source) >= ssu2MaxRelayForwardsPerSource {
 		m.mu.Unlock()
 		m.sendRelayResponse(alice, localHash, dataplanessu2.RelayResponse{Code: ssu2RelayRejectLimit, Nonce: request.Nonce, Timestamp: uint32(m.now().Unix())})
 		return
@@ -172,7 +232,7 @@ func (m *SSU2Manager) handleRelayRequest(alice *ssu2TransportSession, request da
 		m.sendRelayResponse(alice, localHash, dataplanessu2.RelayResponse{Code: ssu2RelayRejectGeneralFailure, Nonce: request.Nonce, Timestamp: uint32(m.now().Unix())})
 		return
 	}
-	m.relayForwards[request.Nonce] = ssu2RelayForward{alice: alice, charlie: charlie, expires: m.nowLocked().Add(m.timeout)}
+	m.relayForwards[request.Nonce] = ssu2RelayForward{alice: alice, charlie: charlie, source: source, expires: m.nowLocked().Add(m.timeout)}
 	m.mu.Unlock()
 
 	job := ssu2RelayStoreJob{nonce: request.Nonce, request: request, alice: alice, charlie: charlie, aliceInfo: aliceInfo, localHash: localHash}
@@ -183,6 +243,20 @@ func (m *SSU2Manager) handleRelayRequest(alice *ssu2TransportSession, request da
 	default:
 		m.failRelayForward(job)
 	}
+}
+
+// relayForwardsFromLocked counts the pending relay forwards whose Alice
+// arrived from source.
+//
+// +checklocks:m.mu
+func (m *SSU2Manager) relayForwardsFromLocked(source netip.Prefix) int {
+	count := 0
+	for _, forward := range m.relayForwards {
+		if forward.source == source {
+			count++
+		}
+	}
+	return count
 }
 
 // relayStoreLoop drains bounded relay jobs. Multiple workers may compress
@@ -254,6 +328,10 @@ func (m *SSU2Manager) handleRelayIntroAttempt(bob *ssu2TransportSession, intro d
 		return
 	}
 	localHash := bindings.LocalInfo.Hash()
+	if !m.grantedRelayTag(bob.peer, intro.Request.RelayTag) {
+		m.sendRelayResponse(bob, bob.peer, dataplanessu2.RelayResponse{Code: ssu2RelayRejectGeneralFailure, Nonce: intro.Request.Nonce, Timestamp: uint32(m.now().Unix())})
+		return
+	}
 	response := dataplanessu2.RelayResponse{Code: ssu2RelayRejectAliceUnknown, Nonce: intro.Request.Nonce, Timestamp: uint32(m.now().Unix())}
 	alice := foundation.Hash(intro.AliceHash)
 	aliceInfo, known := m.routerInfo(alice)
@@ -280,6 +358,18 @@ func (m *SSU2Manager) processRelayIntro(bob *ssu2TransportSession, intro datapla
 	valid, verifyErr := aliceInfo.Identity.Verify(input, intro.Request.Signature)
 	clear(input)
 	if verifyErr != nil || !valid {
+		return response, false
+	}
+	if !validSSU2Endpoint(intro.Request.Endpoint) || !m.addressPolicy.allows(intro.Request.Endpoint.Addr()) {
+		response.Code = ssu2RelayRejectUnsupported
+		return response, false
+	}
+	duplicate, limited := m.claimRelayIntro(bob.peer, intro.Request.Nonce)
+	if duplicate {
+		return response, true
+	}
+	if limited {
+		response.Code = ssu2RelayRejectCharlieLimit
 		return response, false
 	}
 	endpoint, err := m.localSSU2Endpoint()
@@ -462,7 +552,7 @@ func (m *SSU2Manager) signRelayResponse(bobHash foundation.Hash, response *datap
 }
 
 func (m *SSU2Manager) sendHolePunch(aliceAddress ssu2PeerAddress, remote netip.AddrPort, response dataplanessu2.RelayResponse) {
-	if !validSSU2Endpoint(remote) {
+	if !validSSU2Endpoint(remote) || !m.addressPolicy.allows(remote.Addr()) {
 		return
 	}
 	payload, err := m.holePunchPayload(response)
@@ -551,17 +641,46 @@ func (m *SSU2Manager) cachedSSU2RouterInfoStore(info foundation.NetworkDatabaseR
 	if err != nil {
 		return foundation.I2NPMessage{}, err
 	}
+	snapshot.stored = now
 	m.routerInfoStoresMu.Lock()
 	if m.routerInfoStores == nil {
 		m.routerInfoStores = make(map[foundation.Hash]ssu2RouterInfoStoreSnapshot)
 	}
-	if current, exists := m.routerInfoStores[hash]; exists && bytes.Equal(current.raw, raw) {
+	current, exists := m.routerInfoStores[hash]
+	switch {
+	case exists && bytes.Equal(current.raw, raw):
 		snapshot = current
-	} else {
+	case exists:
+		m.routerInfoStores[hash] = snapshot
+	default:
+		m.evictSSU2RouterInfoStoresLocked()
 		m.routerInfoStores[hash] = snapshot
 	}
 	m.routerInfoStoresMu.Unlock()
 	return snapshot.message(now)
+}
+
+// evictSSU2RouterInfoStoresLocked makes room for one new entry by dropping
+// the oldest stored snapshots. A relay only forwards stores for established
+// sessions, so the cache never needs more entries than the session limit.
+//
+// +checklocks:m.routerInfoStoresMu
+func (m *SSU2Manager) evictSSU2RouterInfoStoresLocked() {
+	limit := m.maxSessions
+	if limit <= 0 {
+		limit = defaultSSU2MaxSessions
+	}
+	for len(m.routerInfoStores) >= limit {
+		var oldest foundation.Hash
+		var oldestStored time.Time
+		first := true
+		for hash, cached := range m.routerInfoStores {
+			if first || cached.stored.Before(oldestStored) {
+				oldest, oldestStored, first = hash, cached.stored, false
+			}
+		}
+		delete(m.routerInfoStores, oldest)
+	}
 }
 
 func newSSU2RouterInfoStoreSnapshot(info foundation.NetworkDatabaseRouterInfo) (ssu2RouterInfoStoreSnapshot, error) {
@@ -732,9 +851,13 @@ func selectSSU2Introducers(info foundation.NetworkDatabaseRouterInfo, now uint64
 	}
 }
 
+// validSSU2Endpoint accepts unicast IPv4 and IPv6 endpoints. Multicast and
+// the IPv4 limited broadcast address never name one peer, so they are
+// rejected under every network profile.
 func validSSU2Endpoint(endpoint netip.AddrPort) bool {
 	address := endpoint.Addr()
-	return endpoint.IsValid() && endpoint.Port() != 0 && !address.IsUnspecified() && !address.Is4In6() && (address.Is4() || address.Is6())
+	unicast := !address.IsUnspecified() && !address.IsMulticast() && address != netip.AddrFrom4([4]byte{255, 255, 255, 255})
+	return endpoint.IsValid() && endpoint.Port() != 0 && unicast && !address.Is4In6() && (address.Is4() || address.Is6())
 }
 
 func udpAddressFromAddrPort(endpoint netip.AddrPort) *net.UDPAddr {

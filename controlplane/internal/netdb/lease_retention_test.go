@@ -136,3 +136,52 @@ func TestExpiredLeaseSet2TriggersLookupBeforeMaintenance(t *testing.T) {
 	default:
 	}
 }
+
+// TestLeaseRetentionLongLivedFloodDoesNotPinCache covers M10: a full cache of
+// attacker entries with distant expiries must not leave room for only one
+// honest LeaseSet at a time.
+//
+// +checklocksignore
+func TestLeaseRetentionLongLivedFloodDoesNotPinCache(t *testing.T) {
+	const now = uint64(1_750_000_000_000)
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+	database.maxLeases = 4
+	database.leasesMu.Lock()
+	for index := range byte(4) {
+		database.storeLeaseEntry(foundation.Hash{0xaa, index}, leaseEntry{expires: now + MetaLeaseSetMaxFutureMillis, version: 1})
+	}
+	honest := []foundation.Hash{{0x01}, {0x02}, {0x03}}
+	for _, key := range honest {
+		database.storeLeaseEntry(key, leaseEntry{expires: now + 10*60_000, version: 1})
+	}
+	database.leasesMu.Unlock()
+	for _, key := range honest {
+		if _, ok := database.leases[key]; !ok {
+			t.Fatalf("honest LeaseSet %x evicted while attacker entries remain", key[:1])
+		}
+	}
+}
+
+// +checklocksignore
+func TestLeaseRetentionEvictsLeastRecentlyStored(t *testing.T) {
+	database := NewDatabase(foundation.Hash{}, DefaultBucketCapacity)
+	database.maxLeases = 2
+	first, second, third := foundation.Hash{1}, foundation.Hash{2}, foundation.Hash{3}
+	database.leasesMu.Lock()
+	database.storeLeaseEntry(first, leaseEntry{expires: 100, version: 1})
+	database.storeLeaseEntry(second, leaseEntry{expires: 10, version: 1})
+	database.storeLeaseEntry(third, leaseEntry{expires: 50, version: 1})
+	database.leasesMu.Unlock()
+	if _, ok := database.leases[first]; ok {
+		t.Fatal("full store kept the least recently stored entry")
+	}
+	if _, ok := database.leases[second]; !ok {
+		t.Fatal("full store evicted by expiry instead of store order")
+	}
+	if removed := database.ExpireLeases(11); removed != 1 {
+		t.Fatalf("expiry after store-order eviction removed %d leases, want 1", removed)
+	}
+	if removed := database.ExpireLeases(101); removed != 1 || len(database.leases) != 0 {
+		t.Fatalf("expiry index kept an evicted entry: removed=%d len=%d", removed, len(database.leases))
+	}
+}

@@ -18,7 +18,6 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
-	"net/http/pprof"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -30,6 +29,7 @@ import (
 	"time"
 
 	"filippo.io/keygen"
+	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/hkdf"
 	"gosuda.org/ivnp/node"
 	"gosuda.org/ivnp/state"
@@ -39,10 +39,17 @@ var version = "active-dev"
 
 var (
 	errEmptySeedPhrase          = errors.New("seed phrase is empty after normalization")
+	errSeedPhraseTooShort       = fmt.Errorf("seed phrase must be at least %d characters for %s", minArgon2idSeedPhraseLen, seedKDFArgon2id)
+	errUnknownSeedKDF           = errors.New("unknown seed KDF")
 	errAdvertiseHostNeedsPort   = errors.New("-router-advertise-host requires -router-port")
 	errAdvertisePortOutOfRange  = errors.New("-router-advertise-port must be between 1 and 65535")
 	errAdvertiseHostnameTooLong = errors.New("hostname longer than 255 characters")
 )
+
+// seedPhraseEnv names the environment variable that carries the signing
+// seed phrase. It is read only after flag parsing and then removed from the
+// process environment, so usage output and child processes never see it.
+const seedPhraseEnv = "RESEED_SEED_PHRASE"
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
@@ -69,9 +76,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	interval := flags.Duration("interval", 10*time.Minute, "refresh interval for harvesting, probing, and packaging")
 	netID := flags.Uint("netid", 2, "I2P network ID")
 	signerID := flags.String("signer-id", envOr("RESEED_SIGNER_ID", "reseed@ivnp.network"), "SU3 signer common name (env RESEED_SIGNER_ID)")
-	seedPhrase := flags.String("seed-phrase", envOr("RESEED_SEED_PHRASE", ""), "deterministic RSA-4096 signing key seed phrase; prefer env RESEED_SEED_PHRASE so the phrase stays out of process arguments")
+	seedPhraseFlag := flags.String("seed-phrase", "", "deterministic RSA-4096 signing key seed phrase; prefer env "+seedPhraseEnv+" so the phrase stays out of process arguments")
 	routerPort := flags.Int("router-port", 0, "port for embedded router NTCP2/SSU2 transports (default 0 for random/ephemeral)")
 	routerAdvertiseHost := flags.String("router-advertise-host", envOr("RESEED_ROUTER_ADVERTISE_HOST", ""), "public host or IP advertised in the embedded router's info for inbound connections (requires -router-port; empty keeps the router firewalled)")
+	seedKDFName := flags.String("seed-kdf", envOr("RESEED_SEED_KDF", string(seedKDFHKDF)), "seed phrase key derivation: "+string(seedKDFHKDF)+" (legacy, unstretched) or "+string(seedKDFArgon2id)+" (stretched, salted with -signer-id); changing it changes the signing key (env RESEED_SEED_KDF)")
 	routerAdvertisePort := flags.Int("router-advertise-port", 0, "public port advertised when it differs from -router-port, e.g. NAT port forwarding (default: same as -router-port)")
 	noRouter := flags.Bool("no-router", false, "disable embedded router (test/replay mode)")
 	pprofAddr := flags.String("pprof", "", "serve net/http/pprof endpoints on this address (e.g. 127.0.0.1:6060); disabled when empty")
@@ -80,6 +88,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	showVersion := flags.Bool("version", false, "show version and exit")
 
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	seedPhrase := resolveSeedPhrase(*seedPhraseFlag)
+	kdf, err := parseSeedKDF(*seedKDFName)
+	if err != nil {
+		fmt.Fprintf(stderr, "invalid -seed-kdf: %v\n", err)
 		return 2
 	}
 	if *showVersion {
@@ -93,6 +107,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	}
+	if *pprofAddr != "" {
+		if err := validatePprofAddr(*pprofAddr); err != nil {
+			fmt.Fprintln(stderr, "ivnp-reseed:", err)
+			return 2
+		}
 	}
 
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -164,10 +184,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			if addr == "" {
 				continue
 			}
-			srv := &http.Server{
-				Addr:    addr,
-				Handler: server,
-			}
+			srv := newPublicHTTPServer(addr, server)
 			httpServers = append(httpServers, srv)
 			go func(s *http.Server) {
 				logger.Info("starting reseed HTTP server", "listen", s.Addr)
@@ -178,7 +195,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	rsaPrivKey, err := initSigningKey(*seedPhrase, logger)
+	rsaPrivKey, err := initSigningKey(seedPhrase, kdf, *signerID, logger)
 	if err != nil {
 		logger.Error("failed to initialize RSA signing key", "error", err)
 		return 1
@@ -383,20 +400,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	var pprofServer *http.Server
 	if *pprofAddr != "" {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/debug/pprof/", pprof.Index)
-		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-		pprofServer = &http.Server{
-			Addr:              *pprofAddr,
-			Handler:           mux,
-			ReadHeaderTimeout: 5 * time.Second,
-		}
+		pprofServer = newPprofServer(*pprofAddr)
 		go func() {
 			logger.Info("starting pprof server", "listen", *pprofAddr)
-			if srvErr := pprofServer.ListenAndServe(); srvErr != nil && srvErr != http.ErrServerClosed {
+			if srvErr := servePprof(pprofServer); srvErr != nil && srvErr != http.ErrServerClosed {
 				logger.Error("pprof server failed", "listen", *pprofAddr, "error", srvErr)
 			}
 		}()
@@ -432,6 +439,32 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 			epochTimer.Reset(time.Until(nextEpochBoundary(time.Now(), *interval)))
 		}
+	}
+}
+
+// Public reseed listener bounds. Every request is a small GET, so headers and
+// bodies arrive quickly; the write budget covers an SU3 download to a slow
+// client, and idle keep-alive connections are reclaimed.
+const (
+	publicReadHeaderTimeout = 10 * time.Second
+	publicReadTimeout       = 30 * time.Second
+	publicWriteTimeout      = 60 * time.Second
+	publicIdleTimeout       = 120 * time.Second
+	publicMaxHeaderBytes    = 16 << 10
+)
+
+// newPublicHTTPServer builds an internet-facing reseed listener whose read,
+// write, and idle deadlines and header size limit stop slow or oversized
+// clients from pinning connections and goroutines indefinitely.
+func newPublicHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: publicReadHeaderTimeout,
+		ReadTimeout:       publicReadTimeout,
+		WriteTimeout:      publicWriteTimeout,
+		IdleTimeout:       publicIdleTimeout,
+		MaxHeaderBytes:    publicMaxHeaderBytes,
 	}
 }
 
@@ -562,6 +595,16 @@ func configureActiveClientRouter(baseDir, tempDir string, netID uint8, routerPor
 	return cfg
 }
 
+// resolveSeedPhrase returns the -seed-phrase flag value, or the
+// RESEED_SEED_PHRASE environment value when the flag is empty, and removes
+// the environment variable either way. The phrase is never a flag default, so
+// flag usage and error output cannot print it.
+func resolveSeedPhrase(flagValue string) string {
+	envValue := os.Getenv(seedPhraseEnv)
+	_ = os.Unsetenv(seedPhraseEnv)
+	return cmp.Or(flagValue, envValue)
+}
+
 func normalizeSeedPhrase(phrase string) (string, error) {
 	normalized := strings.Join(strings.Fields(phrase), " ")
 	if normalized == "" {
@@ -570,20 +613,76 @@ func normalizeSeedPhrase(phrase string) (string, error) {
 	return normalized, nil
 }
 
-// deriveSigningKeyFromSeedPhrase turns a seed phrase into a deterministic
-// RSA-4096 key: HKDF-SHA512 expands the phrase into the key-generation
-// secret, then keygen.RSA runs the c2sp.org/det-keygen procedure (internal
-// HMAC_DRBG per NIST SP 800-90A), so the same phrase always reproduces the
-// same key. rsa.GenerateKey cannot be used: since Go 1.26 it ignores custom
-// readers and always uses crypto/rand.
+// seedKDF names a versioned seed phrase derivation. Each version fixes its
+// algorithm and parameters: changing either changes the derived signing key
+// and therefore the published reseed certificate.
+type seedKDF string
+
+const (
+	// seedKDFHKDF is the original, unstretched HKDF-SHA512 derivation with a
+	// global salt. It stays the default so existing signer identities persist.
+	seedKDFHKDF seedKDF = "hkdf-sha512"
+	// seedKDFArgon2id stretches the phrase with Argon2id, salted with the
+	// signer ID, so each guess against a published certificate costs memory
+	// and time and precomputed tables do not carry across deployments.
+	seedKDFArgon2id seedKDF = "argon2id-v2"
+)
+
+// Argon2id parameters for seedKDFArgon2id (RFC 9106 section 4, second
+// recommended option). They are part of the version and must never change.
+const (
+	argon2idSeedTime    = 3
+	argon2idSeedMemory  = 64 * 1024 // KiB
+	argon2idSeedThreads = 4
+	argon2idSeedSalt    = "ivnp-reseed/argon2id-v2/signer:"
+
+	// minArgon2idSeedPhraseLen is a length floor, not an entropy measurement:
+	// a phrase of random characters this long (for example the output of
+	// "openssl rand -base64 32") carries well over 128 bits.
+	minArgon2idSeedPhraseLen = 32
+)
+
+func parseSeedKDF(name string) (seedKDF, error) {
+	switch seedKDF(name) {
+	case "", seedKDFHKDF:
+		return seedKDFHKDF, nil
+	case seedKDFArgon2id:
+		return seedKDFArgon2id, nil
+	}
+	return "", fmt.Errorf("%w %q (want %s or %s)", errUnknownSeedKDF, name, seedKDFHKDF, seedKDFArgon2id)
+}
+
+// deriveSigningKeyFromSeedPhrase derives the key with the legacy default KDF.
 func deriveSigningKeyFromSeedPhrase(phrase string) (*rsa.PrivateKey, error) {
+	return deriveSigningKey(phrase, seedKDFHKDF, "")
+}
+
+// deriveSigningKey turns a seed phrase into a deterministic RSA-4096 key: the
+// selected KDF expands the phrase into the key-generation secret, then
+// keygen.RSA runs the c2sp.org/det-keygen procedure (internal HMAC_DRBG per
+// NIST SP 800-90A), so the same inputs always reproduce the same key.
+// rsa.GenerateKey cannot be used: since Go 1.26 it ignores custom readers and
+// always uses crypto/rand. signerID salts only seedKDFArgon2id.
+func deriveSigningKey(phrase string, kdf seedKDF, signerID string) (*rsa.PrivateKey, error) {
 	normalized, err := normalizeSeedPhrase(phrase)
 	if err != nil {
 		return nil, err
 	}
-	secret := make([]byte, 64)
-	if _, err := io.ReadFull(hkdf.New(sha512.New, []byte(normalized), []byte("ivnp-reseed"), []byte("reseed-rsa-4096")), secret); err != nil {
-		return nil, fmt.Errorf("expand seed phrase: %w", err)
+	var secret []byte
+	switch kdf {
+	case seedKDFHKDF:
+		secret = make([]byte, 64)
+		if _, err := io.ReadFull(hkdf.New(sha512.New, []byte(normalized), []byte("ivnp-reseed"), []byte("reseed-rsa-4096")), secret); err != nil {
+			clear(secret)
+			return nil, fmt.Errorf("expand seed phrase: %w", err)
+		}
+	case seedKDFArgon2id:
+		if len(normalized) < minArgon2idSeedPhraseLen {
+			return nil, errSeedPhraseTooShort
+		}
+		secret = argon2.IDKey([]byte(normalized), []byte(argon2idSeedSalt+signerID), argon2idSeedTime, argon2idSeedMemory, argon2idSeedThreads, 64)
+	default:
+		return nil, fmt.Errorf("%w %q", errUnknownSeedKDF, kdf)
 	}
 	defer clear(secret)
 	key, err := keygen.RSA(4096, secret)
@@ -596,9 +695,15 @@ func deriveSigningKeyFromSeedPhrase(phrase string) (*rsa.PrivateKey, error) {
 // initSigningKey derives the RSA-4096 signing key from the seed phrase, or
 // generates an ephemeral one when no phrase is configured. Key files are
 // never read or written: the seed phrase is the only backup.
-func initSigningKey(seedPhrase string, logger *slog.Logger) (*rsa.PrivateKey, error) {
+func initSigningKey(seedPhrase string, kdf seedKDF, signerID string, logger *slog.Logger) (*rsa.PrivateKey, error) {
 	if seedPhrase != "" {
-		return deriveSigningKeyFromSeedPhrase(seedPhrase)
+		if kdf == seedKDFHKDF {
+			logger.Warn("seed phrase uses the legacy unstretched "+string(seedKDFHKDF)+" derivation; a low-entropy phrase can be guessed offline from the published certificate",
+				"migrate_to", string(seedKDFArgon2id),
+				"min_phrase_chars", minArgon2idSeedPhraseLen,
+			)
+		}
+		return deriveSigningKey(seedPhrase, kdf, signerID)
 	}
 	logger.Warn("RESEED_SEED_PHRASE not set; generating ephemeral signing key that changes on restart")
 	return rsa.GenerateKey(rand.Reader, 4096)
@@ -669,18 +774,15 @@ func initReseedMaterial(certPath string, pubKeyPath string, signerID string, pri
 	return certPEM, pubKeyPEM, nil
 }
 
-// writeFileAtomic stages data under "<path>.tmp" then renames it over path so
-// readers never observe a partially written state file.
+// writeFileAtomic stages data in an exclusively created, randomly named file
+// in the same directory, then renames it over path so readers never observe a
+// partially written state file and a planted symlink is never followed.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, perm); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return state.FilesystemStoreWriteAtomic(path, data, perm, -1)
 }
 
-// removeStaleTempFile deletes a leftover "<statePath>.tmp" from a write
-// interrupted before its rename completed.
+// removeStaleTempFile deletes a leftover "<statePath>.tmp" written by earlier
+// releases, which staged atomic writes under that predictable name.
 func removeStaleTempFile(statePath string, logger *slog.Logger) {
 	tmpPath := statePath + ".tmp"
 	if err := os.Remove(tmpPath); err == nil {

@@ -41,9 +41,13 @@ VOLUME ["/data"]
 
 # RESEED_SIGNER_ID: SU3 signer common name shown to clients.
 # RESEED_SEED_PHRASE: seed phrase deriving the RSA-4096 signing key
-# deterministically (HKDF-SHA512 → det-keygen). No key file is used; the
+# deterministically (RESEED_SEED_KDF → det-keygen). No key file is used; the
 # phrase is the only backup. Without it an ephemeral key is generated on each start:
-#   docker run -e RESEED_SEED_PHRASE="word1 word2 ..." ...
+#   docker run -e RESEED_SEED_KDF=argon2id-v2 -e RESEED_SEED_PHRASE="<saved random phrase>" ...
+# Generate the phrase once (for example: openssl rand -base64 32) and keep it.
+# RESEED_SEED_KDF: hkdf-sha512 (legacy default, unstretched) or argon2id-v2
+# (stretched, salted with the signer ID, phrase of at least 32 characters).
+# Changing it changes the signing key; see README "Seed Phrase Derivation Versions".
 # Prefer env over -seed-phrase so the phrase stays out of the command line.
 ENV RESEED_SIGNER_ID="reseed@ivnp.network"
 

@@ -4,9 +4,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"io"
 	"math/big"
+	"sync"
+
+	"filippo.io/bigmod"
 )
 
 const (
@@ -42,6 +46,20 @@ const elGamalPrimeHex = "" +
 	"9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3B" +
 	"E39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF695581718" +
 	"3995497CEA956AE515D2261898FA051015728E5A8AACAA68FFFFFFFFFFFFFFFF"
+
+// elGamalModulus returns the shared constant-time modulus for decryption. A
+// bigmod.Modulus exposes no mutators, so sharing one instance is safe.
+var elGamalModulus = sync.OnceValues(func() (*bigmod.Modulus, error) {
+	raw, err := hex.DecodeString(elGamalPrimeHex)
+	if err != nil {
+		return nil, errElGamalParameters
+	}
+	m, err := bigmod.NewModulus(raw)
+	if err != nil || m.Size() != ElGamalPrivateKeySize {
+		return nil, errElGamalParameters
+	}
+	return m, nil
+})
 
 func elGamalParameters() (p, pMinusTwo *big.Int, err error) {
 	p, ok := new(big.Int).SetString(elGamalPrimeHex, 16)
@@ -133,38 +151,50 @@ func encryptElGamal(random io.Reader, dst []byte, public ElGamalPublicKey, plain
 
 // DecryptElGamal decrypts and validates an I2P legacy ElGamal ciphertext block.
 // It verifies the 0xff prefix and embedded SHA-256 hash before returning the 222-byte plaintext.
+// The private exponent is handled only by constant-time filippo.io/bigmod
+// arithmetic, so decryption time does not depend on the private key.
 func DecryptElGamal(dst []byte, private ElGamalPrivateKey, ciphertext []byte) ([]byte, error) {
 	if len(dst) < ElGamalPlaintextSize || len(ciphertext) != ElGamalCiphertextSize || ciphertext[0] != 0 || ciphertext[257] != 0 {
 		return nil, ErrElGamal
 	}
-	p, pMinusTwo, err := elGamalParameters()
+	p, err := elGamalModulus()
 	if err != nil {
 		return nil, err
 	}
-	x := new(big.Int).SetBytes(private[:])
-	if x.Sign() <= 0 || x.Cmp(pMinusTwo) > 0 {
+	// 1 <= x <= p-2, checked without branching on intermediate secret values.
+	x, err := bigmod.NewNat().SetBytes(private[:], p)
+	if err != nil {
 		return nil, ErrElGamal
 	}
-	a := new(big.Int).SetBytes(ciphertext[1:257])
-	b := new(big.Int).SetBytes(ciphertext[258:])
-	if a.Sign() <= 0 || a.Cmp(p) >= 0 || b.Sign() <= 0 || b.Cmp(p) >= 0 {
+	defer clear(x.Bits())
+	if x.IsZero()|x.IsMinusOne(p) != 0 {
+		return nil, ErrElGamal
+	}
+	a, err := bigmod.NewNat().SetBytes(ciphertext[1:257], p)
+	if err != nil || a.IsZero() == 1 {
+		return nil, ErrElGamal
+	}
+	b, err := bigmod.NewNat().SetBytes(ciphertext[258:], p)
+	if err != nil || b.IsZero() == 1 {
 		return nil, ErrElGamal
 	}
 
-	// a^(p-1-x) = a^(-x) mod p
-	exponent := new(big.Int).Sub(p, big.NewInt(1))
-	exponent.Sub(exponent, x)
-	inverse := new(big.Int).Exp(a, exponent, p)
-	m := new(big.Int).Mul(b, inverse)
-	m.Mod(m, p)
-	if m.BitLen() > 255*8 {
+	// a^(p-1-x) = a^(-x) mod p. Since 1 <= x <= p-2, (p-1) - x mod p never wraps.
+	exponent := p.Nat().SubOne(p)
+	defer clear(exponent.Bits())
+	exponent.Sub(x, p)
+	exponentBytes := exponent.Bytes(p)
+	defer clear(exponentBytes)
+	m := bigmod.NewNat().Exp(a, exponentBytes, p)
+	defer clear(m.Bits())
+	m.Mul(b, p)
+	representative := m.Bytes(p)
+	defer clear(representative)
+	// The 256-byte representative must be 0x00 || 0xff || SHA256(plaintext) || plaintext.
+	if representative[0] != 0 || representative[1] != 0xff {
 		return nil, ErrElGamal
 	}
-	var encoded [255]byte
-	m.FillBytes(encoded[:])
-	if encoded[0] != 0xff {
-		return nil, ErrElGamal
-	}
+	encoded := representative[1:]
 	hash := sha256.Sum256(encoded[33:])
 	if subtle.ConstantTimeCompare(encoded[1:33], hash[:]) != 1 {
 		return nil, ErrElGamal

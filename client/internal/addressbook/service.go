@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
@@ -40,6 +41,8 @@ type Config struct {
 	MaxResponseBytes int64
 	MaxRedirects     int
 	HTTPClient       *http.Client
+	// Logger receives subscription conflict reports. Nil uses slog.Default.
+	Logger *slog.Logger
 }
 
 type snapshot struct{ entries map[string]string }
@@ -47,9 +50,13 @@ type snapshot struct{ entries map[string]string }
 // Service resolves .i2p hostnames using in-memory snapshots of local files and remote subscriptions.
 type Service struct {
 	config Config
+	logger *slog.Logger
 	local  map[string]string
 	// +checklocks:mu
 	remote map[string]string
+	// owners names the subscription that first bound each remote name.
+	// +checklocks:mu
+	owners map[string]string
 	// +checklocks:mu
 	sources map[string]map[string]string
 	current atomic.Pointer[snapshot]
@@ -93,7 +100,11 @@ func NewService(config Config) (*Service, error) {
 	if config.MaxRedirects == 0 {
 		config.MaxRedirects = 3
 	}
-	s := &Service{config: config, local: make(map[string]string), remote: make(map[string]string), sources: make(map[string]map[string]string), done: make(chan struct{}), etag: make(map[string]string), modified: make(map[string]string)}
+	logger := config.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	s := &Service{config: config, logger: logger, local: make(map[string]string), remote: make(map[string]string), owners: make(map[string]string), sources: make(map[string]map[string]string), done: make(chan struct{}), etag: make(map[string]string), modified: make(map[string]string)}
 	if err := validateSubscriptions(config.Subscriptions); err != nil {
 		return nil, err
 	}
@@ -176,50 +187,49 @@ func (s *Service) restoreState() error {
 	if s.config.StatePath == "" {
 		return nil
 	}
-	_, sources, etags, modified, err := loadState(s.config.StatePath, s.config.MaxFileBytes, s.config.MaxEntries)
+	persisted, err := loadState(s.config.StatePath, s.config.MaxFileBytes, s.config.MaxEntries)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			s.remote = make(map[string]string)
+			s.owners = make(map[string]string)
 			s.sources = make(map[string]map[string]string)
 		}
 		return nil
 	}
 	for _, raw := range s.config.Subscriptions {
-		source, present := sources[raw]
+		source, present := persisted.Sources[raw]
 		if !present {
 			continue
 		}
-		if err := s.restoreSource(raw, source, etags[raw], modified[raw]); err != nil {
-			return err
+		s.sources[raw] = cloneEntries(source)
+		if etag := persisted.ETag[raw]; etag != "" {
+			s.etag[raw] = etag
+		}
+		if modified := persisted.Modified[raw]; modified != "" {
+			s.modified[raw] = modified
 		}
 	}
+	// A cache written before owners were recorded attributes each binding to
+	// the first current subscription whose snapshot holds the same binding.
+	for name, destination := range persisted.Entries {
+		if persisted.Owners[name] != "" {
+			continue
+		}
+		for _, raw := range s.config.Subscriptions {
+			if s.sources[raw][name] == destination {
+				persisted.Owners[name] = raw
+				break
+			}
+		}
+	}
+	remote, owners, err := s.mergeBindings(persisted.Entries, persisted.Owners, s.sources)
+	if err != nil {
+		return err
+	}
+	s.remote, s.owners = remote, owners
 	// Rewrite the cache immediately so removed sources cannot become
 	// authoritative again merely by being re-added before a verified refresh.
-	return saveState(s.config.StatePath, s.remote, s.sources, s.etag, s.modified, s.config.MaxFileBytes)
-}
-
-// +checklocks:s.mu
-func (s *Service) restoreSource(raw string, source map[string]string, etag, modified string) error {
-	s.sources[raw] = cloneEntries(source)
-	if etag != "" {
-		s.etag[raw] = etag
-	}
-	if modified != "" {
-		s.modified[raw] = modified
-	}
-	for name, destination := range source {
-		if _, local := s.local[name]; local {
-			continue
-		}
-		if _, exists := s.remote[name]; exists {
-			continue
-		}
-		if len(s.remote) >= s.config.MaxEntries {
-			return ErrConfig
-		}
-		s.remote[name] = destination
-	}
-	return nil
+	return saveState(s.config.StatePath, persistedState{Entries: s.remote, Owners: s.owners, Sources: s.sources, ETag: s.etag, Modified: s.modified}, s.config.MaxFileBytes)
 }
 
 // +checklocks:s.mu

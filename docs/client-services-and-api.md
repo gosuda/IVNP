@@ -80,7 +80,7 @@ Passing a raw or `datagram3` network string to `ListenPacket` fails with an expl
 | Endpoint | Auth Required | Response Format & Semantics |
 | :--- | :--- | :--- |
 | `GET /metrics` | Bearer token (if configured) | Prometheus text format `0.0.4` (zero-reflection pooled formatter across 13 metric domains + Go runtime stats) |
-| `GET /varz` | Public on allowed listener | Indented JSON snapshot of all atomic counters, gauges, and process memory metrics |
+| `GET /varz` | Bearer token (if configured) | Indented JSON snapshot of all atomic counters, gauges, and process memory metrics; it carries the same counters as `/metrics`, so `RequireBearer` does not exempt it |
 | `GET /healthz`, `GET /livez` | Public on allowed listener | HTTP `200` (`HealthOK` / `HealthDegraded`) or `503` (`HealthUnavailable`) |
 | `GET /readyz` | Public on allowed listener | HTTP `200` when `ManagementStatus.Ready == true`, else `503 Service Unavailable` |
 
@@ -104,12 +104,12 @@ Passing a raw or `datagram3` network string to `ListenPacket` fails with an expl
 `HTTPProxy` (`127.0.0.1:4444`) handles both `.i2p` eepsite requests and clearnet outproxy forwarding:
 
 - **Direct `.i2p` Requests**: Resolves `.b32.i2p`, raw base64, or named `.i2p` hosts (via `AddressBook`), strips hop-by-hop and `X-Forwarded-*` headers, normalizes `User-Agent` to `"MYOB/6.66 (AN/ON)"`, and relays HTTP or `CONNECT` streams over `Network.DialI2P`.
-- **Clearnet Outproxy Forwarding**: Non-`.i2p` hosts passing `validClearnetHost` round-robin across configured `Outproxies` (default `exit.stormycloud.i2p`), normalize `User-Agent` to `"Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"`, and tunnel HTTP or `CONNECT` requests through port `80` of the outproxy. A background loop (`warmOutproxyLoop`) warms outproxy LeaseSets and tunnels every `5m`.
+- **Clearnet Outproxy Forwarding**: Non-`.i2p` hosts passing `validClearnetHost` round-robin across configured `Outproxies` (default `exit.stormycloud.i2p`), normalize `User-Agent` to `"Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"`, and tunnel HTTP or `CONNECT` requests through port `80` of the outproxy. Both HTTP paths apply the Java I2P client tunnel defaults to request headers: `Accept-Language`, `Accept-Charset`, and every other `Accept-*` header except `Accept-Encoding` are removed, and a `Referer` is forwarded only when its scheme, host, and port match the request target, reduced to its path and query (any other `Referer` is dropped). A background loop (`warmOutproxyLoop`) warms outproxy LeaseSets and tunnels every `5m`.
 
 ### 3.3 SOCKS5 Proxy & Lock-Free AddressBook
 
 - **`SOCKS5Proxy` (`127.0.0.1:4447`, `socks5.go`)**: Accepts SOCKS5 `CONNECT` (`0x01`) requests with domain addressing (`ATYP = 0x03`), monitoring the client socket with `reader.Peek(1)` during `DialI2P` so client disconnects cancel in-flight I2P dials immediately.
-- **`AddressBookService` (`client/internal/addressbook`)**: Stores merged hostname maps in an `atomic.Pointer[snapshot]` so `ResolveDestination` is lock-free. Precedence runs from highest to lowest: `PrivateHostsPath` -> `UserHostsPath` -> `HostsPath` -> `defaultBootstrapHosts` (`reg.i2p`, `identiguy.i2p`, `stats.i2p`, `exit.stormycloud.i2p`, `i2p-projekt.i2p`, `zzz.i2p`) -> remote subscriptions (`RefreshInterval = 12h`, conditional `If-None-Match` / `If-Modified-Since`, same-origin redirect enforcement).
+- **`AddressBookService` (`client/internal/addressbook`)**: Stores merged hostname maps in an `atomic.Pointer[snapshot]` so `ResolveDestination` is lock-free. Precedence runs from highest to lowest: `PrivateHostsPath` -> `UserHostsPath` -> `HostsPath` -> `defaultBootstrapHosts` (`reg.i2p`, `identiguy.i2p`, `stats.i2p`, `exit.stormycloud.i2p`, `i2p-projekt.i2p`, `zzz.i2p`) -> remote subscriptions (`RefreshInterval = 12h`, conditional `If-None-Match` / `If-Modified-Since`, same-origin redirect enforcement). As in the Java I2P addressbook, a subscription can add names but cannot re-point one that is already bound: the first-seen destination stays until the subscription that supplied it is removed, even if the feed later drops or changes the entry. Conflicting entries are ignored and logged. Signed `changedest` records are not supported, so an operator changes a bound name through `privatehosts.txt` or `userhosts.txt`.
 
 ---
 
@@ -133,6 +133,16 @@ Passing a raw or `datagram3` network string to `ListenPacket` fails with an expl
 | `POST /api/actions/restart` | Schedule an in-process router restart supervised by `main.go` while keeping the WebUI listener online |
 | `GET /api/actions/log` | Most recent `50` administrative actions (`reseed`, `probe`, `restart`, `config`, `rollback`), newest first |
 | `GET /api/events` | 1-second Server-Sent Events (`text/event-stream`) telemetry stream |
+| `GET /healthz`, `GET /livez`, `GET /readyz` | Router liveness and client readiness probes; exempt from the bearer token |
+| `GET /varz` | The `/api/metrics` JSON document; requires the bearer token whenever `/api/*` does |
+
+Every request passes the listener's access policy before any handler runs. The policy follows the bind address, not `-webui-auth`:
+
+- **Loopback bind** (`127.0.0.0/8`, `::1`, `localhost`): only loopback clients are served, and the `Host` header must name a loopback address or `localhost`. This DNS-rebinding check stays in force with `-webui-auth=false`. When a token is set, `/api/*` and `/varz` also require it.
+- **Non-loopback bind with a token**: `/api/*` and `/varz` require `Authorization: Bearer <token>` (or `?token=` on `/api/events`); the `Host` header is not restricted.
+- **Non-loopback bind with `-webui-auth=false`**: the `Host` header must be `localhost` or an IP literal, so a page served from a rebound DNS name is rejected. Use a token to reach the console through a DNS name.
+
+The `/healthz`, `/livez`, and `/readyz` probes skip only the token check; the client and `Host` checks above apply to them as well. State-changing requests must also carry an `Origin` that matches `Host`, when an `Origin` is present.
 
 ---
 

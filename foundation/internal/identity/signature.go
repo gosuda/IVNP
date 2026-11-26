@@ -14,7 +14,6 @@ import (
 	"math/big"
 	"sync"
 
-	"gosuda.org/ivnp/cryptography"
 	"gosuda.org/ivnp/internal/pool"
 )
 
@@ -58,10 +57,12 @@ func VerifySignature(kind SigningKeyType, first, rest, message, signature []byte
 	case SigningRedDSASHA512Ed25519:
 		// RedDSA uses standard Ed25519 verification rules
 		return ed25519.Verify(ed25519.PublicKey(first), message, signature), nil
-	case SigningGOSTR3410_256:
-		return cryptography.Verify256(first, message, signature[:32], signature[32:]), nil
-	case SigningGOSTR3410_512:
-		return cryptography.Verify512(first, message, signature[:64], signature[64:]), nil
+	case SigningGOSTR3410_256, SigningGOSTR3410_512:
+		// The I2P specification reserves GOST R 34.10 (types 9 and 10) and Java
+		// I2P cannot verify them. Every caller verifies untrusted network data,
+		// and one GOST verification costs milliseconds of variable-time big.Int
+		// arithmetic, so the types are refused before any curve work.
+		return false, ErrUnsupportedSignature
 	default:
 		return false, ErrUnsupportedSignature
 	}

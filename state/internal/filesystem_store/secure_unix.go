@@ -39,6 +39,18 @@ func ValidateOwnedFile(file *os.File) error {
 	return nil
 }
 
+// ValidateNoSharedWrite rejects files that the group or other users can write.
+func ValidateNoSharedWrite(file *os.File) error {
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return ErrUnsafePermissions
+	}
+	return nil
+}
+
 // ValidatePrivateAccess requires an owned regular file without group or other access.
 func ValidatePrivateAccess(file *os.File) error {
 	if err := ValidateOwnedFile(file); err != nil {

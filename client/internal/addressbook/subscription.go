@@ -60,6 +60,8 @@ func (s *Service) refresh(parent context.Context) error {
 	}
 
 	s.mu.Lock()
+	previous := cloneEntries(s.remote)
+	previousOwners := cloneEntries(s.owners)
 	sources := cloneSources(s.sources)
 	etags := cloneEntries(s.etag)
 	modified := cloneEntries(s.modified)
@@ -102,11 +104,15 @@ func (s *Service) refresh(parent context.Context) error {
 	}
 	close(jobs)
 	group.Wait()
+	// A failed subscription keeps its last good snapshot and does not hold
+	// back the others; its error still schedules an early retry.
+	var fetchErrs []error
 	for index, result := range results {
-		if result.err != nil {
-			return result.err
-		}
 		raw := fetches[index].raw
+		if result.err != nil {
+			fetchErrs = append(fetchErrs, result.err)
+			continue
+		}
 		if result.unchanged {
 			continue
 		}
@@ -122,29 +128,91 @@ func (s *Service) refresh(parent context.Context) error {
 			delete(modified, raw)
 		}
 	}
-	remote := make(map[string]string)
-	for _, raw := range s.config.Subscriptions {
-		for name, destination := range sources[raw] {
-			if _, local := s.local[name]; local {
-				continue
-			}
-			if _, exists := remote[name]; !exists {
-				if len(remote) >= s.config.MaxEntries {
-					return ErrConfig
-				}
-				remote[name] = destination
-			}
-		}
+	if len(fetchErrs) == len(results) || parent.Err() != nil {
+		return errors.Join(append(fetchErrs, parent.Err())...)
 	}
-	if err := saveState(s.config.StatePath, remote, sources, etags, modified, s.config.MaxFileBytes); err != nil {
+	remote, owners, err := s.mergeBindings(previous, previousOwners, sources)
+	if err != nil {
+		return err
+	}
+	if err = saveState(s.config.StatePath, persistedState{Entries: remote, Owners: owners, Sources: sources, ETag: etags, Modified: modified}, s.config.MaxFileBytes); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	s.remote, s.sources, s.etag, s.modified = remote, sources, etags, modified
+	s.remote, s.owners, s.sources, s.etag, s.modified = remote, owners, sources, etags, modified
 	s.publish()
 	s.mu.Unlock()
+	return errors.Join(fetchErrs...)
+}
+
+// maxLoggedConflicts bounds the names listed in one conflict report, so a
+// hostile feed cannot flood the log.
+const maxLoggedConflicts = 8
+
+// mergeBindings builds the remote address book the way the Java I2P
+// addressbook does: a name bound by a subscription keeps its first
+// destination for as long as that subscription stays configured, even if the
+// feed later drops or re-points it. Names nobody has bound yet go to the first
+// configured subscription that lists them. A feed entry that disagrees with an
+// existing binding is ignored and reported. IVNP does not accept signed
+// changedest records, so only local hosts files or unsubscribing can change a
+// bound name.
+func (s *Service) mergeBindings(previous, previousOwners map[string]string, sources map[string]map[string]string) (map[string]string, map[string]string, error) {
+	configured := make(map[string]struct{}, len(s.config.Subscriptions))
+	for _, raw := range s.config.Subscriptions {
+		configured[raw] = struct{}{}
+	}
+	remote := make(map[string]string, len(previous))
+	owners := make(map[string]string, len(previous))
+	for name, destination := range previous {
+		owner := previousOwners[name]
+		if _, ok := configured[owner]; !ok {
+			continue
+		}
+		if _, local := s.local[name]; local {
+			continue
+		}
+		remote[name], owners[name] = destination, owner
+	}
+	for _, raw := range s.config.Subscriptions {
+		if err := s.bindSource(raw, sources[raw], remote, owners); err != nil {
+			return nil, nil, err
+		}
+	}
+	return remote, owners, nil
+}
+
+// bindSource adds the unbound names of one subscription snapshot to remote
+// and reports entries that disagree with an existing binding.
+func (s *Service) bindSource(raw string, entries, remote, owners map[string]string) error {
+	conflicts := 0
+	var sample []string
+	for name, destination := range entries {
+		if _, local := s.local[name]; local {
+			continue
+		}
+		bound, exists := remote[name]
+		if !exists {
+			if len(remote) >= s.config.MaxEntries {
+				return ErrConfig
+			}
+			remote[name], owners[name] = destination, raw
+			continue
+		}
+		if bound == destination {
+			continue
+		}
+		conflicts++
+		if len(sample) < maxLoggedConflicts {
+			sample = append(sample, name)
+		}
+	}
+	if conflicts != 0 {
+		s.logger.Warn("addressbook: subscription conflicts with existing bindings ignored", "subscription", raw, "conflicts", conflicts, "names", sample)
+	}
 	return nil
 }
+
 func (s *Service) fetchSubscription(parent context.Context, client *http.Client, raw string, haveSnapshot bool, etag, modified string) (map[string]string, string, string, bool, error) {
 	u, err := subscriptionURL(raw)
 	if err != nil {
@@ -190,7 +258,7 @@ func (s *Service) fetchSubscription(parent context.Context, client *http.Client,
 	if int64(len(data)) > s.config.MaxResponseBytes {
 		return nil, "", "", false, ErrConfig
 	}
-	entries, err := parseHosts(strings.NewReader(string(data)), s.config.MaxResponseBytes, s.config.MaxEntries)
+	entries, err := parseSubscriptionHosts(strings.NewReader(string(data)), s.config.MaxResponseBytes, s.config.MaxEntries)
 	if err != nil {
 		return nil, "", "", false, err
 	}
