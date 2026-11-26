@@ -914,7 +914,7 @@ func TestInitReseedMaterial(t *testing.T) {
 	pubKeyPath := filepath.Join(tempDir, "reseed-rsa.pub.pem")
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	key, err := initSigningKey("", logger)
+	key, err := initSigningKey("", seedKDFHKDF, "reseed@test.network", logger)
 	if err != nil {
 		t.Fatalf("initSigningKey failed: %v", err)
 	}
@@ -1661,7 +1661,7 @@ func TestSeedPhraseKeyDerivationAndCert(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	phrase := "legal winner thank year wave sausage worth useful legal winner thank yellow"
-	key, err := initSigningKey(phrase, logger)
+	key, err := initSigningKey(phrase, seedKDFHKDF, "reseed@test.network", logger)
 	if err != nil {
 		t.Fatalf("initSigningKey with phrase: %v", err)
 	}
@@ -1670,7 +1670,7 @@ func TestSeedPhraseKeyDerivationAndCert(t *testing.T) {
 	}
 
 	// The same phrase always reproduces the same key without any key file.
-	reloaded, err := initSigningKey(phrase, logger)
+	reloaded, err := initSigningKey(phrase, seedKDFHKDF, "reseed@test.network", logger)
 	if err != nil {
 		t.Fatalf("initSigningKey rerun: %v", err)
 	}
@@ -1681,7 +1681,7 @@ func TestSeedPhraseKeyDerivationAndCert(t *testing.T) {
 		t.Fatal("key file must never be read or written")
 	}
 
-	rotated, err := initSigningKey("other seed phrase entirely", logger)
+	rotated, err := initSigningKey("other seed phrase entirely", seedKDFHKDF, "reseed@test.network", logger)
 	if err != nil {
 		t.Fatalf("initSigningKey rotated: %v", err)
 	}
