@@ -567,10 +567,6 @@ func TestLeaseSetPublisherRecoversAfterEmptyFloodfillSnapshot(t *testing.T) {
 		t.Fatalf("publication without floodfills = %d, %v", sent, err)
 	}
 	addRequestTestFloodfill(database, requestTestHash(3))
-	now += PublicationConfirmTimeout - 1
-	if sent, err := publisher.Maintain(t.Context()); err != nil || sent != 0 {
-		t.Fatalf("publication before retry deadline = %d, %v", sent, err)
-	}
 	now++
 	if sent, err := publisher.Maintain(t.Context()); err != nil || sent != 1 {
 		t.Fatalf("publication after floodfill discovery = %d, %v; want one send", sent, err)

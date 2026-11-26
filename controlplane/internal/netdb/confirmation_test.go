@@ -2,6 +2,7 @@ package netdb
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -104,7 +105,11 @@ func TestConfirmedPublicationPrefersConfiguredVerifiedFloodfills(t *testing.T) {
 	}
 }
 
-func TestForcedPublicationDiscoversTargetsDuringBackoff(t *testing.T) {
+// An empty target snapshot sends nothing, so it must not arm the
+// confirmation backoff: a cold-starting router whose NetDB fills seconds
+// later would otherwise wait a full PublicationConfirmTimeout before its
+// first RouterInfo or LeaseSet store.
+func TestEmptyTargetSnapshotDoesNotArmPublicationBackoff(t *testing.T) {
 	const now = uint64(1_000)
 	key := foundation.Hash{9}
 	database := NewDatabase(foundation.Hash{1}, DefaultBucketCapacity)
@@ -118,14 +123,130 @@ func TestForcedPublicationDiscoversTargetsDuringBackoff(t *testing.T) {
 	}
 	target := requestTestHash(3)
 	addRequestTestFloodfill(database, target)
-	if sent, err := publication.maintain(t.Context(), false); err != nil || sent != 0 {
-		t.Fatalf("periodic publication ignored backoff: %d, %v", sent, err)
-	}
-	if sent, err := publication.maintain(t.Context(), true); err != nil || sent != 1 {
-		t.Fatalf("forced publication to discovered target = %d, %v", sent, err)
+	if sent, err := publication.maintain(t.Context(), false); err != nil || sent != 1 {
+		t.Fatalf("periodic publication to target discovered after empty snapshot = %d, %v", sent, err)
 	}
 	if len(sender.targets) != 1 || sender.targets[0] != target {
 		t.Fatalf("publication targets = %v, want [%x]", sender.targets, target)
+	}
+}
+
+type toggledPublicationRoute struct {
+	mu      sync.Mutex
+	gateway foundation.Hash
+	ready   bool
+}
+
+func (r *toggledPublicationRoute) NetDBReplyPath() (foundation.Hash, uint32, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.gateway, 0, r.ready
+}
+
+func (r *toggledPublicationRoute) set(ready bool) {
+	r.mu.Lock()
+	r.ready = ready
+	r.mu.Unlock()
+}
+
+// A pass that skips every target because no reply path exists yet also sends
+// nothing and must not arm the backoff; the store goes out as soon as the
+// reply path appears.
+func TestMissingReplyPathDoesNotArmPublicationBackoff(t *testing.T) {
+	const now = uint64(1_000)
+	key := foundation.Hash{9}
+	database := NewDatabase(foundation.Hash{1}, DefaultBucketCapacity)
+	for _, value := range []byte{3, 4, 5, 6} {
+		addRequestTestFloodfill(database, requestTestHash(value))
+	}
+	sender := new(publicationTestSender)
+	route := &toggledPublicationRoute{gateway: foundation.Hash{2}}
+	publication := newConfirmedPublication(database, sender, route, nil,
+		func() uint64 { return now }, func() uint32 { return 23 }, key, foundation.I2NPStoreLeaseSet2, nil, PublicationFloodfillK, nil)
+	t.Cleanup(publication.close)
+	publication.replace([]byte{1})
+	if sent, err := publication.maintain(t.Context(), false); sent != 0 || !errors.Is(err, ErrInvalidReplyRoute) {
+		t.Fatalf("publication without reply path = %d, %v", sent, err)
+	}
+	route.set(true)
+	if sent, err := publication.maintain(t.Context(), false); err != nil || sent != PublicationFloodfillK {
+		t.Fatalf("periodic publication after reply path appeared = %d, %v", sent, err)
+	}
+}
+
+// Stores that were actually sent keep the backoff: an unconfirmed target set
+// is not retried before PublicationConfirmTimeout.
+func TestSentPublicationKeepsConfirmationBackoff(t *testing.T) {
+	now := uint64(1_000)
+	key := foundation.Hash{9}
+	database := NewDatabase(foundation.Hash{1}, DefaultBucketCapacity)
+	for _, value := range []byte{3, 4, 5} {
+		addRequestTestFloodfill(database, requestTestHash(value))
+	}
+	sender := new(publicationTestSender)
+	publication := newConfirmedPublication(database, sender, publicationTestRoute{gateway: foundation.Hash{2}}, nil,
+		func() uint64 { return now }, func() uint32 { return 23 }, key, foundation.I2NPStoreLeaseSet2, nil, PublicationFloodfillK, nil)
+	t.Cleanup(publication.close)
+	publication.replace([]byte{1})
+	if sent, err := publication.maintain(t.Context(), false); err != nil || sent != PublicationFloodfillK {
+		t.Fatalf("initial publication = %d, %v", sent, err)
+	}
+	now += PublicationConfirmTimeout - 1
+	if sent, err := publication.maintain(t.Context(), false); err != nil || sent != 0 {
+		t.Fatalf("unconfirmed publication retried inside backoff = %d, %v", sent, err)
+	}
+	now++
+	if sent, err := publication.maintain(t.Context(), false); err != nil || sent != PublicationFloodfillK {
+		t.Fatalf("publication after confirmation timeout = %d, %v", sent, err)
+	}
+}
+
+type failingOncePublicationSender struct {
+	publicationTestSender
+	failed bool
+}
+
+func (s *failingOncePublicationSender) Send(ctx context.Context, target RouterRef, message foundation.I2NPMessage) error {
+	s.mu.Lock()
+	if !s.failed {
+		s.failed = true
+		s.mu.Unlock()
+		return errors.New("send failed")
+	}
+	s.mu.Unlock()
+	return s.publicationTestSender.Send(ctx, target, message)
+}
+
+// A store handed to the sender arms the backoff even when the send fails, so
+// periodic passes do not hammer an unreachable floodfill set; a forced pass
+// still re-snapshots and reaches a newly discovered target.
+func TestForcedPublicationDiscoversTargetsDuringBackoff(t *testing.T) {
+	const now = uint64(1_000)
+	key := foundation.Hash{9}
+	database := NewDatabase(foundation.Hash{1}, DefaultBucketCapacity)
+	addRequestTestFloodfill(database, requestTestHash(3))
+	sender := new(failingOncePublicationSender)
+	publication := newConfirmedPublication(database, sender, publicationTestRoute{gateway: foundation.Hash{2}}, nil,
+		func() uint64 { return now }, func() uint32 { return 23 }, key, foundation.I2NPStoreLeaseSet2, nil, PublicationFloodfillK, nil)
+	t.Cleanup(publication.close)
+	publication.replace([]byte{1})
+	if sent, err := publication.maintain(t.Context(), false); err == nil || sent != 0 {
+		t.Fatalf("failed initial publication = %d, %v", sent, err)
+	}
+	target := requestTestHash(4)
+	addRequestTestFloodfill(database, target)
+	if sent, err := publication.maintain(t.Context(), false); err != nil || sent != 0 {
+		t.Fatalf("periodic publication ignored backoff after a failed send: %d, %v", sent, err)
+	}
+	if sent, err := publication.maintain(t.Context(), true); err != nil || sent != 2 {
+		t.Fatalf("forced publication after backoff = %d, %v", sent, err)
+	}
+	found := false
+	for _, got := range sender.targets {
+		found = found || got == target
+	}
+	if !found {
+		t.Fatalf("publication targets = %v, want %x", sender.targets, target)
 	}
 }
 

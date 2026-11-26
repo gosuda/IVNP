@@ -156,8 +156,12 @@ type confirmedPublication struct {
 	confirmed int
 	// +checklocks:mu
 	nextRetry uint64
-	logger    *slog.Logger
-	mu        sync.Mutex
+	// dispatched counts stores handed to the sender from the current target
+	// snapshot. Only a dispatched store may arm the confirmation backoff.
+	// +checklocks:mu
+	dispatched int
+	logger     *slog.Logger
+	mu         sync.Mutex
 }
 
 func newConfirmedPublication(database *Database, sender LeaseSetPublishSender, route ReplyPathSource, registry *PublicationTokenRegistry, now func() uint64, random func() uint32, key foundation.Hash, typeID foundation.I2NPStoreType, preferred []foundation.Hash, targetK int, logger *slog.Logger) *confirmedPublication {
@@ -187,6 +191,7 @@ func (p *confirmedPublication) replace(data []byte) {
 	p.generation++
 	p.targets = nil
 	p.nextTarget = 0
+	p.dispatched = 0
 	p.confirmed = 0
 	p.nextRetry = 0
 }
@@ -242,6 +247,7 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 	if len(p.attempts) == 0 && p.confirmed < p.targetK && p.nextTarget >= len(p.targets) && retryDue {
 		p.targets = nil
 		p.nextTarget = 0
+		p.dispatched = 0
 	}
 	if p.targets == nil {
 		p.targets = p.snapshotTargets()
@@ -270,7 +276,12 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 			}
 			p.mu.Lock()
 			if p.confirmed+len(p.attempts) >= p.targetK || p.nextTarget >= len(p.targets) {
-				p.nextRetry = saturatingAdd(now, PublicationConfirmTimeout)
+				// A snapshot that dispatched nothing (no eligible floodfill
+				// yet, or no reply path) has nothing awaiting confirmation;
+				// leave the next pass free to re-snapshot.
+				if p.dispatched > 0 {
+					p.nextRetry = saturatingAdd(now, PublicationConfirmTimeout)
+				}
 				p.mu.Unlock()
 				break
 			}
@@ -318,6 +329,7 @@ func (p *confirmedPublication) maintain(ctx context.Context, force bool) (int, e
 			p.mu.Lock()
 			if p.generation == generation {
 				p.attempts[token] = publicationAttempt{token: token, target: target, sentAt: now, deadline: saturatingAdd(now, PublicationConfirmTimeout)}
+				p.dispatched++
 			}
 			p.mu.Unlock()
 			if metrics := p.database.Metrics(); metrics != nil {
