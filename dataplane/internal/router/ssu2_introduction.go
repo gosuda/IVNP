@@ -20,6 +20,7 @@ const (
 	ssu2RelayRejectLimit          = 3
 	ssu2RelayRejectSignature      = 67
 	ssu2RelayRejectUnsupported    = 65
+	ssu2RelayRejectCharlieLimit   = 66
 	ssu2RelayRejectAliceUnknown   = 70
 	ssu2RelayRejectGeneralFailure = 64
 )
@@ -55,7 +56,59 @@ func (m *SSU2Manager) expireIntroductions(now time.Time) {
 			delete(m.deferredRelayIntros, nonce)
 		}
 	}
+	retention := m.relayIntroRetention()
+	for nonce, claim := range m.relayIntros {
+		if now.Sub(claim.seen) >= retention {
+			delete(m.relayIntros, nonce)
+		}
+	}
 	m.mu.Unlock()
+}
+
+// relayIntroRetention covers the whole interval in which relayTimestampValid
+// accepts one RelayIntro, so a replay always finds its claim.
+func (m *SSU2Manager) relayIntroRetention() time.Duration {
+	return 2 * m.maxClockSkew
+}
+
+// grantedRelayTag reports whether this router, as Charlie, holds an unexpired
+// relay tag from bob equal to tag. Only an introducer this router asked for a
+// tag may forward RelayIntro blocks to it.
+func (m *SSU2Manager) grantedRelayTag(bob foundation.Hash, tag uint32) bool {
+	m.mu.RLock()
+	lease, granted := m.advertisedRelays[bob]
+	now := m.nowLocked()
+	m.mu.RUnlock()
+	return granted && tag != 0 && lease.tag == tag && lease.expires.After(now)
+}
+
+// claimRelayIntro records nonce for bob. It reports duplicate for a nonce
+// already acted on, and limited when bob has used its budget of maxPending
+// introductions within one handshake timeout.
+func (m *SSU2Manager) claimRelayIntro(bob foundation.Hash, nonce uint32) (duplicate, limited bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.nowLocked()
+	if _, exists := m.relayIntros[nonce]; exists {
+		return true, false
+	}
+	recent := 0
+	retention := m.relayIntroRetention()
+	for claimed, claim := range m.relayIntros {
+		age := now.Sub(claim.seen)
+		if age >= retention {
+			delete(m.relayIntros, claimed)
+			continue
+		}
+		if claim.bob == bob && age < m.timeout {
+			recent++
+		}
+	}
+	if recent >= m.maxPending {
+		return false, true
+	}
+	m.relayIntros[nonce] = ssu2RelayIntroClaim{bob: bob, seen: now}
+	return false, false
 }
 
 func (m *SSU2Manager) ssu2KeysForPeer(peer foundation.Hash) (ssu2PeerAddress, error) {
@@ -254,6 +307,10 @@ func (m *SSU2Manager) handleRelayIntroAttempt(bob *ssu2TransportSession, intro d
 		return
 	}
 	localHash := bindings.LocalInfo.Hash()
+	if !m.grantedRelayTag(bob.peer, intro.Request.RelayTag) {
+		m.sendRelayResponse(bob, bob.peer, dataplanessu2.RelayResponse{Code: ssu2RelayRejectGeneralFailure, Nonce: intro.Request.Nonce, Timestamp: uint32(m.now().Unix())})
+		return
+	}
 	response := dataplanessu2.RelayResponse{Code: ssu2RelayRejectAliceUnknown, Nonce: intro.Request.Nonce, Timestamp: uint32(m.now().Unix())}
 	alice := foundation.Hash(intro.AliceHash)
 	aliceInfo, known := m.routerInfo(alice)
@@ -280,6 +337,18 @@ func (m *SSU2Manager) processRelayIntro(bob *ssu2TransportSession, intro datapla
 	valid, verifyErr := aliceInfo.Identity.Verify(input, intro.Request.Signature)
 	clear(input)
 	if verifyErr != nil || !valid {
+		return response, false
+	}
+	if !validSSU2Endpoint(intro.Request.Endpoint) {
+		response.Code = ssu2RelayRejectUnsupported
+		return response, false
+	}
+	duplicate, limited := m.claimRelayIntro(bob.peer, intro.Request.Nonce)
+	if duplicate {
+		return response, true
+	}
+	if limited {
+		response.Code = ssu2RelayRejectCharlieLimit
 		return response, false
 	}
 	endpoint, err := m.localSSU2Endpoint()
@@ -732,9 +801,13 @@ func selectSSU2Introducers(info foundation.NetworkDatabaseRouterInfo, now uint64
 	}
 }
 
+// validSSU2Endpoint accepts unicast IPv4 and IPv6 endpoints. Multicast and
+// the IPv4 limited broadcast address never name one peer, so they are
+// rejected under every network profile.
 func validSSU2Endpoint(endpoint netip.AddrPort) bool {
 	address := endpoint.Addr()
-	return endpoint.IsValid() && endpoint.Port() != 0 && !address.IsUnspecified() && !address.Is4In6() && (address.Is4() || address.Is6())
+	unicast := !address.IsUnspecified() && !address.IsMulticast() && address != netip.AddrFrom4([4]byte{255, 255, 255, 255})
+	return endpoint.IsValid() && endpoint.Port() != 0 && unicast && !address.Is4In6() && (address.Is4() || address.Is6())
 }
 
 func udpAddressFromAddrPort(endpoint netip.AddrPort) *net.UDPAddr {
