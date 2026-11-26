@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1117,5 +1118,81 @@ func testTCPPair(t *testing.T) (net.Conn, net.Conn) {
 		_ = client.Close()
 		t.Fatal("listener did not accept")
 		return nil, nil
+	}
+}
+
+func TestHTTPProxyScrubsRefererAndAcceptHeaders(t *testing.T) {
+	tests := []struct {
+		name        string
+		target      string
+		headers     string
+		wantReferer string
+	}{
+		{name: "outproxy cross-origin referer", target: "http://tracker.example/pixel", headers: "Referer: http://secret-forum.i2p/thread/42\r\n"},
+		{name: "outproxy same-origin referer", target: "http://example.com/a", headers: "Referer: http://example.com/b/c?q=1#frag\r\n", wantReferer: "/b/c?q=1"},
+		{name: "eepsite cross-origin referer", target: "http://forum.i2p/a", headers: "Referer: http://other.i2p/secret\r\n"},
+		{name: "eepsite same-origin referer", target: "http://forum.i2p/a", headers: "Referer: http://FORUM.i2p/b\r\n", wantReferer: "/b"},
+		{name: "eepsite referer on another port", target: "http://forum.i2p/a", headers: "Referer: http://forum.i2p:8080/b\r\n"},
+		{name: "eepsite referer on another scheme", target: "http://forum.i2p/a", headers: "Referer: https://forum.i2p/b\r\n"},
+		{name: "eepsite relative referer", target: "http://forum.i2p/a", headers: "Referer: /b\r\n"},
+		{name: "eepsite duplicate referer", target: "http://forum.i2p/a", headers: "Referer: http://forum.i2p/b\r\nReferer: http://other.i2p/c\r\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			seen := make(chan http.Header, 1)
+			network := pipeNetwork(func(connection net.Conn) {
+				defer connection.Close()
+				request, err := http.ReadRequest(bufio.NewReader(connection))
+				if err != nil {
+					_, _ = io.Copy(io.Discard, connection)
+					return
+				}
+				seen <- request.Header
+				_, _ = io.WriteString(connection, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+			})
+			proxy, err := NewHTTPProxy(HTTPProxyConfig{
+				Network: network, Resolver: destinationResolverFunc(func(_ context.Context, name string) (string, error) {
+					if name == "forum.i2p" || name == "exit.stormycloud.i2p" {
+						return testB32, nil
+					}
+					return "", ErrI2PTarget
+				}),
+				ListenAddress: "127.0.0.1:0", Outproxies: []string{"exit.stormycloud.i2p"}, OutproxyWarmupInterval: time.Hour,
+				OutproxyWarmupReady: func() bool { return false }, OutproxyWarmupRetryInterval: time.Hour,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = proxy.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = proxy.Close(); _ = proxy.Wait() })
+			connection, err := net.Dial("tcp", proxy.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.Close()
+			host := strings.TrimPrefix(test.target, "http://")
+			host, _, _ = strings.Cut(host, "/")
+			_, _ = io.WriteString(connection, "GET "+test.target+" HTTP/1.1\r\nHost: "+host+"\r\n"+test.headers+
+				"Accept: text/html\r\nAccept-Encoding: gzip\r\nAccept-Language: ko-KR,ko;q=0.9\r\nAccept-Charset: utf-8\r\n\r\n")
+			response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			header := <-seen
+			if got := strings.Join(header.Values("Referer"), ","); got != test.wantReferer {
+				t.Fatalf("Referer = %q, want %q", got, test.wantReferer)
+			}
+			for _, name := range []string{"Accept-Language", "Accept-Charset"} {
+				if got := header.Get(name); got != "" {
+					t.Fatalf("%s forwarded: %q", name, got)
+				}
+			}
+			if header.Get("Accept") != "text/html" || header.Get("Accept-Encoding") != "gzip" {
+				t.Fatalf("content negotiation headers dropped: %#v", header)
+			}
+		})
 	}
 }
