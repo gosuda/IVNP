@@ -73,6 +73,8 @@ Autonomous I2P network indexer and SU3 reseed server (`gosuda.org/ivnp/cmd/ivnp-
 
 All `/i2pseeds.su3` responses include `Cache-Control: public, max-age=600` and an `ETag` header; conditional requests with a matching `If-None-Match` receive `304 Not Modified`. Certificate and public key endpoints set `Cache-Control: public, max-age=86400`.
 
+Every `-listen` server bounds slow and oversized clients: request headers must arrive within `10s` and the full request within `30s`, each response must finish within `60s`, idle keep-alive connections close after `120s`, and request headers are limited to `16 KiB` (larger requests receive `431 Request Header Fields Too Large`). The listeners have no concurrent connection cap; deploy behind a reverse proxy or firewall rule when one is needed.
+
 ---
 
 ## SU3 Wire Format (`/i2pseeds.su3`)
