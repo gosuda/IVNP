@@ -360,7 +360,7 @@ func (m *SSU2Manager) processRelayIntro(bob *ssu2TransportSession, intro datapla
 	if verifyErr != nil || !valid {
 		return response, false
 	}
-	if !validSSU2Endpoint(intro.Request.Endpoint) {
+	if !validSSU2Endpoint(intro.Request.Endpoint) || !m.addressPolicy.allows(intro.Request.Endpoint.Addr()) {
 		response.Code = ssu2RelayRejectUnsupported
 		return response, false
 	}
@@ -552,7 +552,7 @@ func (m *SSU2Manager) signRelayResponse(bobHash foundation.Hash, response *datap
 }
 
 func (m *SSU2Manager) sendHolePunch(aliceAddress ssu2PeerAddress, remote netip.AddrPort, response dataplanessu2.RelayResponse) {
-	if !validSSU2Endpoint(remote) {
+	if !validSSU2Endpoint(remote) || !m.addressPolicy.allows(remote.Addr()) {
 		return
 	}
 	payload, err := m.holePunchPayload(response)

@@ -69,6 +69,10 @@ type ssu2RelayIntroFixture struct {
 // newSSU2RelayIntroFixture connects Mallory to Charlie. Mallory is an
 // authenticated SSU2 peer of Charlie but not, unless granted, its introducer.
 func newSSU2RelayIntroFixture(t *testing.T, charlieMaxPending int) *ssu2RelayIntroFixture {
+	return newSSU2RelayIntroFixtureWithPolicy(t, charlieMaxPending, false)
+}
+
+func newSSU2RelayIntroFixtureWithPolicy(t *testing.T, charlieMaxPending int, requirePublic bool) *ssu2RelayIntroFixture {
 	t.Helper()
 	f := &ssu2RelayIntroFixture{network: newSSU2SimNetwork(t)}
 	malloryConn := newSSU2SimConn(t, f.network, "mallory")
@@ -92,7 +96,8 @@ func newSSU2RelayIntroFixture(t *testing.T, charlieMaxPending int) *ssu2RelayInt
 	}
 	f.malloryManager = newSSU2LiveManager(t, malloryDB, malloryStatic, f.malloryIntro, time.Minute, time.Minute)
 	f.charlieManager, err = NewSSU2Manager(SSU2ManagerConfig{NetworkID: 2, Peers: charlieDB, StaticPrivate: charlieStatic, IntroKey: charlieIntro,
-		TokenLifetime: time.Minute, HandshakeTimeout: time.Second, IdleTimeout: time.Minute, MaxPending: charlieMaxPending})
+		TokenLifetime: time.Minute, HandshakeTimeout: time.Second, IdleTimeout: time.Minute, MaxPending: charlieMaxPending,
+		RequirePublicPeerAddresses: requirePublic})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,6 +251,31 @@ func TestSSU2RelayIntroRejectsNonUnicastEndpoint(t *testing.T) {
 			if got := f.charlieWrites.writesTo(endpoint); got != 0 {
 				t.Fatalf("Charlie sent %d packets to non-unicast endpoint %s", got, endpoint)
 			}
+		}
+	})
+}
+
+func TestSSU2RelayIntroPublicPolicyRejectsNonPublicEndpoint(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newSSU2RelayIntroFixtureWithPolicy(t, 0, true)
+		tag := f.grantRelayTag(t)
+		for i, endpoint := range []netip.AddrPort{
+			netip.MustParseAddrPort("127.0.0.1:9"),
+			netip.MustParseAddrPort("10.0.0.5:9"),
+			netip.MustParseAddrPort("192.168.1.1:9"),
+			netip.MustParseAddrPort("100.64.0.1:9"),
+			netip.MustParseAddrPort("169.254.1.1:9"),
+			netip.MustParseAddrPort("[::1]:9"),
+			netip.MustParseAddrPort("[fd00::1]:9"),
+		} {
+			f.sendIntro(t, 0x81818100+uint32(i), tag, endpoint)
+			if got := f.charlieWrites.writesTo(endpoint); got != 0 {
+				t.Fatalf("public-policy Charlie sent %d packets to non-public endpoint %s", got, endpoint)
+			}
+		}
+		f.sendIntro(t, 0x82828282, tag, f.victim)
+		if got := f.victimHolePunches(t); got != 1 {
+			t.Fatalf("public-policy Charlie hole-punched %d times for routable simnet endpoint, want 1", got)
 		}
 	})
 }
