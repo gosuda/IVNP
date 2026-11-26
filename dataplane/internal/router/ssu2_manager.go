@@ -930,11 +930,13 @@ type ssu2RelayStoreJob struct {
 }
 
 // ssu2RouterInfoStoreSnapshot holds immutable RouterInfo-store bytes shared
-// through SSU2Manager.routerInfoStores.
+// through SSU2Manager.routerInfoStores. stored orders eviction once the cache
+// reaches the session limit.
 type ssu2RouterInfoStoreSnapshot struct {
 	raw        []byte
 	compressed []byte
 	hash       foundation.Hash
+	stored     time.Time
 }
 
 type ssu2PeerAddress struct {
