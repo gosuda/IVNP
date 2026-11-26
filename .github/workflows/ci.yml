@@ -51,7 +51,7 @@ jobs:
           trap 'rm -rf -- "$tmp"' EXIT
           cd "$tmp"
           GOTOOLCHAIN=local go mod init tools
-          GOTOOLCHAIN=local go get github.com/gosuda/JustGoodPractices/cmd/gojgp@v1.2.0 golang.org/x/tools@v0.51.0
+          GOTOOLCHAIN=local go get github.com/gosuda/JustGoodPractices/cmd/gojgp@v1.2.0 golang.org/x/tools/cmd/goimports@v0.51.0
           GOTOOLCHAIN=local go install github.com/gosuda/JustGoodPractices/cmd/gojgp golang.org/x/tools/cmd/goimports
       - name: Install checklocks
         if: steps.tools-cache.outputs.cache-hit != 'true'
