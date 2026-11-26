@@ -15,8 +15,8 @@ This document provides a code-level structural reference for Layers **L6** (`cli
 | `service.go` | `Service`, `Config`, `snapshot` | Implements `destination.DestinationResolver`; stores `merged map[string]string` in `atomic.Pointer[snapshot]` so `ResolveDestination` is lock-free |
 | `bootstrap.go` | `defaultBootstrapHosts`, `ensureBootstrapHostsFile` | Seeds 6 built-in `.i2p` hosts (`reg.i2p`, `identiguy.i2p`, `stats.i2p`, `exit.stormycloud.i2p`, `i2p-projekt.i2p`, `zzz.i2p`) and writes initial `0600` `hosts.txt` if missing |
 | `hosts.go` | `parseHosts`, `normalizeName`, `canonicalDestination` | Parses `name=dest` lines, strips `#` comments, rejects `#!` mutation commands (`ErrMutation`), normalizes `.i2p` / `.i2p.alt` labels (`<= 67` chars), and verifies canonical base32/base64 destinations |
-| `subscription.go` | `refresh`, `subscriptionURL` | Fetches up to 32 remote subscriptions concurrently via `parallelism.Workers`, sends conditional `ETag` / `If-Modified-Since` headers, and blocks cross-origin redirects (`sameSubscriptionOrigin`) |
-| `store.go` | `persistedState`, `loadState`, `saveState` | Persists `Version: 2` subscription snapshots via `state.FilesystemStoreWriteAtomic` (`0600`) and re-sanitizes all entries on load |
+| `subscription.go` | `refresh`, `mergeBindings`, `subscriptionURL` | Fetches up to 32 remote subscriptions concurrently via `parallelism.Workers`, sends conditional `ETag` / `If-Modified-Since` headers, and blocks cross-origin redirects (`sameSubscriptionOrigin`). `mergeBindings` keeps each name's first-seen destination for as long as the subscription that bound it stays configured; later feed entries that re-point a bound name are ignored and logged at `WARN` |
+| `store.go` | `persistedState`, `loadState`, `saveState` | Persists `Version: 3` state (merged bindings, the owning subscription of each binding, and per-subscription snapshots) via `state.FilesystemStoreWriteAtomic` (`0600`) and re-sanitizes all entries on load. Version 1 and 2 files load with each binding attributed to the first current subscription whose snapshot holds it |
 
 ### 1.2 `client/internal/frontend`
 

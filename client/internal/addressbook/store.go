@@ -11,36 +11,42 @@ import (
 
 var errStateSizeOverflow = errors.New("addressbook: state size limit overflows int")
 
+// persistedState is the address book cache. Entries holds the merged remote
+// bindings and Owners names the subscription that first bound each entry.
+// Version 3 added Owners; older files have their owners inferred on load.
 type persistedState struct {
 	Version  int                          `json:"version"`
 	Entries  map[string]string            `json:"entries"`
+	Owners   map[string]string            `json:"owners,omitempty"`
 	Sources  map[string]map[string]string `json:"sources,omitempty"`
 	ETag     map[string]string            `json:"etag,omitempty"`
 	Modified map[string]string            `json:"modified,omitempty"`
 }
 
-func loadState(path string, maxBytes int64, maxEntries int) (map[string]string, map[string]map[string]string, map[string]string, map[string]string, error) {
+const persistedStateVersion = 3
+
+func loadState(path string, maxBytes int64, maxEntries int) (persistedState, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return persistedState{}, err
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxBytes {
-		return nil, nil, nil, nil, ErrConfig
+		return persistedState{}, ErrConfig
 	}
 	data := make([]byte, info.Size())
 	if _, err = io.ReadFull(file, data); err != nil {
-		return nil, nil, nil, nil, err
+		return persistedState{}, err
 	}
 	var state persistedState
 	err = json.Unmarshal(data, &state)
 	invalidState := err != nil
 	if !invalidState {
-		invalidState = (state.Version != 1 && state.Version != 2) || len(state.Entries) > maxEntries
+		invalidState = state.Version < 1 || state.Version > persistedStateVersion || len(state.Entries) > maxEntries
 	}
 	if invalidState {
-		return nil, nil, nil, nil, ErrConfig
+		return persistedState{}, ErrConfig
 	}
 	validate := func(entries map[string]string) error {
 		for name, destination := range entries {
@@ -53,21 +59,29 @@ func loadState(path string, maxBytes int64, maxEntries int) (map[string]string, 
 		return nil
 	}
 	if validate(state.Entries) != nil {
-		return nil, nil, nil, nil, ErrConfig
+		return persistedState{}, ErrConfig
+	}
+	for _, owner := range state.Owners {
+		if u, ownerErr := subscriptionURL(owner); ownerErr != nil || u.String() != owner {
+			return persistedState{}, ErrConfig
+		}
 	}
 	total := 0
 	for source, entries := range state.Sources {
 		u, sourceErr := subscriptionURL(source)
 		if sourceErr != nil || u.String() != source || len(entries) > maxEntries || validate(entries) != nil {
-			return nil, nil, nil, nil, ErrConfig
+			return persistedState{}, ErrConfig
 		}
 		total += len(entries)
 		if total > maxEntries*32 {
-			return nil, nil, nil, nil, ErrConfig
+			return persistedState{}, ErrConfig
 		}
 	}
 	if state.Entries == nil {
 		state.Entries = make(map[string]string)
+	}
+	if state.Owners == nil {
+		state.Owners = make(map[string]string)
 	}
 	if state.Sources == nil {
 		state.Sources = make(map[string]map[string]string)
@@ -78,17 +92,18 @@ func loadState(path string, maxBytes int64, maxEntries int) (map[string]string, 
 	if state.Modified == nil {
 		state.Modified = make(map[string]string)
 	}
-	return state.Entries, state.Sources, state.ETag, state.Modified, nil
+	return state, nil
 }
 
-func saveState(path string, entries map[string]string, sources map[string]map[string]string, etags, modified map[string]string, max int64) error {
+func saveState(path string, persisted persistedState, max int64) error {
 	if path == "" {
 		return nil
 	}
 	if err := ensureStateDir(path); err != nil {
 		return err
 	}
-	data, err := json.Marshal(persistedState{Version: 2, Entries: entries, Sources: sources, ETag: etags, Modified: modified})
+	persisted.Version = persistedStateVersion
+	data, err := json.Marshal(persisted)
 	if err != nil {
 		return err
 	}
