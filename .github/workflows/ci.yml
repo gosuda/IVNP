@@ -91,7 +91,7 @@ jobs:
         include:
           - os: depot-ubuntu-24.04
             arch: amd64
-          - os: macos-latest
+          - os: depot-macos-latest
             arch: arm64
           - os: windows-latest
             arch: amd64
