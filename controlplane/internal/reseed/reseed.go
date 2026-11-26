@@ -32,11 +32,15 @@ const (
 	DefaultTargetRouterInfos   = 150
 	DefaultParallelFetches     = 3
 	DefaultMaxSuccessfulReseed = 3
-	DefaultBucketSubnetQuota   = 2
-	DefaultBucketAdmitLimit    = 20
-	DefaultVerifyAnchorCount   = 16
-	DefaultMergeWait           = 5 * time.Second
-	ReseedUserAgent            = "Wget/1.11.4"
+	// DefaultMinReseedSources is the number of successful reseed sources
+	// FetchAny waits for before the candidate target alone ends the fetch,
+	// when that many endpoints are configured.
+	DefaultMinReseedSources  = 2
+	DefaultBucketSubnetQuota = 2
+	DefaultBucketAdmitLimit  = 20
+	DefaultVerifyAnchorCount = 16
+	DefaultMergeWait         = 5 * time.Second
+	ReseedUserAgent          = "Wget/1.11.4"
 )
 
 var (
@@ -382,29 +386,50 @@ func leadingZerosXOR(a, b foundation.Hash) int {
 // The first byte tags the address family so a /16 and a /48 can never alias.
 type ingressSubnet [8]byte
 
+// hostlessIngressSubnet is the shared quota slot for RouterInfos that publish
+// no literal IP host, so omitting or obscuring the host cannot bypass the
+// per-bucket subnet quota.
+var hostlessIngressSubnet = ingressSubnet{3}
+
 // ingressKey is a (local bucket, subnet) quota slot.
 type ingressKey struct {
 	bucket uint16
 	subnet ingressSubnet
 }
 
+// sourceKey is a (local bucket, reseed source) quota slot.
+type sourceKey struct {
+	bucket uint16
+	source int
+}
+
 // ingressGuard enforces per-local-bucket admission quotas: at most M routers
-// per subnet per bucket and at most the bucket capacity overall. Unlike the
-// retired per-archive guard, the quota follows the local router's own distance
-// bands, which is where an eclipse attacker would concentrate keys.
+// per subnet per bucket, at most sourceQuota routers per reseed source per
+// bucket, and at most the bucket capacity overall. Unlike the retired
+// per-archive guard, the quota follows the local router's own distance bands,
+// which is where an eclipse attacker would concentrate keys.
 type ingressGuard struct {
 	subnetQuota int
 	bucketLimit int
+	sourceQuota int
 	subnetUse   map[ingressKey]int
+	sourceUse   map[sourceKey]int
 	bucketUse   [256]int
 }
 
-func newIngressGuard(subnetQuota, bucketLimit int) *ingressGuard {
-	return &ingressGuard{subnetQuota: subnetQuota, bucketLimit: bucketLimit, subnetUse: make(map[ingressKey]int)}
+func newIngressGuard(subnetQuota, bucketLimit, sourceQuota int) *ingressGuard {
+	return &ingressGuard{
+		subnetQuota: subnetQuota, bucketLimit: bucketLimit, sourceQuota: sourceQuota,
+		subnetUse: make(map[ingressKey]int), sourceUse: make(map[sourceKey]int),
+	}
 }
 
-func (g *ingressGuard) claim(bucket int, subnets []ingressSubnet) bool {
+func (g *ingressGuard) claim(bucket, source int, subnets []ingressSubnet) bool {
 	if bucket < 0 || bucket >= len(g.bucketUse) || g.bucketUse[bucket] >= g.bucketLimit {
+		return false
+	}
+	perSource := sourceKey{bucket: uint16(bucket), source: source}
+	if g.sourceQuota > 0 && g.sourceUse[perSource] >= g.sourceQuota {
 		return false
 	}
 	if g.subnetQuota > 0 {
@@ -417,12 +442,14 @@ func (g *ingressGuard) claim(bucket int, subnets []ingressSubnet) bool {
 			g.subnetUse[ingressKey{bucket: uint16(bucket), subnet: subnet}]++
 		}
 	}
+	g.sourceUse[perSource]++
 	g.bucketUse[bucket]++
 	return true
 }
 
 // ingressSubnetsOf returns the distinct subnet claims of a RouterInfo's
-// contact addresses: IPv4 /16 and IPv6 /48 prefixes.
+// contact addresses: IPv4 /16 and IPv6 /48 prefixes. A RouterInfo without any
+// literal IP host claims hostlessIngressSubnet.
 func ingressSubnetsOf(info foundation.NetworkDatabaseRouterInfo) []ingressSubnet {
 	seen := make(map[ingressSubnet]struct{}, 4)
 	var subnets []ingressSubnet
@@ -462,6 +489,9 @@ func ingressSubnetsOf(info foundation.NetworkDatabaseRouterInfo) []ingressSubnet
 			seen[subnet] = struct{}{}
 			subnets = append(subnets, subnet)
 		}
+	}
+	if len(subnets) == 0 {
+		subnets = append(subnets, hostlessIngressSubnet)
 	}
 	return subnets
 }
@@ -622,13 +652,16 @@ func orderByLocalBuckets(slots map[foundation.Hash]*dedupSlot, local foundation.
 
 // ingestCandidates is phase two of reseed admission: deduplicated candidates
 // are ordered by per-local-bucket farthest-point spread, signature-verified
-// once, gated on per-local-bucket subnet quotas, then stored. Floodfill
+// once, gated on per-local-bucket subnet and per-source quotas, then stored.
+// When candidates come from more than one reseed source, each source may fill
+// at most an even share of every local bucket. Floodfill
 // anchors closest to the local hash are retained for post-reseed connectivity
 // checks.
 func (c Client) ingestCandidates(slots map[foundation.Hash]*dedupSlot, database *controlplanenetdb.Database, seenAt uint64) ReseedResult {
 	local := database.Routers().Local()
 	ordered := orderByLocalBuckets(slots, local, c.bucketAdmitLimit())
-	guard := newIngressGuard(c.bucketSubnetQuota(), c.bucketAdmitLimit())
+	bucketLimit := c.bucketAdmitLimit()
+	guard := newIngressGuard(c.bucketSubnetQuota(), bucketLimit, sourceShare(slots, bucketLimit))
 	anchorLimit := c.verifyAnchorCount()
 	var anchors []foundation.Hash
 	admitted := 0
@@ -648,7 +681,7 @@ func (c Client) ingestCandidates(slots map[foundation.Hash]*dedupSlot, database 
 				continue
 			}
 		}
-		if !guard.claim(bucket, ingressSubnetsOf(candidate.info)) {
+		if !guard.claim(bucket, candidate.source, ingressSubnetsOf(candidate.info)) {
 			continue
 		}
 		if database.AdmitVerifiedReseedRouterInfo(candidate.info, seenAt) != nil {
@@ -660,6 +693,23 @@ func (c Client) ingestCandidates(slots map[foundation.Hash]*dedupSlot, database 
 		}
 	}
 	return ReseedResult{Admitted: admitted, Anchors: anchors}
+}
+
+// sourceShare returns the per-bucket admission cap for each reseed source: the
+// bucket limit split evenly across the distinct sources that supplied
+// candidates, rounded up. A single source keeps the whole bucket.
+func sourceShare(slots map[foundation.Hash]*dedupSlot, bucketLimit int) int {
+	sources := make(map[int]struct{})
+	for _, slot := range slots {
+		sources[slot.best.source] = struct{}{}
+		if slot.count > 1 {
+			sources[slot.fallback.source] = struct{}{}
+		}
+	}
+	if len(sources) < 2 {
+		return bucketLimit
+	}
+	return (bucketLimit + len(sources) - 1) / len(sources)
 }
 
 // insertAnchor keeps the anchors closest to the local hash, sorted
@@ -766,9 +816,11 @@ func isPriorityReseedEndpoint(endpoint string) bool {
 	return isPriorityReseedHost(parsed.Hostname())
 }
 
-// FetchAny fetches reseed archives across multiple endpoints until enough
-// unique candidates are collected or sufficient independent sources succeed,
-// then runs one deduplicated, quota-gated admission pass. Prioritized
+// FetchAny fetches reseed archives across multiple endpoints until at least
+// DefaultMinReseedSources sources have succeeded (or every endpoint has been
+// tried) and either enough unique candidates are collected or
+// DefaultMaxSuccessfulReseed sources succeed, then runs one deduplicated,
+// quota-gated admission pass. Prioritized
 // endpoints (such as hotseed.gosuda.org) are all queried in parallel and
 // their archives are merged (ingestion waits for every priority response so
 // a slow source still contributes coverage, bounded by Client.MergeWait)
@@ -820,10 +872,13 @@ func (c Client) FetchAny(ctx context.Context, endpoints []string, database *cont
 		state.drain()
 		return c.ingestCandidates(state.slots, database, seenAt)
 	}
+	minSources := min(DefaultMinReseedSources, len(ordered))
 	done := func() bool {
-		return len(state.slots) >= state.target ||
-			state.successes >= DefaultMaxSuccessfulReseed ||
-			(state.next >= len(state.endpoints) && state.active == 0)
+		if state.next >= len(state.endpoints) && state.active == 0 {
+			return true
+		}
+		return state.successes >= minSources &&
+			(len(state.slots) >= state.target || state.successes >= DefaultMaxSuccessfulReseed)
 	}
 
 	hasPriority := len(priority) > 0

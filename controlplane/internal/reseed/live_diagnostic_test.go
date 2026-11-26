@@ -99,7 +99,7 @@ func TestLivePriorityReseedDiagnostic(t *testing.T) {
 
 	outcomes := map[string]int{}
 	sigFailures, floodfills, v2Only, noV2 := 0, 0, 0, 0
-	guard := newIngressGuard(client.bucketSubnetQuota(), client.bucketAdmitLimit())
+	guard := newIngressGuard(client.bucketSubnetQuota(), client.bucketAdmitLimit(), sourceShare(slots, client.bucketAdmitLimit()))
 	for _, slot := range slots {
 		category, sigFailed, isFF, hasV2 := classifySlotAdmission(slot, guard, database, local, seenAt)
 		outcomes[category]++
@@ -183,7 +183,7 @@ func classifySlotAdmission(slot *dedupSlot, guard *ingressGuard, database *contr
 	isFF := foundation.NetworkDatabaseIsFloodfill(candidate.info)
 	hasV2 := hasV2Transport(candidate.info)
 	bucket := leadingZerosXOR(local, candidate.info.Hash())
-	if !guard.claim(bucket, ingressSubnetsOf(candidate.info)) {
+	if !guard.claim(bucket, candidate.source, ingressSubnetsOf(candidate.info)) {
 		if guard.bucketUse[bucket] >= guard.bucketLimit {
 			return "bucket-full", sigFailed, isFF, hasV2
 		}
