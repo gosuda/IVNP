@@ -150,7 +150,8 @@ Usage of ivnp-reseed:
   -signer-id string
         SU3 signer common name (default "reseed@ivnp.network", env RESEED_SIGNER_ID)
   -seed-phrase string
-        Deterministic RSA-4096 signing key seed phrase (env RESEED_SEED_PHRASE preferred)
+        Deterministic RSA-4096 signing key seed phrase (env RESEED_SEED_PHRASE preferred;
+        the flag has no default, so usage output never prints the phrase)
   -router-port int
         Port for embedded router NTCP2/SSU2 transports (default 0 for random/ephemeral)
   -router-advertise-host string
@@ -179,9 +180,11 @@ Usage of ivnp-reseed:
 | Environment Variable | CLI Flag | Purpose |
 | :--- | :--- | :--- |
 | `RESEED_SIGNER_ID` | `-signer-id` | SU3 signer Common Name (for example, `reseed@ivnp.network`) |
-| `RESEED_SEED_PHRASE` | `-seed-phrase` | Seed phrase used to derive the RSA-4096 signing key deterministically via `HKDF-SHA512` (`"ivnp-reseed"`, `"reseed-rsa-4096"`) and `filippo.io/keygen.RSA(4096, secret)`. Pass via environment variable so the phrase does not appear in process argument tables. |
+| `RESEED_SEED_PHRASE` | `-seed-phrase` | Seed phrase used to derive the RSA-4096 signing key deterministically via `HKDF-SHA512` (`"ivnp-reseed"`, `"reseed-rsa-4096"`) and `filippo.io/keygen.RSA(4096, secret)`. Pass via environment variable so the phrase does not appear in process argument tables. A non-empty `-seed-phrase` takes precedence over the variable. |
 
 When `RESEED_SEED_PHRASE` is set, `ivnp-reseed` reproduces the exact same RSA-4096 private key and X.509 certificate in memory on every restart; no private key file is ever written to disk. If no seed phrase is provided, `ivnp-reseed` generates an ephemeral keypair at startup.
+
+`ivnp-reseed` reads `RESEED_SEED_PHRASE` only after flag parsing and then removes it from its own process environment, so the phrase never appears in flag usage or error output and is not inherited through the environment by anything the process starts later.
 
 Persistent artifacts in `-data-dir` (`peers.gob`, `i2pseeds.su3`, `reseed-rsa.crt`, `reseed-rsa.pub.pem`) are written through an atomic `.tmp` write-and-rename sequence, and any stale `.tmp` files are cleaned up on startup.
 
