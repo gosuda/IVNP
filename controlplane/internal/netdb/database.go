@@ -3,6 +3,7 @@ package netdb
 import (
 	"bytes"
 	"compress/gzip"
+	"container/list"
 	"errors"
 	"io"
 	"sync"
@@ -44,6 +45,8 @@ type leaseEntry struct {
 	expires   uint64
 	published bool
 	typeID    foundation.I2NPStoreType
+	// stored is this entry's position in Database.leaseOrder.
+	stored *list.Element
 }
 
 type leaseExpiry struct {
@@ -64,6 +67,12 @@ type Database struct {
 	leaseExpiries []leaseExpiry
 	// +checklocks:leasesMu
 	leaseExpiryIndex map[foundation.Hash]int
+	// leaseOrder lists keys from least to most recently stored. A full cache
+	// evicts from its front, so an attacker-chosen expiry cannot make an entry
+	// outlive honest ones.
+	//
+	// +checklocks:leasesMu
+	leaseOrder list.List
 	// +checklocks:leasesMu
 	maxLeases int
 	networkID uint32
@@ -626,14 +635,32 @@ func (d *Database) EncryptedLeaseSet(key foundation.Hash) (foundation.NetworkDat
 // +checklocks:d.leasesMu
 // +checklocksexclude:d.routers.mu
 func (d *Database) storeLeaseEntry(key foundation.Hash, entry leaseEntry) {
-	_, exists := d.leases[key]
-	if !exists && len(d.leases) >= d.maxLeases {
-		if oldest, ok := d.popLeaseExpiryLocked(); ok {
-			delete(d.leases, oldest.key)
+	if old, exists := d.leases[key]; exists {
+		entry.stored = old.stored
+		d.leaseOrder.MoveToBack(entry.stored)
+	} else {
+		if len(d.leases) >= d.maxLeases {
+			if front := d.leaseOrder.Front(); front != nil {
+				d.removeLeaseLocked(front.Value.(foundation.Hash))
+			}
 		}
+		entry.stored = d.leaseOrder.PushBack(key)
 	}
 	d.leases[key] = entry
 	d.upsertLeaseExpiryLocked(key, entry.expires)
+}
+
+// +checklocks:d.leasesMu
+func (d *Database) removeLeaseLocked(key foundation.Hash) {
+	entry, exists := d.leases[key]
+	if !exists {
+		return
+	}
+	delete(d.leases, key)
+	d.leaseOrder.Remove(entry.stored)
+	if index, ok := d.leaseExpiryIndex[key]; ok {
+		d.removeLeaseExpiryLocked(index)
+	}
 }
 
 // +checklocks:d.leasesMu
@@ -657,23 +684,19 @@ func (d *Database) upsertLeaseExpiryLocked(key foundation.Hash, expires uint64) 
 }
 
 // +checklocks:d.leasesMu
-func (d *Database) popLeaseExpiryLocked() (leaseExpiry, bool) {
-	if len(d.leaseExpiries) == 0 {
-		return leaseExpiry{}, false
-	}
-	oldest := d.leaseExpiries[0]
-	delete(d.leaseExpiryIndex, oldest.key)
+func (d *Database) removeLeaseExpiryLocked(index int) {
+	removed := d.leaseExpiries[index]
+	delete(d.leaseExpiryIndex, removed.key)
 	last := len(d.leaseExpiries) - 1
-	if last != 0 {
-		d.leaseExpiries[0] = d.leaseExpiries[last]
-		d.leaseExpiryIndex[d.leaseExpiries[0].key] = 0
+	if index != last {
+		d.leaseExpiries[index] = d.leaseExpiries[last]
+		d.leaseExpiryIndex[d.leaseExpiries[index].key] = index
 	}
 	d.leaseExpiries[last] = leaseExpiry{}
 	d.leaseExpiries = d.leaseExpiries[:last]
-	if len(d.leaseExpiries) != 0 {
-		d.fixLeaseExpiryLocked(0)
+	if index < len(d.leaseExpiries) {
+		d.fixLeaseExpiryLocked(index)
 	}
-	return oldest, true
 }
 
 // +checklocks:d.leasesMu
@@ -736,8 +759,7 @@ func (d *Database) ExpireLeases(nowMillis uint64) int {
 		if oldest.expires == 0 || oldest.expires >= nowMillis {
 			break
 		}
-		d.popLeaseExpiryLocked()
-		delete(d.leases, oldest.key)
+		d.removeLeaseLocked(oldest.key)
 		removed++
 	}
 	return removed

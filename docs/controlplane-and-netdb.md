@@ -37,6 +37,8 @@ This rotation prevents a fixed set of floodfill routers from permanently sitting
 | `EncryptedLeaseSet` | `5` | `store.Key == SHA256(sigType[2, BE] \|\| blindedPubKey[32])`; valid `Red25519` signature over `0x05 \|\| Unsigned`; valid expiration range; strictly newer `Published`. |
 | `MetaLeaseSet` | `7` | `Hash() == store.Key`; valid signature over `0x07 \|\| Unsigned`; expiration up to `MetaLeaseSetMaxFutureMillis` (`65,535s`). |
 
+The LeaseSet cache holds at most `4096` entries of all types. Entries leave it when they expire (`ExpireLeases`). When a new key arrives at a full cache, the least recently stored entry is evicted; storing a newer version of an existing key moves it to the most recent position. Eviction never depends on a record's own expiration, so long-lived records (such as `MetaLeaseSet` entries valid for up to `65,535s`) cannot outlast shorter-lived ones under store pressure.
+
 #### Private vs. Published LeaseSet Isolation
 
 Every stored `leaseEntry` carries a `published bool` flag:
