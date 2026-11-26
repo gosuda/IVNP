@@ -90,6 +90,8 @@ func TestWebUIAccessPolicy(t *testing.T) {
 		{name: "localhost", address: "localhost:7070", wantLoopback: true},
 		{name: "127 slash 8", address: "127.44.2.9:7070", wantLoopback: true},
 		{name: "IPv6 loopback", address: "[::1]:7070", wantLoopback: true},
+		{name: "loopback with disableAuth", address: "127.0.0.1:7070", disableAuth: true, wantLoopback: true},
+		{name: "localhost with disableAuth", address: "localhost:7070", disableAuth: true, wantLoopback: true},
 		{name: "explicit wildcard with token", address: "0.0.0.0:7070", token: "0123456789abcdef", wantLoopback: false},
 		{name: "wildcard without token", address: "0.0.0.0:7070", wantError: true},
 		{name: "wildcard with disableAuth", address: "0.0.0.0:7070", disableAuth: true, wantLoopback: false},
@@ -184,6 +186,92 @@ func TestWebUILoopbackMiddlewareRejectsRemoteHostAndOrigin(t *testing.T) {
 			handler.ServeHTTP(record, request)
 			if record.Code != test.wantStatus {
 				t.Fatalf("middleware status = %d, want %d; body %q", record.Code, test.wantStatus, record.Body.String())
+			}
+		})
+	}
+}
+
+func TestWebUIDisabledAuthKeepsHostAllowlist(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		listen     string
+		remoteAddr string
+		host       string
+		method     string
+		origin     string
+		wantStatus int
+	}{
+		{name: "loopback bind localhost", listen: "127.0.0.1:7070", remoteAddr: "127.0.0.1:42000", host: "localhost:7070", method: http.MethodGet, wantStatus: http.StatusNoContent},
+		{name: "loopback bind rebinding read", listen: "127.0.0.1:7070", remoteAddr: "127.0.0.1:42000", host: "attacker.example:7070", method: http.MethodGet, wantStatus: http.StatusForbidden},
+		{name: "loopback bind rebinding write", listen: "127.0.0.1:7070", remoteAddr: "127.0.0.1:42000", host: "attacker.example:7070", method: http.MethodPatch, origin: "http://attacker.example:7070", wantStatus: http.StatusForbidden},
+		{name: "loopback bind remote client", listen: "127.0.0.1:7070", remoteAddr: "192.168.1.9:42000", host: "127.0.0.1:7070", method: http.MethodGet, wantStatus: http.StatusForbidden},
+		{name: "wildcard bind IP literal", listen: "0.0.0.0:7070", remoteAddr: "192.168.1.9:42000", host: "192.168.1.20:7070", method: http.MethodGet, wantStatus: http.StatusNoContent},
+		{name: "wildcard bind localhost", listen: "0.0.0.0:7070", remoteAddr: "127.0.0.1:42000", host: "localhost:7070", method: http.MethodPatch, origin: "http://localhost:7070", wantStatus: http.StatusNoContent},
+		{name: "wildcard bind rebinding to loopback", listen: "0.0.0.0:7070", remoteAddr: "127.0.0.1:42000", host: "attacker.example:7070", method: http.MethodPatch, origin: "http://attacker.example:7070", wantStatus: http.StatusForbidden},
+		{name: "wildcard bind rebinding to LAN", listen: "0.0.0.0:7070", remoteAddr: "192.168.1.9:42000", host: "attacker.example:7070", method: http.MethodGet, wantStatus: http.StatusForbidden},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server := newTestWebUIServer(t, WebUIConfig{ListenAddress: test.listen, DisableAuth: true})
+			handler := server.wrapMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			request := httptest.NewRequest(test.method, "http://"+test.host+"/api/config", nil)
+			request.RemoteAddr = test.remoteAddr
+			request.Host = test.host
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			record := httptest.NewRecorder()
+			handler.ServeHTTP(record, request)
+			if record.Code != test.wantStatus {
+				t.Fatalf("middleware status = %d, want %d; body %q", record.Code, test.wantStatus, record.Body.String())
+			}
+		})
+	}
+}
+
+func TestWebUIProbePathsKeepAccessPolicy(t *testing.T) {
+	t.Parallel()
+	const token = "secret-token-123456"
+	tests := []struct {
+		name       string
+		listen     string
+		token      string
+		path       string
+		host       string
+		auth       string
+		wantStatus int
+	}{
+		{name: "loopback varz", listen: "127.0.0.1:7070", path: "/varz", host: "127.0.0.1:7070", wantStatus: http.StatusNoContent},
+		{name: "loopback varz rebinding", listen: "127.0.0.1:7070", path: "/varz", host: "attacker.example:7070", wantStatus: http.StatusForbidden},
+		{name: "loopback healthz rebinding", listen: "127.0.0.1:7070", path: "/healthz", host: "attacker.example:7070", wantStatus: http.StatusForbidden},
+		{name: "loopback readyz rebinding", listen: "127.0.0.1:7070", path: "/readyz", host: "attacker.example:7070", wantStatus: http.StatusForbidden},
+		{name: "token varz without token", listen: "127.0.0.1:7070", token: token, path: "/varz", host: "127.0.0.1:7070", wantStatus: http.StatusUnauthorized},
+		{name: "token varz with token", listen: "127.0.0.1:7070", token: token, path: "/varz", host: "127.0.0.1:7070", auth: "Bearer " + token, wantStatus: http.StatusNoContent},
+		{name: "token healthz without token", listen: "127.0.0.1:7070", token: token, path: "/healthz", host: "127.0.0.1:7070", wantStatus: http.StatusNoContent},
+		{name: "wildcard varz without token", listen: "0.0.0.0:7070", token: token, path: "/varz", host: "router.example:7070", wantStatus: http.StatusUnauthorized},
+		{name: "wildcard livez without token", listen: "0.0.0.0:7070", token: token, path: "/livez", host: "router.example:7070", wantStatus: http.StatusNoContent},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server := newTestWebUIServer(t, WebUIConfig{ListenAddress: test.listen, BearerToken: test.token})
+			handler := server.wrapMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			request := httptest.NewRequest(http.MethodGet, "http://"+test.host+test.path, nil)
+			request.RemoteAddr = "127.0.0.1:42000"
+			request.Host = test.host
+			if test.auth != "" {
+				request.Header.Set("Authorization", test.auth)
+			}
+			record := httptest.NewRecorder()
+			handler.ServeHTTP(record, request)
+			if record.Code != test.wantStatus {
+				t.Fatalf("%s status = %d, want %d; body %q", test.path, record.Code, test.wantStatus, record.Body.String())
 			}
 		})
 	}
@@ -478,8 +566,21 @@ func TestWebUIProbeEndpoints(t *testing.T) {
 		}
 	}
 
-	// Varz returns 200 with JSON metrics even without bearer token
+	// Varz serves the /api/metrics telemetry, so it needs the bearer token.
 	response, err := http.Get(baseURL + "/varz")
+	if err != nil {
+		t.Fatalf("GET /varz error = %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /varz without token status = %d, want 401", response.StatusCode)
+	}
+	request, err := http.NewRequest(http.MethodGet, baseURL+"/varz", nil)
+	if err != nil {
+		t.Fatalf("new /varz request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	response, err = http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("GET /varz error = %v", err)
 	}
