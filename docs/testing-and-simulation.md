@@ -107,7 +107,7 @@ IVNP_EEPSITE_PROXY=http://127.0.0.1:4444 IVNP_SAM_ADDRESS=127.0.0.1:7656 \
 
 ## CI frequency
 
-Pull requests and merge groups run the full Go tests, vet, checklocks, gojgp,
+Pull requests, pushes to `main`, and merge groups run the full Go tests, vet, checklocks, gojgp,
 and deterministic simulation with seed 42. The Monday run and manual
 dispatch also cover all ten simulation seeds and the platform build matrix.
 The live I2P and in-memory eepsite workflows run weekly or on demand.
