@@ -141,7 +141,7 @@ L0 packages have zero internal dependencies and rely only on the Go standard lib
 - **`dataplane/internal/transport/ssu2/`**:
   - `packet.go` & `token.go`: `ShortHeader` (16B), `LongHeader` (32B), dual-ChaCha20 `ProtectHeader`, and stateless HMAC-SHA256 retry tokens.
   - `handshake.go`: `Noise_XKchaobfse+hs1+hs2+hs3_25519_ChaChaPoly_SHA256` `Initiator`/`Responder`, `ConfirmedReassembler` (up to 15 fragments), and `DataCipher`.
-  - `block.go` & `ack.go`: TLV block codecs (types 0..20, 254) and `ACKTracker` (up to 64 ACK ranges).
+  - `block.go` & `ack.go`: TLV block codecs (types 0..20, 254) and `ACKTracker` (up to 64 ACK ranges; it is also the data-phase replay filter, and evicting the oldest range raises a monotonic floor so every packet number at or below the evicted range is rejected as a replay).
   - `introduction.go`, `peertest.go`, `path.go`: Signed `RelayRequest`/`RelayIntro`/`RelayResponse`, 7-message `PeerTestBlock`, and `PathValidator` migration challenges.
   - `batch.go`, `batch_linux_vector.go`, `batch_linux_amd64.go`, `batch_linux_arm64.go`, `batch_stub.go`, `batch_portable.go`, `dispatch.go`: Linux 64-bit (`amd64` and `arm64`) `recvmmsg`/`sendmmsg` + `SO_RXQ_OVFL` drop counter, portable UDP batching, and bounded `Dispatcher`.
 - **`dataplane/internal/tunnel/`**:

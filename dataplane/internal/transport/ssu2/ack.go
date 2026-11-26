@@ -13,12 +13,16 @@ var ErrACK = errors.New("ssu2: invalid acknowledgement ranges")
 type ACKRange struct{ Start, End uint32 }
 
 // ACKTracker retains a bounded descending set of received packet ranges.
+// When the oldest range is evicted, every packet number at or below it is
+// treated as already received, so the tracker stays a sound replay filter.
 type ACKTracker struct {
 	mu sync.Mutex
 	// +checklocks:mu
 	ranges [MaxACKRanges]ACKRange
 	// +checklocks:mu
 	count int
+	// +checklocks:mu
+	floor uint64
 }
 
 func (a *ACKTracker) Observe(packet uint32) {
@@ -29,6 +33,9 @@ func (a *ACKTracker) Observe(packet uint32) {
 func (a *ACKTracker) ObserveNew(packet uint32) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if uint64(packet) < a.floor {
+		return false
+	}
 	for i := 0; i < a.count; i++ {
 		r := &a.ranges[i]
 		if packet >= r.Start && packet <= r.End {
@@ -47,6 +54,7 @@ func (a *ACKTracker) ObserveNew(packet uint32) bool {
 		if packet > r.End {
 			if a.count == MaxACKRanges {
 				a.count--
+				a.floor = max(a.floor, uint64(a.ranges[a.count].End)+1)
 			}
 			copy(a.ranges[i+1:a.count+1], a.ranges[i:a.count])
 			a.ranges[i] = ACKRange{Start: packet, End: packet}
