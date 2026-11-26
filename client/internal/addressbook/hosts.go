@@ -79,7 +79,20 @@ func canonicalDestination(value string) (string, bool) {
 	return canonical, true
 }
 
+// parseHosts parses a local hosts file. Any malformed line, duplicate name, or
+// "#!" mutation command rejects the whole file, so operator mistakes surface.
 func parseHosts(reader io.Reader, maxBytes int64, maxEntries int) (map[string]string, error) {
+	return parseHostLines(reader, maxBytes, maxEntries, false)
+}
+
+// parseSubscriptionHosts parses a remote subscription feed the way the Java I2P
+// addressbook does: malformed lines, unsupported "#!" commands, and later
+// duplicates of a name are skipped, so one bad line cannot discard the feed.
+func parseSubscriptionHosts(reader io.Reader, maxBytes int64, maxEntries int) (map[string]string, error) {
+	return parseHostLines(reader, maxBytes, maxEntries, true)
+}
+
+func parseHostLines(reader io.Reader, maxBytes int64, maxEntries int, skipInvalid bool) (map[string]string, error) {
 	if maxBytes <= 0 || maxEntries <= 0 {
 		return nil, ErrConfig
 	}
@@ -95,27 +108,20 @@ func parseHosts(reader io.Reader, maxBytes int64, maxEntries int) (map[string]st
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 4096), 1<<20)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "#!") {
-			return nil, ErrMutation
+		name, destination, lineErr := parseHostLine(scanner.Text())
+		if lineErr == nil && name != "" {
+			if _, exists := entries[name]; exists {
+				lineErr = ErrName
+			}
 		}
-		if line == "" || strings.HasPrefix(line, "#") {
+		if lineErr != nil {
+			if skipInvalid {
+				continue
+			}
+			return nil, lineErr
+		}
+		if name == "" {
 			continue
-		}
-		nameRaw, destinationRaw, ok := strings.Cut(line, "=")
-		if !ok || strings.Contains(destinationRaw, "=") && strings.Contains(strings.TrimSpace(destinationRaw), " ") {
-			return nil, ErrName
-		}
-		name, nameErr := normalizeName(nameRaw)
-		if nameErr != nil {
-			return nil, nameErr
-		}
-		destination, destinationOK := canonicalDestination(strings.TrimSpace(destinationRaw))
-		if !destinationOK {
-			return nil, ErrDestination
-		}
-		if _, exists := entries[name]; exists {
-			return nil, ErrName
 		}
 		if len(entries) >= maxEntries {
 			return nil, ErrConfig
@@ -126,6 +132,30 @@ func parseHosts(reader io.Reader, maxBytes int64, maxEntries int) (map[string]st
 		return nil, err
 	}
 	return entries, nil
+}
+
+// parseHostLine returns an empty name for blank and comment lines.
+func parseHostLine(raw string) (string, string, error) {
+	line := strings.TrimSpace(raw)
+	if strings.HasPrefix(line, "#!") {
+		return "", "", ErrMutation
+	}
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", "", nil
+	}
+	nameRaw, destinationRaw, ok := strings.Cut(line, "=")
+	if !ok || strings.Contains(destinationRaw, "=") && strings.Contains(strings.TrimSpace(destinationRaw), " ") {
+		return "", "", ErrName
+	}
+	name, nameErr := normalizeName(nameRaw)
+	if nameErr != nil {
+		return "", "", nameErr
+	}
+	destination, destinationOK := canonicalDestination(strings.TrimSpace(destinationRaw))
+	if !destinationOK {
+		return "", "", ErrDestination
+	}
+	return name, destination, nil
 }
 
 func loadHostsFile(path string, maxBytes int64, maxEntries int) (map[string]string, error) {
