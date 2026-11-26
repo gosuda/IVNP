@@ -54,7 +54,7 @@ Every stored `leaseEntry` carries a `published bool` flag:
   - **UTC Midnight Rollover**: Within `45m` of UTC midnight for `RouterInfo` (or `10m` for `LeaseSet`), `StoreFlooder` also floods to the `2` closest floodfills under *tomorrow's* `RoutingKey` so lookups remain continuous across midnight.
 - **Confirmed Publication (`confirmation.go`, `publication.go`, `router_publication.go`)**:
   - `PublicationTokenRegistry` allocates 31-bit non-zero tokens (`(rand | 1) & 0x7fffffff`, keeping bit 31 clear for tunnel health probes).
-  - `LeaseSetPublisher` and `RouterInfoPublisher` send `DatabaseStore` waves (`30s` wave timeout) across the 12 closest floodfills until `K = 4` (LeaseSet, configurable via `LeaseSetFloodfillK`) or `K = 5` (RouterInfo, configurable via `RouterInfoFloodfillK`) distinct floodfills return matching `DeliveryStatus` confirmations. Each generation tracks `confirmedTargets` so floodfills that have already confirmed the generation are excluded from subsequent retry waves.
+  - `LeaseSetPublisher` and `RouterInfoPublisher` send `DatabaseStore` waves (`30s` wave timeout) across the 12 closest floodfills until `K = 4` (LeaseSet, configurable via `LeaseSetFloodfillK`) or `K = 5` (RouterInfo, configurable via `RouterInfoFloodfillK`) distinct floodfills return matching `DeliveryStatus` confirmations. Each generation tracks `confirmedTargets` so floodfills that have already confirmed the generation are excluded from subsequent retry waves. The wave timeout arms only after a wave hands at least one `DatabaseStore` to the sender; a pass that finds no eligible floodfill or no reply path sends nothing, so the next maintenance pass re-snapshots targets immediately instead of waiting for the timeout.
 
 ---
 
