@@ -102,11 +102,15 @@ func (s *Service) refresh(parent context.Context) error {
 	}
 	close(jobs)
 	group.Wait()
+	// A failed subscription keeps its last good snapshot and does not hold
+	// back the others; its error still schedules an early retry.
+	var fetchErrs []error
 	for index, result := range results {
-		if result.err != nil {
-			return result.err
-		}
 		raw := fetches[index].raw
+		if result.err != nil {
+			fetchErrs = append(fetchErrs, result.err)
+			continue
+		}
 		if result.unchanged {
 			continue
 		}
@@ -121,6 +125,9 @@ func (s *Service) refresh(parent context.Context) error {
 		} else {
 			delete(modified, raw)
 		}
+	}
+	if len(fetchErrs) == len(results) || parent.Err() != nil {
+		return errors.Join(append(fetchErrs, parent.Err())...)
 	}
 	remote := make(map[string]string)
 	for _, raw := range s.config.Subscriptions {
@@ -143,7 +150,7 @@ func (s *Service) refresh(parent context.Context) error {
 	s.remote, s.sources, s.etag, s.modified = remote, sources, etags, modified
 	s.publish()
 	s.mu.Unlock()
-	return nil
+	return errors.Join(fetchErrs...)
 }
 func (s *Service) fetchSubscription(parent context.Context, client *http.Client, raw string, haveSnapshot bool, etag, modified string) (map[string]string, string, string, bool, error) {
 	u, err := subscriptionURL(raw)
@@ -190,7 +197,7 @@ func (s *Service) fetchSubscription(parent context.Context, client *http.Client,
 	if int64(len(data)) > s.config.MaxResponseBytes {
 		return nil, "", "", false, ErrConfig
 	}
-	entries, err := parseHosts(strings.NewReader(string(data)), s.config.MaxResponseBytes, s.config.MaxEntries)
+	entries, err := parseSubscriptionHosts(strings.NewReader(string(data)), s.config.MaxResponseBytes, s.config.MaxEntries)
 	if err != nil {
 		return nil, "", "", false, err
 	}
