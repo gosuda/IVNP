@@ -164,10 +164,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			if addr == "" {
 				continue
 			}
-			srv := &http.Server{
-				Addr:    addr,
-				Handler: server,
-			}
+			srv := newPublicHTTPServer(addr, server)
 			httpServers = append(httpServers, srv)
 			go func(s *http.Server) {
 				logger.Info("starting reseed HTTP server", "listen", s.Addr)
@@ -432,6 +429,32 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 			epochTimer.Reset(time.Until(nextEpochBoundary(time.Now(), *interval)))
 		}
+	}
+}
+
+// Public reseed listener bounds. Every request is a small GET, so headers and
+// bodies arrive quickly; the write budget covers an SU3 download to a slow
+// client, and idle keep-alive connections are reclaimed.
+const (
+	publicReadHeaderTimeout = 10 * time.Second
+	publicReadTimeout       = 30 * time.Second
+	publicWriteTimeout      = 60 * time.Second
+	publicIdleTimeout       = 120 * time.Second
+	publicMaxHeaderBytes    = 16 << 10
+)
+
+// newPublicHTTPServer builds an internet-facing reseed listener whose read,
+// write, and idle deadlines and header size limit stop slow or oversized
+// clients from pinning connections and goroutines indefinitely.
+func newPublicHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: publicReadHeaderTimeout,
+		ReadTimeout:       publicReadTimeout,
+		WriteTimeout:      publicWriteTimeout,
+		IdleTimeout:       publicIdleTimeout,
+		MaxHeaderBytes:    publicMaxHeaderBytes,
 	}
 }
 
