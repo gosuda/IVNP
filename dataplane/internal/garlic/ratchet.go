@@ -28,6 +28,7 @@ var (
 	ErrRatchet                = dataplanegarlicecies.ErrRatchet
 	ErrRatchetClosed          = dataplanegarlicecies.ErrRatchetClosed
 	ErrRatchetReplay          = dataplanegarlicecies.ErrRatchetReplay
+	ErrRatchetReplayFull      = dataplanegarlicecies.ErrRatchetReplayFull
 	ErrRatchetExpired         = dataplanegarlicecies.ErrRatchetExpired
 	ErrRatchetNoSession       = dataplanegarlicecies.ErrRatchetNoSession
 	RatchetEncryptBufferSizes = dataplanegarlicecies.RatchetEncryptBufferSizes
@@ -112,6 +113,10 @@ func NewRatchetManager(local *foundation.LocalDestination, config RatchetConfig)
 	if maxSessions <= 0 {
 		maxSessions = 256
 	}
+	maxReplays := config.MaxReplays
+	if maxReplays <= 0 {
+		maxReplays = 16384
+	}
 	lookahead := config.TagLookahead
 	if lookahead <= 0 {
 		lookahead = dataplanegarlicecies.DefaultTagLookahead
@@ -151,6 +156,13 @@ func NewRatchetManager(local *foundation.LocalDestination, config RatchetConfig)
 		if index < maxTags%shardCount {
 			config.MaxInboundTags++
 		}
+		// New Sessions route by decoded ephemeral key, so each shard holds an
+		// even share of the replay cache, and at least one reservation.
+		config.MaxReplays = maxReplays / shardCount
+		if index < maxReplays%shardCount {
+			config.MaxReplays++
+		}
+		config.MaxReplays = max(1, config.MaxReplays)
 		observer := ratchetTagObserver{manager: manager, shard: index}
 		shard, err := dataplanegarlicecies.NewRatchetManagerWithTagObserver(local, config, observer)
 		if err != nil {
