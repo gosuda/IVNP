@@ -348,12 +348,36 @@ func TestRequireBearerRejectsMissingAndAcceptsMatchingToken(t *testing.T) {
 	}
 
 	// Verify probe endpoints bypass bearer auth
-	for _, probePath := range []string{HealthPath, LivePath, ReadyPath, VarzPath} {
+	for _, probePath := range []string{HealthPath, LivePath, ReadyPath} {
 		request := httptest.NewRequest(http.MethodGet, probePath, nil)
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		if response.Code != http.StatusNoContent {
 			t.Fatalf("probe %q code = %d, want 204 (bypassed)", probePath, response.Code)
+		}
+	}
+}
+
+func TestRequireBearerProtectsVarz(t *testing.T) {
+	reg := NewRegistry()
+	reg.AddTransportReceivedBytes(12345)
+	handler := RequireBearer(NewHandler(reg, nil), "metrics-secret")
+	for _, authorization := range []string{"", "Bearer wrong", "Bearer metrics-secret"} {
+		request := httptest.NewRequest(http.MethodGet, VarzPath, nil)
+		if authorization != "" {
+			request.Header.Set("Authorization", authorization)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		want := http.StatusUnauthorized
+		if authorization == "Bearer metrics-secret" {
+			want = http.StatusOK
+		}
+		if response.Code != want {
+			t.Fatalf("varz authorization %q status = %d, want %d", authorization, response.Code, want)
+		}
+		if want == http.StatusUnauthorized && strings.Contains(response.Body.String(), "ReceivedBytes") {
+			t.Fatalf("varz authorization %q leaked counters: %q", authorization, response.Body.String())
 		}
 	}
 }
