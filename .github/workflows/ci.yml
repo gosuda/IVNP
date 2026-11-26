@@ -28,7 +28,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         id: go
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: true
       - name: Cache Go tool binaries
         id: tools-cache
@@ -88,7 +88,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         id: go
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: true
       - name: Generate durable-sync overlay
         # Patches the current GOROOT's sync primitives so lock waits inside a
@@ -125,7 +125,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         id: go
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: true
       - name: Build packages
         run: go build ./...
