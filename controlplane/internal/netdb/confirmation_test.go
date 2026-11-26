@@ -201,6 +201,8 @@ func TestSentPublicationKeepsConfirmationBackoff(t *testing.T) {
 	}
 }
 
+var errTestPublicationSendFailed = errors.New("send failed")
+
 type failingOncePublicationSender struct {
 	publicationTestSender
 	failed bool
@@ -211,7 +213,7 @@ func (s *failingOncePublicationSender) Send(ctx context.Context, target RouterRe
 	if !s.failed {
 		s.failed = true
 		s.mu.Unlock()
-		return errors.New("send failed")
+		return errTestPublicationSendFailed
 	}
 	s.mu.Unlock()
 	return s.publicationTestSender.Send(ctx, target, message)

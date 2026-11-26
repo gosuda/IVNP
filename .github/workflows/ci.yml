@@ -41,7 +41,7 @@ jobs:
             ~/go/bin/gojgp
             ~/go/bin/goimports
             ~/go/bin/checklocks
-          key: gotools-${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-gojgp-v1.2.0-tools-v0.51.0-checklocks-20261024223036-c3e0783a533c
+          key: gotools-${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-gojgp-v1.3.0-tools-v0.52.0-checklocks-20261024223036-c3e0783a533c
       - name: Install gojgp and goimports
         if: steps.tools-cache.outputs.cache-hit != 'true'
         shell: bash
@@ -51,7 +51,7 @@ jobs:
           trap 'rm -rf -- "$tmp"' EXIT
           cd "$tmp"
           GOTOOLCHAIN=local go mod init tools
-          GOTOOLCHAIN=local go get github.com/gosuda/JustGoodPractices/cmd/gojgp@v1.2.0 golang.org/x/tools/cmd/goimports@v0.51.0
+          GOTOOLCHAIN=local go get github.com/gosuda/JustGoodPractices/cmd/gojgp@v1.3.0 golang.org/x/tools/cmd/goimports@v0.52.0
           GOTOOLCHAIN=local go install github.com/gosuda/JustGoodPractices/cmd/gojgp golang.org/x/tools/cmd/goimports
       - name: Install checklocks
         if: steps.tools-cache.outputs.cache-hit != 'true'

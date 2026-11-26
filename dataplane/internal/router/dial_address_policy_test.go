@@ -34,7 +34,10 @@ var nonPublicDialHosts = []string{
 	"::ffff:127.0.0.1",
 }
 
-var hostnameDialHosts = []string{"internal.example", "localhost"}
+var (
+	errTestDialMustNotBeAttempted = errors.New("dial must not be attempted")
+	hostnameDialHosts             = []string{"internal.example", "localhost"}
+)
 
 func TestPublicDialAddressClassification(t *testing.T) {
 	for _, host := range nonPublicDialHosts {
@@ -78,7 +81,7 @@ func TestNTCP2PublicPeerAddressesRefuseNonPublicHostsBeforeDial(t *testing.T) {
 			manager.started = true
 			manager.bindings = TransportBindings{Clock: WallClock{}, DialStream: func(context.Context, Endpoint) (net.Conn, error) {
 				dials.Add(1)
-				return nil, errors.New("dial must not be attempted")
+				return nil, errTestDialMustNotBeAttempted
 			}}
 			t.Cleanup(manager.cancel)
 			if err := manager.openOutbound(t.Context(), info.Hash()); !errors.Is(err, ErrNTCP2Peer) {

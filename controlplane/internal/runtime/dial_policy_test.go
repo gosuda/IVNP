@@ -57,10 +57,12 @@ func TestDirectNetDBRepliesRequireSessionAwareTransport(t *testing.T) {
 	}
 }
 
+var errTestDirectReplySessionUnaware = errors.New("session-unaware transport must not be used for direct replies")
+
 type replySendOnly struct{}
 
 func (replySendOnly) Send(context.Context, foundation.Hash, foundation.I2NPMessage) error {
-	return errors.New("session-unaware transport must not be used for direct replies")
+	return errTestDirectReplySessionUnaware
 }
 
 func TestPeerAddressPolicyFollowsNetworkProfile(t *testing.T) {
