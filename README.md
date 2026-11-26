@@ -55,7 +55,7 @@ ivnpd -memory
 
 ### Daemon Configuration & Flags
 
-On first start with the default `-config ivnp.conf` path, `ivnpd` creates `ivnp.conf` (`0600`) if absent and stores AES-256-GCM encrypted router state (`router.state`), master keys (`router.keys`), and NetDB snapshots under `./data`.
+On first start with the default `-config ivnp.conf` path, `ivnpd` creates `ivnp.conf` (`0600`) if absent and stores AES-256-GCM encrypted router state (`router.state`), master keys (`router.keys`), and NetDB snapshots under `./data`. On Unix-like systems, `ivnpd` refuses to load a configuration file or a `[reseed] trusted_cert_files` entry that is group- or world-writable (any mode bit in `0o022`); fix such a file with `chmod go-w`.
 
 ```ini
 [paths]

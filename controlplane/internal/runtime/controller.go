@@ -93,6 +93,10 @@ func loadTrustedCertFiles(paths []string) ([][]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open %q: %w", path, err)
 		}
+		if err := state.FilesystemStoreValidateNoSharedWrite(file); err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("%q is group- or world-writable: %w", path, err)
+		}
 		contents, readErr := state.FilesystemStoreReadBoundedFile(file, 64<<10)
 		_ = file.Close()
 		if readErr != nil {

@@ -29,6 +29,7 @@ var (
 	errUnsafeOperating                     = errors.New("config: unsafe operating configuration")
 	errReadOperating                       = errors.New("config: cannot read operating configuration")
 	errBearerCredentialsRequirePrivateFile = errors.New("config: bearer credentials require a private configuration file")
+	errWritableOperating                   = errors.New("config: configuration file must not be group- or world-writable")
 	errInvalidEndpoint                     = errors.New("invalid endpoint")
 	errInvalidReseedEndpoint               = errors.New("invalid endpoint")
 	errInvalidReseedEndpointCount          = errors.New("invalid endpoint count")
@@ -292,6 +293,9 @@ func LoadOperating(path string) (Operating, error) {
 	defer file.Close()
 	if err := filesystemstore.ValidateOwnedFile(file); err != nil {
 		return Operating{}, errUnsafeOperating
+	}
+	if err := filesystemstore.ValidateNoSharedWrite(file); err != nil {
+		return Operating{}, errWritableOperating
 	}
 	contents, err := filesystemstore.ReadBoundedFile(file, maxConfigBytes)
 	if err != nil {

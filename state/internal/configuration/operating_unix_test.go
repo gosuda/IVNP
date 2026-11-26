@@ -3,6 +3,7 @@
 package configuration
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -38,5 +39,31 @@ func TestLoadOperatingRejectsUnsafeSecretSources(t *testing.T) {
 	}
 	if _, err := LoadOperating(fifo); err == nil {
 		t.Fatal("LoadOperating accepted a FIFO")
+	}
+}
+
+func TestLoadOperatingRejectsGroupOrWorldWritableFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ivnp.conf")
+	if err := os.WriteFile(path, []byte("[network]\nprofile = public\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []os.FileMode{0o620, 0o602, 0o664, 0o666} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadOperating(path); !errors.Is(err, errWritableOperating) {
+			t.Fatalf("LoadOperating(mode %#o) error = %v, want %v", mode, err, errWritableOperating)
+		}
+		if _, err := LoadOrCreateOperating(path); !errors.Is(err, errWritableOperating) {
+			t.Fatalf("LoadOrCreateOperating(mode %#o) error = %v, want %v", mode, err, errWritableOperating)
+		}
+	}
+	for _, mode := range []os.FileMode{0o600, 0o640, 0o644} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadOperating(path); err != nil {
+			t.Fatalf("LoadOperating(mode %#o) error = %v", mode, err)
+		}
 	}
 }
