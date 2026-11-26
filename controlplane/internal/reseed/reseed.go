@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -40,16 +41,17 @@ const (
 )
 
 var (
-	ErrInsecureURL     = errors.New("reseed: HTTPS endpoint required")
-	ErrInvalidURL      = errors.New("reseed: endpoint must have exactly the selected netid query and no credentials or fragment")
-	ErrNetwork         = errors.New("reseed: RouterInfo network does not match selected network")
-	ErrUnsafeRedirect  = errors.New("reseed: unsafe redirect")
-	ErrArchiveTooLarge = errors.New("reseed: archive exceeds configured limit")
-	ErrTooManyEntries  = errors.New("reseed: router info count exceeds configured limit")
-	ErrNoRouterInfos   = errors.New("reseed: archive contained no admissible router infos")
-	ErrUnsignedArchive = errors.New("reseed: authenticated SU3 archive required")
-	errRedirectLimit   = errors.New("stopped after 10 redirects")
-	errNilDatabase     = errors.New("reseed: nil database")
+	ErrInsecureURL         = errors.New("reseed: HTTPS endpoint required")
+	ErrInvalidURL          = errors.New("reseed: endpoint must have exactly the selected netid query and no credentials or fragment")
+	ErrNetwork             = errors.New("reseed: RouterInfo network does not match selected network")
+	ErrUnsafeRedirect      = errors.New("reseed: unsafe redirect")
+	ErrArchiveTooLarge     = errors.New("reseed: archive exceeds configured limit")
+	ErrTooManyEntries      = errors.New("reseed: router info count exceeds configured limit")
+	ErrNoRouterInfos       = errors.New("reseed: archive contained no admissible router infos")
+	ErrUnsignedArchive     = errors.New("reseed: authenticated SU3 archive required")
+	ErrDuplicateRouterInfo = errors.New("reseed: archive contains duplicate router hashes")
+	errRedirectLimit       = errors.New("stopped after 10 redirects")
+	errNilDatabase         = errors.New("reseed: nil database")
 )
 
 // Client fetches and processes reseed archives.
@@ -232,7 +234,8 @@ type reseedCandidate struct {
 
 // fetchCandidates downloads one reseed archive, authenticates the SU3/ZIP
 // container, and returns candidates that pass the cheap pre-signature cuts:
-// netId match and reseed freshness. RouterInfo signatures stay unverified until
+// netId match and reseed freshness. An archive that lists one router hash more
+// than once is rejected as a whole. RouterInfo signatures stay unverified until
 // cross-archive deduplication selects the newest candidates per hash.
 func (c Client) fetchCandidates(ctx context.Context, endpoint string, seenAt uint64) ([]reseedCandidate, error) {
 	parsedURL, err := url.Parse(endpoint)
@@ -311,6 +314,7 @@ func (c Client) fetchCandidates(ctx context.Context, endpoint string, seenAt uin
 		}
 	}
 	var candidates []reseedCandidate
+	seen := make(map[foundation.Hash]struct{}, len(files))
 	for _, file := range files {
 		if file.UncompressedSize64 == 0 || file.UncompressedSize64 > uint64(foundation.NetworkDatabaseMaxRouterInfoBytes) {
 			continue
@@ -323,15 +327,21 @@ func (c Client) fetchCandidates(ctx context.Context, endpoint string, seenAt uin
 		copy(owned, data)
 		lease.Release()
 		info, parseErr := foundation.NetworkDatabaseParseRouterInfo(owned)
-		if parseErr == nil && !routerInfoMatchesNetwork(info, c.NetworkID) {
+		if parseErr != nil {
 			continue
 		}
-		if parseErr == nil && controlplanenetdb.ReseedRouterInfoFresh(info, seenAt) != nil {
+		hash := info.Hash()
+		if _, dup := seen[hash]; dup {
+			return nil, ErrDuplicateRouterInfo
+		}
+		seen[hash] = struct{}{}
+		if !routerInfoMatchesNetwork(info, c.NetworkID) {
 			continue
 		}
-		if parseErr == nil {
-			candidates = append(candidates, reseedCandidate{info: info})
+		if controlplanenetdb.ReseedRouterInfoFresh(info, seenAt) != nil {
+			continue
 		}
+		candidates = append(candidates, reseedCandidate{info: info})
 	}
 	if len(candidates) == 0 {
 		return nil, ErrNoRouterInfos
@@ -339,29 +349,49 @@ func (c Client) fetchCandidates(ctx context.Context, endpoint string, seenAt uin
 	return candidates, nil
 }
 
-// dedupSlot retains the two most recent candidates for one router hash. The
-// runner-up survives a forged-newest attack: if the freshest candidate fails
-// signature verification, the second falls back instead of losing the router.
+// dedupSlot holds the candidates for one router hash: at most one per reseed
+// source, newest Published first. Admission verifies them in that order and
+// keeps the first valid signature, so forged newer copies from any number of
+// sources cannot shadow a valid copy delivered by another source.
 type dedupSlot struct {
-	best     reseedCandidate
-	fallback reseedCandidate
-	count    int
+	candidates []reseedCandidate
 }
 
 func addCandidate(slots map[foundation.Hash]*dedupSlot, candidate reseedCandidate) {
 	hash := candidate.info.Hash()
 	slot, ok := slots[hash]
 	if !ok {
-		slots[hash] = &dedupSlot{best: candidate, count: 1}
+		slots[hash] = &dedupSlot{candidates: []reseedCandidate{candidate}}
 		return
 	}
-	slot.count++
-	if candidate.info.Published >= slot.best.info.Published {
-		slot.fallback = slot.best
-		slot.best = candidate
-	} else if slot.count == 2 || candidate.info.Published > slot.fallback.info.Published {
-		slot.fallback = candidate
+	for i, existing := range slot.candidates {
+		if existing.source != candidate.source {
+			continue
+		}
+		if candidate.info.Published <= existing.info.Published {
+			return
+		}
+		slot.candidates = slices.Delete(slot.candidates, i, i+1)
+		break
 	}
+	index := len(slot.candidates)
+	for i, existing := range slot.candidates {
+		if candidate.info.Published > existing.info.Published {
+			index = i
+			break
+		}
+	}
+	slot.candidates = slices.Insert(slot.candidates, index, candidate)
+}
+
+// verified returns the newest candidate whose RouterInfo signature verifies.
+func (slot *dedupSlot) verified() (reseedCandidate, bool) {
+	for _, candidate := range slot.candidates {
+		if ok, _ := candidate.info.Verify(); ok {
+			return candidate, true
+		}
+	}
+	return reseedCandidate{}, false
 }
 
 // leadingZerosXOR mirrors distanceBucket: the number of shared leading bits
@@ -603,10 +633,11 @@ func fpsOrderBucket(cands []bucketCandidate, picks int, out []reseedCandidate) [
 func orderByLocalBuckets(slots map[foundation.Hash]*dedupSlot, local foundation.Hash, pickLimit int) []reseedCandidate {
 	var buckets [256][]bucketCandidate
 	for hash, slot := range slots {
-		info := slot.best.info
+		newest := slot.candidates[0]
+		info := newest.info
 		b := leadingZerosXOR(local, hash)
 		buckets[b] = append(buckets[b], bucketCandidate{
-			candidate: slot.best,
+			candidate: newest,
 			hash:      hash,
 			floodfill: foundation.NetworkDatabaseIsFloodfill(info),
 			v2:        hasV2Transport(info),
@@ -638,15 +669,13 @@ func (c Client) ingestCandidates(slots map[foundation.Hash]*dedupSlot, database 
 		if guard.bucketUse[bucket] >= guard.bucketLimit {
 			continue // bucket already full: skip signature verification
 		}
-		if ok, _ := candidate.info.Verify(); !ok {
-			slot := slots[hash]
-			if slot == nil || slot.count < 2 {
-				continue
-			}
-			candidate = slot.fallback
-			if ok, _ := candidate.info.Verify(); !ok {
-				continue
-			}
+		slot := slots[hash]
+		if slot == nil {
+			continue
+		}
+		candidate, ok := slot.verified()
+		if !ok {
+			continue
 		}
 		if !guard.claim(bucket, ingressSubnetsOf(candidate.info)) {
 			continue

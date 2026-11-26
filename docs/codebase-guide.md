@@ -181,7 +181,7 @@ L0 packages have zero internal dependencies and rely only on the Go standard lib
   - `profile.go`, `netdb_source.go`, `stats.go`, `creator_budget.go`, `creator_claim.go`: Rolling peer profiling, SipHash-2-4 sub-tier hop ordering, 3-pass `/16` and family diversity selection, and Bayesian build statistics.
   - `pool.go`, `rotation.go`, `paired_maintenance.go`, `health.go`: Sticky outbound selection, `PairedPoolMaintainer` bootstrap ordering (Bootstrap Inbound -> Outbound -> Paired Inbound -> Backups), and bit-31 `DeliveryStatus` health probing.
 - **`controlplane/internal/reseed/`**:
-  - `su3.go`, `certificates.go`, `reseed.go`, `certs/*.crt`: SU3 container parser, raw PKCS#1 v1.5 RSA-4096 SHA-512 verifier, 18 embedded X.509 certificates, and two-phase eclipse-resistant candidate ingestion (`dedupSlot` fallback + K-bucket farthest-point sampling + `/16` subnet quotas).
+  - `su3.go`, `certificates.go`, `reseed.go`, `certs/*.crt`: SU3 container parser, raw PKCS#1 v1.5 RSA-4096 SHA-512 verifier, 18 embedded X.509 certificates, and two-phase eclipse-resistant candidate ingestion (per-source `dedupSlot` candidates verified newest first + K-bucket farthest-point sampling + `/16` subnet quotas).
 - **`controlplane/internal/nat/`**:
   - `natpmp/natpmp.go`: RFC 6886 NAT-PMP UDP client (`port 5351`).
   - `upnp/ssdp.go`, `description.go`, `soap.go`: UPnP IGD multicast SSDP discovery, XML service parsing (`WANIPConnection`/`WANPPPConnection`), and SOAP `AddPortMapping` / `GetExternalIPAddress`.
