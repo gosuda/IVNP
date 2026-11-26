@@ -151,6 +151,10 @@ Usage of ivnp-reseed:
         SU3 signer common name (default "reseed@ivnp.network", env RESEED_SIGNER_ID)
   -seed-phrase string
         Deterministic RSA-4096 signing key seed phrase (env RESEED_SEED_PHRASE preferred)
+  -seed-kdf string
+        Seed phrase key derivation: hkdf-sha512 (legacy, unstretched) or argon2id-v2
+        (stretched, salted with -signer-id); changing it changes the signing key
+        (default "hkdf-sha512", env RESEED_SEED_KDF)
   -router-port int
         Port for embedded router NTCP2/SSU2 transports (default 0 for random/ephemeral)
   -router-advertise-host string
@@ -179,9 +183,32 @@ Usage of ivnp-reseed:
 | Environment Variable | CLI Flag | Purpose |
 | :--- | :--- | :--- |
 | `RESEED_SIGNER_ID` | `-signer-id` | SU3 signer Common Name (for example, `reseed@ivnp.network`) |
-| `RESEED_SEED_PHRASE` | `-seed-phrase` | Seed phrase used to derive the RSA-4096 signing key deterministically via `HKDF-SHA512` (`"ivnp-reseed"`, `"reseed-rsa-4096"`) and `filippo.io/keygen.RSA(4096, secret)`. Pass via environment variable so the phrase does not appear in process argument tables. |
+| `RESEED_SEED_PHRASE` | `-seed-phrase` | Seed phrase used to derive the RSA-4096 signing key deterministically: the `-seed-kdf` derivation turns it into a 64-byte secret for `filippo.io/keygen.RSA(4096, secret)`. Pass via environment variable so the phrase does not appear in process argument tables. |
+| `RESEED_SEED_KDF` | `-seed-kdf` | Versioned seed phrase derivation, `hkdf-sha512` (default) or `argon2id-v2`. See [Seed Phrase Derivation Versions](#seed-phrase-derivation-versions). |
 
 When `RESEED_SEED_PHRASE` is set, `ivnp-reseed` reproduces the exact same RSA-4096 private key and X.509 certificate in memory on every restart; no private key file is ever written to disk. If no seed phrase is provided, `ivnp-reseed` generates an ephemeral keypair at startup.
+
+### Seed Phrase Derivation Versions
+
+The signing certificate is public, so anyone can test seed phrase guesses offline by deriving a key and comparing it to the published public key. The derivation therefore determines how expensive each guess is.
+
+| `-seed-kdf` | Derivation | Guess cost | Phrase requirement |
+| :--- | :--- | :--- | :--- |
+| `hkdf-sha512` (default) | `HKDF-SHA512` with the global salt `"ivnp-reseed"` and info `"reseed-rsa-4096"` | One RSA-4096 key generation (well under one second per core); no salt separates deployments | None enforced; a warning is logged at startup |
+| `argon2id-v2` | `Argon2id` (`t=3`, `m=64 MiB`, `p=4`) salted with `"ivnp-reseed/argon2id-v2/signer:" + signer ID` | One Argon2id evaluation plus one RSA-4096 key generation per guess and per signer ID | At least `32` characters after whitespace normalization |
+
+`hkdf-sha512` remains the default because changing the derivation changes the signing key, and every client that pins the existing certificate would reject the new one. Each version's algorithm and parameters are fixed; a stronger derivation will be added as a new version rather than by changing an existing one.
+
+The phrase length floor is not an entropy measurement. Generate the phrase from a cryptographic random source, for example `openssl rand -base64 32` (256 bits), rather than choosing words by hand. With `argon2id-v2`, the signer ID is part of the salt, so changing `-signer-id` also changes the signing key; choose a signer ID unique to your deployment.
+
+**Migrating an existing deployment to `argon2id-v2`:**
+
+1. Generate a new random phrase of at least `32` characters.
+2. Derive the new certificate offline, for example `RESEED_SEED_KDF=argon2id-v2 RESEED_SEED_PHRASE="<new phrase>" ivnp-reseed -once -no-router -data-dir <scratch dir> -signer-id <your signer id>`, and take `reseed-rsa.crt` from the scratch directory.
+3. Distribute the new certificate to client reseed certificate stores (Java I2P, `i2pd`, IVNP) under your signer ID and wait until clients carry it. A client trusts one certificate per signer ID, so coordinate the cutover or publish the new key under a new signer ID.
+4. Restart the production server with `RESEED_SEED_KDF=argon2id-v2` and the new phrase. Keep the old phrase until no client depends on the old certificate.
+
+New deployments should start with `RESEED_SEED_KDF=argon2id-v2`.
 
 Persistent artifacts in `-data-dir` (`peers.gob`, `i2pseeds.su3`, `reseed-rsa.crt`, `reseed-rsa.pub.pem`) are written through an atomic `.tmp` write-and-rename sequence, and any stale `.tmp` files are cleaned up on startup.
 
@@ -200,7 +227,8 @@ go build -trimpath -o /usr/local/bin/ivnp-reseed ./cmd/ivnp-reseed
 
 # Run behind NAT with port forwarding configured on port 39898:
 RESEED_SIGNER_ID="reseed@example.org" \
-RESEED_SEED_PHRASE="your secret recovery phrase here" \
+RESEED_SEED_KDF="argon2id-v2" \
+RESEED_SEED_PHRASE="<output of: openssl rand -base64 32>" \
   ivnp-reseed -listen ":8080,:8443" -data-dir /var/lib/ivnp-reseed \
   -router-port 39898 -router-advertise-host reseed.example.org
 ```
@@ -216,7 +244,8 @@ docker run -d \
   -p 8080:8080 \
   -v ivnp_reseed_data:/data \
   -e RESEED_SIGNER_ID="reseed@ivnp.network" \
-  -e RESEED_SEED_PHRASE="twelve word seed phrase goes here ..." \
+  -e RESEED_SEED_KDF="argon2id-v2" \
+  -e RESEED_SEED_PHRASE="<saved output of: openssl rand -base64 32>" \
   ivnp-reseed
 ```
 
