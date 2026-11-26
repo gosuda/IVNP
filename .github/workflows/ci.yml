@@ -1,6 +1,8 @@
 name: CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
   merge_group:
   schedule:
@@ -11,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -24,6 +26,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        id: go
         with:
           go-version: '1.27.3'
           cache: true
@@ -34,7 +37,7 @@ jobs:
           path: |
             ~/go/bin/gojgp
             ~/go/bin/checklocks
-          key: gotools-${{ runner.os }}-gojgp-v1.2.0-checklocks-20261024223036-c3e0783a533c
+          key: gotools-${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-gojgp-v1.2.0-checklocks-20261024223036-c3e0783a533c
       - name: Install gojgp
         if: steps.tools-cache.outputs.cache-hit != 'true'
         run: |
@@ -83,6 +86,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        id: go
         with:
           go-version: '1.27.3'
           cache: true
@@ -119,6 +123,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        id: go
         with:
           go-version: '1.27.3'
           cache: true
