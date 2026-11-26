@@ -27,13 +27,34 @@ const (
 	defaultMaxPendingBuilds   = 32 // default concurrent build limit per destination
 	shortBuildPastSkew        = 8 * 60_000
 	shortBuildFutureSkew      = 5 * 60_000
-	shortBuildReplayLifetime  = 10 * 60_000
 	buildMessageLifetime      = 60_000
 	nextHopSendTimeout        = 25_000
 	buildMessageFuzz          = 20_000
 	normalBuildRequestTimeout = 5_000
 	slowBuildRequestTimeout   = 10_000
 	buildReplyGracePeriod     = 60_000 // Java BuildExecutor.GRACE_PERIOD
+)
+
+const (
+	// variableBuildReplayLifetime covers the long ECIES VariableTunnelBuild
+	// timestamp window. ShortTunnelBuild records instead stay in the replay
+	// table until their own request timestamp stops being accepted.
+	variableBuildReplayLifetime = 10 * 60_000
+	// variableTransitLifetime is the installed lifetime of a VariableTunnelBuild
+	// transit tunnel.
+	variableTransitLifetime = 660_000
+	// transitReplayCapacity bounds the transit build records remembered for
+	// replay detection across all previous hops. It is independent of the
+	// creator-side pending build capacity.
+	transitReplayCapacity = 16_384
+	// transitReplayPerSource bounds the records one previous hop can hold in the
+	// replay table, so a single peer cannot fill it for everyone else.
+	transitReplayPerSource = 256
+	// transitSweepInterval bounds how often admission scans transit state for
+	// expired entries.
+	transitSweepInterval = 1_000
+	// defaultMaxParticipating bounds concurrently installed transit tunnels.
+	defaultMaxParticipating = 2_048
 )
 
 var (
@@ -204,6 +225,7 @@ type BuildManager struct {
 	random           io.Reader
 	profiles         *PeerProfiles
 	maxPending       int
+	maxParticipating int
 	logger           *slog.Logger
 	metrics          *observability.Registry
 	onBuildEvent     func()
@@ -228,13 +250,24 @@ type BuildManager struct {
 	// +checklocks:mu
 	transit map[uint32]uint64
 	// +checklocks:mu
-	transitRecords map[[32]byte]uint64
+	transitRecords map[[32]byte]transitReplayRecord
+	// +checklocks:mu
+	transitSources map[foundation.Hash]int
+	// +checklocks:mu
+	participating map[uint32]uint64
+	// +checklocks:mu
+	transitSweepAt uint64
 	// +checklocks:mu
 	// +checklocks:lifecycleMu
 	// +checklocksreadany
 	released bool
 	ctx      context.Context
 	cancel   context.CancelFunc
+}
+
+type transitReplayRecord struct {
+	deadline uint64
+	source   foundation.Hash
 }
 
 type pendingOutboundBuild struct {
@@ -322,6 +355,10 @@ type BuildManagerConfig struct {
 	// CreatorBudget is shared by router owners; nil gives this manager a private budget.
 	CreatorBudget *CreatorBudget
 	Stats         *BuildStatistics
+
+	// MaxParticipating bounds concurrently installed transit tunnels; zero
+	// selects defaultMaxParticipating.
+	MaxParticipating int
 }
 
 func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
@@ -337,6 +374,9 @@ func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
 	}
 	if config.MaxPending <= 0 {
 		config.MaxPending = defaultMaxPendingBuilds
+	}
+	if config.MaxParticipating <= 0 {
+		config.MaxParticipating = defaultMaxParticipating
 	}
 	if config.Schedule == nil {
 		config.Schedule = func(delay time.Duration, callback func()) func() {
@@ -371,11 +411,12 @@ func NewBuildManager(config BuildManagerConfig) (*BuildManager, error) {
 		profiles:        config.Profiles,
 		maxPending:      config.MaxPending, pending: make(map[uint32]*pendingOutboundBuild),
 		pendingInbound: make(map[uint32]*pendingInboundBuild), pendingVariable: make(map[uint32]*pendingVariableBuild), recent: make(map[uint32]recentCreatorBuild),
-		transit: make(map[uint32]uint64), transitRecords: make(map[[32]byte]uint64), staticPrivateKey: staticPrivateKey,
+		transit: make(map[uint32]uint64), transitRecords: make(map[[32]byte]transitReplayRecord), staticPrivateKey: staticPrivateKey,
 		logger: config.Logger, metrics: config.Metrics, onBuildEvent: config.OnBuildEvent, schedule: config.Schedule,
 		ctx: lifecycle, cancel: cancel,
 		creatorBudget: config.CreatorBudget, creators: make(map[*creatorAttempt]struct{}), claims: make(map[*creatorClaim]struct{}),
-		stats: config.Stats,
+		stats: config.Stats, transitSources: make(map[foundation.Hash]int), participating: make(map[uint32]uint64),
+		maxParticipating: config.MaxParticipating,
 	}
 	if !manager.creatorBudget.register(manager) {
 		cancel()
@@ -442,6 +483,8 @@ func (m *BuildManager) ReleaseSensitive() {
 	}
 	clear(m.transit)
 	clear(m.transitRecords)
+	clear(m.transitSources)
+	clear(m.participating)
 	m.staticPrivateKey = nil
 	clear(m.legacyPrivate[:])
 	m.legacyEnabled = false
@@ -1007,7 +1050,7 @@ func (m *BuildManager) HandleBuildContext(ctx context.Context, source BuildSourc
 		}
 		return m.handleTransit(ctx, source, message)
 	case foundation.I2NPVariableTunnelBuild:
-		return m.handleVariableTransit(ctx, message)
+		return m.handleVariableTransit(ctx, source, message)
 	default:
 		return ErrBuildConfig
 	}
@@ -1170,7 +1213,7 @@ func (m *BuildManager) handleTransit(ctx context.Context, source BuildSource, me
 	if source.Direct && source.Router != (foundation.Hash{}) && m.profiles != nil {
 		m.profiles.RecordTransportSuccess(source.Router, now)
 	}
-	if !m.reserveTransit(message.Header.ID, replayHash, now) {
+	if !m.reserveTransit(message.Header.ID, replayHash, source.Router, shortBuildReplayDeadline(request), now) {
 		return ErrBuildTransit
 	}
 	if _, exists := m.runtime.InspectCircuit(request.ReceiveTunnelID); exists {
@@ -1187,15 +1230,24 @@ func (m *BuildManager) handleTransit(ctx context.Context, source BuildSource, me
 	if accept && m.admit != nil {
 		accept = m.admit(request)
 	}
+	participating := accept && m.reserveParticipating(request.ReceiveTunnelID, now+uint64(request.LifetimeSeconds)*1_000)
+	accept = participating
 	var installed dataplane.TunnelCircuitToken
 	defer func() {
 		if result != nil {
 			m.runtime.RemoveCircuit(installed)
+			if participating {
+				m.releaseParticipating(request.ReceiveTunnelID)
+			}
 		}
 	}()
 	if accept {
 		installed, err = m.installTransitCircuit(request, keys, now)
 		accept = err == nil
+		if !accept {
+			m.releaseParticipating(request.ReceiveTunnelID)
+			participating = false
+		}
 	}
 	replyCode := byte(30)
 	if accept {
@@ -1299,31 +1351,40 @@ func (m *BuildManager) installTransitCircuit(request ShortBuildRequest, keys Sho
 	return m.runtime.RegisterInbound(circuit)
 }
 
+// shortBuildReplayDeadline returns the first time validTransitRequest rejects
+// request because of its timestamp, so a replayed record is caught for as long
+// as it could otherwise be accepted.
+func shortBuildReplayDeadline(request ShortBuildRequest) uint64 {
+	return uint64(request.RequestMinutes)*60_000 + shortBuildPastSkew + 60_000
+}
+
+// reserveTransit records a transit build message ID and record hash for replay
+// detection. The replay table has its own global and per-previous-hop bounds;
+// it does not limit how many tunnels this router participates in.
+//
 // +checklocksexclude:m.mu
-func (m *BuildManager) reserveTransit(id uint32, recordHash [32]byte, now uint64) bool {
-	if id == 0 {
+func (m *BuildManager) reserveTransit(id uint32, recordHash [32]byte, source foundation.Hash, deadline, now uint64) bool {
+	if id == 0 || deadline <= now {
 		return false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for messageID, deadline := range m.transit {
-		if deadline <= now {
-			delete(m.transit, messageID)
-		}
-	}
-	for hash, deadline := range m.transitRecords {
-		if deadline <= now {
-			delete(m.transitRecords, hash)
-		}
+	if now >= m.transitSweepAt {
+		m.sweepTransitLocked(now)
+		m.transitSweepAt = now + transitSweepInterval
 	}
 	if _, exists := m.transit[id]; exists {
 		return false
 	}
-	if _, exists := m.transitRecords[recordHash]; exists || len(m.transitRecords) >= m.maxPending {
+	if _, exists := m.transitRecords[recordHash]; exists {
+		return false
+	}
+	if len(m.transitRecords) >= transitReplayCapacity || m.transitSources[source] >= transitReplayPerSource {
 		return false
 	}
 	m.transit[id] = now + buildMessageLifetime
-	m.transitRecords[recordHash] = now + shortBuildReplayLifetime
+	m.transitRecords[recordHash] = transitReplayRecord{deadline: deadline, source: source}
+	m.transitSources[source]++
 	return true
 }
 
@@ -1331,7 +1392,61 @@ func (m *BuildManager) reserveTransit(id uint32, recordHash [32]byte, now uint64
 func (m *BuildManager) releaseTransit(id uint32, recordHash [32]byte) {
 	m.mu.Lock()
 	delete(m.transit, id)
+	m.dropTransitRecordLocked(recordHash)
+	m.mu.Unlock()
+}
+
+// +checklocks:m.mu
+func (m *BuildManager) dropTransitRecordLocked(recordHash [32]byte) {
+	record, exists := m.transitRecords[recordHash]
+	if !exists {
+		return
+	}
 	delete(m.transitRecords, recordHash)
+	if count := m.transitSources[record.source] - 1; count > 0 {
+		m.transitSources[record.source] = count
+	} else {
+		delete(m.transitSources, record.source)
+	}
+}
+
+// +checklocks:m.mu
+func (m *BuildManager) sweepTransitLocked(now uint64) {
+	for id, deadline := range m.transit {
+		if deadline <= now {
+			delete(m.transit, id)
+		}
+	}
+	for hash, record := range m.transitRecords {
+		if record.deadline <= now {
+			m.dropTransitRecordLocked(hash)
+		}
+	}
+	for id, expiresAt := range m.participating {
+		if expiresAt <= now {
+			delete(m.participating, id)
+		}
+	}
+}
+
+// reserveParticipating admits one installed transit tunnel against the
+// participating-tunnel limit until expiresAt.
+//
+// +checklocksexclude:m.mu
+func (m *BuildManager) reserveParticipating(id uint32, expiresAt uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.participating[id]; exists || len(m.participating) >= m.maxParticipating {
+		return false
+	}
+	m.participating[id] = expiresAt
+	return true
+}
+
+// +checklocksexclude:m.mu
+func (m *BuildManager) releaseParticipating(id uint32) {
+	m.mu.Lock()
+	delete(m.participating, id)
 	m.mu.Unlock()
 }
 
@@ -1529,16 +1644,7 @@ func (m *BuildManager) Expire(nowMillis uint64) int {
 			expiredVariable = append(expiredVariable, pending)
 		}
 	}
-	for id, deadline := range m.transit {
-		if deadline <= nowMillis {
-			delete(m.transit, id)
-		}
-	}
-	for hash, deadline := range m.transitRecords {
-		if deadline <= nowMillis {
-			delete(m.transitRecords, hash)
-		}
-	}
+	m.sweepTransitLocked(nowMillis)
 	m.mu.Unlock()
 
 	return m.finishExpiredBuilds(expiredOutbound, expiredInbound, expiredVariable, expiredRecent, nowMillis)

@@ -165,7 +165,7 @@ func fillVariableRequest(record []byte, hop VariableBuildHop, request VariableBu
 	}
 }
 
-func (m *BuildManager) handleVariableTransit(ctx context.Context, message foundation.I2NPMessage) (result error) {
+func (m *BuildManager) handleVariableTransit(ctx context.Context, source BuildSource, message foundation.I2NPMessage) (result error) {
 	if m.local == (foundation.Hash{}) {
 		return ErrBuildConfig
 	}
@@ -173,15 +173,16 @@ func (m *BuildManager) handleVariableTransit(ctx context.Context, message founda
 	if err != nil {
 		return err
 	}
-	now := m.now()
-	if !m.reserveTransit(message.Header.ID, sha256.Sum256(message.Payload), now) {
-		return ErrBuildTransit
-	}
 	kind := VariableBuildLongECIES
 	if m.legacyEnabled {
 		kind = VariableBuildElGamal
 	} else if m.staticPrivateKey == nil {
 		return ErrBuildConfig
+	}
+	now := m.now()
+	replayHash := sha256.Sum256(message.Payload)
+	if !m.reserveTransit(message.Header.ID, replayHash, source.Router, now+variableBuildReplayLifetime, now) {
+		return ErrBuildTransit
 	}
 	var staticPrivate []byte
 	if m.staticPrivateKey != nil {
@@ -191,6 +192,9 @@ func (m *BuildManager) handleVariableTransit(ctx context.Context, message founda
 	request, keys, slot, err := ProcessVariableBuildRecords(records.Records, plaintext[:], m.local, kind, staticPrivate, m.legacyPrivate, false, m.random)
 	clear(plaintext[:])
 	if err != nil {
+		// Nothing was installed or forwarded, so an undecryptable message must
+		// not keep replay capacity from its sender.
+		m.releaseTransit(message.Header.ID, replayHash)
 		return err
 	}
 	defer clearVariableBuildKey(&keys)
@@ -198,15 +202,24 @@ func (m *BuildManager) handleVariableTransit(ctx context.Context, message founda
 	if accept && m.admit != nil {
 		accept = m.admit(shortRequestFromVariable(request))
 	}
+	participating := accept && m.reserveParticipating(request.ReceiveTunnelID, now+variableTransitLifetime)
+	accept = participating
 	var installed dataplane.TunnelCircuitToken
 	defer func() {
 		if result != nil {
 			m.runtime.RemoveCircuit(installed)
+			if participating {
+				m.releaseParticipating(request.ReceiveTunnelID)
+			}
 		}
 	}()
 	if accept {
 		installed, err = m.installVariableTransitCircuit(request, now)
 		accept = err == nil
+		if !accept {
+			m.releaseParticipating(request.ReceiveTunnelID)
+			participating = false
+		}
 	}
 	if accept {
 		record := records.Records[int(slot)*VariableBuildRecordSize : (int(slot)+1)*VariableBuildRecordSize]
@@ -340,7 +353,7 @@ func (m *BuildManager) installVariableTransitCircuit(request VariableBuildReques
 	if err != nil {
 		return dataplane.TunnelCircuitToken{}, err
 	}
-	circuit := dataplane.TunnelInboundCircuit{ID: request.ReceiveTunnelID, Transforms: []dataplane.TunnelLayerCipher{decryptor}, ExpiresAt: now + 660_000}
+	circuit := dataplane.TunnelInboundCircuit{ID: request.ReceiveTunnelID, Transforms: []dataplane.TunnelLayerCipher{decryptor}, ExpiresAt: now + variableTransitLifetime}
 	if request.Endpoint {
 		circuit.Endpoint, circuit.Local = dataplane.TunnelNewEndpoint(128, 0), m.localDelivery
 	} else {
